@@ -53,76 +53,96 @@ pub fn transactInBlockWithPrelude(
 /// block-prelude error before it reaches a program caller.
 const ContractError = error{TransactionPreludeFailed};
 
-/// Bind transaction semantics using flat engine-family and program carriers.
-/// Concrete VM types expose this through `VM.Program(...)`.
-pub fn ProgramType(
-    comptime Executor: type,
-    // FIXME: this has to be stop
-    comptime Transaction_: type,
-    comptime Input: type,
-    comptime Output_: type,
-    comptime Rejection_: type,
-    comptime Implementation: type,
-    comptime PreludeError: type,
-) type {
-    comptime {
-        std.debug.assert(@hasField(Input, "tx"));
-        std.debug.assert(@FieldType(Input, "tx") == Transaction_);
+/// Type-erased block-prelude transport shared by every program instantiation.
+/// Constructed only by `Prelude.init`, which validates the typed `run`
+/// signature before erasing it.
+pub const PreludeBinding = struct {
+    handle: *anyopaque,
+    run: *const fn (*anyopaque, *anyopaque) anyerror!void,
+};
+
+/// Weld a transition implementation's carrier decls to its `transact`
+/// signature. Decls are the tooling-visible truth; the signature must agree.
+/// Only the function type is inspected; a call expression here would force
+/// eager analysis of the whole transact graph at every instantiation.
+fn validateTransition(comptime Implementation: type) void {
+    inline for (.{ "Context", "Transaction", "Output", "Rejection", "Error" }) |name| {
+        if (!@hasDecl(Implementation, name))
+            @compileError("transition implementation must declare `" ++ name ++ "`");
     }
+    const Context = Implementation.Context;
+    if (!@hasDecl(Context, "Executor") or !@hasDecl(Context, "Input") or
+        Context != ContextType(Context.Executor, Context.Input))
+        @compileError("`Context` must come from `Vm.Context(Input)`");
+    if (!@hasField(Context.Input, "tx") or
+        @FieldType(Context.Input, "tx") != Implementation.Transaction)
+        @compileError("`Transaction` must be the type of the input's `tx` field");
+    const info = @typeInfo(@TypeOf(Implementation.transact)).@"fn";
+    if (info.params.len != 2 or
+        info.params[0].type.? != *Context or
+        info.params[1].type.? != Implementation.Transaction)
+        @compileError("`transact` must take (*Context, Transaction)");
+    if (info.return_type.? != Implementation.Error!TransitionOutcomeType(
+        Implementation.Output,
+        Implementation.Rejection,
+    ))
+        @compileError("`transact` must return `Error!TransitionOutcomeType(Output, Rejection)`");
+}
+
+/// Bind transaction semantics above one transition implementation.
+/// Concrete VM types expose this through `VM.Program(...)`.
+///
+/// The implementation declares its carriers — `Context`, `Transaction`
+/// (`Input.tx`), `Output`, `Rejection`, `Error` — and `validateTransition`
+/// welds its `transact` signature to them.
+pub fn ProgramType(comptime Implementation: type) type {
+    comptime validateTransition(Implementation);
 
     const ContextError = executor_errors.Error || ContractError;
-    const Runtime = RuntimeStateType(Executor, Input);
+    const Runtime = RuntimeStateType(Implementation.Context.Executor, Implementation.Context.Input);
 
-    const ProgramError = ContextError || Implementation.Error || PreludeError;
+    const ProgramError = ContextError || Implementation.Error;
 
-    const ExecutedType = Executor.Executed(Output_);
+    const ExecutedType = Implementation.Context.Executor.Executed(Implementation.Output);
 
-    const OutcomeType = TransactOutcomeType(ExecutedType, Rejection_);
+    const OutcomeType = TransactOutcomeType(ExecutedType, Implementation.Rejection);
 
     return struct {
         const Self = @This();
 
-        comptime {
-            validateTransition(Context, Transaction_, Output_, Rejection_, Implementation);
-        }
-
         pub const specification = Executor.specification;
-        pub const Context = ContextType(Executor, Input);
-        pub const Transaction = Transaction_;
-        pub const TransactInput = Input;
-        pub const Output = Output_;
+        pub const Executor = Implementation.Context.Executor;
+        pub const Context = Implementation.Context;
+        pub const Transaction = Implementation.Transaction;
+        pub const TransactInput = Implementation.Context.Input;
+        pub const Output = Implementation.Output;
         pub const TransactionLog = Host.Log;
         pub const TransactionLogs = Executor.State.LogView;
-        pub const Rejection = Rejection_;
+        pub const Rejection = Implementation.Rejection;
         pub const Executed = ExecutedType;
-        pub const Prelude = PreludeType(PreludeContext);
-        pub const PreludeContext = PreludeContextType(
-            Executor,
-            Runtime,
-            PreludeError,
-        );
+        pub const Prelude = PreludeFor(error{});
+        pub const PreludeContext = PreludeContextFor(error{});
         pub const Outcome = OutcomeType;
         pub const Error = ProgramError;
 
-        pub const Observed = struct {
+        /// Prelude author context whose error set is widened by one block
+        /// implementation's `PreludeError`. Instantiating this never rebuilds
+        /// the program itself.
+        pub fn PreludeContextFor(comptime PreludeError: type) type {
+            return PreludeContextType(Executor, Runtime, PreludeError);
+        }
+
+        /// Typed prelude validator matching `PreludeContextFor(PreludeError)`.
+        pub fn PreludeFor(comptime PreludeError: type) type {
+            return PreludeType(PreludeContextFor(PreludeError));
+        }
+
+        pub const Instrumented = struct {
             program: *Self,
+            mode: InstrumentationMode,
 
-            pub fn transact(self: Observed, input_value: Input) Error!Outcome {
-                return self.program.transactOwned(input_value, false, null, .observed);
-            }
-        };
-
-        pub const Captured = struct {
-            program: *Self,
-            context: *CaptureContext,
-
-            pub fn transact(self: Captured, input_value: Input) Error!Outcome {
-                return self.program.transactOwned(
-                    input_value,
-                    false,
-                    null,
-                    .{ .captured = self.context },
-                );
+            pub fn transact(self: Instrumented, input_value: TransactInput) Error!Outcome {
+                return self.program.transactOwned(input_value, false, null, self.mode);
             }
         };
 
@@ -138,36 +158,12 @@ pub fn ProgramType(
 
         /// Close this transaction program over one block-fold policy.
         ///
-        /// The returned type is the only public in-block transaction entry
-        /// point; block claims and transaction-runtime choreography stay
-        /// internal to that type.
-        pub fn Block(
-            comptime EnvType: type,
-            comptime IncludedType: type,
-            comptime ResultType: type,
-            comptime BlockImplementationType: type,
-        ) type {
-            const RuntimeWithPrelude = ProgramType(
-                Executor,
-                Transaction,
-                Input,
-                Output,
-                Rejection,
-                Implementation,
-                PreludeError || BlockImplementationType.PreludeError,
-            );
-            return block_program.bind(
-                RuntimeWithPrelude,
-                Executor,
-                Transaction,
-                Input,
-                Output,
-                Rejection,
-                EnvType,
-                IncludedType,
-                ResultType,
-                BlockImplementationType,
-            );
+        /// Env, Included, and Result are decls of the implementation. The
+        /// returned type is the only public in-block transaction entry point;
+        /// block claims and transaction-runtime choreography stay internal to
+        /// that type.
+        pub fn Block(comptime BlockImplementationType: type) type {
+            return block_program.bind(Self, BlockImplementationType);
         }
 
         /// Execute one family transaction.
@@ -175,25 +171,25 @@ pub fn ProgramType(
         /// Rejection opens no pending state. Completion returns the sole
         /// rollback-armed `Executed` owner, which the caller must retain or
         /// discard before reusing this Executor.
-        pub fn transact(self: *@This(), input_value: Input) Error!Outcome {
+        pub fn transact(self: *@This(), input_value: TransactInput) Error!Outcome {
             return self.transactOwned(input_value, false, null, .normal);
         }
 
         /// Borrow a transaction facade that records state observations.
-        pub fn observe(self: *Self) Observed {
-            return .{ .program = self };
+        pub fn observe(self: *Self) Instrumented {
+            return .{ .program = self, .mode = .observed };
         }
 
         /// Borrow a transaction facade bound to caller-owned capture storage.
-        pub fn capture(self: *Self, context: *CaptureContext) Captured {
-            return .{ .program = self, .context = context };
+        pub fn capture(self: *Self, context: *CaptureContext) Instrumented {
+            return .{ .program = self, .mode = .{ .captured = context } };
         }
 
         fn transactOwned(
             self: *@This(),
-            input_value: Input,
+            input_value: TransactInput,
             block_claimed: bool,
-            prelude: ?Prelude,
+            prelude: ?PreludeBinding,
             mode: InstrumentationMode,
         ) Error!OutcomeType {
             const executor = self.executor;
@@ -206,10 +202,7 @@ pub fn ProgramType(
                 .executor = executor,
                 .input_value = &input_value,
                 .mode = mode,
-                .prelude = if (prelude) |value| .{ .pending = .{
-                    .handle = value.handle,
-                    .run = value.run_fn,
-                } } else .none,
+                .prelude = if (prelude) |value| .{ .pending = value } else .none,
             };
             errdefer runtime.discardIfActive();
             var context: Context = .{ .handle = &runtime };
@@ -244,11 +237,6 @@ fn RuntimeStateType(
 
     return struct {
         const Self = @This();
-
-        const PreludeBinding = struct {
-            handle: *anyopaque,
-            run: *const fn (*anyopaque, *anyopaque) anyerror!void,
-        };
 
         const PreludeState = union(enum) {
             none,
@@ -330,10 +318,7 @@ fn PreludeType(comptime Context: type) type {
     const ContextError = Context.Error;
 
     return struct {
-        handle: *anyopaque,
-        run_fn: *const fn (*anyopaque, *anyopaque) anyerror!void,
-
-        pub fn init(pointer: anytype) @This() {
+        pub fn init(pointer: anytype) PreludeBinding {
             const Pointer = @TypeOf(pointer);
             const pointer_info = switch (@typeInfo(Pointer)) {
                 .pointer => |info| info,
@@ -356,25 +341,30 @@ fn PreludeType(comptime Context: type) type {
             };
             return .{
                 .handle = @ptrCast(pointer),
-                .run_fn = Adapter.run,
+                .run = Adapter.run,
             };
         }
     };
 }
 
 /// Concrete family-authoring context assembled from flat lexical carriers.
+///
+/// `Executor` and `Input` are exported so binders can derive every other
+/// carrier from a transition's `*Context` parameter alone.
 pub fn ContextType(
-    comptime Executor: type,
-    comptime Input: type,
+    comptime ExecutorType: type,
+    comptime InputType: type,
 ) type {
     const ContextError = executor_errors.Error || ContractError;
-    const RuntimeState = RuntimeStateType(Executor, Input);
+    const RuntimeState = RuntimeStateType(ExecutorType, InputType);
 
     return struct {
         handle: *anyopaque,
 
         const Self = @This();
 
+        pub const Executor = ExecutorType;
+        pub const Input = InputType;
         pub const Error = ContextError;
         pub const specification = Executor.specification;
 
@@ -571,21 +561,3 @@ pub fn ContextType(
     };
 }
 
-fn validateTransition(
-    comptime Context: type,
-    comptime Transaction: type,
-    comptime Output: type,
-    comptime Rejection: type,
-    comptime Bound: type,
-) void {
-    comptime {
-        std.debug.assert(@hasDecl(Bound, "Error"));
-        // Inspect the function type only; a call expression here would force
-        // eager analysis of the whole transact graph at every instantiation.
-        const info = @typeInfo(@TypeOf(Bound.transact)).@"fn";
-        std.debug.assert(info.params.len == 2);
-        std.debug.assert(info.params[0].type.? == *Context);
-        std.debug.assert(info.params[1].type.? == Transaction);
-        std.debug.assert(info.return_type.? == Bound.Error!TransitionOutcomeType(Output, Rejection));
-    }
-}

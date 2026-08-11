@@ -23,18 +23,23 @@ const Address = address.Address;
 pub fn bind(
     comptime spec: ExactSpec,
     comptime ExactExecutor: type,
-    comptime Context: type,
-    comptime Output: type,
+    comptime ContextType: type,
+    comptime OutputType: type,
 ) type {
-    _ = ExactExecutor;
-    // comptime std.debug.assert(Context.Executor == ExactExecutor);
+    comptime std.debug.assert(ContextType.Executor == ExactExecutor);
     const PreparedTransaction = transaction.Prepared(tx_settlement.DefaultPlan);
-    const Rejection = transaction_validation.ValidationError;
 
     return struct {
         const Settlement = transaction.SettlementRuntime(spec);
         const authorization_spec = spec.authorization;
         const settlement_spec = spec.settlement;
+
+        // Carrier decls the program binder reads; the `transact` signature is
+        // welded to them at bind time.
+        pub const Context = ContextType;
+        pub const Transaction = transaction.Transaction;
+        pub const Output = OutputType;
+        pub const Rejection = transaction_validation.ValidationError;
 
         pub const Error = Context.Error || error{
             Overflow,

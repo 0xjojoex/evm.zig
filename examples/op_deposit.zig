@@ -313,6 +313,10 @@ fn OpTransition(
     comptime DepositImplementation: type,
 ) type {
     return struct {
+        pub const Context = OpContext;
+        pub const Transaction = OpTransaction;
+        pub const Output = OpOutput;
+        pub const Rejection = OpRejection;
         pub const Error = EthereumTransition.Error || DepositImplementation.Error;
 
         pub fn transact(
@@ -358,6 +362,10 @@ pub const OpBlockEnv = struct {
 /// between `planInclude`, which may still fail while the output is only
 /// borrowed, and `applyInclude`, which commits once the transaction retains.
 const OpBlockProgram = struct {
+    pub const Env = OpBlockEnv;
+    pub const Included = OpIncludedTransaction;
+    pub const Result = u64;
+
     pub const State = u64;
     pub const Error = error{TransactionCountOverflow};
     pub const PreludeError = error{};
@@ -418,19 +426,8 @@ fn OpFamilyFromSpec(comptime revision: OpRevision, comptime spec_value: evmz.eth
     const EthereumTransition = EthereumVm.Transition(OpInput);
     const DepositImplementation = DepositTransition(Context, EthereumVm);
     const CombinedTransition = OpTransition(Context, EthereumTransition, DepositImplementation);
-    const TransactionVm = EthereumVm.Program(
-        OpTransaction,
-        OpInput,
-        OpOutput,
-        OpRejection,
-        CombinedTransition,
-    );
-    const BlockExecution = TransactionVm.Block(
-        OpBlockEnv,
-        OpIncludedTransaction,
-        u64,
-        OpBlockProgram,
-    );
+    const TransactionVm = EthereumVm.Program(CombinedTransition);
+    const BlockExecution = TransactionVm.Block(OpBlockProgram);
 
     return struct {
         pub const specification = spec_value;

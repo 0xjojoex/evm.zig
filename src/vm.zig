@@ -40,6 +40,16 @@ pub const Env = transaction.Env;
 /// Terminal status of a transaction that reached execution.
 pub const TxStatus = execution.Status;
 
+/// Complete `Vm.transact` error surface, declared concretely so tooling can
+/// resolve `Vm.Error` without evaluating the program binder. Welded to the
+/// derived program error set inside `VmType`; membership drift fails compilation.
+pub const TransactError = executor_module.errors.Error || error{
+    // Internal prelude transport: caught and replaced by the binder before it
+    // reaches a caller, but nominally part of the program error set today.
+    TransactionPreludeFailed,
+    Overflow,
+};
+
 /// Execution payload for a transaction that passed validation and ran.
 ///
 /// `output` is borrowed from the owning Executor and remains valid until its
@@ -67,14 +77,7 @@ pub const TxReceiptView = struct {
     logs: state_module.LogBuffer.View = .empty,
 };
 
-/// Summary of included transactions in a `BlockExecution`.
-pub const BlockResult = struct {
-    /// Cumulative receipt gas.
-    gas_used: u64 = 0,
-    /// Cumulative block/header gas contribution.
-    block_gas: transaction.BlockGas = .{},
-    tx_count: u64 = 0,
-};
+pub const BlockResult = ethereum_block_program.Result;
 
 /// Read-only account view borrowed from an Executor overlay/state-reader cache.
 pub const AccountView = struct {
@@ -143,49 +146,11 @@ pub fn VmType(
 
         const EthereumTxTransition = Self.Transition(PublicTransactInput);
 
-        const TransactionRuntime = Self.Program(
-            transaction.Transaction,
-            PublicTransactInput,
-            TxExecutionResult,
-            transaction_validation.ValidationError,
-            EthereumTxTransition,
-        );
+        const TransactionRuntime = Self.Program(EthereumTxTransition);
 
-        const EthereumBlock = ethereum_block_program.bind(TransactionRuntime, Env, IncludedTransactionType, BlockResult);
+        const EthereumBlock = ethereum_block_program.bind(TransactionRuntime);
 
-        const BlockTransactionRuntime = transaction_program.ProgramType(
-            Executor,
-            transaction.Transaction,
-            PublicTransactInput,
-            TxExecutionResult,
-            transaction_validation.ValidationError,
-            EthereumTxTransition,
-            EthereumBlock.Implementation.PreludeError,
-        );
-        const BlockExecutionType = block_program_module.bind(
-            BlockTransactionRuntime,
-            Executor,
-            transaction.Transaction,
-            PublicTransactInput,
-            TxExecutionResult,
-            transaction_validation.ValidationError,
-            Env,
-            IncludedTransactionType,
-            BlockResult,
-            EthereumBlock.Implementation,
-        );
-
-        const ReceiptType = struct {
-            status: TxStatus,
-            gas_used: u64 = 0,
-            cumulative_gas_used: u64 = 0,
-            created_address: ?Address = null,
-            logs: Executor.State.LogView = .empty,
-        };
-        const IncludedTransactionType = struct {
-            result: TxExecutionResult,
-            receipt: ReceiptType,
-        };
+        const BlockExecutionType = TransactionRuntime.Block(EthereumBlock.Implementation);
 
         pub const specification = spec;
         pub const compile_options = options_value;
@@ -203,29 +168,16 @@ pub fn VmType(
         pub const Prelude = TransactionRuntime.Prelude;
         pub const PreludeContext = TransactionRuntime.PreludeContext;
         pub const Outcome = TransactionRuntime.Outcome;
-        pub const Error = TransactionRuntime.Error;
+        pub const Error = TransactError;
+
+        comptime {
+            assertSameErrorSet(TransactError, TransactionRuntime.Error);
+        }
         pub const Gas = transaction.GasRuntime(spec);
         pub const Settlement = transaction.SettlementRuntime(spec);
         pub const BlockExecution = BlockExecutionType;
 
         transaction_runtime: TransactionRuntime,
-
-        pub const Observed = struct {
-            vm: *Self,
-
-            pub fn transact(self: Observed, input: TransactInput) Error!Outcome {
-                return self.vm.transaction_runtime.observe().transact(input);
-            }
-        };
-
-        pub const Captured = struct {
-            vm: *Self,
-            context: *executor_module.CaptureContext,
-
-            pub fn transact(self: Captured, input: TransactInput) Error!Outcome {
-                return self.vm.transaction_runtime.capture(self.context).transact(input);
-            }
-        };
 
         /// Bind this exact VM family to one caller-owned Executor.
         ///
@@ -244,13 +196,16 @@ pub fn VmType(
         }
 
         /// Borrow a VM facade that records state observations.
-        pub fn observe(self: *Self) Observed {
-            return .{ .vm = self };
+        pub fn observe(self: *Self) TransactionRuntime.Instrumented {
+            return self.transaction_runtime.observe();
         }
 
         /// Borrow a VM facade bound to caller-owned passive capture storage.
-        pub fn capture(self: *Self, context: *executor_module.CaptureContext) Captured {
-            return .{ .vm = self, .context = context };
+        pub fn capture(
+            self: *Self,
+            context: *executor_module.CaptureContext,
+        ) TransactionRuntime.Instrumented {
+            return self.transaction_runtime.capture(context);
         }
 
         /// Define the narrow family-authoring context for a custom input type.
@@ -263,23 +218,14 @@ pub fn VmType(
             return ethereum_tx_transition.bind(spec, Executor, Context(Input), TxExecutionResult);
         }
 
-        /// Bind one closed transaction representation and workflow to this VM.
-        pub fn Program(
-            comptime TransactionType: type,
-            comptime InputType: type,
-            comptime OutputType: type,
-            comptime RejectionType: type,
-            comptime ImplementationType: type,
-        ) type {
-            return transaction_program.ProgramType(
-                Executor,
-                TransactionType,
-                InputType,
-                OutputType,
-                RejectionType,
-                ImplementationType,
-                error{},
-            );
+        /// Bind one closed transaction workflow to this VM.
+        ///
+        /// All carriers are derived from the implementation's `transact`
+        /// signature; its authoring context must be this VM's `Context(Input)`.
+        pub fn Program(comptime ImplementationType: type) type {
+            const Bound = transaction_program.ProgramType(ImplementationType);
+            comptime std.debug.assert(Bound.Executor == Executor);
+            return Bound;
         }
 
         /// One-worker Ethereum block lifecycle over the exact VM.
@@ -385,15 +331,15 @@ pub fn VmType(
                 const outcome = switch (mode) {
                     .normal => try self.block.transactWithPrelude(
                         tx,
-                        TransactionRuntime.Prelude.init(&prelude),
+                        BlockExecution.Prelude.init(&prelude),
                     ),
                     .observed => try self.block.observe(observer).transactWithPrelude(
                         tx,
-                        TransactionRuntime.Prelude.init(&prelude),
+                        BlockExecution.Prelude.init(&prelude),
                     ),
                     .captured => |context| try self.block.capture(context, observer).transactWithPrelude(
                         tx,
-                        TransactionRuntime.Prelude.init(&prelude),
+                        BlockExecution.Prelude.init(&prelude),
                     ),
                 };
                 switch (outcome) {
@@ -578,4 +524,28 @@ pub fn VmType(
             return gas -| @min(gas, left);
         }
     };
+}
+
+/// Weld a concretely declared error set to its derived source of truth.
+/// Both directions are checked so the declaration can neither omit nor invent.
+fn assertSameErrorSet(comptime Declared: type, comptime Derived: type) void {
+    const declared = @typeInfo(Declared).error_set orelse
+        @compileError("declared error set must be closed");
+    const derived = @typeInfo(Derived).error_set orelse
+        @compileError("derived error set must be closed");
+    for (declared) |member| {
+        if (!errorSetContains(derived, member.name))
+            @compileError("declared error '" ++ member.name ++ "' is not produced by the transaction program");
+    }
+    for (derived) |member| {
+        if (!errorSetContains(declared, member.name))
+            @compileError("derived error '" ++ member.name ++ "' is missing from the declared TransactError");
+    }
+}
+
+fn errorSetContains(comptime set: []const std.builtin.Type.Error, comptime name: []const u8) bool {
+    for (set) |member| {
+        if (std.mem.eql(u8, member.name, name)) return true;
+    }
+    return false;
 }

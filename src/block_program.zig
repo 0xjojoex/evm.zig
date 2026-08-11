@@ -152,32 +152,34 @@ test "block hook collections preserve insertion order" {
 }
 
 /// Internal flat binder used by a concrete VM program's `Block(...)` closure.
+///
+/// Transaction carriers are read off the bound runtime; block-fold carriers
+/// (Env, Included, Result) are decls of the implementation, welded to its
+/// signatures by `validateImplementation`. The prelude author types widen by
+/// the implementation's `PreludeError` without rebuilding the program.
 pub fn bind(
-    comptime RuntimeWithPrelude: type,
-    comptime ExecutorType: type,
-    comptime TransactionType: type,
-    comptime TransactInputType: type,
-    comptime OutputType: type,
-    comptime RejectionType: type,
-    comptime EnvType: type,
-    comptime IncludedType: type,
-    comptime ResultType: type,
+    comptime Runtime: type,
     comptime ImplementationType: type,
 ) type {
-    comptime std.debug.assert(@hasDecl(ImplementationType, "PreludeError"));
+    comptime {
+        for (.{ "PreludeError", "Env", "Included", "Result" }) |name| {
+            if (!@hasDecl(ImplementationType, name))
+                @compileError("block implementation must declare `" ++ name ++ "`");
+        }
+    }
 
     return BoundBlockProgram(
-        RuntimeWithPrelude,
-        ExecutorType,
-        TransactionType,
-        TransactInputType,
-        OutputType,
-        RejectionType,
-        RuntimeWithPrelude.Prelude,
-        RuntimeWithPrelude.PreludeContext,
-        EnvType,
-        IncludedType,
-        ResultType,
+        Runtime,
+        Runtime.Executor,
+        Runtime.Transaction,
+        Runtime.TransactInput,
+        Runtime.Output,
+        Runtime.Rejection,
+        Runtime.PreludeFor(ImplementationType.PreludeError),
+        Runtime.PreludeContextFor(ImplementationType.PreludeError),
+        ImplementationType.Env,
+        ImplementationType.Included,
+        ImplementationType.Result,
         ImplementationType,
     );
 }
@@ -200,7 +202,7 @@ fn BoundBlockProgram(
     const ContractError = error{
         UncommittedChanges,
     };
-    const ErrorType = TransactionRuntimeType.Error || ImplementationType.Error || ContractError;
+    const ErrorType = TransactionRuntimeType.Error || ImplementationType.Error || ImplementationType.PreludeError || ContractError;
     const TransactionLogs = TransactionRuntimeType.TransactionLogs;
     comptime validateImplementation(
         TransactionType,
@@ -255,7 +257,7 @@ fn BoundBlockProgram(
                 pub fn transactWithPrelude(
                     self: @This(),
                     transaction_value: Transaction,
-                    prelude: Prelude,
+                    prelude: transaction_program.PreludeBinding,
                 ) anyerror!Outcome {
                     return self.block.transactOwned(
                         transaction_value,
@@ -323,7 +325,7 @@ fn BoundBlockProgram(
         pub fn transactWithPrelude(
             self: *Self,
             transaction_value: Transaction,
-            prelude: Prelude,
+            prelude: transaction_program.PreludeBinding,
         ) Error!Outcome {
             return self.transactOwned(
                 transaction_value,
@@ -336,7 +338,7 @@ fn BoundBlockProgram(
         fn transactOwned(
             self: *Self,
             transaction_value: Transaction,
-            prelude: ?Prelude,
+            prelude: ?transaction_program.PreludeBinding,
             mode: InstrumentationMode,
             observer: anytype,
         ) anyerror!Outcome {
