@@ -147,7 +147,7 @@ fn expectAmsterdamColdAccountAccessGas(comptime opcode: evmz.Opcode) !void {
     try std.testing.expectEqual(@as(i64, 6_997), result.gas_left);
 }
 
-fn expectAmsterdamCodeAccessGas(comptime opcode: evmz.Opcode, status: Host.AccessStatus) !void {
+fn expectAmsterdamCodeAccessGas(comptime opcode: evmz.Opcode, status: evmz.execution.AccessStatus) !void {
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
     const expected_gas_left: i64 = switch (status) {
         .cold => 6_897,
@@ -156,7 +156,7 @@ fn expectAmsterdamCodeAccessGas(comptime opcode: evmz.Opcode, status: Host.Acces
     try expectAmsterdamAccessGas(&bytecode, status, expected_gas_left);
 }
 
-fn expectAmsterdamExtcodecopyAccessGas(status: Host.AccessStatus) !void {
+fn expectAmsterdamExtcodecopyAccessGas(status: evmz.execution.AccessStatus) !void {
     const bytecode = evmz.t.bytecode(.{
         .PUSH0, .PUSH0, .PUSH0, .PUSH2, 0xcc, 0xcc, .EXTCODECOPY, .STOP,
     });
@@ -167,7 +167,7 @@ fn expectAmsterdamExtcodecopyAccessGas(status: Host.AccessStatus) !void {
     try expectAmsterdamAccessGas(&bytecode, status, expected_gas_left);
 }
 
-fn expectAmsterdamAccessGas(code: []const u8, status: Host.AccessStatus, expected_gas_left: i64) !void {
+fn expectAmsterdamAccessGas(code: []const u8, status: evmz.execution.AccessStatus, expected_gas_left: i64) !void {
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     const target = evmz.addr(0xcccc);

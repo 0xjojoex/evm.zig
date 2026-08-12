@@ -321,15 +321,15 @@ const semantics = struct {
         return if (input.target_alive) 0 else @intCast(eth_tx.amsterdam_new_account_state_gas);
     }
 
-    fn noStorageAccess(_: execution.AccountAccessStatus) ?i64 {
+    fn noStorageAccess(_: execution.AccessStatus) ?i64 {
         return null;
     }
 
-    fn berlinStorageAccess(status: execution.AccountAccessStatus) ?i64 {
+    fn berlinStorageAccess(status: execution.AccessStatus) ?i64 {
         return if (status == .cold) cold_sload_cost else 0;
     }
 
-    fn amsterdamStorageAccess(status: execution.AccountAccessStatus) ?i64 {
+    fn amsterdamStorageAccess(status: execution.AccessStatus) ?i64 {
         return if (status == .cold) @intCast(eth_tx.amsterdam_cold_storage_access_cost) else warm_storage_read_cost;
     }
 

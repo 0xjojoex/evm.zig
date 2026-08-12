@@ -6,6 +6,7 @@ const eip7702 = @import("./eip7702.zig");
 const Address = evmz.Address;
 const AddressWord = evmz.AddressWord;
 const Host = evmz.Host;
+const execution = evmz.execution;
 
 pub fn bind(comptime Executor: type) type {
     return struct {
@@ -49,7 +50,7 @@ pub fn bind(comptime Executor: type) type {
                     return call_runtime.resolveHostCall(self, msg);
                 }
 
-                fn accessAccount(ptr: *anyopaque, address: AddressWord) !Host.AccessStatus {
+                fn accessAccount(ptr: *anyopaque, address: AddressWord) !execution.AccessStatus {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
                     if (nativeContractActive(address)) return .warm;
                     const target = Executor.executionAddress(address);
@@ -58,7 +59,7 @@ pub fn bind(comptime Executor: type) type {
                     return .cold;
                 }
 
-                fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?Host.AccessStatus {
+                fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?execution.AccessStatus {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
                     const target = eip7702.delegationTarget(
                         try self.state.getCode(Executor.executionAddress(address)),
@@ -147,7 +148,7 @@ pub fn bind(comptime Executor: type) type {
             return self.state.getStorage(Executor.executionAddress(address), key);
         }
 
-        fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStatus {
+        fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !execution.StorageStatus {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return self.state.setStorage(Executor.executionAddress(address), key, value);
         }
@@ -197,7 +198,7 @@ pub fn bind(comptime Executor: type) type {
             return (try source.getBlockHash(block_number)) orelse 0;
         }
 
-        fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.AccessStatus {
+        fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !execution.AccessStatus {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return self.state.accessStorage(Executor.executionAddress(address), key);
         }

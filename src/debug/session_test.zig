@@ -33,7 +33,7 @@ fn expectCallParity(
 
     const Executor = Exact.Executor;
     const runtime = call_runtime.bind(Executor);
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const message = Host.Message{
@@ -65,7 +65,7 @@ fn expectCallParity(
     defer controlled_executor.discardStateTransition();
     var controlled_code = try controlled_executor.prepareBytecode(code);
     defer controlled_code.deinit(std.testing.allocator);
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&controlled_executor, message, controlled_code.view());
     defer controlled.deinit();
     const stepped = try finishCanonical(&controlled);
@@ -125,7 +125,7 @@ test "debug session matches uninterrupted execution" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const runtime = call_runtime.bind(Executor);
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const code = [_]u8{
@@ -174,7 +174,7 @@ test "debug session matches uninterrupted execution" {
     var controlled_code = try controlled_executor.prepareBytecode(&code);
     defer controlled_code.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&controlled_executor, message, controlled_code.view());
     defer controlled.deinit();
     const root_frame = controlled.call_runtime.frames.frame(controlled.call_runtime.frame_base);
@@ -211,6 +211,58 @@ test "debug session matches uninterrupted execution" {
     try std.testing.expectEqual(normal.status(), result.status());
     try std.testing.expectEqual(normal.gas_left, result.gas_left);
     try std.testing.expectEqualSlices(u8, normal.output_data, result.output_data);
+}
+
+test "debug session stops at the next instruction and jump target" {
+    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Executor = Exact.Executor;
+    const Session = session.SessionType(Executor);
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+    const code = evmz.t.bytecode(.{
+        .PUSH1,    4,
+        .JUMP,     .STOP,
+        .JUMPDEST, .PUSH1,
+        0x2a,
+    });
+    const message = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100_000,
+        .recipient = recipient,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = recipient,
+    };
+
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try executor.beginTransaction(
+        evmz.t.defaultExecutionContext(sender, 100_000),
+        sender,
+        recipient,
+    );
+    defer executor.discardStateTransition();
+    var prepared = try executor.prepareBytecode(&code);
+    defer prepared.deinit(std.testing.allocator);
+
+    var controlled: Session = undefined;
+    try controlled.init(&executor, message, prepared.view());
+    defer controlled.deinit();
+
+    var pause = try controlled.step();
+    try std.testing.expectEqual(@as(usize, 2), pause.opcode.pc);
+    var frame = controlled.call_runtime.frames.frame(controlled.call_runtime.frames.len() - 1);
+    try std.testing.expectEqual(@as(u256, 4), frame.stack.peek().?);
+
+    pause = try controlled.step();
+    try std.testing.expectEqual(@as(usize, 4), pause.opcode.pc);
+    frame = controlled.call_runtime.frames.frame(controlled.call_runtime.frames.len() - 1);
+    try std.testing.expectEqual(@as(u16, 0), frame.stack.len);
+
+    pause = try controlled.step();
+    try std.testing.expectEqual(@as(usize, 5), pause.opcode.pc);
 }
 
 test "debug session matches call, create, precompile, and terminal outcomes" {
@@ -258,7 +310,7 @@ test "debug session matches call, create, precompile, and terminal outcomes" {
 test "debug session dispatches a child and resumes its parent" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const child = evmz.addr(0x1234);
@@ -307,7 +359,7 @@ test "debug session dispatches a child and resumes its parent" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&executor, message, bytecode.view());
     defer controlled.deinit();
 
@@ -349,7 +401,7 @@ test "debug session dispatches a child and resumes its parent" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
 
-    var over: driver.Session = undefined;
+    var over: Session = undefined;
     try over.init(&executor, message, bytecode.view());
     defer over.deinit();
     pause = try over.pause();
@@ -368,7 +420,7 @@ test "debug session dispatches a child and resumes its parent" {
 test "debug session can substitute a call before continuing" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const root_code = [_]u8{
@@ -396,7 +448,7 @@ test "debug session can substitute a call before continuing" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&executor, .{
         .depth = 0,
         .kind = .call,
@@ -445,7 +497,7 @@ test "debug session can substitute a call before continuing" {
 test "debug session mismatch remains canonical when dispatched" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const root_code = evmz.t.bytecode(.{
@@ -465,7 +517,7 @@ test "debug session mismatch remains canonical when dispatched" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&executor, .{
         .depth = 0,
         .kind = .call,
@@ -511,7 +563,7 @@ test "debug session mismatch remains canonical when dispatched" {
 test "debug session can substitute a create before continuing" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const deployed = evmz.addr(0xdead);
@@ -542,7 +594,7 @@ test "debug session can substitute a create before continuing" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&executor, message, bytecode.view());
     defer controlled.deinit();
 
@@ -591,7 +643,7 @@ test "debug session can substitute a create before continuing" {
 test "debug session aborts at child and action boundaries" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const child = evmz.addr(0x1234);
@@ -638,7 +690,7 @@ test "debug session aborts at child and action boundaries" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&executor, message, bytecode.view());
     defer controlled.deinit();
 
@@ -669,7 +721,7 @@ test "debug session aborts at child and action boundaries" {
         sender,
         recipient,
     );
-    var at_action: driver.Session = undefined;
+    var at_action: Session = undefined;
     try at_action.init(&executor, message, bytecode.view());
     defer at_action.deinit();
     pause = try at_action.pause();
@@ -707,7 +759,7 @@ test "debug session resolves and executes a custom instruction" {
     const Exact = evmz.t.CustomVm(.cancun, .{ .instruction = custom_instructions }) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
     const runtime = call_runtime.bind(Executor);
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const code = [_]u8{
@@ -755,7 +807,7 @@ test "debug session resolves and executes a custom instruction" {
     var controlled_code = try controlled_executor.prepareBytecode(&code);
     defer controlled_code.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&controlled_executor, message, controlled_code.view());
     defer controlled.deinit();
 
@@ -804,7 +856,7 @@ test "debug session resolves and executes a custom instruction" {
 test "debug session rejects an active capture context" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const code = [_]u8{0x00};
@@ -834,14 +886,14 @@ test "debug session rejects an active capture context" {
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try std.testing.expectError(error.CaptureActive, controlled.init(&executor, message, bytecode.view()));
 }
 
 test "debug session inspection rebinds to the active frame" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const child = evmz.addr(0x1234);
@@ -883,7 +935,7 @@ test "debug session inspection rebinds to the active frame" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     try controlled.init(&executor, message, bytecode.view());
     defer controlled.deinit();
 
@@ -947,7 +999,7 @@ const ArmedFailingAllocator = struct {
 test "failed debug session init leaves no prepared-code execution scope" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const driver = session.bind(Executor);
+    const Session = session.SessionType(Executor);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     const root_code = evmz.t.bytecode(.{ .PUSH1, 0x01, .PUSH1, 0x02, .ADD, .STOP });
@@ -974,7 +1026,7 @@ test "failed debug session init leaves no prepared-code execution scope" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(failing.allocator());
 
-    var controlled: driver.Session = undefined;
+    var controlled: Session = undefined;
     failing.armed = true;
     const failed = controlled.init(&executor, message, bytecode.view());
     failing.armed = false;

@@ -1,7 +1,7 @@
 //! Storage keys and SSTORE status classification.
 
 const std = @import("std");
-const Host = @import("../Host.zig");
+const execution = @import("../execution.zig");
 const Address = @import("../address.zig").Address;
 
 pub const Key = struct {
@@ -9,7 +9,7 @@ pub const Key = struct {
     key: u256,
 };
 
-pub fn status(original: u256, current: u256, next: u256) Host.StorageStatus {
+pub fn status(original: u256, current: u256, next: u256) execution.StorageStatus {
     if (current == next) return .assigned;
 
     if (original == current) {
@@ -33,10 +33,10 @@ pub fn status(original: u256, current: u256, next: u256) Host.StorageStatus {
 }
 
 test "storage status classifies basic transitions" {
-    try std.testing.expectEqual(Host.StorageStatus.assigned, status(0, 0, 0));
-    try std.testing.expectEqual(Host.StorageStatus.added, status(0, 0, 1));
-    try std.testing.expectEqual(Host.StorageStatus.deleted, status(1, 1, 0));
-    try std.testing.expectEqual(Host.StorageStatus.modified, status(1, 1, 2));
-    try std.testing.expectEqual(Host.StorageStatus.deleted_restored, status(1, 0, 1));
-    try std.testing.expectEqual(Host.StorageStatus.added_deleted, status(0, 1, 0));
+    try std.testing.expectEqual(execution.StorageStatus.assigned, status(0, 0, 0));
+    try std.testing.expectEqual(execution.StorageStatus.added, status(0, 0, 1));
+    try std.testing.expectEqual(execution.StorageStatus.deleted, status(1, 1, 0));
+    try std.testing.expectEqual(execution.StorageStatus.modified, status(1, 1, 2));
+    try std.testing.expectEqual(execution.StorageStatus.deleted_restored, status(1, 0, 1));
+    try std.testing.expectEqual(execution.StorageStatus.added_deleted, status(0, 1, 0));
 }

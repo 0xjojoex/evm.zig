@@ -12,9 +12,11 @@ const addr = evmz.addr;
 const Address = evmz.Address;
 const AddressWord = evmz.AddressWord;
 const execution = @import("./execution.zig");
+const AccessStatus = execution.AccessStatus;
 const ExecutionOutcome = execution.ExecutionOutcome;
 const FrameHalt = execution.FrameHalt;
 const Status = execution.Status;
+const StorageStatus = execution.StorageStatus;
 const TerminalCause = execution.TerminalCause;
 
 pub const max_call_depth: u16 = 1024;
@@ -22,23 +24,6 @@ pub const max_call_depth: u16 = 1024;
 pub const Account = struct {
     nonce: u64 = 0,
     balance: u256,
-};
-
-pub const AccessStatus = enum(u1) {
-    cold = 0,
-    warm = 1,
-};
-
-pub const StorageStatus = enum(u8) {
-    assigned,
-    added,
-    deleted,
-    modified,
-    deleted_added,
-    modified_deleted,
-    deleted_restored,
-    added_deleted,
-    modified_restored,
 };
 
 pub const StorageLoadResult = struct {

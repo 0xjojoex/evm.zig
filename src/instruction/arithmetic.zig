@@ -1,111 +1,5 @@
-const interpreter = @import("../Interpreter.zig");
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const ExactSpec = @import("../spec.zig").Spec;
-const uint256 = @import("../uint256.zig");
-
-const CallFrame = interpreter.CallFrame;
-
-pub fn add(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-    const result = a +% b;
-
-    frame.stack.push(result);
-}
-
-pub fn mul(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-    const result = a *% b;
-
-    frame.stack.push(result);
-}
-
-pub fn sub(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-    const result = a -% b;
-
-    frame.stack.push(result);
-}
-
-pub fn div(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-    frame.stack.push(uint256.div(a, b));
-}
-
-pub fn sdiv(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-
-    frame.stack.push(uint256.sdiv(a, b));
-}
-
-pub fn mod(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-    frame.stack.push(uint256.mod(a, b));
-}
-
-pub fn smod(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-    frame.stack.push(uint256.smod(a, b));
-}
-
-pub fn addmod(frame: *CallFrame) !void {
-    const a, const b, const c = frame.popN(3) orelse return;
-    frame.stack.push(uint256.addMod(a, b, c));
-}
-
-pub fn mulmod(frame: *CallFrame) !void {
-    const a, const b, const c = frame.popN(3) orelse return;
-    frame.stack.push(uint256.mulMod(a, b, c));
-}
-
-pub fn bind(comptime spec: ExactSpec) type {
-    return struct {
-        pub fn exp(frame: *CallFrame) !void {
-            const a, const exponent = frame.popN(2) orelse return;
-
-            const exponent_byte_size = countSignificantBytesSize(exponent);
-            if (!frame.trackGas(spec.instruction.exp_byte_gas * exponent_byte_size)) return;
-
-            const result = wrapExp(a, exponent);
-            frame.stack.push(result);
-        }
-    };
-}
-
-pub fn signextend(frame: *CallFrame) !void {
-    const a, const b = frame.popN(2) orelse return;
-
-    var val = b;
-    if (a < 32) {
-        const sign_bit: u8 = @as(u8, @intCast(a)) * 8 + 7;
-        const mask = std.math.shl(u256, 1, sign_bit) - 1;
-        if (((b >> sign_bit) & 1) != 0) {
-            val = b | ~mask;
-        } else {
-            val = b & mask;
-        }
-    }
-
-    frame.stack.push(val);
-}
-
-pub fn keccak256(frame: *CallFrame) !void {
-    const offset_word, const size_word = frame.popN(2) orelse return;
-    const size = frame.wordToUsizeOrOog(size_word) orelse return;
-    const offset = frame.memoryOffsetToUsizeOrOog(offset_word, size) orelse return;
-
-    if (!try frame.expandMemory(offset, size)) return;
-    const min_word_size = (size + 31) / 32;
-    const gas_for_word: i64 = @intCast(6 * min_word_size);
-    if (!frame.trackGas(gas_for_word)) return;
-
-    const value = frame.memory.readBytes(offset, size);
-
-    const result = if (value.len == 0) evmz.crypto.keccak256_empty else evmz.crypto.keccak256(value);
-
-    const final_result = evmz.uint256.fromBytes32(&result);
-    frame.stack.push(final_result);
-}
 
 test "DIV and SDIV with one operand fail as invalid instructions" {
     try evmz.t.expectLatestForkBytecodeStatus(.{ .PUSH1, 0x01, .DIV }, .invalid);
@@ -170,9 +64,7 @@ test "EXP byte gas comes from the exact spec" {
         result.exp_byte_gas = 1;
         break :exact result;
     };
-    const spec = evmz.eth.spurious_dragon.extend(.{
-        .instruction = exact,
-    });
+    const Exact = evmz.t.CustomVm(.spurious_dragon, .{ .instruction = exact }) orelse return error.SkipZigTest;
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -180,20 +72,23 @@ test "EXP byte gas comes from the exact spec" {
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{@intFromEnum(evmz.Opcode.EXP)};
 
-    var frame = try interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .source = .{ .code = &code },
     });
     defer frame.deinit();
-
     frame.frame.stack.push(0x0100);
     frame.frame.stack.push(2);
 
-    try bind(spec).exp(frame.frame);
+    var intpr = frame.interpreter();
+    const result = try intpr.execute();
 
-    try std.testing.expect(frame.frame.isRunning());
-    try std.testing.expectEqual(@as(i64, 99_998), frame.frame.gas_left);
+    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(
+        msg.gas - Exact.specification.instruction.entry(@intFromEnum(evmz.Opcode.EXP)).info.static_gas - 2,
+        frame.frame.gas_left,
+    );
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
 }
 

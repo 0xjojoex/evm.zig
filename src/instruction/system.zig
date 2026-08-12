@@ -2,7 +2,7 @@ const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Host = @import("../Host.zig");
 const evmz = @import("../evm.zig");
-const ExactSpec = @import("../spec.zig").Spec;
+const Spec = @import("../spec.zig").Spec;
 const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
@@ -15,39 +15,7 @@ fn nextDepth(depth: u16) u16 {
     return if (depth == std.math.maxInt(u16)) depth else depth + 1;
 }
 
-pub inline fn stop(frame: *CallFrame) !void {
-    frame.halt(.success);
-}
-
-pub inline fn invalid(frame: *CallFrame) !void {
-    frame.halt(.invalid_opcode);
-}
-
-/// `RETURN` Halt the execution returning the output data
-pub inline fn ret(frame: *CallFrame) !void {
-    const offset, const size = frame.popN(2) orelse return;
-
-    const size_usize = frame.wordToUsizeOrOog(size) orelse return;
-    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
-
-    if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    frame.setOutputRange(offset_usize, size_usize);
-    frame.halt(.success);
-}
-
-/// `REVERT` Halt the execution reverting state changes but returning data and remaining gas
-pub inline fn revert(frame: *CallFrame) !void {
-    const offset, const size = frame.popN(2) orelse return;
-
-    const size_usize = frame.wordToUsizeOrOog(size) orelse return;
-    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
-
-    if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    frame.setOutputRange(offset_usize, size_usize);
-    frame.halt(.revert);
-}
-
-pub fn bind(comptime spec: ExactSpec) type {
+pub fn System(comptime spec: Spec) type {
     return struct {
         const Self = @This();
 
@@ -356,7 +324,7 @@ test "CREATE initcode limit is independent from transaction validation" {
     frame.frame.stack.push(2);
     frame.frame.stack.push(0);
     frame.frame.stack.push(0);
-    try bind(spec).create(frame.frame);
+    try System(spec).create(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameHalt.out_of_gas, frame.frame.haltReason().?);
 }

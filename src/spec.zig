@@ -275,7 +275,7 @@ pub const StorageSpec = struct {
     sstore_minimum_gas: ?i64,
     /// SSTORE access charge by warm/cold before the write schedule
     /// (EIP-2929); null means access accounting is inactive.
-    sstoreAccessGas: *const fn (execution.AccountAccessStatus) ?i64,
+    sstoreAccessGas: *const fn (execution.AccessStatus) ?i64,
     /// Write cost and refund by storage transition (net-metering schedules).
     sstoreGas: *const fn (execution.StorageStatus) execution.StorageGas,
     /// State-gas charge and refund by storage transition (Amsterdam).

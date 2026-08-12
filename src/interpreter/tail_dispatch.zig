@@ -100,18 +100,32 @@ const TerminalStatus = enum {
     revert,
 };
 
+pub const Continuation = enum {
+    chain,
+    step,
+};
+
 /// Tail dispatch for an exact specification.
 ///
 /// traced: whether the dispatch table should include traced handlers.
-pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool }) type {
+/// continuation: whether a successful opcode dispatches its successor or
+/// returns after spilling the next instruction state.
+pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
+    traced: bool,
+    continuation: Continuation = .chain,
+}) type {
     const traced = cfg.traced;
+    const continuation = cfg.continuation;
+    if (traced and continuation != .chain) {
+        @compileError("traced tail dispatch requires chained continuation");
+    }
 
     return struct {
         const Self = @This();
         const Instructions = instruction.Instruction(spec);
-        const EnvironmentInstructions = environment_instruction.bind(spec);
-        const StorageInstructions = storage_instruction.bind(spec);
-        const SystemInstructions = system_instruction.bind(spec);
+        const EnvironmentInstructions = environment_instruction.Enviroment(spec);
+        const StorageInstructions = storage_instruction.Storage(spec);
+        const SystemInstructions = system_instruction.System(spec);
         // ip rides in a register across tail calls; it always points at the NEXT
         // byte to decode (one past the handler's own opcode byte).
         const Handler = fn ([*]const u8, [*]u256, i64, *Context) TailStatus;
@@ -434,7 +448,18 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         }
 
         pub fn execute(frame: *CallFrame) anyerror!void {
-            comptime std.debug.assert(!traced);
+            comptime {
+                std.debug.assert(!traced);
+                std.debug.assert(continuation == .chain);
+            }
+            return executeAt(frame, frame.code.ptr);
+        }
+
+        pub fn executeInstruction(frame: *CallFrame) anyerror!void {
+            comptime {
+                std.debug.assert(!traced);
+                std.debug.assert(continuation == .step);
+            }
             return executeAt(frame, frame.code.ptr);
         }
 
@@ -450,7 +475,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             };
 
             const ip = code_base + frame.pc;
-            const status = table[ip[0]](ip + 1, stack_base + frame.stack.len, frame.gas_left, &ctx);
+            const status = dispatchFirst(ip, stack_base + frame.stack.len, frame.gas_left, &ctx);
             switch (status) {
                 .done => ctx.spill(ctx.final_ip, ctx.final_sp, ctx.final_gas),
                 .out_of_gas => {
@@ -459,6 +484,16 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 },
                 .thrown => return ctx.err.?,
             }
+        }
+
+        inline fn dispatchFirst(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            if (comptime continuation == .step) {
+                @setEvalBranchQuota(30_000);
+                return switch (ip[0]) {
+                    inline 0...255 => |opcode_byte| table[opcode_byte](ip + 1, sp, gas, ctx),
+                };
+            }
+            return table[ip[0]](ip + 1, sp, gas, ctx);
         }
 
         pub fn executeTraced(capture: *trace.TraceCapture, frame: *CallFrame) anyerror!void {
@@ -520,6 +555,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         // only from opcode handlers with the Handler signature. `ip` must point at
         // the opcode byte to execute next.
         inline fn tailNext(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            if (comptime continuation == .step) return ctx.finish(ip, sp, gas, .done);
             const next_table = if (traced) traced_table else table;
             return @call(.always_tail, next_table[ip[0]], .{ ip + 1, sp, gas, ctx });
         }
@@ -802,7 +838,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
                     if (comptime value == .self_balance) {
                         if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
-                        const result = environment_instruction.readSelfBalance(ctx.frame) catch |err| {
+                        const result = ctx.frame.host.getBalance(.fromAddress(ctx.frame.msg.recipient)) catch |err| {
                             recordError(ctx, ip, sp, next_gas, err);
                             return .thrown;
                         };

@@ -110,7 +110,7 @@ pub const Spec = struct {
         };
     }
 
-    pub fn codeAccountAccessGas(comptime self: Spec, status: execution.AccountAccessStatus) ?i64 {
+    pub fn codeAccountAccessGas(comptime self: Spec, status: execution.AccessStatus) ?i64 {
         return switch (status) {
             .cold => self.code_account_cold_access_gas,
             .warm => self.code_account_warm_access_gas,

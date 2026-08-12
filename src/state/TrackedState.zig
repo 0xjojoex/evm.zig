@@ -49,7 +49,7 @@ const AccountRef = struct {
 const AccountAccess = struct {
     id: AccountId,
     row: *AccountRow,
-    status: Host.AccessStatus,
+    status: execution.AccessStatus,
 };
 
 const StorageRef = struct {
@@ -60,7 +60,7 @@ const StorageRef = struct {
 const StorageAccess = struct {
     storage: StorageRef,
     scope: *ScopeStorage,
-    status: Host.AccessStatus,
+    status: execution.AccessStatus,
 };
 
 pub const ByteRange = range.Bytes;
@@ -1725,7 +1725,7 @@ pub fn setNonce(self: *TrackedState, address: Address, nonce: u64) !void {
     row.mutation.dirty = true;
 }
 
-pub fn accessAccount(self: *TrackedState, address: Address) !Host.AccessStatus {
+pub fn accessAccount(self: *TrackedState, address: Address) !execution.AccessStatus {
     const access = try self.ensureAccountWarm(address);
     if (try self.observeAccount(.{ .id = access.id, .row = access.row })) |observation| {
         observation.observation.accessed = true;
@@ -1785,7 +1785,7 @@ pub fn getStorage(self: *TrackedState, address: Address, key: u256) !u256 {
     return row.current.?;
 }
 
-pub fn accessStorage(self: *TrackedState, address: Address, key: u256) !Host.AccessStatus {
+pub fn accessStorage(self: *TrackedState, address: Address, key: u256) !execution.AccessStatus {
     return (try self.accessStorageKey(.{ .address = address, .key = key })).status;
 }
 
@@ -1818,7 +1818,7 @@ pub fn loadStorage(self: *TrackedState, address: Address, key: u256) !Host.Stora
     return .{ .value = access.storage.row.current.?, .access_status = access.status };
 }
 
-pub fn setStorage(self: *TrackedState, address: Address, key: u256, value: u256) !Host.StorageStatus {
+pub fn setStorage(self: *TrackedState, address: Address, key: u256, value: u256) !execution.StorageStatus {
     const storage_key = StorageKey{ .address = address, .key = key };
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
@@ -1842,7 +1842,7 @@ fn setStorageAfterAccess(
     storage_ref: StorageRef,
     scope_storage: *ScopeStorage,
     value: u256,
-) !Host.StorageStatus {
+) !execution.StorageStatus {
     const row = storage_ref.row;
     const observation = try self.observeStorage(storage_ref);
     if (observation) |observed| {

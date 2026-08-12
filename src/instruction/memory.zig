@@ -1,61 +1,4 @@
 const evmz = @import("../evm.zig");
-const Interpreter = @import("../Interpreter.zig");
-const std = @import("std");
-
-const CallFrame = Interpreter.CallFrame;
-
-pub fn mstore(frame: *CallFrame) !void {
-    const offset, const value = frame.popN(2) orelse return;
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
-    const end = std.math.add(usize, offset_usize, 32) catch {
-        frame.halt(.out_of_gas);
-        return;
-    };
-
-    if (end <= frame.memory.len()) {
-        frame.memory.write(offset_usize, value);
-        return;
-    }
-
-    if (!try frame.expandMemory(offset_usize, 32)) return;
-    frame.memory.write(offset_usize, value);
-}
-
-pub fn mstore8(frame: *CallFrame) !void {
-    const offset, const value = frame.popN(2) orelse return;
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
-    const end = std.math.add(usize, offset_usize, 1) catch {
-        frame.halt(.out_of_gas);
-        return;
-    };
-
-    if (end <= frame.memory.len()) {
-        frame.memory.write8(offset_usize, value);
-        return;
-    }
-
-    if (!try frame.expandMemory(offset_usize, 1)) return;
-    frame.memory.write8(offset_usize, value);
-}
-
-pub fn mload(frame: *CallFrame) !void {
-    const offset = frame.pop() orelse return;
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
-    const end = std.math.add(usize, offset_usize, 32) catch {
-        frame.halt(.out_of_gas);
-        return;
-    };
-
-    if (end <= frame.memory.len()) {
-        const value = frame.memory.read(offset_usize);
-        frame.stack.push(value);
-        return;
-    }
-
-    if (!try frame.expandMemory(offset_usize, 32)) return;
-    const value = frame.memory.read(offset_usize);
-    frame.stack.push(value);
-}
 
 test "MSTORE overwrites already expanded memory" {
     try evmz.t.expectLatestForkBytecodeStackTop(.{
@@ -67,28 +10,6 @@ test "MSTORE overwrites already expanded memory" {
         .PUSH1,  0x00,
         .MLOAD,
     }, 0xbb);
-}
-
-pub fn msize(frame: *CallFrame) !void {
-    const size = frame.memory.len();
-    _ = frame.push(size);
-}
-
-pub fn mcopy(frame: *CallFrame) !void {
-    const dest, const offset, const size = frame.popN(3) orelse return;
-    if (size == 0) return;
-
-    const dest_usize = frame.wordToUsizeOrOog(dest) orelse return;
-    const offset_usize = frame.wordToUsizeOrOog(offset) orelse return;
-    const size_usize = frame.wordToUsizeOrOog(size) orelse return;
-
-    if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    if (!try frame.expandMemory(dest_usize, size_usize)) return;
-    const size_i64 = frame.wordToIntOrHalt(i64, size, .out_of_gas) orelse return;
-    const word_copied_cost = evmz.calcWordSize(i64, size_i64) * 3;
-    if (!frame.trackGas(word_copied_cost)) return;
-
-    frame.memory.copy(dest_usize, offset_usize, size_usize);
 }
 
 test "MCOPY is only enabled from Cancun" {

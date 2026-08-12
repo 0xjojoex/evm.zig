@@ -9,6 +9,7 @@ const std = @import("std");
 const address = @import("../address.zig");
 const claim_plan = @import("../eth/bal/ClaimPlan.zig");
 const crypto = @import("../crypto.zig");
+const execution = @import("../execution.zig");
 const Host = @import("../Host.zig");
 const Account = @import("../state/Account.zig");
 const artifacts = @import("./artifacts.zig");
@@ -1220,7 +1221,7 @@ pub fn accessStorage(
     self: *StatelessBlockState,
     target: address.AddressWord,
     slot: u256,
-) (ResolutionError || Allocator.Error)!Host.AccessStatus {
+) (ResolutionError || Allocator.Error)!execution.AccessStatus {
     const resolved = (try self.resolveStorageKey(target, slot, .optional_warm_only)) orelse
         return .cold;
     return self.accessResolvedStorage(resolved);
@@ -1245,7 +1246,7 @@ pub fn setStorage(
     target: address.AddressWord,
     slot: u256,
     value: u256,
-) (ResolutionError || Allocator.Error)!Host.StorageStatus {
+) (ResolutionError || Allocator.Error)!execution.StorageStatus {
     const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
     try self.observeAccount(resolved.account, .{ .accessed = true });
     return self.setResolvedStorage(resolved, value);
@@ -1269,7 +1270,7 @@ pub fn storeStorage(
 fn accessResolvedStorage(
     self: *StatelessBlockState,
     resolved: ResolvedStorage,
-) Allocator.Error!Host.AccessStatus {
+) Allocator.Error!execution.AccessStatus {
     return if (try self.warmStorageId(resolved.storage)) .cold else .warm;
 }
 
@@ -1286,7 +1287,7 @@ fn setResolvedStorage(
     self: *StatelessBlockState,
     resolved: ResolvedStorage,
     value: u256,
-) Allocator.Error!Host.StorageStatus {
+) Allocator.Error!execution.StorageStatus {
     self.captureStorageOriginal(resolved.storage);
     try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
     self.captureExecutionOriginal(resolved.storage);

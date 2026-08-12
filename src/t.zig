@@ -232,7 +232,7 @@ pub const MockHost = struct {
         });
     }
 
-    fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStatus {
+    fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !evmz.execution.StorageStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
         const original_entry = try self.original_store.getOrPut(key);
@@ -268,7 +268,7 @@ pub const MockHost = struct {
     fn storeStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStoreResult {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.storage_stores += 1;
-        const access_status: Host.AccessStatus = if (self.store.contains(key)) .warm else .cold;
+        const access_status: evmz.execution.AccessStatus = if (self.store.contains(key)) .warm else .cold;
         return .{
             .access_status = access_status,
             .storage_status = try setStorage(ptr, address, key, value),
@@ -392,7 +392,7 @@ pub const MockHost = struct {
         return should_refund;
     }
 
-    fn accessAccount(ptr: *anyopaque, address_word: AddressWord) !Host.AccessStatus {
+    fn accessAccount(ptr: *anyopaque, address_word: AddressWord) !evmz.execution.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const address = address_word.address();
         const local = self.local_account.get(address);
@@ -402,7 +402,7 @@ pub const MockHost = struct {
         return .cold;
     }
 
-    fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.AccessStatus {
+    fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !evmz.execution.AccessStatus {
         const self: *Self = @ptrCast(@alignCast(ptr));
         _ = address;
         self.access_storage_reads += 1;
@@ -413,7 +413,7 @@ pub const MockHost = struct {
         return .cold;
     }
 
-    fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?Host.AccessStatus {
+    fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?evmz.execution.AccessStatus {
         _ = ptr;
         _ = address;
         return null;

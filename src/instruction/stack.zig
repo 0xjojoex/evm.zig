@@ -1,57 +1,4 @@
-const std = @import("std");
 const evmz = @import("../evm.zig");
-const Interpreter = @import("../Interpreter.zig");
-
-const CallFrame = Interpreter.CallFrame;
-
-pub fn push0(frame: *CallFrame) !void {
-    _ = frame.push(0);
-}
-
-pub inline fn push(frame: *CallFrame, comptime n: u8) !void {
-    comptime std.debug.assert(n >= 1 and n <= 32);
-
-    const start = frame.pc;
-    if (comptime n >= 3) {
-        if (start <= frame.code.len and frame.code.len - start >= n) {
-            const Int = std.meta.Int(.unsigned, @as(comptime_int, n) * 8);
-            const bytes: *const [n]u8 = @ptrCast(frame.code.ptr + start);
-            if (!frame.push(@as(u256, std.mem.readInt(Int, bytes, .big)))) return;
-            frame.pc += n;
-            return;
-        }
-    }
-
-    var value: u256 = 0;
-    inline for (0..n) |i| {
-        value <<= 8;
-        if (start + i < frame.code.len) {
-            value |= @intCast(frame.code[start + i]);
-        }
-    }
-
-    if (!frame.push(value)) return;
-    frame.pc += n;
-}
-
-pub fn pop(frame: *CallFrame) !void {
-    _ = frame.pop() orelse return;
-}
-
-pub fn dup(frame: *CallFrame, comptime n: u8) !void {
-    comptime std.debug.assert(n >= 1 and n <= 16);
-    _ = frame.dup(n);
-}
-
-pub fn dupn(frame: *CallFrame) !void {
-    const immediate = immediateByte(frame);
-    const n = decodeDepthImmediate(immediate) orelse {
-        frame.halt(.invalid_opcode);
-        return;
-    };
-    frame.pc += 1;
-    _ = frame.dupDepth(n);
-}
 
 test "PUSH pads missing immediate bytes with zeroes" {
     try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH2, 0x01 }, 0x0100);
@@ -99,35 +46,6 @@ test "PUSH decodes full immediates" {
         },
         0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,
     );
-}
-
-pub fn swap(frame: *CallFrame, comptime n: u8) !void {
-    comptime std.debug.assert(n >= 1 and n <= 16);
-    _ = frame.swap(n);
-}
-
-pub fn swapn(frame: *CallFrame) !void {
-    const immediate = immediateByte(frame);
-    const n = decodeDepthImmediate(immediate) orelse {
-        frame.halt(.invalid_opcode);
-        return;
-    };
-    frame.pc += 1;
-    _ = frame.swapDepth(n);
-}
-
-pub fn exchange(frame: *CallFrame) !void {
-    const immediate = immediateByte(frame);
-    const n, const m = decodeExchangeImmediate(immediate) orelse {
-        frame.halt(.invalid_opcode);
-        return;
-    };
-    frame.pc += 1;
-    _ = frame.exchangeDepths(n, m);
-}
-
-fn immediateByte(frame: *CallFrame) u8 {
-    return if (frame.pc < frame.code.len) frame.code[frame.pc] else 0;
 }
 
 pub fn decodeDepthImmediate(x: u8) ?usize {

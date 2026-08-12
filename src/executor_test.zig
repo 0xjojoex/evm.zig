@@ -1979,7 +1979,7 @@ test "rollback transaction restores branch checkpoint and closes execution conte
     var pre_execution = try executor.branchCheckpoint();
     defer pre_execution.deinit();
 
-    try std.testing.expectEqual(Host.StorageStatus.added, try executor.state.setStorage(contract, 7, 2));
+    try std.testing.expectEqual(execution_values.StorageStatus.added, try executor.state.setStorage(contract, 7, 2));
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
 
     executor.rollbackTransaction(&pre_execution);
@@ -2375,14 +2375,14 @@ test "exact spec drives precompile warm access" {
     try default_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer default_executor.discardStateTransition();
     var default_host = default_executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.warm, try default_host.accessAccount(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(execution_values.AccessStatus.warm, try default_host.accessAccount(.fromAddress(precompile_address)));
 
     var custom_executor = NoPrecompile.Executor.init(std.testing.allocator, .{});
     defer custom_executor.deinit();
     try custom_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer custom_executor.discardStateTransition();
     var custom_host = custom_executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.cold, try custom_host.accessAccount(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(execution_values.AccessStatus.cold, try custom_host.accessAccount(.fromAddress(precompile_address)));
 }
 
 test "exact spec drives precompile execution" {
@@ -2899,7 +2899,7 @@ test "active precompiles are warm but not existing state accounts" {
 
     var host_iface = executor.host();
     try std.testing.expect(!try host_iface.accountExists(.fromAddress(precompile_address)));
-    try std.testing.expectEqual(Host.AccessStatus.warm, try host_iface.accessAccount(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(execution_values.AccessStatus.warm, try host_iface.accessAccount(.fromAddress(precompile_address)));
     try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(.fromAddress(precompile_address)));
 
     // Alive, so the address is a real state account: an EIP-161-empty one is
@@ -2926,7 +2926,7 @@ fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {
     try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &code });
 
     var host_iface = executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.warm, (try host_iface.accessDelegatedAccount(.fromAddress(authority))).?);
+    try std.testing.expectEqual(execution_values.AccessStatus.warm, (try host_iface.accessDelegatedAccount(.fromAddress(authority))).?);
 }
 
 test "sealed observations expose storage state without a trace tape" {

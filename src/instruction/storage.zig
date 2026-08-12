@@ -2,61 +2,14 @@ const evmz = @import("../evm.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const Interpreter = @import("../Interpreter.zig");
 const instruction = evmz.instruction;
-const Host = evmz.Host;
 const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
-const AccountAccessStatus = evmz.execution.AccountAccessStatus;
+const AccessStatus = evmz.execution.AccessStatus;
 const StorageStatus = evmz.execution.StorageStatus;
 
-fn accountAccessStatus(status: Host.AccessStatus) AccountAccessStatus {
-    return switch (status) {
-        .cold => .cold,
-        .warm => .warm,
-    };
-}
-
-fn storageStatus(status: Host.StorageStatus) StorageStatus {
-    return switch (status) {
-        .assigned => .assigned,
-        .added => .added,
-        .deleted => .deleted,
-        .modified => .modified,
-        .deleted_added => .deleted_added,
-        .modified_deleted => .modified_deleted,
-        .deleted_restored => .deleted_restored,
-        .added_deleted => .added_deleted,
-        .modified_restored => .modified_restored,
-    };
-}
-
-test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
-    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 200, .refund = 4800 }, evmz.eth.constantinople.storage.sstoreGas(.modified_restored));
-    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 5000, .refund = 0 }, evmz.eth.petersburg.storage.sstoreGas(.modified_restored));
-    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 800, .refund = 4200 }, evmz.eth.istanbul.storage.sstoreGas(.modified_restored));
-}
-
-test "Amsterdam SSTORE separates access and write gas from state gas" {
-    const storage = evmz.eth.amsterdam.storage;
-    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 10_000, .refund = 0 }, storage.sstoreGas(.added));
-    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 0, .refund = 10_000 }, storage.sstoreGas(.added_deleted));
-    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 0, .refund = -2_480 }, storage.sstoreGas(.deleted_restored));
-}
-
-pub fn bind(comptime spec: ExactSpec) type {
+pub fn Storage(comptime spec: ExactSpec) type {
     return struct {
-        const Self = @This();
-
-        pub fn sstore(frame: *CallFrame) !void {
-            if (frame.msg.is_static) {
-                frame.halt(.write_protection);
-                return;
-            }
-            const key, const value = frame.popN(2) orelse return;
-
-            try Self.sstoreAfterPop(frame, key, value);
-        }
-
         pub fn sstoreAfterPop(frame: *CallFrame, key: u256, value: u256) !void {
             const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
             const host = frame.host;
@@ -68,25 +21,23 @@ pub fn bind(comptime spec: ExactSpec) type {
                 }
             }
 
-            const host_status = blk: {
+            const status = blk: {
                 if (spec.storage.sstoreAccessGas(.warm)) |warm_access_gas| {
                     const cold_access_gas = spec.storage.sstoreAccessGas(.cold) orelse warm_access_gas;
                     if (frame.gas_left >= @max(warm_access_gas, cold_access_gas)) {
                         const result = try host.storeStorage(recipient, key, value);
-                        const access_status = accountAccessStatus(result.access_status);
+                        const access_status = result.access_status;
                         if (!frame.trackGas(spec.storage.sstoreAccessGas(access_status) orelse 0)) return;
                         break :blk result.storage_status;
                     }
 
-                    const access_status = accountAccessStatus(try host.accessStorage(recipient, key));
+                    const access_status = try host.accessStorage(recipient, key);
                     const access_gas = spec.storage.sstoreAccessGas(access_status) orelse 0;
                     if (!frame.trackGas(access_gas)) return;
                 }
 
                 break :blk try host.setStorage(recipient, key, value);
             };
-
-            const status = storageStatus(host_status);
 
             const cost = spec.storage.sstoreGas(status);
 
@@ -96,12 +47,6 @@ pub fn bind(comptime spec: ExactSpec) type {
             const state_gas = spec.storage.sstoreStateGas(status);
             if (!frame.trackStateGas(state_gas.charge)) return;
             frame.refillStateGas(state_gas.refund);
-        }
-
-        pub fn sload(frame: *CallFrame) !void {
-            const key = frame.pop() orelse return;
-            const value = (try Self.sloadAfterPop(frame, key)) orelse return;
-            frame.stack.push(value);
         }
 
         pub fn sloadAfterPop(frame: *CallFrame, key: u256) !?u256 {
@@ -126,23 +71,17 @@ pub fn bind(comptime spec: ExactSpec) type {
     };
 }
 
-pub fn tload(frame: *CallFrame) !void {
-    const key = frame.pop() orelse return;
-    const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
-    const value = try frame.host.getTransientStorage(recipient, key);
-    frame.stack.push(value);
+test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 200, .refund = 4800 }, evmz.eth.constantinople.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 5000, .refund = 0 }, evmz.eth.petersburg.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 800, .refund = 4200 }, evmz.eth.istanbul.storage.sstoreGas(.modified_restored));
 }
 
-pub fn tstore(frame: *CallFrame) !void {
-    if (frame.msg.is_static) {
-        frame.halt(.write_protection);
-        return;
-    }
-
-    const key, const value = frame.popN(2) orelse return;
-
-    const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
-    try frame.host.setTransientStorage(recipient, key, value);
+test "Amsterdam SSTORE separates access and write gas from state gas" {
+    const storage = evmz.eth.amsterdam.storage;
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 10_000, .refund = 0 }, storage.sstoreGas(.added));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 0, .refund = 10_000 }, storage.sstoreGas(.added_deleted));
+    try std.testing.expectEqual(evmz.execution.StorageGas{ .cost = 0, .refund = -2_480 }, storage.sstoreGas(.deleted_restored));
 }
 
 test "transient storage opcodes are only enabled from Cancun" {
@@ -173,10 +112,11 @@ test "SLOAD cold storage access gas comes from the exact spec" {
     defer frame.deinit();
 
     frame.frame.stack.push(0);
-    try bind(spec).sload(frame.frame);
+    var intpr = frame.interpreter();
+    const result = try intpr.execute();
 
-    try std.testing.expect(frame.frame.isRunning());
-    try std.testing.expectEqual(@as(i64, 99_989), frame.frame.gas_left);
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(@as(i64, 99_939), frame.frame.gas_left);
     try std.testing.expectEqual(@as(u64, 1), mock_host.storage_loads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_reads);
@@ -186,7 +126,7 @@ test "SLOAD cold storage access gas comes from the exact spec" {
 test "SSTORE gas and state gas come from the exact spec" {
     if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
     const semantics = struct {
-        fn sstoreAccessGas(_: AccountAccessStatus) ?i64 {
+        fn sstoreAccessGas(_: AccessStatus) ?i64 {
             return null;
         }
 
@@ -222,9 +162,10 @@ test "SSTORE gas and state gas come from the exact spec" {
 
     frame.frame.stack.push(42);
     frame.frame.stack.push(0);
-    try bind(spec).sstore(frame.frame);
+    var intpr = frame.interpreter();
+    const result = try intpr.execute();
 
-    try std.testing.expect(frame.frame.isRunning());
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 99_993), frame.frame.gas_left);
     try std.testing.expectEqual(@as(i64, 0), frame.frame.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 3), frame.frame.gas_refund);

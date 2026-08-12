@@ -25,13 +25,20 @@ pub const Status = enum(u8) {
     out_of_gas,
 };
 
-// TODO: merge with Host.AccountAccessStatus
-pub const AccountAccessStatus = enum {
-    cold,
-    warm,
+/// Whether a transaction-scoped warmth record already existed for the thing
+/// being accessed. Applies to accounts, storage slots, and delegation targets
+/// alike; it says nothing about which kind of thing was accessed.
+pub const AccessStatus = enum(u1) {
+    cold = 0,
+    warm = 1,
 };
 
-pub const StorageStatus = enum {
+/// How one SSTORE moves a slot through its original/current/next triple.
+///
+/// Classified from state in `state.storage.status`; priced by fork gas
+/// schedules. `assigned` covers every transition that neither creates nor
+/// clears observable value.
+pub const StorageStatus = enum(u8) {
     assigned,
     added,
     deleted,
@@ -79,7 +86,7 @@ pub const TopLevelDelegatedAccountAccessInput = struct {
 };
 
 pub const DelegatedAccountAccess = struct {
-    status: AccountAccessStatus,
+    status: AccessStatus,
     gas: i64 = 0,
 };
 

@@ -1,9 +1,9 @@
 //! Interactive front end for the internal controlled-execution session.
 //!
 //! Paste bytecode, then either walk it a boundary at a time or run it out. Every
-//! opcode executes through definition-owned `Instruction(spec).execute`, sharing
-//! builtin and custom semantics with the production tail table while remaining
-//! frame-materialized so the session can pause after exactly one opcode.
+//! opcode executes through a comptime single-step specialization of tail dispatch,
+//! sharing builtin and custom semantics with production while materializing the
+//! frame after each opcode so the session can pause.
 //!
 //! This is deliberately not an example of a public API: it imports the internal
 //! session directly so the POC can be driven without exporting debugger
@@ -15,13 +15,13 @@
 
 const std = @import("std");
 const evmz = @import("./evm.zig");
-const session = @import("./debug/session.zig");
+const debug = @import("./debug.zig");
 
 const Address = evmz.Address;
 const Host = evmz.Host;
 const Status = evmz.execution.Status;
 const Executor = evmz.Evm.Executor;
-const Driver = session.bind(Executor);
+const Session = debug.SessionType(Executor);
 const instruction_spec = evmz.Evm.specification.instruction;
 const disassemble = evmz.instruction.disassemble;
 
@@ -154,16 +154,16 @@ const Repl = struct {
     executor: *Executor,
     loaded: ?Loaded = null,
 
-    /// One armed session plus everything it borrows. The driver must not move
+    /// One armed session plus everything it borrows. The ses must not move
     /// once initialized, so this is installed whole and dropped whole; it is
     /// never reassigned while a session is live.
     const Loaded = struct {
         bytecode: evmz.Bytecode,
         /// Borrowed by the root message for the life of the session.
         input: []u8,
-        driver: Driver.Session,
-        pause: session.Pause,
-        /// The driver closed itself: finished, aborted, or dropped after an
+        session: Session,
+        pause: debug.session.Pause,
+        /// The session closed itself: finished, aborted, or dropped after an
         /// error. State stays readable, nothing advances.
         closed: bool,
     };
@@ -219,7 +219,7 @@ const Repl = struct {
             .sub => return self.substitute(loaded, words),
             .abort => {
                 if (loaded.closed) return self.out.writeAll("session already closed\n");
-                loaded.driver.abort();
+                loaded.session.abort();
                 loaded.closed = true;
                 return self.out.writeAll("aborted: child writes restored, root attempt still the caller's\n");
             },
@@ -267,20 +267,20 @@ const Repl = struct {
         self.loaded = .{
             .bytecode = try self.executor.prepareBytecode(code),
             .input = input,
-            .driver = undefined,
+            .session = undefined,
             .pause = undefined,
             .closed = false,
         };
         const loaded = &self.loaded.?;
         errdefer {
-            // A no-op if the driver never opened; otherwise it closes the
+            // A no-op if the.session never opened; otherwise it closes the
             // prepared-code scope before `discardStateTransition` demands it.
-            loaded.driver.deinit();
+            loaded.session.deinit();
             loaded.bytecode.deinit(self.allocator);
             self.loaded = null;
         }
 
-        try loaded.driver.init(self.executor, .{
+        try loaded.session.init(self.executor, .{
             .depth = 0,
             .kind = .call,
             .gas = @intCast(gas),
@@ -291,7 +291,7 @@ const Repl = struct {
             .code_address = recipient,
         }, loaded.bytecode.view());
 
-        try self.settle(loaded, loaded.driver.pause());
+        try self.settle(loaded, loaded.session.pause());
         if (run_now) while (!loaded.closed) try self.stepOnce(loaded);
         try self.printPause(loaded);
     }
@@ -299,9 +299,9 @@ const Repl = struct {
     fn unload(self: *Repl) void {
         if (self.loaded == null) return;
         const loaded = &self.loaded.?;
-        // A no-op once the driver closed itself; otherwise it restores every
+        // A no-op once the.session closed itself; otherwise it restores every
         // unresolved child checkpoint before the transaction goes.
-        loaded.driver.deinit();
+        loaded.session.deinit();
         loaded.bytecode.deinit(self.allocator);
         self.allocator.free(loaded.input);
         self.loaded = null;
@@ -310,13 +310,13 @@ const Repl = struct {
 
     /// Advance one boundary: execute an opcode, or dispatch a pending call.
     ///
-    /// The single chokepoint for touching a closed driver: after an abort the
-    /// last pause still names an opcode the driver can no longer execute.
+    /// The single chokepoint for touching a closed.session: after an abort the
+    /// last pause still names an opcode the.session can no longer execute.
     fn stepOnce(self: *Repl, loaded: *Loaded) !void {
         if (loaded.closed) return;
         switch (loaded.pause) {
-            .opcode => try self.settle(loaded, loaded.driver.step()),
-            .suspended => try self.settle(loaded, loaded.driver.dispatchSuspension()),
+            .opcode => try self.settle(loaded, loaded.session.step()),
+            .suspended => try self.settle(loaded, loaded.session.dispatchSuspension()),
             .finished => {},
         }
     }
@@ -365,7 +365,7 @@ const Repl = struct {
             },
             .gas_refund = 0,
         };
-        try self.settle(loaded, loaded.driver.substituteResult(switch (action) {
+        try self.settle(loaded, loaded.session.substituteResult(switch (action) {
             .call => Host.Result.fromCall(result),
             // The CREATE handler derived the address before suspending, so a
             // substituted create still deploys where the canonical one would.
@@ -374,13 +374,13 @@ const Repl = struct {
         try self.printPause(loaded);
     }
 
-    /// Record a driver transition. A driver error leaves execution at no
+    /// Record a.session transition. A.session error leaves execution at no
     /// well-defined boundary, so the session is dropped rather than resumed.
-    fn settle(self: *Repl, loaded: *Loaded, next: anyerror!session.Pause) !void {
+    fn settle(self: *Repl, loaded: *Loaded, next: anyerror!debug.Pause) !void {
         loaded.pause = next catch |err| {
-            loaded.driver.deinit();
+            loaded.session.deinit();
             loaded.closed = true;
-            return self.out.print("driver error: {s}; session dropped\n", .{@errorName(err)});
+            return self.out.print("session error: {s}; session dropped\n", .{@errorName(err)});
         };
         if (loaded.pause == .finished) loaded.closed = true;
     }
@@ -394,7 +394,7 @@ const Repl = struct {
         if (self.loaded == null) return self.out.writeAll("no code loaded; try disasm <hex>\n");
         const loaded = &self.loaded.?;
         if (loaded.closed) return self.printDisassembly(loaded.bytecode.bytes, null);
-        try self.printDisassembly(loaded.driver.code(), switch (loaded.pause) {
+        try self.printDisassembly(loaded.session.code(), switch (loaded.pause) {
             .opcode => |event| event.pc,
             else => null,
         });
@@ -411,7 +411,7 @@ const Repl = struct {
         if (words.next()) |word| {
             account = self.parseAddress(word) catch return self.out.writeAll("address is not 20 hex bytes\n");
         } else if (!loaded.closed) {
-            account = loaded.driver.message().recipient;
+            account = loaded.session.message().recipient;
         }
         try self.out.print("0x{x}[0x{x}] = 0x{x}\n", .{
             account,
@@ -435,9 +435,9 @@ const Repl = struct {
                     event.pc,
                     name,
                     event.gas_left,
-                    loaded.driver.stack().len,
+                    loaded.session.stack().len,
                 });
-                try self.printStackSummary(loaded.driver.stack());
+                try self.printStackSummary(loaded.session.stack());
             },
             .suspended => |event| {
                 if (loaded.closed) return self.out.writeAll("session closed\n");
@@ -477,7 +477,7 @@ const Repl = struct {
 
     fn printStack(self: *Repl, loaded: *Loaded) !void {
         if (loaded.closed) return self.out.writeAll("session closed\n");
-        const values = loaded.driver.stack();
+        const values = loaded.session.stack();
         if (values.len == 0) return self.out.writeAll("stack empty\n");
         for (0..values.len) |offset| {
             try self.out.print("  {d:>2} 0x{x}\n", .{ offset, values[values.len - 1 - offset] });
@@ -486,7 +486,7 @@ const Repl = struct {
 
     fn printMemory(self: *Repl, loaded: *Loaded) !void {
         if (loaded.closed) return self.out.writeAll("session closed\n");
-        const bytes = loaded.driver.memory();
+        const bytes = loaded.session.memory();
         if (bytes.len == 0) return self.out.writeAll("memory empty\n");
         var offset: usize = 0;
         while (offset < bytes.len) : (offset += 32) {
@@ -530,7 +530,7 @@ const Repl = struct {
     }
 };
 
-fn depthOf(pause: session.Pause) ?u16 {
+fn depthOf(pause: debug.Pause) ?u16 {
     return switch (pause) {
         .opcode => |event| event.site.depth,
         .suspended => |event| event.site.depth,
