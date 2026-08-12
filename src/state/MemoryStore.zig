@@ -18,7 +18,7 @@ const TrackedState = @import("./TrackedState.zig");
 const StateReader = @import("./Reader.zig");
 const ConcurrentReader = @import("./ConcurrentReader.zig");
 const trie = @import("../eth/trie.zig");
-const SparseHashMap = @import("./sparse_hash_map.zig").Auto;
+const sparse_hash_map = @import("./sparse_hash_map.zig");
 
 const Address = evmz.Address;
 const ChangesView = TrackedState.ChangesView;
@@ -49,14 +49,14 @@ const addr = evmz.addr;
 const MemoryStore = @This();
 
 allocator: std.mem.Allocator,
-accounts: SparseHashMap(Address, MemoryAccount),
-codes: SparseHashMap([32]u8, []u8),
+accounts: sparse_hash_map.WithContext(Address, MemoryAccount, Address.HashContext),
+codes: sparse_hash_map.Auto([32]u8, []u8),
 
 pub fn init(allocator: std.mem.Allocator) MemoryStore {
     return .{
         .allocator = allocator,
-        .accounts = SparseHashMap(Address, MemoryAccount).init(allocator),
-        .codes = SparseHashMap([32]u8, []u8).init(allocator),
+        .accounts = sparse_hash_map.WithContext(Address, MemoryAccount, Address.HashContext).init(allocator),
+        .codes = sparse_hash_map.Auto([32]u8, []u8).init(allocator),
     };
 }
 

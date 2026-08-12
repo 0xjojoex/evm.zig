@@ -187,12 +187,12 @@ const TestBase = struct {
 
     fn testAccountExists(ptr: *anyopaque, target: Address) !bool {
         const self = from(ptr);
-        return std.mem.eql(u8, &self.target, &target) and self.account != null;
+        return Address.eql(self.target, target) and self.account != null;
     }
 
     fn testLoadAccount(ptr: *anyopaque, target: Address) !?Account {
         const self = from(ptr);
-        if (!std.mem.eql(u8, &self.target, &target)) return null;
+        if (!Address.eql(self.target, target)) return null;
         return self.account;
     }
 
@@ -206,7 +206,7 @@ const TestBase = struct {
 
     fn testGetStorage(ptr: *anyopaque, target: Address, key: u256) !u256 {
         const self = from(ptr);
-        if (!std.mem.eql(u8, &self.target, &target)) return 0;
+        if (!Address.eql(self.target, target)) return 0;
         for (self.storage) |entry| {
             if (entry.key == key) return entry.value;
         }
@@ -215,7 +215,7 @@ const TestBase = struct {
 
     fn testAccountHasStorage(ptr: *anyopaque, target: Address) !bool {
         const self = from(ptr);
-        if (!std.mem.eql(u8, &self.target, &target)) return false;
+        if (!Address.eql(self.target, target)) return false;
         for (self.storage) |entry| {
             if (entry.value != 0) return true;
         }

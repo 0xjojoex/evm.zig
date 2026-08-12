@@ -564,7 +564,7 @@ test "debug session can substitute a create before continuing" {
     }));
     try std.testing.expect(controlled.isIntervened());
     try std.testing.expectEqual(
-        evmz.address.toU256(deployed),
+        deployed.toU256(),
         controlled.stack()[controlled.stack().len - 1],
     );
 
@@ -581,7 +581,7 @@ test "debug session can substitute a create before continuing" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 32), result.output_data.len);
     try std.testing.expectEqual(
-        evmz.address.toU256(deployed),
+        deployed.toU256(),
         std.mem.readInt(u256, result.output_data[0..32], .big),
     );
     // The substituted address was never deployed; nothing entered state.

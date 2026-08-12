@@ -120,7 +120,7 @@ pub fn Operations(
         }
 
         pub fn candidateTransactionBlobGasUsed(tx: transaction.Transaction) !u64 {
-            return block_stf.transactionBlobGasUsed(revision, Engine, tx);
+            return block_stf.transactionBlobGasUsed(revision, Engine, &tx);
         }
 
         pub fn candidateBlockBlobGasLimit(

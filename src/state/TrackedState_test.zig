@@ -1,5 +1,7 @@
 const std = @import("std");
-const addr = @import("../address.zig").addr;
+const address_mod = @import("../address.zig");
+const Address = address_mod.Address;
+const addr = address_mod.addr;
 const crypto = @import("../crypto.zig");
 const uint256 = @import("../uint256.zig");
 const Account = @import("./Account.zig");
@@ -7,7 +9,7 @@ const Reader = @import("./Reader.zig");
 const TrackedState = @import("./TrackedState.zig");
 
 const TestReader = struct {
-    account_address: @import("../address.zig").Address = addr(1),
+    account_address: Address = addr(1),
     account: Account = .{ .nonce = 3, .balance = 10 },
     code: []const u8 = &.{},
     storage_key: u256 = 2,
@@ -27,13 +29,13 @@ const TestReader = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn accountExists(ptr: *anyopaque, address: @import("../address.zig").Address) !bool {
-        return std.mem.eql(u8, &cast(ptr).account_address, &address);
+    fn accountExists(ptr: *anyopaque, address: Address) !bool {
+        return Address.eql(cast(ptr).account_address, address);
     }
 
-    fn loadAccount(ptr: *anyopaque, address: @import("../address.zig").Address) !?Account {
+    fn loadAccount(ptr: *anyopaque, address: Address) !?Account {
         const self = cast(ptr);
-        if (!std.mem.eql(u8, &self.account_address, &address)) return null;
+        if (!Address.eql(self.account_address, address)) return null;
         return self.account;
     }
 
@@ -43,13 +45,13 @@ const TestReader = struct {
         return code;
     }
 
-    fn getStorage(ptr: *anyopaque, address: @import("../address.zig").Address, key: u256) !u256 {
+    fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
         const self = cast(ptr);
-        if (!std.mem.eql(u8, &self.account_address, &address) or key != self.storage_key) return 0;
+        if (!Address.eql(self.account_address, address) or key != self.storage_key) return 0;
         return self.storage_value;
     }
 
-    fn accountHasStorage(ptr: *anyopaque, address: @import("../address.zig").Address) !bool {
+    fn accountHasStorage(ptr: *anyopaque, address: Address) !bool {
         return accountExists(ptr, address);
     }
 };
@@ -303,6 +305,11 @@ test "transient state and owned logs follow checkpoint rollback" {
     state.revertToCheckpoint(checkpoint);
 
     try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
+    try std.testing.expectEqual(@as(u32, 1), state.tx.?.scope.transient_storage.count());
+    try state.setTransientStorage(addr(1), 4, 12);
+    try state.setTransientStorage(addr(1), 4, 0);
+    try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
+    try std.testing.expectEqual(@as(u32, 1), state.tx.?.scope.transient_storage.count());
     try std.testing.expectEqual(@as(usize, 0), state.tx.?.logs.rows.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.tx.?.logs.topics.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.tx.?.logs.data.items.len);

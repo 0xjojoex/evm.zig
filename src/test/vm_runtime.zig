@@ -46,7 +46,7 @@ fn accountChange(
     var index: u32 = 0;
     while (index < changes.accounts.len()) : (index += 1) {
         const change = changes.accounts.at(index);
-        if (std.mem.eql(u8, &change.address, &target)) return change;
+        if (evmz.Address.eql(change.address, target)) return change;
     }
     return null;
 }
@@ -59,7 +59,7 @@ fn storageChange(
     var index: u32 = 0;
     while (index < changes.storage_writes.len()) : (index += 1) {
         const change = changes.storage_writes.at(index);
-        if (std.mem.eql(u8, &change.address, &target) and change.key == key) return change;
+        if (evmz.Address.eql(change.address, target) and change.key == key) return change;
     }
     return null;
 }
@@ -84,7 +84,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
             var index: u32 = 0;
             while (index < view.accounts.len()) : (index += 1) {
                 const fact = view.accounts.at(index);
-                if (!std.mem.eql(u8, &fact.address, &self.address)) continue;
+                if (!evmz.Address.eql(fact.address, self.address)) continue;
                 try std.testing.expect(fact.observation.code_read);
                 const loaded_account = switch (fact.current orelse return error.ExpectedLoadedAccount) {
                     .loaded => |value| value,
@@ -190,7 +190,7 @@ test "Executor runs low-level standalone create" {
         .legacy(100_000),
     )).expectCreate();
     try std.testing.expectEqual(interpreter_module.Status.success, result.status());
-    try std.testing.expectEqualSlices(u8, &create_address, &result.address);
+    try std.testing.expectEqual(create_address, result.address);
 
     const changes = executor.acceptedChanges();
     try std.testing.expectEqual(@as(u32, 2), changes.accounts.len());
@@ -437,7 +437,7 @@ test "transaction STF reports successful create address" {
         },
     }));
     try std.testing.expectEqual(TxStatus.success, result.status);
-    try std.testing.expectEqualSlices(u8, &create_address, &result.created_address.?);
+    try std.testing.expectEqual(create_address, result.created_address.?);
 
     const changes = executor.acceptedChanges();
     try std.testing.expectEqual(@as(u32, 2), changes.accounts.len());
@@ -636,7 +636,7 @@ test "Executor exposes borrowed logs after transaction retention" {
     try std.testing.expectEqual(TxStatus.success, result.status);
     const logs = executor.logView();
     try std.testing.expectEqual(@as(usize, 1), logs.len());
-    try std.testing.expectEqualSlices(u8, &evmz.eth.system_address, &logs.get(0).address);
+    try std.testing.expectEqual(evmz.eth.system_address, logs.get(0).address);
     try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, logs.get(0).topics[0]);
 }
 

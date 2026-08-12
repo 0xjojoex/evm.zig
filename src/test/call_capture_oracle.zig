@@ -188,8 +188,8 @@ fn runCase(comptime case: cases.Case) !void {
     const revision = comptime std.meta.stringToEnum(evmz.eth.Revision, case.fork) orelse
         return error.UnknownOracleRevision;
     const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
-    const sender = try evmz.address.fromHex(cases.sender);
-    const recipient = try evmz.address.fromHex(case.recipient);
+    const sender = try evmz.Address.fromHex(cases.sender);
+    const recipient = try evmz.Address.fromHex(case.recipient);
 
     var executor = ExactVm.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
@@ -205,7 +205,7 @@ fn runCase(comptime case: cases.Case) !void {
         defer std.testing.allocator.free(code);
         try seedAccount(
             &executor,
-            try evmz.address.fromHex(account.address),
+            try evmz.Address.fromHex(account.address),
             try parseHexInt(u256, account.balance),
             account.nonce,
             code,
@@ -237,13 +237,13 @@ fn runCase(comptime case: cases.Case) !void {
         try std.testing.expectEqual(expected.checkpoint_reverted, row.checkpointReverted());
 
         const expected_created = if (expected.created_address) |address|
-            try evmz.address.fromHex(address)
+            try evmz.Address.fromHex(address)
         else
             null;
         try std.testing.expectEqual(expected_created, row.createdAddress());
 
         if (expected.attempted_to) |address| {
-            try std.testing.expectEqual(try evmz.address.fromHex(address), row.to);
+            try std.testing.expectEqual(try evmz.Address.fromHex(address), row.to);
         }
     }
 }

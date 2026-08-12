@@ -317,18 +317,18 @@ test "call arena preserves preorder, parentage, and copied bytes" {
     const root = try arena.start(.{
         .depth = 0,
         .kind = .call,
-        .from = @splat(0x11),
-        .to = @splat(0x22),
-        .code_address = @splat(0x22),
+        .from = Address.fromBytes(@splat(0x11)),
+        .to = Address.fromBytes(@splat(0x22)),
+        .code_address = Address.fromBytes(@splat(0x22)),
         .gas = 100,
         .input = &.{ 0xaa, 0xbb },
     });
     const child = try arena.start(.{
         .depth = 1,
         .kind = .staticcall,
-        .from = @splat(0x22),
-        .to = @splat(0x33),
-        .code_address = @splat(0x33),
+        .from = Address.fromBytes(@splat(0x22)),
+        .to = Address.fromBytes(@splat(0x33)),
+        .code_address = Address.fromBytes(@splat(0x33)),
         .gas = 40,
         .input = &.{0xcc},
     });
@@ -353,7 +353,7 @@ test "call arena preserves preorder, parentage, and copied bytes" {
 }
 
 test "created address is derived from create kind and committed outcome" {
-    const created = @as(Address, @splat(0x44));
+    const created = Address.fromBytes(@splat(0x44));
     var arena = CallArena.init(std.testing.allocator);
     defer arena.deinit();
     try arena.begin();
@@ -361,7 +361,7 @@ test "created address is derived from create kind and committed outcome" {
     const success = try arena.start(.{
         .depth = 0,
         .kind = .create,
-        .from = @splat(0x11),
+        .from = Address.fromBytes(@splat(0x11)),
         .to = created,
         .code_address = created,
     });
@@ -370,7 +370,7 @@ test "created address is derived from create kind and committed outcome" {
     const frontier_exception = try arena.start(.{
         .depth = 0,
         .kind = .create2,
-        .from = @splat(0x22),
+        .from = Address.fromBytes(@splat(0x22)),
         .to = created,
         .code_address = created,
     });
@@ -382,7 +382,7 @@ test "created address is derived from create kind and committed outcome" {
     const rejected = try arena.start(.{
         .depth = 0,
         .kind = .create,
-        .from = @splat(0x33),
+        .from = Address.fromBytes(@splat(0x33)),
         .to = created,
         .code_address = created,
     });
@@ -409,9 +409,9 @@ test "bounded call arena reports capacity before partial append" {
     try std.testing.expectError(error.CallCaptureCapacityExceeded, arena.start(.{
         .depth = 0,
         .kind = .call,
-        .from = @splat(0),
-        .to = @splat(0),
-        .code_address = @splat(0),
+        .from = Address.fromBytes(@splat(0)),
+        .to = Address.fromBytes(@splat(0)),
+        .code_address = Address.fromBytes(@splat(0)),
         .input = &.{ 1, 2 },
     }));
     try std.testing.expectEqual(@as(usize, 0), arena.rows.items.len);
@@ -430,9 +430,9 @@ test "bounded call arena finishes from reserved storage without allocation" {
     const token = try arena.start(.{
         .depth = 0,
         .kind = .call,
-        .from = @splat(0),
-        .to = @splat(0),
-        .code_address = @splat(0),
+        .from = Address.fromBytes(@splat(0)),
+        .to = Address.fromBytes(@splat(0)),
+        .code_address = Address.fromBytes(@splat(0)),
         .input = &.{0xaa},
     });
     try arena.reserveOutput(1);

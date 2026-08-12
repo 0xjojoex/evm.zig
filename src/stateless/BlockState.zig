@@ -16,13 +16,47 @@ const records = @import("./ParentFacts.zig");
 const checkpoint_types = @import("../state/checkpoint.zig");
 const storage_status = @import("../state/storage.zig");
 const trie = @import("../eth/trie.zig");
-const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
+const sparse_hash_map = @import("../state/sparse_hash_map.zig");
 const Views = @import("./views.zig").ViewType(StatelessBlockState);
 
 const Allocator = std.mem.Allocator;
 const StatelessBlockState = @This();
-const StorageKey = storage_status.Key;
-const TransientStorageMap = SparseHashMap(StorageKey, u256);
+
+const TransientStorageKey = extern struct {
+    address_word: address.AddressWord,
+    slot_words: [4]u64,
+
+    fn init(target: address.AddressWord, slot: u256) TransientStorageKey {
+        return .{ .address_word = target, .slot_words = @bitCast(slot) };
+    }
+
+    const HashContext = struct {
+        pub inline fn hash(_: HashContext, value: TransientStorageKey) u64 {
+            return std.hash.Wyhash.hash(0, std.mem.asBytes(&value));
+        }
+
+        pub inline fn eql(_: HashContext, a: TransientStorageKey, b: TransientStorageKey) bool {
+            return address.AddressWord.eql(a.address_word, b.address_word) and
+                a.slot_words[0] == b.slot_words[0] and
+                a.slot_words[1] == b.slot_words[1] and
+                a.slot_words[2] == b.slot_words[2] and
+                a.slot_words[3] == b.slot_words[3];
+        }
+    };
+};
+
+const TransientStorageMap = sparse_hash_map.WithContext(
+    TransientStorageKey,
+    u256,
+    TransientStorageKey.HashContext,
+);
+
+comptime {
+    // Transient keys stay inside one transaction-owned map. Word storage carries
+    // one boundary conversion through every hash/equality probe and drops padding.
+    std.debug.assert(@sizeOf(TransientStorageKey) == 56);
+    std.debug.assert(@alignOf(TransientStorageKey) == 8);
+}
 
 pub const AccountId = claim_plan.AccountId;
 pub const StorageId = claim_plan.StorageId;
@@ -50,6 +84,11 @@ pub const ResolutionPolicy = enum {
 pub const ResolutionError = error{
     UndeclaredAccount,
     UndeclaredStorage,
+};
+
+const ResolvedStorage = struct {
+    account: AccountId,
+    storage: StorageId,
 };
 
 pub const CodeError = artifacts.CodeStore.CacheError;
@@ -278,8 +317,8 @@ const Journal = struct {
     };
 
     const TransientUndo = struct {
-        key: StorageKey,
-        previous: ?u256,
+        key: TransientStorageKey,
+        previous: u256,
     };
 
     entries: std.ArrayList(Entry) = .empty,
@@ -413,17 +452,19 @@ transaction_scope_reverted: bool = false,
 /// Admitted hot-translation execution state: two remembered address→ID
 /// entries and one (account, slot)→ID entry. `ClaimPlan` is immutable for the
 /// whole block, so a remembered entry can never go stale and
-/// revert/retain/discard must not touch it. Full-key equality decides a hit;
-/// a miss falls back to the deterministic binary search and evicts entries
-/// round-robin. Two account entries cover the caller/callee alternation of
-/// nested calls, which a single entry misses on every step. Every dynamic
+/// revert/retain/discard must not touch it. Full-key equality decides a hit.
+/// An account miss falls back to `ClaimPlan`'s deterministic linear-probe
+/// table and evicts an account memo entry round-robin; a storage miss binary
+/// searches the account's slot window and replaces the one storage memo entry.
+/// Two account entries cover the caller/callee alternation of nested calls,
+/// which a single entry misses on every step. Every dynamic
 /// translation — CALL-family targets, dynamic-address opcodes, storage
 /// owners, and system calls — passes through `resolveAccount`/
 /// `resolveStorage`, so these entries cover the complete translation domain.
 /// Memo keys are pre-assembled address words: the probe is assembled once per
 /// resolution and then compares in registers, instead of paying an align-1
 /// byte ladder on every hit.
-translation_account_keys: [2][3]u64 = undefined,
+translation_account_keys: [2]address.AddressWord = undefined,
 translation_account_ids: [2]AccountId = undefined,
 translation_account_valid: [2]bool = .{ false, false },
 translation_account_victim: u1 = 0,
@@ -497,8 +538,8 @@ fn initWithCodeStore(
     errdefer owned_plan.deinit(allocator);
     errdefer owned_facts.deinit(allocator);
     errdefer code.deinit(allocator);
-    std.debug.assert(owned_plan.accounts.len == owned_facts.accounts.len);
-    std.debug.assert(owned_plan.storage.len == owned_facts.storage.len);
+    std.debug.assert(owned_plan.accountCount() == owned_facts.accounts.len);
+    std.debug.assert(owned_plan.storageCount() == owned_facts.storage.len);
 
     const accounts = try allocator.alloc(AccountRow, owned_facts.accounts.len);
     errdefer allocator.free(accounts);
@@ -561,32 +602,21 @@ pub fn deinit(self: *StatelessBlockState) void {
     self.* = undefined;
 }
 
-inline fn addressWords(target: address.Address) [3]u64 {
-    return .{
-        std.mem.readInt(u64, target[0..8], .little),
-        std.mem.readInt(u64, target[8..16], .little),
-        std.mem.readInt(u32, target[16..20], .little),
-    };
-}
-
 pub inline fn resolveAccount(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     policy: ResolutionPolicy,
 ) ResolutionError!?AccountId {
-    const words = addressWords(target);
     inline for (0..2) |entry| {
         if (self.translation_account_valid[entry] and
-            self.translation_account_keys[entry][0] == words[0] and
-            self.translation_account_keys[entry][1] == words[1] and
-            self.translation_account_keys[entry][2] == words[2])
+            address.AddressWord.eql(self.translation_account_keys[entry], target))
         {
             return self.translation_account_ids[entry];
         }
     }
-    if (self.plan.accountId(target)) |id| {
+    if (self.plan.accountIdWord(target)) |id| {
         const victim = self.translation_account_victim;
-        self.translation_account_keys[victim] = words;
+        self.translation_account_keys[victim] = target;
         self.translation_account_ids[victim] = id;
         self.translation_account_valid[victim] = true;
         self.translation_account_victim +%= 1;
@@ -621,6 +651,17 @@ pub fn resolveStorage(
         .required_observed => error.UndeclaredStorage,
         .optional_warm_only => null,
     };
+}
+
+fn resolveStorageKey(
+    self: *StatelessBlockState,
+    target: address.AddressWord,
+    slot: u256,
+    policy: ResolutionPolicy,
+) ResolutionError!?ResolvedStorage {
+    const account = (try self.resolveAccount(target, policy)) orelse return null;
+    const storage = (try self.resolveStorage(account, slot, policy)) orelse return null;
+    return .{ .account = account, .storage = storage };
 }
 
 pub fn beginTransaction(self: *StatelessBlockState) AttemptId {
@@ -808,7 +849,7 @@ pub fn revertToCheckpoint(self: *StatelessBlockState, value: Checkpoint) void {
 
 pub fn readAccount(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!AccountValue {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     // Block-system-call admission may inspect code presence before opening the
@@ -819,21 +860,21 @@ pub fn readAccount(
 }
 
 /// Return a materialized row without creating an execution observation.
-pub fn getAccount(self: *const StatelessBlockState, target: address.Address) ?Account {
-    const id = self.plan.accountId(target) orelse return null;
+pub fn getAccount(self: *const StatelessBlockState, target: address.AddressWord) ?Account {
+    const id = self.plan.accountIdWord(target) orelse return null;
     return accountValue(self.accounts[@intFromEnum(id)].current);
 }
 
 pub fn getAccountOrLoad(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!?Account {
     return accountValue(try self.readAccount(target));
 }
 
 pub fn accountExists(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!bool {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     if (self.transaction_active)
@@ -843,7 +884,7 @@ pub fn accountExists(
 
 pub fn getBalance(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!u256 {
     return switch (try self.readAccount(target)) {
         .absent => 0,
@@ -853,7 +894,7 @@ pub fn getBalance(
 
 pub fn getNonce(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!u64 {
     return switch (try self.readAccount(target)) {
         .absent => 0,
@@ -863,7 +904,7 @@ pub fn getNonce(
 
 pub fn setNonce(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     nonce: u64,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -879,7 +920,7 @@ pub fn setNonce(
 
 pub fn getCodeView(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error || error{InvalidWitness})!CodeView {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     if (self.transaction_active)
@@ -893,14 +934,14 @@ pub fn getCodeView(
 
 pub fn getCode(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error || error{InvalidWitness})![]const u8 {
     return (try self.getCodeView(target)).bytes;
 }
 
 pub fn getCodeHash(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!u256 {
     return switch (try self.readAccount(target)) {
         .absent => 0,
@@ -910,7 +951,7 @@ pub fn getCodeHash(
 
 pub fn accountHasCode(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!bool {
     return switch (try self.readAccount(target)) {
         .absent => false,
@@ -920,7 +961,7 @@ pub fn accountHasCode(
 
 pub fn setBalance(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     balance: u256,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -936,7 +977,7 @@ pub fn setBalance(
 
 pub fn addBalance(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     value: u256,
 ) (ResolutionError || Allocator.Error || error{BalanceOverflow})!void {
     if (value == 0) return;
@@ -949,7 +990,7 @@ pub fn addBalance(
 
 pub fn subtractBalance(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     value: u256,
 ) (ResolutionError || Allocator.Error)!bool {
     if (value == 0) return true;
@@ -961,7 +1002,7 @@ pub fn subtractBalance(
 
 pub fn touchAccount(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     try self.observeAccount(id, .{ .accessed = true });
@@ -977,7 +1018,7 @@ pub fn touchAccount(
 
 pub fn setCode(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     bytes: []const u8,
 ) (ResolutionError || CodeError)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -1014,7 +1055,7 @@ pub fn setCode(
 
 pub fn clearCode(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || CodeError)!void {
     try self.setCode(target, &.{});
 }
@@ -1057,7 +1098,7 @@ pub fn markSelfdestructedId(self: *StatelessBlockState, id: AccountId) Allocator
 
 pub fn markCreatedContract(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     if (self.accounts[@intFromEnum(id)].flags.created) return;
@@ -1066,20 +1107,20 @@ pub fn markCreatedContract(
 
 pub fn markSelfdestructed(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     if (self.accounts[@intFromEnum(id)].flags.selfdestructed) return;
     try self.markSelfdestructedId(id);
 }
 
-pub fn createdInTransaction(self: *const StatelessBlockState, target: address.Address) bool {
-    const id = self.plan.accountId(target) orelse return false;
+pub fn createdInTransaction(self: *const StatelessBlockState, target: address.AddressWord) bool {
+    const id = self.plan.accountIdWord(target) orelse return false;
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.created;
 }
 
-pub fn wasSelfdestructed(self: *const StatelessBlockState, target: address.Address) bool {
-    const id = self.plan.accountId(target) orelse return false;
+pub fn wasSelfdestructed(self: *const StatelessBlockState, target: address.AddressWord) bool {
+    const id = self.plan.accountIdWord(target) orelse return false;
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.selfdestructed;
 }
 
@@ -1166,92 +1207,116 @@ pub fn wipeStorage(self: *StatelessBlockState, id: AccountId) Allocator.Error!vo
 
 pub fn getStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!u256 {
-    const account = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(account, .{ .accessed = true });
-    const id = (try self.resolveStorage(account, slot, .required_observed)).?;
-    self.captureStorageOriginal(id);
-    try self.observeStorage(id, .{ .accessed = true, .value_read = true });
-    return self.effectiveStorage(id);
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    return self.readResolvedStorage(resolved);
 }
 
 pub fn accessStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!Host.AccessStatus {
-    const account = (try self.resolveAccount(target, .optional_warm_only)) orelse return .cold;
-    const id = (try self.resolveStorage(account, slot, .optional_warm_only)) orelse return .cold;
-    return if (try self.warmStorageId(id)) .cold else .warm;
+    const resolved = (try self.resolveStorageKey(target, slot, .optional_warm_only)) orelse
+        return .cold;
+    return self.accessResolvedStorage(resolved);
 }
 
 pub fn loadStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!Host.StorageLoadResult {
-    const access_status = try self.accessStorage(target, slot);
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    const access_status = try self.accessResolvedStorage(resolved);
     return .{
-        .value = try self.getStorage(target, slot),
+        .value = try self.readResolvedStorage(resolved),
         .access_status = access_status,
     };
 }
 
 pub fn setStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     slot: u256,
     value: u256,
 ) (ResolutionError || Allocator.Error)!Host.StorageStatus {
-    const account = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(account, .{ .accessed = true });
-    const id = (try self.resolveStorage(account, slot, .required_observed)).?;
-    self.captureStorageOriginal(id);
-    try self.observeStorage(id, .{ .accessed = true, .value_read = true });
-    self.captureExecutionOriginal(id);
-    const row = &self.storage[@intFromEnum(id)];
-    const status = storage_status.status(row.execution_original, self.effectiveStorage(id), value);
-    if (self.effectiveStorage(id) != value) try self.writeStorage(id, value);
-    return status;
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    return self.setResolvedStorage(resolved, value);
 }
 
 pub fn storeStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     slot: u256,
     value: u256,
 ) (ResolutionError || Allocator.Error)!Host.StorageStoreResult {
-    const access_status = try self.accessStorage(target, slot);
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    const access_status = try self.accessResolvedStorage(resolved);
     return .{
-        .storage_status = try self.setStorage(target, slot, value),
+        .storage_status = try self.setResolvedStorage(resolved, value),
         .access_status = access_status,
     };
 }
 
+fn accessResolvedStorage(
+    self: *StatelessBlockState,
+    resolved: ResolvedStorage,
+) Allocator.Error!Host.AccessStatus {
+    return if (try self.warmStorageId(resolved.storage)) .cold else .warm;
+}
+
+fn readResolvedStorage(
+    self: *StatelessBlockState,
+    resolved: ResolvedStorage,
+) Allocator.Error!u256 {
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    return self.effectiveStorage(resolved.storage);
+}
+
+fn setResolvedStorage(
+    self: *StatelessBlockState,
+    resolved: ResolvedStorage,
+    value: u256,
+) Allocator.Error!Host.StorageStatus {
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    self.captureExecutionOriginal(resolved.storage);
+    const row = &self.storage[@intFromEnum(resolved.storage)];
+    const current = self.effectiveStorage(resolved.storage);
+    const status = storage_status.status(row.execution_original, current, value);
+    if (current != value) try self.writeStorage(resolved.storage, value);
+    return status;
+}
+
 pub fn originalStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!u256 {
-    const account = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(account, .{ .accessed = true });
-    const id = (try self.resolveStorage(account, slot, .required_observed)).?;
-    self.captureStorageOriginal(id);
-    try self.observeStorage(id, .{ .accessed = true, .value_read = true });
-    self.captureExecutionOriginal(id);
-    return self.storage[@intFromEnum(id)].execution_original;
+    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    self.captureExecutionOriginal(resolved.storage);
+    return self.storage[@intFromEnum(resolved.storage)].execution_original;
 }
 
 pub fn accountHasStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!bool {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     try self.observeAccount(id, .{ .accessed = true, .existence_read = true });
     const row = &self.accounts[@intFromEnum(id)];
-    const range = self.plan.accounts[@intFromEnum(id)].storage;
+    const range = self.plan.accountStorageRange(id);
     const begin: usize = range.start;
     const end: usize = range.end();
     for (self.storage[begin..end]) |storage_row| {
@@ -1267,34 +1332,32 @@ pub fn accountHasStorage(
 
 pub fn getTransientStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     key: u256,
 ) u256 {
     self.assertTransaction();
-    return self.transient_storage.get(.{ .address = target, .key = key }) orelse 0;
+    return self.transient_storage.get(.init(target, key)) orelse 0;
 }
 
 pub fn setTransientStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     key: u256,
     value: u256,
 ) !void {
     self.assertTransaction();
-    const storage_key = StorageKey{ .address = target, .key = key };
-    const previous = self.transient_storage.get(storage_key);
-    if ((previous orelse 0) == value) return;
-    if (previous == null and value != 0)
-        try self.transient_storage.ensureUnusedCapacity(1);
+    const storage_key = TransientStorageKey.init(target, key);
+    const previous_entry = self.transient_storage.get(storage_key);
+    const previous = previous_entry orelse 0;
+    if (previous == value) return;
+    if (previous_entry == null) try self.transient_storage.ensureUnusedCapacity(1);
     try self.journal.appendTransient(self.allocator, .{
         .key = storage_key,
         .previous = previous,
     });
-    if (value == 0) {
-        _ = self.transient_storage.remove(storage_key);
-    } else {
-        self.transient_storage.putAssumeCapacity(storage_key, value);
-    }
+    // Zero is transient storage's semantic absence. Retain the row until the
+    // transaction-wide clear so checkpoint rollback never repairs probe clusters.
+    self.transient_storage.putAssumeCapacity(storage_key, value);
 }
 
 pub fn emitLog(self: *StatelessBlockState, event_log: Host.Log) !void {
@@ -1340,7 +1403,7 @@ pub fn acceptedStorageValueForView(
     id: StorageId,
 ) u256 {
     if (!self.transaction_active) return self.effectiveStorage(id);
-    const account = self.plan.storage[@intFromEnum(id)].account;
+    const account = self.plan.storageAccount(id);
     const account_row = &self.accounts[@intFromEnum(account)];
     const account_generation = if (account_row.observation_generation == self.transaction_generation)
         self.observed_accounts.items[account_row.observation_index].original_storage_generation
@@ -1365,7 +1428,7 @@ pub fn writeStorage(
     value: u256,
 ) Allocator.Error!void {
     self.assertTransaction();
-    const account = self.plan.storage[@intFromEnum(id)].account;
+    const account = self.plan.storageAccount(id);
     try self.observeAccount(account, .{ .accessed = true });
     self.captureStorageOriginal(id);
     self.captureExecutionOriginal(id);
@@ -1415,7 +1478,7 @@ pub fn writeStorage(
 
 pub fn warmAccountAddress(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     policy: ResolutionPolicy,
 ) (ResolutionError || Allocator.Error)!?bool {
     const id = (try self.resolveAccount(target, policy)) orelse return null;
@@ -1432,7 +1495,7 @@ pub fn warmStorageSlot(
     return try self.warmStorageId(id);
 }
 
-pub fn warmAccount(self: *StatelessBlockState, target: address.Address) Allocator.Error!void {
+pub fn warmAccount(self: *StatelessBlockState, target: address.AddressWord) Allocator.Error!void {
     _ = self.warmAccountAddress(target, .optional_warm_only) catch |err| switch (err) {
         error.UndeclaredAccount, error.UndeclaredStorage => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
@@ -1441,7 +1504,7 @@ pub fn warmAccount(self: *StatelessBlockState, target: address.Address) Allocato
 
 pub fn warmStorage(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
     slot: u256,
 ) Allocator.Error!void {
     const account = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return;
@@ -1451,12 +1514,12 @@ pub fn warmStorage(
     };
 }
 
-pub fn isAccountWarm(self: *StatelessBlockState, target: address.Address) bool {
+pub fn isAccountWarm(self: *StatelessBlockState, target: address.AddressWord) bool {
     const id = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return false;
     return self.accountWarm(id);
 }
 
-pub fn isStorageWarm(self: *StatelessBlockState, target: address.Address, slot: u256) bool {
+pub fn isStorageWarm(self: *StatelessBlockState, target: address.AddressWord, slot: u256) bool {
     const account = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return false;
     const id = (self.resolveStorage(account, slot, .optional_warm_only) catch unreachable) orelse return false;
     return self.storageWarm(id);
@@ -1464,7 +1527,7 @@ pub fn isStorageWarm(self: *StatelessBlockState, target: address.Address, slot: 
 
 pub fn observeAccountAccess(
     self: *StatelessBlockState,
-    target: address.Address,
+    target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
@@ -1582,7 +1645,7 @@ pub fn journalLen(self: *const StatelessBlockState) usize {
 fn captureStorageOriginal(self: *StatelessBlockState, id: StorageId) void {
     const row = &self.storage[@intFromEnum(id)];
     if (row.original_generation == self.transaction_generation) return;
-    const account_id = self.plan.storage[@intFromEnum(id)].account;
+    const account_id = self.plan.storageAccount(id);
     const account = &self.accounts[@intFromEnum(account_id)];
     row.transaction_original = if (account.storage_wipe_transaction_generation == self.transaction_generation)
         row.current
@@ -1600,8 +1663,7 @@ fn captureExecutionOriginal(self: *StatelessBlockState, id: StorageId) void {
 }
 
 fn effectiveStorage(self: *const StatelessBlockState, id: StorageId) u256 {
-    const claim = self.plan.storage[@intFromEnum(id)];
-    const account = &self.accounts[@intFromEnum(claim.account)];
+    const account = &self.accounts[@intFromEnum(self.plan.storageAccount(id))];
     const row = &self.storage[@intFromEnum(id)];
     if (row.storage_generation != account.storage_generation) return 0;
     return row.current;
@@ -1614,12 +1676,11 @@ fn effectiveStorage(self: *const StatelessBlockState, id: StorageId) u256 {
 fn compactAcceptedStorageChanges(self: *StatelessBlockState) void {
     var write: usize = 0;
     for (self.dirty_storage.items) |id| {
-        const claim = self.plan.storage[@intFromEnum(id)];
         const row = &self.storage[@intFromEnum(id)];
         if (!row.flags.block_dirty) continue;
         row.flags.block_dirty = false;
         const current = row.storage_generation ==
-            self.accounts[@intFromEnum(claim.account)].storage_generation;
+            self.accounts[@intFromEnum(self.plan.storageAccount(id))].storage_generation;
         if (!current) continue;
         self.dirty_storage.items[write] = id;
         write += 1;
@@ -1693,10 +1754,9 @@ fn compactTransactionStorageWipes(self: *StatelessBlockState) void {
 fn compactTransactionStorageChanges(self: *StatelessBlockState) void {
     var write: usize = 0;
     for (self.changed_storage.items) |id| {
-        const claim = self.plan.storage[@intFromEnum(id)];
         const row = &self.storage[@intFromEnum(id)];
         if (row.storage_generation !=
-            self.accounts[@intFromEnum(claim.account)].storage_generation) continue;
+            self.accounts[@intFromEnum(self.plan.storageAccount(id))].storage_generation) continue;
         self.changed_storage.items[write] = id;
         write += 1;
     }
@@ -1844,11 +1904,7 @@ fn revertJournalTo(self: *StatelessBlockState, target_len: u32) void {
                 const index = @intFromEnum(undo_id);
                 std.debug.assert(index + 1 == self.journal.transient.items.len);
                 const undo = self.journal.transient.pop().?;
-                if (undo.previous) |previous| {
-                    self.transient_storage.putAssumeCapacity(undo.key, previous);
-                } else {
-                    _ = self.transient_storage.remove(undo.key);
-                }
+                self.transient_storage.putAssumeCapacity(undo.key, undo.previous);
             },
         }
     }
@@ -2035,14 +2091,14 @@ test "dense state resolves required accesses and skips optional warm-only misses
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
     defer state.deinit();
 
-    try std.testing.expect((try state.resolveAccount(address.addr(1), .required_observed)) != null);
+    try std.testing.expect((try state.resolveAccount(.fromAddress(address.addr(1)), .required_observed)) != null);
     try std.testing.expectError(
         error.UndeclaredAccount,
-        state.resolveAccount(address.addr(3), .required_observed),
+        state.resolveAccount(.fromAddress(address.addr(3)), .required_observed),
     );
     try std.testing.expectEqual(
         @as(?AccountId, null),
-        try state.resolveAccount(address.addr(3), .optional_warm_only),
+        try state.resolveAccount(.fromAddress(address.addr(3)), .optional_warm_only),
     );
     const first: AccountId = @enumFromInt(0);
     try std.testing.expectError(
@@ -2060,11 +2116,11 @@ test "dense state resolves required accesses and skips optional warm-only misses
     const attempt = beginTestTransaction(&state);
     try std.testing.expectEqual(
         @as(?bool, null),
-        try state.warmAccountAddress(address.addr(3), .optional_warm_only),
+        try state.warmAccountAddress(.fromAddress(address.addr(3)), .optional_warm_only),
     );
     try std.testing.expectError(
         error.UndeclaredAccount,
-        state.warmAccountAddress(address.addr(3), .required_observed),
+        state.warmAccountAddress(.fromAddress(address.addr(3)), .required_observed),
     );
 
     discardTestTransaction(&state, attempt);
@@ -2106,7 +2162,7 @@ test "observations survive nested revert while values warmth and dirty IDs rever
     const attempt = beginTestTransaction(&state);
 
     const checkpoint_value = state.checkpoint();
-    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(.fromAddress(target), 7));
     const account_id: AccountId = @enumFromInt(0);
     const storage_id: StorageId = @enumFromInt(0);
     try std.testing.expect(try state.warmAccountId(account_id));
@@ -2200,15 +2256,15 @@ test "execution original survives checkpoints and refreshes across execution sco
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try std.testing.expectEqual(.modified, try state.setStorage(target, 7, 9));
+    try std.testing.expectEqual(.modified, try state.setStorage(.fromAddress(target), 7, 9));
     const nested = state.checkpoint();
-    try std.testing.expectEqual(@as(u256, 3), try state.originalStorage(target, 7));
-    try std.testing.expectEqual(.assigned, try state.setStorage(target, 7, 11));
+    try std.testing.expectEqual(@as(u256, 3), try state.originalStorage(.fromAddress(target), 7));
+    try std.testing.expectEqual(.assigned, try state.setStorage(.fromAddress(target), 7, 11));
     state.commitCheckpoint(nested);
     state.closeScope();
 
     state.beginScope();
-    try std.testing.expectEqual(@as(u256, 11), try state.originalStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, 11), try state.originalStorage(.fromAddress(target), 7));
     try std.testing.expectEqual(@as(u256, 3), state.storage[0].transaction_original);
     state.closeScope();
     state.seal(attempt);
@@ -2258,18 +2314,18 @@ test "storage wipe uses account generation without inventing slot observations" 
     const account_id: AccountId = @enumFromInt(0);
     const storage_id: StorageId = @enumFromInt(0);
 
-    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(.fromAddress(target), 7));
     const nested = state.checkpoint();
     try state.wipeStorage(account_id);
     try std.testing.expectEqual(@as(usize, 1), state.observed_storage.items.len);
-    try std.testing.expectEqual(@as(u256, 0), try state.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, 0), try state.getStorage(.fromAddress(target), 7));
     try state.writeStorage(storage_id, 9);
-    try std.testing.expectEqual(@as(u256, 9), try state.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, 9), try state.getStorage(.fromAddress(target), 7));
     try std.testing.expect(state.accounts[0].flags.storage_wiped);
     try std.testing.expect(state.observed_accounts.items[0].effect.storage_wiped);
     state.revertToCheckpoint(nested);
 
-    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, 3), try state.getStorage(.fromAddress(target), 7));
     try std.testing.expect(!state.accounts[0].flags.storage_wiped);
     try std.testing.expect(!state.observed_accounts.items[0].effect.storage_wiped);
     try std.testing.expect(!state.observed_storage.items[0].effect.written);
@@ -2373,15 +2429,15 @@ test "dense transaction cleans every allocation failure" {
             defer state.deinit();
             const attempt = beginTestTransaction(&state);
             defer if (state.transaction_active) discardTestTransaction(&state, attempt);
-            try state.setBalance(target, 4);
-            try state.setCode(target, &.{0x5f});
-            try state.setTransientStorage(target, 8, 12);
+            try state.setBalance(.fromAddress(target), 4);
+            try state.setCode(.fromAddress(target), &.{0x5f});
+            try state.setTransientStorage(.fromAddress(target), 8, 12);
             try state.emitLog(.{
                 .address = target,
                 .topics = &.{1},
                 .data = &.{2},
             });
-            _ = try state.getStorage(target, 7);
+            _ = try state.getStorage(.fromAddress(target), 7);
             const nested = state.checkpoint();
             var nested_active = true;
             errdefer if (nested_active) state.revertToCheckpoint(nested);

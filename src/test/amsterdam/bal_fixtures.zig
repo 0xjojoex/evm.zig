@@ -402,7 +402,7 @@ fn jsonString(value: JsonValue) ?[]const u8 {
 
 fn parseAddress(value: JsonValue) !bal.Address {
     const string = jsonString(value) orelse return error.MalformedFixture;
-    return evmz.address.fromHex(string) catch error.MalformedFixture;
+    return evmz.Address.fromHex(string) catch error.MalformedFixture;
 }
 
 fn parseBlockAccessIndex(value: JsonValue) !bal.BlockAccessIndex {

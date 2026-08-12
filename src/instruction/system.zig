@@ -59,7 +59,8 @@ pub fn bind(comptime spec: ExactSpec) type {
                     const gas, const address_word, const in_offset, const in_size, const out_offset, const out_size = frame.popN(6) orelse return;
                     break :blk .{ gas, address_word, 0, in_offset, in_size, out_offset, out_size };
                 };
-            const address = evmz.address.fromWord(address_word);
+            const address: evmz.AddressWord = .fromU256(address_word);
+            const canonical_address = address.address();
 
             const in_size_usize = frame.wordToUsizeOrOog(in_size) orelse return;
             const out_size_usize = frame.wordToUsizeOrOog(out_size) orelse return;
@@ -87,9 +88,9 @@ pub fn bind(comptime spec: ExactSpec) type {
             var msg = Host.Message{
                 .depth = nextDepth(frame.msg.depth),
                 .kind = Host.CallKind.fromOpcode(op),
-                .recipient = if (op == Opcode.CALL or op == Opcode.STATICCALL) address else frame.msg.recipient,
+                .recipient = if (op == Opcode.CALL or op == Opcode.STATICCALL) canonical_address else frame.msg.recipient,
                 .is_static = frame.msg.is_static or op == Opcode.STATICCALL,
-                .code_address = address,
+                .code_address = canonical_address,
                 .sender = if (op == Opcode.DELEGATECALL) frame.msg.sender else frame.msg.recipient,
                 .value = if (op == Opcode.DELEGATECALL) frame.msg.value else value,
                 .input_data = data,
@@ -206,11 +207,11 @@ pub fn bind(comptime spec: ExactSpec) type {
                     queueCreate(frame, target, value, init_code, 0, true, .call_depth_exceeded);
                     return;
                 }
-                if (value != 0 and try frame.host.getBalance(creator) < value) {
+                if (value != 0 and try frame.host.getBalance(.fromAddress(creator)) < value) {
                     queueCreate(frame, target, value, init_code, 0, true, .insufficient_balance);
                     return;
                 }
-                const creator_nonce = try frame.host.getNonce(creator);
+                const creator_nonce = try frame.host.getNonce(.fromAddress(creator));
                 if (creator_nonce == std.math.maxInt(u64)) {
                     queueCreate(frame, target, value, init_code, 0, true, .nonce_overflow);
                     return;
@@ -219,13 +220,13 @@ pub fn bind(comptime spec: ExactSpec) type {
                 // The attempted CREATE address is determined before shared
                 // depth, balance, and nonce validation, so a failed semantic
                 // call can retain it without beginning child execution.
-                const creator_nonce = try frame.host.getNonce(creator);
+                const creator_nonce = try frame.host.getNonce(.fromAddress(creator));
                 target = evmz.address.create(creator, creator_nonce);
                 if (frame.msg.depth >= Host.max_call_depth) {
                     queueCreate(frame, target, value, init_code, 0, false, .call_depth_exceeded);
                     return;
                 }
-                if (value != 0 and try frame.host.getBalance(creator) < value) {
+                if (value != 0 and try frame.host.getBalance(.fromAddress(creator)) < value) {
                     queueCreate(frame, target, value, init_code, 0, false, .insufficient_balance);
                     return;
                 }
@@ -235,13 +236,14 @@ pub fn bind(comptime spec: ExactSpec) type {
                 }
             }
 
-            try frame.host.observeAccountAccess(target, nextDepth(frame.msg.depth));
-            const target_alive = if (try frame.host.getNonce(target) != 0)
+            const target_word: evmz.AddressWord = .fromAddress(target);
+            try frame.host.observeAccountAccess(target_word, nextDepth(frame.msg.depth));
+            const target_alive = if (try frame.host.getNonce(target_word) != 0)
                 true
-            else if (try frame.host.getBalance(target) != 0)
+            else if (try frame.host.getBalance(target_word) != 0)
                 true
             else blk: {
-                const code_hash = try frame.host.getCodeHash(target);
+                const code_hash = try frame.host.getCodeHash(target_word);
                 break :blk code_hash != 0 and code_hash != evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
             };
             const account_state_gas = spec.create.accountStateGas(.{
@@ -301,22 +303,23 @@ pub fn bind(comptime spec: ExactSpec) type {
 
             const address_word = frame.pop() orelse return;
 
-            const address = evmz.address.fromWord(address_word);
+            const address_word_key: evmz.AddressWord = .fromU256(address_word);
+            const address = address_word_key.address();
 
-            const balance = try frame.host.getBalance(frame.msg.recipient);
-            const same_address = std.mem.eql(u8, &frame.msg.recipient, &address);
+            const balance = try frame.host.getBalance(.fromAddress(frame.msg.recipient));
+            const same_address = evmz.Address.eql(frame.msg.recipient, address);
             const transfers_balance = balance > 0 and !same_address;
             if (spec.self_destruct.cold_account_access_gas) |cold_account_access_cost| {
-                if (try frame.host.accessAccount(address) == .cold) {
+                if (try frame.host.accessAccount(address_word_key) == .cold) {
                     if (!frame.trackGas(cold_account_access_cost)) return;
                 }
             }
-            try frame.traceAccountAccess(address);
+            try frame.traceAccountAccess(address_word_key);
 
             const new_account_gas = spec.self_destruct.newAccountGas(.{
                 .same_address = same_address,
                 .transfers_balance = transfers_balance,
-                .account_exists = try frame.host.accountExists(address),
+                .account_exists = try frame.host.accountExists(address_word_key),
             });
             if (!frame.trackGas(new_account_gas.regular)) return;
             if (!frame.trackStateGas(new_account_gas.state)) return;

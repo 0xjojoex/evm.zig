@@ -21,7 +21,7 @@ pub const FrameHalt = evmz.execution.FrameHalt;
 
 pub const FrameState = union(enum) {
     running,
-    suspended: Action,
+    suspended: *const Action,
     halted: FrameHalt,
 };
 
@@ -65,36 +65,12 @@ pub const FrameResult = struct {
     }
 };
 
-pub const Action = union(enum) {
-    call: Call,
-    create: Create,
-
-    pub const CallResume = struct {
-        gas_limit: i64,
-        out_offset: usize,
-        out_size: usize,
-        state_gas_charged: i64 = 0,
-    };
-
-    pub const CreateResume = struct {
-        gas_limit: i64,
-        state_gas_charged: i64 = 0,
-    };
-
-    pub const Call = struct {
-        msg: Host.Message,
-        continuation: CallResume,
-    };
-
-    pub const Create = struct {
-        msg: Host.Message,
-        continuation: CreateResume,
-    };
-};
+pub const Action = frame_io.Action;
 
 pub const RunResult = union(enum) {
     finished: FrameResult,
-    /// Borrowed from `CallFrame.state` and valid only until the frame resumes.
+    /// Borrowed from the frame's action storage and valid only until the frame
+    /// resumes or its owner relocates that storage.
     suspended: *const Action,
 };
 
@@ -255,12 +231,14 @@ pub const CallFrame = struct {
     jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
 
     comptime {
-        std.debug.assert(@sizeOf(CallFrame) == 416);
-        std.debug.assert(@alignOf(CallFrame) == 16);
-        std.debug.assert(@offsetOf(CallFrame, "msg") == 248);
-        std.debug.assert(@offsetOf(CallFrame, "stack") == 256);
-        std.debug.assert(@offsetOf(CallFrame, "memory") == 272);
-        std.debug.assert(@offsetOf(CallFrame, "gas_left") == 320);
+        std.debug.assert(@sizeOf(CallFrame) == 184);
+        std.debug.assert(@alignOf(CallFrame) == 8);
+        std.debug.assert(@offsetOf(CallFrame, "state") == 0);
+        std.debug.assert(@offsetOf(CallFrame, "host") == 16);
+        std.debug.assert(@offsetOf(CallFrame, "msg") == 24);
+        std.debug.assert(@offsetOf(CallFrame, "stack") == 32);
+        std.debug.assert(@offsetOf(CallFrame, "memory") == 48);
+        std.debug.assert(@offsetOf(CallFrame, "gas_left") == 96);
     }
 
     pub fn init(
@@ -327,7 +305,7 @@ pub const CallFrame = struct {
     /// Borrow the frame-owned action until the frame resumes.
     pub fn suspendedAction(self: *const CallFrame) ?*const Action {
         return switch (self.state) {
-            .suspended => |*action| action,
+            .suspended => |action| action,
             else => null,
         };
     }
@@ -341,7 +319,15 @@ pub const CallFrame = struct {
 
     pub fn suspendWith(self: *CallFrame, action: Action) void {
         std.debug.assert(self.isRunning());
-        self.state = .{ .suspended = action };
+        self.io.action = action;
+        self.state = .{ .suspended = &self.io.action };
+    }
+
+    /// Rebind cold frame storage after its owner relocates it.
+    pub fn rebindIo(self: *CallFrame, io: *frame_io.Slot) void {
+        self.io = io;
+        if (self.isSuspended()) self.state = .{ .suspended = &io.action };
+        self.return_data = io.return_data.slice();
     }
 
     /// Resume from an engine result while preserving its CALL/CREATE type.
@@ -371,7 +357,7 @@ pub const CallFrame = struct {
         if (child.outcome.status == .success) {
             // A deployed contract yields its address, never return data.
             try self.replaceReturnData(&.{});
-            self.stack.push(evmz.address.toU256(child.address));
+            self.stack.push(child.address.toU256());
         } else {
             try self.replaceReturnData(child.output_data);
             self.stack.push(0);
@@ -586,7 +572,7 @@ pub const CallFrame = struct {
         return frame_result;
     }
 
-    pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.Address) !void {
+    pub fn traceAccountAccess(self: *CallFrame, account_address: evmz.AddressWord) !void {
         try self.host.observeAccountAccess(account_address, self.msg.depth);
     }
 };
@@ -599,15 +585,16 @@ pub const CallFrameSlot = struct {
     msg: Host.Message = undefined,
 
     comptime {
-        std.debug.assert(@sizeOf(CallFrameSlot) == 33440);
-        std.debug.assert(@offsetOf(CallFrameSlot, "frame") == 0);
-        std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == @sizeOf(CallFrame));
-        std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @sizeOf(CallFrame) + @sizeOf(Stack.Storage));
-        std.debug.assert(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message));
+        std.debug.assert(@sizeOf(CallFrameSlot) == 33424);
+        std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == 0);
+        std.debug.assert(@offsetOf(CallFrameSlot, "io_storage") == @sizeOf(Stack.Storage));
+        std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @offsetOf(CallFrameSlot, "io_storage") + @sizeOf(frame_io.Slot));
+        std.debug.assert(@offsetOf(CallFrameSlot, "frame") == @offsetOf(CallFrameSlot, "msg") + @sizeOf(Host.Message));
+        std.debug.assert(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "frame") + @sizeOf(CallFrame));
     }
 
     pub fn init(self: *CallFrameSlot, allocator: std.mem.Allocator, options: Init) !void {
-        self.io_storage = frame_io.Slot.init(allocator);
+        self.io_storage.init(allocator);
         errdefer self.io_storage.deinit();
 
         var frame_options = options;
@@ -647,7 +634,8 @@ test "call frame can execute with externally supplied stack storage" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    var io_storage = frame_io.Slot.init(std.testing.allocator);
+    var io_storage: frame_io.Slot = undefined;
+    io_storage.init(std.testing.allocator);
     defer io_storage.deinit();
     var bytecode = try Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
@@ -685,7 +673,8 @@ test "call frame can execute with externally supplied memory storage" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    var io_storage = frame_io.Slot.init(std.testing.allocator);
+    var io_storage: frame_io.Slot = undefined;
+    io_storage.init(std.testing.allocator);
     defer io_storage.deinit();
     var bytecode = try Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
@@ -846,7 +835,8 @@ test "captured tail memory exhaustion remains a resource error" {
     var msg_storage: Host.Message = undefined;
     var stack_storage: Stack.Storage = undefined;
     var memory_storage: Memory.Storage = .empty;
-    var io_storage = frame_io.Slot.init(std.testing.allocator);
+    var io_storage: frame_io.Slot = undefined;
+    io_storage.init(std.testing.allocator);
     defer io_storage.deinit();
     var frame: CallFrame = undefined;
     try frame.init(no_growth_allocator, .{
@@ -992,7 +982,7 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
     );
 }
 
-test "yielded action stays in the call frame until resume" {
+test "yielded action stays in frame-owned sidecar until resume" {
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
@@ -1001,6 +991,7 @@ test "yielded action stays in the call frame until resume" {
         .msg = &msg,
     });
     defer owned.deinit();
+    try std.testing.expect(owned.frame.suspendedAction() == null);
 
     const continuation = Action.CallResume{
         .gas_limit = 10,
@@ -1013,6 +1004,7 @@ test "yielded action stays in the call frame until resume" {
         .msg = msg,
         .continuation = continuation,
     } });
+    try std.testing.expect(owned.frame.suspendedAction().? == &owned.slot.io_storage.action);
 
     var interpreter = owned.interpreter();
     const yielded = try interpreter.executeUntilSuspended();

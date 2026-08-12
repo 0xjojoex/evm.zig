@@ -20,7 +20,7 @@ pub const Diff = struct {
             else if (actual_account == null)
                 std.math.Order.lt
             else
-                std.mem.order(u8, &expected_account.?.address, &actual_account.?.address);
+                bal.Address.order(expected_account.?.address, actual_account.?.address);
 
             switch (order) {
                 .eq => {

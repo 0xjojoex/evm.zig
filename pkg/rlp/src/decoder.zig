@@ -80,6 +80,11 @@ pub const Decoder = struct {
         return self.cursor.expectDone();
     }
 
+    /// Parse the next item without consuming it or charging the budget.
+    pub fn peek(self: Decoder) Error!raw.Item {
+        return self.cursor.peek();
+    }
+
     pub fn next(self: *Decoder) Error!raw.Item {
         const value = try self.cursor.next();
         try self.budget.visitItem();

@@ -33,26 +33,18 @@ pub fn build(b: *std.Build) void {
         .@"native-secp256k1" = native_secp256k1,
     });
     const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
-    const evmz_evmc_dep = b.dependency("evmz_evmc", .{
-        .target = target,
-        .optimize = optimize,
-    });
     const intx_dep = b.dependency("intx", .{ .target = target, .optimize = optimize });
     const zbench_dep = b.dependency("zbench", .{ .target = target, .optimize = micro_optimize });
     const evmone_libgcc = nativeEvmoneLibgcc(b, target);
     const evmz_mod = evmz_dep.module("evmz");
     evmz_mod.omit_frame_pointer = true;
-    const evmz_evmc_mod = b.createModule(.{
-        .root_source_file = evmz_evmc_dep.path("src/lib.zig"),
+    const evmc_bindings_mod = b.createModule(.{
+        .root_source_file = b.path("src/evmc_bindings.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "evmz", .module = evmz_mod },
-        },
     });
-    evmz_evmc_mod.addIncludePath(evmz_evmc_dep.path("include"));
-    evmz_evmc_mod.addIncludePath(evmone_dep.path("evmc/include"));
+    evmc_bindings_mod.addIncludePath(b.path("src"));
+    evmc_bindings_mod.addIncludePath(evmone_dep.path("evmc/include"));
     const vm_loop_support_min = b.option(
         []const u8,
         "bench-support-min",
@@ -96,36 +88,8 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const host_boundary_mod = benchModule(b, "src/host_boundary.zig", target, optimize, evmz_mod);
-        host_boundary_mod.addImport("evmz_evmc", evmz_evmc_mod);
-        const host_boundary = b.addExecutable(.{
-            .name = "evmz-host-boundary",
-            .root_module = host_boundary_mod,
-        });
-        b.installArtifact(host_boundary);
-
-        const run_host_boundary = b.addRunArtifact(host_boundary);
-        if (b.args) |args| run_host_boundary.addArgs(args);
-        b.step("host-boundary", "Run host-boundary benchmark runner").dependOn(&run_host_boundary.step);
-    }
-
-    {
-        const host_matrix_mod = benchModule(b, "src/host_matrix.zig", target, optimize, evmz_mod);
-        host_matrix_mod.addImport("evmz_evmc", evmz_evmc_mod);
-        const host_matrix = b.addExecutable(.{
-            .name = "evmz-host-matrix",
-            .root_module = host_matrix_mod,
-        });
-        b.installArtifact(host_matrix);
-
-        const run_host_matrix = b.addRunArtifact(host_matrix);
-        if (b.args) |args| run_host_matrix.addArgs(args);
-        b.step("host-matrix", "Run host-boundary CSV matrix").dependOn(&run_host_matrix.step);
-    }
-
-    {
         const kernel_mod = benchModule(b, "src/kernel.zig", target, optimize, evmz_mod);
-        kernel_mod.addImport("evmz_evmc", evmz_evmc_mod);
+        kernel_mod.addImport("evmc_bindings", evmc_bindings_mod);
         addEvmoneVm(kernel_mod, evmone_dep, intx_dep, evmone_libgcc);
         const kernel = b.addExecutable(.{
             .name = "evmz-kernel",
@@ -290,7 +254,6 @@ pub fn build(b: *std.Build) void {
     {
         const bench_tests_mod = benchModule(b, "src/test.zig", target, optimize, evmz_mod);
         bench_tests_mod.addImport("build_options", vm_loop_options_mod);
-        bench_tests_mod.addImport("evmz_evmc", evmz_evmc_mod);
         const bench_tests = b.addTest(.{
             .name = "evmz-bench-tests",
             .root_module = bench_tests_mod,
@@ -300,7 +263,7 @@ pub fn build(b: *std.Build) void {
             .name = "evmone-kernel-tests",
             .root_module = blk: {
                 const kernel_test_mod = benchModule(b, "src/kernel.zig", target, optimize, evmz_mod);
-                kernel_test_mod.addImport("evmz_evmc", evmz_evmc_mod);
+                kernel_test_mod.addImport("evmc_bindings", evmc_bindings_mod);
                 addEvmoneVm(kernel_test_mod, evmone_dep, intx_dep, evmone_libgcc);
                 break :blk kernel_test_mod;
             },

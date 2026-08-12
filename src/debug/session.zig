@@ -62,7 +62,7 @@ pub fn bind(comptime Executor: type) type {
                 }
 
                 try self.call_runtime.prepare();
-                try self.call_runtime.pushRootCall(msg, bytecode);
+                try self.call_runtime.pushRootCall(&msg, bytecode);
             }
 
             /// Abort unfinished frames and close the prepared-code execution

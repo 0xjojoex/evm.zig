@@ -458,22 +458,22 @@ pub fn ContextType(
         }
 
         pub fn touchAccount(self: *Self, account_address: Address) ContextError!void {
-            return self.activeExecutor().state.touchAccount(account_address) catch |err|
+            return self.activeExecutor().touchAccount(account_address) catch |err|
                 return executor_errors.normalize(err);
         }
 
         pub fn addBalance(self: *Self, account_address: Address, value: u256) ContextError!void {
-            return self.activeExecutor().state.addBalance(account_address, value) catch |err|
+            return self.activeExecutor().addBalance(account_address, value) catch |err|
                 return executor_errors.normalize(err);
         }
 
         pub fn subtractBalance(self: *Self, account_address: Address, value: u256) ContextError!bool {
-            return self.activeExecutor().state.subtractBalance(account_address, value) catch |err|
+            return self.activeExecutor().subtractBalance(account_address, value) catch |err|
                 return executor_errors.normalize(err);
         }
 
         pub fn setNonce(self: *Self, account_address: Address, nonce: u64) ContextError!void {
-            return self.activeExecutor().state.setNonce(account_address, nonce) catch |err|
+            return self.activeExecutor().setNonce(account_address, nonce) catch |err|
                 return executor_errors.normalize(err);
         }
 
@@ -487,12 +487,12 @@ pub fn ContextType(
         }
 
         pub fn setCode(self: *Self, account_address: Address, code_bytes: []const u8) ContextError!void {
-            return self.activeExecutor().state.setCode(account_address, code_bytes) catch |err|
+            return self.activeExecutor().setCode(account_address, code_bytes) catch |err|
                 return executor_errors.normalize(err);
         }
 
         pub fn clearCode(self: *Self, account_address: Address) ContextError!void {
-            return self.activeExecutor().state.clearCode(account_address) catch |err|
+            return self.activeExecutor().clearCode(account_address) catch |err|
                 return executor_errors.normalize(err);
         }
 

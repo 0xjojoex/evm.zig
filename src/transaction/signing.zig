@@ -62,7 +62,7 @@ pub fn recoverSender(allocator: std.mem.Allocator, bytes: []const u8) SenderReco
     public_key[0] = 0x04;
     @memcpy(public_key[1..], &recovered);
     return .{
-        .sender = address.fromPublicKey(recovered),
+        .sender = Address.fromPublicKey(recovered),
         .signing_hash = message.signing_hash,
         .public_key = public_key,
     };
@@ -264,7 +264,7 @@ fn nextTransactionSignatureUint(cursor: *rlp.Cursor) SenderRecoveryError!u256 {
 }
 
 fn recoverAddress(message_hash: [32]u8, y_parity: u8, r: u256, s: u256) SenderRecoveryError!Address {
-    return address.fromPublicKey(try recoverPublicKey(message_hash, y_parity, r, s));
+    return Address.fromPublicKey(try recoverPublicKey(message_hash, y_parity, r, s));
 }
 
 fn recoverPublicKey(message_hash: [32]u8, y_parity: u8, r: u256, s: u256) SenderRecoveryError![64]u8 {
@@ -284,11 +284,11 @@ test "sender recovery reproduces EIP-155 legacy vector" {
     _ = try std.fmt.hexToBytes(&bytes, hex);
 
     const recovered = try recoverSender(std.testing.allocator, &bytes);
-    try t.expectHex(&recovered.sender, "9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f");
+    try t.expectHex(recovered.sender.asBytes(), "9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f");
     try t.expectHex(&recovered.signing_hash, "daf5a779ae972f972197303d7b574746c7ef83eadac0f2791ad23db92e4c8e53");
     try std.testing.expectEqual(@as(u8, 0x04), recovered.public_key[0]);
-    const public_address = address.fromPublicKey(recovered.public_key[1..65].*);
-    try std.testing.expectEqualSlices(u8, &recovered.sender, &public_address);
+    const public_address = Address.fromPublicKey(recovered.public_key[1..65].*);
+    try std.testing.expectEqual(recovered.sender, public_address);
     const hash_only = try signingHash(std.testing.allocator, &bytes);
     try std.testing.expectEqualSlices(u8, &recovered.signing_hash, &hash_only);
 }
@@ -330,7 +330,7 @@ test "EIP-7702 authorization signer recovery handles generated tuple signature" 
     const signature = try signatureForHash(signer, hash);
 
     const recovered = try recoverAuthorizationSigner(1, target, 7, signature.y_parity, signature.r, signature.s);
-    try std.testing.expectEqualSlices(u8, &signer.sender, &recovered);
+    try std.testing.expectEqual(signer.sender, recovered);
 }
 
 test "sender recovery rejects high-s signatures" {
@@ -356,7 +356,7 @@ const TestSigner = struct {
         @memcpy(&public_key, sec1[1..65]);
         return .{
             .key_pair = key_pair,
-            .sender = address.fromPublicKey(public_key),
+            .sender = Address.fromPublicKey(public_key),
         };
     }
 };
@@ -377,7 +377,7 @@ fn signatureForHash(signer: TestSigner, message_hash: [32]u8) !TestSignature {
     for (0..2) |candidate| {
         const y_parity: u8 = @intCast(candidate);
         const recovered = recoverAddress(message_hash, y_parity, r, s) catch continue;
-        if (std.mem.eql(u8, &recovered, &signer.sender)) {
+        if (Address.eql(recovered, signer.sender)) {
             return .{ .y_parity = y_parity, .r = r, .s = s };
         }
     }
@@ -386,7 +386,7 @@ fn signatureForHash(signer: TestSigner, message_hash: [32]u8) !TestSignature {
 
 fn expectRecoveredSender(allocator: std.mem.Allocator, bytes: []const u8, expected: Address) !void {
     const recovered = try recoverSender(allocator, bytes);
-    try std.testing.expectEqualSlices(u8, &expected, &recovered.sender);
+    try std.testing.expectEqual(expected, recovered.sender);
 }
 
 fn signedLegacyTransactionForTest(allocator: std.mem.Allocator, signer: TestSigner, chain_id: ?u256) ![]u8 {
@@ -410,7 +410,8 @@ fn unsignedLegacyPayloadForTest(allocator: std.mem.Allocator) ![]u8 {
     try fields.int(u64, 9);
     try fields.int(u64, 20_000_000_000);
     try fields.int(u64, 21_000);
-    try fields.bytes(&address.addr(0x3535));
+    const target = address.addr(0x3535);
+    try fields.bytes(target.asBytes());
     try fields.int(u64, 1_000);
     try fields.bytes("");
     return try writerOwnedForTest(&fields);
@@ -445,7 +446,8 @@ fn unsignedTypedPayloadForTest(allocator: std.mem.Allocator, type_id: u8) ![]u8 
         else => unreachable,
     }
     try fields.int(u64, 50_000);
-    try fields.bytes(&address.addr(0x4444));
+    const target = address.addr(0x4444);
+    try fields.bytes(target.asBytes());
     try fields.int(u64, 1_000);
     try fields.bytes("hello");
     try fields.listPayload("");
@@ -487,7 +489,7 @@ fn authorizationHashForTest(allocator: std.mem.Allocator, chain_id: u256, target
     var fields = rlp.Writer.alloc(allocator);
     defer fields.deinit();
     try fields.int(u256, chain_id);
-    try fields.bytes(&target);
+    try fields.bytes(target.asBytes());
     try fields.int(u64, nonce);
 
     var list = rlp.Writer.alloc(allocator);

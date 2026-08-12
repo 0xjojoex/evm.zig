@@ -727,7 +727,7 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
         /// context copy costs measurable guest steps per transaction.
         inline fn executePayloadTransaction(
             self: *const @This(),
-            entry: TransactionInput,
+            entry: *const TransactionInput,
             tx_index: usize,
             accumulated: *BlockAccumulator,
             requests_hash: [32]u8,
@@ -739,7 +739,7 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
 
             self.collector.block_access_index =
                 try eth_bal.transactionIndex(try block_admission.transactionCount(tx_index));
-            const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, entry.tx);
+            const tx_blob_gas_used = try transactionBlobGasUsed(revision, Engine, &entry.tx);
             const next_blob_gas_used = std.math.add(u64, accumulated.blob_gas_used, tx_blob_gas_used) catch return error.BlobGasOverflow;
             if (next_blob_gas_used > accumulated.blob_gas_limit) {
                 const progress = self.block.progress();
@@ -761,7 +761,7 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
                 Engine,
                 self.block,
                 self.env,
-                entry.tx,
+                &entry.tx,
                 if (self.step_capture.active())
                     .{ .steps = self.step_capture.contextPtr() }
                 else if (self.observe_state)
@@ -1141,7 +1141,7 @@ fn executeBlock(
         .step_capture = &step_capture,
         .observe_state = observe_state,
     };
-    for (input.transactions, 0..) |entry, tx_index| {
+    for (input.transactions, 0..) |*entry, tx_index| {
         if (try fold.executePayloadTransaction(
             entry,
             tx_index,
@@ -1344,7 +1344,7 @@ fn transactPayload(
     comptime Engine: type,
     block: *Engine.BlockExecution,
     env: Env,
-    tx_value: Engine.Transaction,
+    tx_value: *const Engine.Transaction,
     capture: PayloadCapture,
     observer: anytype,
 ) !Engine.BlockExecution.Outcome {
@@ -1506,7 +1506,7 @@ pub fn freeRequests(allocator: std.mem.Allocator, requests: []const []const u8) 
 pub fn transactionBlobGasUsed(
     comptime revision: Revision,
     comptime Engine: type,
-    tx: transaction.Transaction,
+    tx: *const transaction.Transaction,
 ) !u64 {
     if (tx.kind != .blob or !revision.isImpl(.cancun)) return 0;
     const blob_count = std.math.cast(u64, tx.blob_hashes.len) orelse return error.BlobGasOverflow;

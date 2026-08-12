@@ -92,7 +92,7 @@ test "stateless wire v1 reuses parity-authenticated transaction decoding" {
     const normalized = try wire.normalize(scratch, input);
     try std.testing.expectEqual(@as(usize, 1), normalized.block.transactions.len);
     try std.testing.expectEqualSlices(u8, &encoded, normalized.block.transactions[0].encoded);
-    try std.testing.expectEqualSlices(u8, &recovered.sender, &normalized.block.transactions[0].tx.sender);
+    try std.testing.expectEqual(recovered.sender, normalized.block.transactions[0].tx.sender);
 
     var opposite_parity = encoded;
     try std.testing.expectEqual(@as(u8, 0x25), opposite_parity[43]);

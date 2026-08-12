@@ -228,6 +228,7 @@ pub fn build(b: *std.Build) void {
         debug_cli_mod.addImport("ssz", ssz_mod);
         debug_cli_mod.addImport("rlp", rlp_mod);
         debug_cli_mod.addImport("mpt", mpt_mod);
+        debug_cli_mod.addImport("rewindable_region", packages.rewindable_region);
         debug_cli_mod.addIncludePath(b.path("include"));
         addPrecompileNative(b, debug_cli_mod, native_precompile_deps);
         addNativeKeccak(debug_cli_mod, xkcp_object);
@@ -257,6 +258,7 @@ pub fn build(b: *std.Build) void {
     call_fixture_oracle_mod.addImport("ssz", ssz_mod);
     call_fixture_oracle_mod.addImport("rlp", rlp_mod);
     call_fixture_oracle_mod.addImport("mpt", mpt_mod);
+    call_fixture_oracle_mod.addImport("rewindable_region", packages.rewindable_region);
     call_fixture_oracle_mod.addIncludePath(b.path("include"));
     if (is_native_profile) addPrecompileNative(b, call_fixture_oracle_mod, native_precompile_deps);
     addNativeKeccak(call_fixture_oracle_mod, xkcp_object);
@@ -399,8 +401,6 @@ pub fn build(b: *std.Build) void {
         addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null, evmz_build, null);
         addBenchRevisionDelegate(b, "bench-compare", "Run VM-core comparison", "compare", bench_optimize_name, bench_support_min, bench_support_max, evmz_build);
         addBenchDelegate(b, "bench-block-lifecycle", "Run VM block lifecycle benchmark", "block-lifecycle", bench_optimize_name, evmz_build, null);
-        addBenchDelegate(b, "bench-host-boundary", "Run host-boundary benchmark runner", "host-boundary", bench_optimize_name, evmz_build, null);
-        addBenchDelegate(b, "bench-host-matrix", "Run host-boundary CSV matrix", "host-matrix", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null, evmz_build, null);
@@ -410,13 +410,6 @@ pub fn build(b: *std.Build) void {
     if (pathExists(b, "pkg/ssz/build.zig")) {
         addSszBenchDelegate(b, bench_optimize_name);
     }
-    if (is_native_profile and pathExists(b, "pkg/evmc/build.zig")) {
-        addEvmcDelegate(b, "evmc", "Build the EVMC compatibility package", null, target, optimize_name, evmz_build);
-        addEvmcDelegate(b, "evmc-ci", "Build and test the EVMC compatibility package", "ci", target, optimize_name, evmz_build);
-        addEvmcDelegate(b, "evmc-test", "Run EVMC compatibility package tests", "test", target, optimize_name, evmz_build);
-        addEvmcDelegate(b, "evmc-example", "Run the EVMC C example", "example", target, optimize_name, evmz_build);
-    }
-
     // Capacity is free in guest execution steps: the linker reserves the heap
     // after `_bss_end` as bare address space, nothing zeroes it, and the bump
     // allocator only writes what it hands out. Default to filling ZisK's RAM,
@@ -495,20 +488,11 @@ pub fn build(b: *std.Build) void {
             "Name of the example",
         ) orelse "basic.zig";
 
-        const is_zig = std.mem.endsWith(u8, example_name, ".zig");
-        if (is_zig) {
-            addExamplesDelegate(b, "example", "Run the selected Zig example", "example", example_name, target, optimize_name, evmz_build, null);
-            addExamplesDelegate(b, "example-test", "Run tests in the selected Zig example", "example-test", example_name, target, optimize_name, evmz_build, null);
-            addExamplesDelegate(b, "examples-test-all", "Run tests in all Zig examples", "test", example_name, target, optimize_name, evmz_build, null);
-        } else {
-            if (!is_native_profile) {
-                std.debug.panic("C examples require -Dprofile=native", .{});
-            }
-            if (!std.mem.eql(u8, example_name, "basic.c")) {
-                std.debug.panic("unknown C example '{s}'", .{example_name});
-            }
-            addEvmcDelegate(b, "example", "Run the EVMC C example", "example", target, optimize_name, evmz_build);
-        }
+        if (!std.mem.endsWith(u8, example_name, ".zig"))
+            std.debug.panic("examples must be Zig source files: '{s}'", .{example_name});
+        addExamplesDelegate(b, "example", "Run the selected Zig example", "example", example_name, target, optimize_name, evmz_build, null);
+        addExamplesDelegate(b, "example-test", "Run tests in the selected Zig example", "example-test", example_name, target, optimize_name, evmz_build, null);
+        addExamplesDelegate(b, "examples-test-all", "Run tests in all Zig examples", "test", example_name, target, optimize_name, evmz_build, null);
     }
 }
 
@@ -1456,34 +1440,6 @@ fn addSszBenchDelegate(b: *std.Build, optimize_name: []const u8) void {
 
     const step = b.step("ssz-bench", "Run standalone SSZ codec benchmarks");
     step.dependOn(&run.step);
-}
-
-fn addEvmcDelegate(
-    b: *std.Build,
-    step_name: []const u8,
-    description: []const u8,
-    child_step: ?[]const u8,
-    target: std.Build.ResolvedTarget,
-    optimize_name: []const u8,
-    config: EvmzBuildConfig,
-) void {
-    const run = b.addSystemCommand(&.{
-        b.graph.zig_exe,
-        "build",
-        b.fmt("-Dtarget={s}", .{target.query.zigTriple(b.allocator) catch @panic("OOM")}),
-        b.fmt("-Dcpu={s}", .{target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM")}),
-        b.fmt("-Doptimize={s}", .{optimize_name}),
-        b.fmt("-Dnative-keccak={t}", .{config.native_keccak}),
-        b.fmt("-Dnative-secp256k1={t}", .{config.native_secp256k1}),
-    });
-    if (child_step) |name| run.addArg(name);
-    if (b.args) |args| {
-        run.addArg("--");
-        run.addArgs(args);
-    }
-    run.setCwd(b.path("pkg/evmc"));
-
-    b.step(step_name, description).dependOn(&run.step);
 }
 
 fn addBenchRevisionDelegate(

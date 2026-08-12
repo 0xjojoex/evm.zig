@@ -205,7 +205,7 @@ fn nextTo(fields: *rlp.Cursor) Error!?Address {
     const bytes = try fields.nextBytes();
     return switch (bytes.len) {
         0 => null,
-        20 => bytes[0..20].*,
+        20 => Address.fromBytes(bytes[0..20].*),
         else => error.InvalidTransactionFormat,
     };
 }
@@ -217,7 +217,7 @@ fn nextAccessList(allocator: std.mem.Allocator, fields: *rlp.Cursor) Error![]con
 
     while (!list.isDone()) {
         var entry = try list.nextList();
-        const entry_address = (try entry.nextBytesExact(20))[0..20].*;
+        const entry_address = Address.fromBytes((try entry.nextBytesExact(20))[0..20].*);
         var keys_cursor = try entry.nextList();
         var keys: std.ArrayList(u256) = .empty;
         errdefer keys.deinit(allocator);
@@ -263,7 +263,7 @@ fn nextAuthorizationList(allocator: std.mem.Allocator, fields: *rlp.Cursor) Erro
         count += 1;
         var tuple = try list.nextList();
         const chain_id = try tuple.nextInt(u256);
-        const target = (try tuple.nextBytesExact(20))[0..20].*;
+        const target = Address.fromBytes((try tuple.nextBytesExact(20))[0..20].*);
         const nonce = try tuple.nextInt(u64);
         const y_parity = try tuple.nextInt(u256);
         const r = try tuple.nextInt(u256);

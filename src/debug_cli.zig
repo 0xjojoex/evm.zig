@@ -413,8 +413,8 @@ const Repl = struct {
         } else if (!loaded.closed) {
             account = loaded.driver.message().recipient;
         }
-        try self.out.print("0x{f}[0x{x}] = 0x{x}\n", .{
-            Hex{ .data = &account },
+        try self.out.print("0x{x}[0x{x}] = 0x{x}\n", .{
+            account,
             key,
             try self.executor.getStorage(account, key),
         });
@@ -445,10 +445,10 @@ const Repl = struct {
                     .call => |call| call.msg,
                     .create => |create| create.msg,
                 };
-                try self.out.print("d{d} {s} -> 0x{f} gas={d} value={d} input={d}B  (step dispatches, sub replaces)\n", .{
+                try self.out.print("d{d} {s} -> 0x{x} gas={d} value={d} input={d}B  (step dispatches, sub replaces)\n", .{
                     event.site.depth,
                     @tagName(msg.kind),
-                    Hex{ .data = &msg.recipient },
+                    msg.recipient,
                     msg.gas,
                     msg.value,
                     msg.input_data.len,
@@ -525,10 +525,8 @@ const Repl = struct {
     fn parseAddress(self: *Repl, text: []const u8) !Address {
         const bytes = try self.parseHex(text);
         defer self.allocator.free(bytes);
-        if (bytes.len != @sizeOf(Address)) return error.InvalidLength;
-        var address: Address = undefined;
-        @memcpy(&address, bytes);
-        return address;
+        if (bytes.len != Address.len) return error.InvalidLength;
+        return Address.fromBytes(bytes[0..Address.len].*);
     }
 };
 

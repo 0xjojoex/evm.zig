@@ -4,8 +4,7 @@
 /*
  * Native evm.zig C API slot.
  *
- * This header intentionally has no public declarations yet. The EVMC
- * compatibility API is distributed separately by the evmz-evmc package.
+ * This header intentionally has no public declarations yet.
  */
 
 #endif /* EVMZ_EVMZ_H */

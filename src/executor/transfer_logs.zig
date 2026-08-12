@@ -9,8 +9,8 @@ pub fn emit(executor: anytype, input: evmz.execution.ValueTransferInput) !void {
 
     const topics = [_]u256{
         transfer_log.topic,
-        evmz.address.toU256(input.from),
-        evmz.address.toU256(input.to),
+        input.from.toU256(),
+        input.to.toU256(),
     };
     var data: [32]u8 = undefined;
     std.mem.writeInt(u256, &data, input.amount, .big);
@@ -78,11 +78,11 @@ test "value transfer log metadata comes from the exact spec" {
 
     try std.testing.expectEqual(@as(usize, 1), executor.state.logs.items.len);
     const event_log = executor.state.logs.items[0];
-    try std.testing.expectEqualSlices(u8, &evmz.addr(0x77), &event_log.address);
+    try std.testing.expectEqual(evmz.addr(0x77), event_log.address);
     try std.testing.expectEqual(@as(usize, 3), event_log.topics.len);
     try std.testing.expectEqual(@as(u256, 0x1234), event_log.topics[0]);
-    try std.testing.expectEqual(evmz.address.toU256(evmz.addr(1)), event_log.topics[1]);
-    try std.testing.expectEqual(evmz.address.toU256(evmz.addr(2)), event_log.topics[2]);
+    try std.testing.expectEqual(evmz.addr(1).toU256(), event_log.topics[1]);
+    try std.testing.expectEqual(evmz.addr(2).toU256(), event_log.topics[2]);
     var expected_data: [32]u8 = undefined;
     std.mem.writeInt(u256, &expected_data, 3, .big);
     try std.testing.expectEqualSlices(u8, &expected_data, event_log.data);

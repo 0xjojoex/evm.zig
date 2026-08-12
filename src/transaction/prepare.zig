@@ -131,7 +131,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
 
         fn isSelfTransfer(view: tx.TransactionView) bool {
             const recipient = view.to orelse return false;
-            return std.mem.eql(u8, &view.sender, &recipient);
+            return address.Address.eql(view.sender, recipient);
         }
     };
 }

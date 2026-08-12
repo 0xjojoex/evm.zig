@@ -152,7 +152,7 @@ pub fn validate(block_access_list: BlockAccessList, options: ValidationOptions) 
     for (block_access_list, 0..) |account, index| {
         if (index != 0) {
             const previous = block_access_list[index - 1].address;
-            switch (std.mem.order(u8, &previous, &account.address)) {
+            switch (Address.order(previous, account.address)) {
                 .lt => {},
                 .eq => return error.DuplicateAccount,
                 .gt => return error.AccountsOutOfOrder,
@@ -171,7 +171,7 @@ pub fn eql(expected: BlockAccessList, actual: BlockAccessList) bool {
 }
 
 pub fn accountEql(expected: AccountChanges, actual: AccountChanges) bool {
-    return std.mem.eql(u8, &expected.address, &actual.address) and
+    return Address.eql(expected.address, actual.address) and
         storageChangesEql(expected.storage_changes, actual.storage_changes) and
         std.mem.eql(u256, expected.storage_reads, actual.storage_reads) and
         changesEql(BalanceChange, expected.balance_changes, actual.balance_changes) and
@@ -331,7 +331,7 @@ pub fn encodeAlloc(
     slot_index = 0;
     for (block_access_list, account_lens) |account, lens| {
         try encoder.listPrefix(lens.payload);
-        try encoder.bytes(&account.address);
+        try encoder.bytes(account.address.asBytes());
         try encoder.listPrefix(lens.storage_changes);
         for (account.storage_changes) |slot_changes| {
             const memo = slot_lens[slot_index];
@@ -398,7 +398,7 @@ test "memoized encodeAlloc is byte-identical to the reflection codec" {
         const accounts = try scratch.alloc(AccountChanges, account_count);
         for (accounts) |*account| {
             var target: Address = undefined;
-            random.bytes(&target);
+            random.bytes(&target.bytes);
             const slot_count = random.uintLessThan(usize, 3);
             const slots = try scratch.alloc(SlotChanges, slot_count);
             for (slots) |*slot_changes| {
@@ -724,7 +724,7 @@ test "BAL RLP round trips model data" {
     try validate(decoded.accounts, .{ .transaction_count = 2 });
 
     try std.testing.expectEqual(@as(usize, 2), decoded.accounts.len);
-    try std.testing.expectEqualSlices(u8, &address.addr(0x1000), &decoded.accounts[0].address);
+    try std.testing.expectEqual(address.addr(0x1000), decoded.accounts[0].address);
     try std.testing.expectEqual(@as(u256, 100), decoded.accounts[0].balance_changes[0].post_balance);
     try std.testing.expectEqual(@as(u64, 7), decoded.accounts[0].nonce_changes[0].new_nonce);
     try std.testing.expectEqual(@as(u256, 2), decoded.accounts[1].storage_changes[0].slot);
@@ -799,7 +799,8 @@ test "BAL decode frees an account rejected for trailing fields" {
 
     var account_payload = rlp.Writer.alloc(std.testing.allocator);
     defer account_payload.deinit();
-    try account_payload.bytes(&address.addr(1));
+    const target = address.addr(1);
+    try account_payload.bytes(target.asBytes());
     inline for (0..4) |_| try account_payload.listPayload(&.{});
     try account_payload.listPayload(code_changes_payload.written());
     try account_payload.listPayload(&.{}); // Trailing seventh account field.

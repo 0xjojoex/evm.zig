@@ -102,7 +102,7 @@ below can infer are free; the rest you name explicitly.
 | `CompatibleUnion`                | `CompatibleUnion(T, config)`                                                        |
 | Progressive collections          | `ProgressiveList`, `ProgressiveListOf`, `ProgressiveByteList`, `ProgressiveBitlist` |
 | `ProgressiveContainer`           | `ProgressiveContainer(T, active_fields, overrides)`                                 |
-| Existing schema, different host  | `Mapped(Host, WireCodec, mapping)`                                                  |
+| Existing schema, different host  | `Mapped(Host, WireCodec, Mapping)`                                                  |
 
 `Alloc(Codec)` keeps a codec's fixed wire schema but materializes decoded values
 on the heap — the practical choice for preset-sized fields (e.g. a blob) that
@@ -188,7 +188,7 @@ const ForkActivation = struct {
 ```
 
 For a different in-memory representation of an existing SSZ schema, use
-`Mapped(Host, WireCodec, mapping)`. The wire codec remains authoritative for
+`Mapped(Host, WireCodec, Mapping)`. The wire codec remains authoritative for
 layout, validation, allocation, and hash-tree-root; the mapping only converts
 the host value:
 
@@ -196,18 +196,17 @@ the host value:
 const Slot = struct {
     value: u64,
 
-    fn toWire(value: @This()) u64 {
-        return value.value;
-    }
+    const WireMapping = struct {
+        pub fn toWire(value: Slot) u64 {
+            return value.value;
+        }
 
-    fn fromWire(value: u64) @This() {
-        return .{ .value = value };
-    }
+        pub fn fromWire(value: u64) Slot {
+            return .{ .value = value };
+        }
+    };
 
-    pub const Ssz = ssz.Mapped(@This(), ssz.Fixed(u64), .{
-        .toWire = toWire,
-        .fromWire = fromWire,
-    });
+    pub const Ssz = ssz.Mapped(@This(), ssz.Fixed(u64), WireMapping);
 };
 ```
 

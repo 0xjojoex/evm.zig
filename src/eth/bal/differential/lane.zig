@@ -263,7 +263,7 @@ fn logsEqual(expected: state.LogBuffer.View, actual: state.LogBuffer.View) bool 
     for (0..expected.len()) |index| {
         const left = expected.get(index);
         const right = actual.get(index);
-        if (!std.mem.eql(u8, &left.address, &right.address) or
+        if (!bal.Address.eql(left.address, right.address) or
             !std.mem.eql(u256, left.topics, right.topics) or
             !std.mem.eql(u8, left.data, right.data))
         {

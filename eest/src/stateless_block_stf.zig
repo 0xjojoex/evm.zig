@@ -569,7 +569,7 @@ fn encodeLegacyTransaction(
     try fields.int(u256, gas_price);
     try fields.int(u64, gas_limit);
     if (recipient) |to| {
-        try fields.bytes(&to);
+        try fields.bytes(to.asBytes());
     } else {
         try fields.bytes(&.{});
     }
@@ -765,7 +765,7 @@ test "stateless BlockSTF EEST runner validates a witness-backed empty Cancun blo
     const empty_root = trie.empty_root_hash;
     const block_hash = try (evmz.eth.ExecutionHeader{
         .parent_hash = [_]u8{0} ** 32,
-        .coinbase = [_]u8{0} ** 20,
+        .coinbase = .zero,
         .state_root = empty_root,
         .transactions_root = empty_root,
         .receipts_root = empty_root,
@@ -942,11 +942,10 @@ test "stateless BlockSTF EEST runner recovers legacy sender from signed bytes" {
     defer arena.deinit();
     const transaction = try parseLegacyTransaction(arena.allocator(), &object);
 
-    var expected_sender: evmz.Address = undefined;
-    _ = try std.fmt.hexToBytes(&expected_sender, "9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f");
+    const expected_sender = try evmz.Address.fromHex("9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f");
     const fixture_sender = try addressField(&object, "sender");
     try std.testing.expectEqual(expected_sender, transaction.tx.sender);
-    try std.testing.expect(!std.mem.eql(u8, &fixture_sender, &transaction.tx.sender));
+    try std.testing.expect(!evmz.Address.eql(fixture_sender, transaction.tx.sender));
 }
 
 test "stateless BlockSTF EEST runner parses postNonce block access list changes" {

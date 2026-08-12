@@ -10,6 +10,7 @@ const Opcode = @import("./opcode.zig").Opcode;
 pub const ExecutionContext = @import("./execution/context.zig").ExecutionContext;
 const addr = evmz.addr;
 const Address = evmz.Address;
+const AddressWord = evmz.AddressWord;
 const execution = @import("./execution.zig");
 const ExecutionOutcome = execution.ExecutionOutcome;
 const FrameHalt = execution.FrameHalt;
@@ -317,82 +318,91 @@ pub const Log = struct {
 const Self = @This();
 
 pub const VTable = struct {
-    accountExists: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
-    getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
-    setStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStatus,
-    getBalance: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
-    getNonce: *const fn (ptr: *anyopaque, address: Address) anyerror!u64,
-    getCodeSize: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
-    getCodeHash: *const fn (ptr: *anyopaque, address: Address) anyerror!u256,
-    copyCode: *const fn (ptr: *anyopaque, address: Address, code_offset: usize, buffer_data: []u8) anyerror!usize,
+    accountExists: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!bool,
+    getStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!u256,
+    setStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256, value: u256) anyerror!StorageStatus,
+    getBalance: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
+    getNonce: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u64,
+    getCodeSize: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
+    getCodeHash: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
+    copyCode: *const fn (ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) anyerror!usize,
     emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
-    getExecutionContext: *const fn (ptr: *anyopaque) anyerror!ExecutionContext,
-    accessAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!AccessStatus,
-    accessStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!AccessStatus,
-    accessDelegatedAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!?AccessStatus,
-    observeAccountAccess: ?*const fn (ptr: *anyopaque, address: Address, depth: u16) anyerror!void = null,
+    /// Project the immutable opcode context without copying it. The pointer is
+    /// valid while the host owner's current execution scope remains active.
+    executionContext: *const fn (ptr: *anyopaque) ?*const ExecutionContext,
+    accessAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!AccessStatus,
+    accessStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!AccessStatus,
+    accessDelegatedAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!?AccessStatus,
+    observeAccountAccess: ?*const fn (ptr: *anyopaque, address: AddressWord, depth: u16) anyerror!void = null,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
-    getTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
-    setTransientStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!void,
+    getTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!u256,
+    setTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256, value: u256) anyerror!void,
 
     /// Native fused storage operations. Split access/get/set primitives remain
-    /// required for gas-ordering paths and compatibility adapters.
-    loadStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!StorageLoadResult,
-    storeStorage: *const fn (ptr: *anyopaque, address: Address, key: u256, value: u256) anyerror!StorageStoreResult,
+    /// required for gas-ordering paths that may stop before value access.
+    loadStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!StorageLoadResult,
+    storeStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256, value: u256) anyerror!StorageStoreResult,
 };
 
 ptr: *anyopaque,
 vtable: *const VTable,
 
-pub fn accountExists(self: *Self, address: Address) !bool {
+comptime {
+    // Host adapters are copied into runtime helpers. Execution context remains
+    // behind the owner pointer so adding immutable capabilities cannot widen it.
+    std.debug.assert(@sizeOf(Self) == 2 * @sizeOf(usize));
+    std.debug.assert(@alignOf(Self) == @alignOf(usize));
+}
+
+pub fn accountExists(self: *Self, address: AddressWord) !bool {
     return self.vtable.accountExists(self.ptr, address);
 }
-pub fn getExecutionContext(self: *Self) !ExecutionContext {
-    return self.vtable.getExecutionContext(self.ptr);
+pub fn executionContext(self: *const Self) !*const ExecutionContext {
+    return self.vtable.executionContext(self.ptr) orelse error.MissingExecutionContext;
 }
 pub fn getBlockHash(self: *Self, number: u256) !u256 {
     return self.vtable.getBlockHash(self.ptr, number);
 }
-pub fn accessAccount(self: *Self, address: Address) !AccessStatus {
+pub fn accessAccount(self: *Self, address: AddressWord) !AccessStatus {
     return self.vtable.accessAccount(self.ptr, address);
 }
-pub fn accessStorage(self: *Self, address: Address, key: u256) !AccessStatus {
+pub fn accessStorage(self: *Self, address: AddressWord, key: u256) !AccessStatus {
     return self.vtable.accessStorage(self.ptr, address, key);
 }
-pub fn accessDelegatedAccount(self: *Self, address: Address) !?AccessStatus {
+pub fn accessDelegatedAccount(self: *Self, address: AddressWord) !?AccessStatus {
     return self.vtable.accessDelegatedAccount(self.ptr, address);
 }
-pub fn observeAccountAccess(self: *Self, address: Address, depth: u16) !void {
+pub fn observeAccountAccess(self: *Self, address: AddressWord, depth: u16) !void {
     const callback = self.vtable.observeAccountAccess orelse return;
     return callback(self.ptr, address, depth);
 }
-pub fn copyCode(self: *Self, address: Address, code_offset: usize, buffer_data: []u8) !usize {
+pub fn copyCode(self: *Self, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
     return self.vtable.copyCode(self.ptr, address, code_offset, buffer_data);
 }
-pub fn getCodeSize(self: *Self, address: Address) !u256 {
+pub fn getCodeSize(self: *Self, address: AddressWord) !u256 {
     return self.vtable.getCodeSize(self.ptr, address);
 }
-pub fn getCodeHash(self: *Self, address: Address) !u256 {
+pub fn getCodeHash(self: *Self, address: AddressWord) !u256 {
     return self.vtable.getCodeHash(self.ptr, address);
 }
-pub fn getBalance(self: *Self, address: Address) !u256 {
+pub fn getBalance(self: *Self, address: AddressWord) !u256 {
     return self.vtable.getBalance(self.ptr, address);
 }
-pub fn getNonce(self: *Self, address: Address) !u64 {
+pub fn getNonce(self: *Self, address: AddressWord) !u64 {
     return self.vtable.getNonce(self.ptr, address);
 }
-pub fn setStorage(self: *Self, address: Address, key: u256, value: u256) !StorageStatus {
+pub fn setStorage(self: *Self, address: AddressWord, key: u256, value: u256) !StorageStatus {
     return self.vtable.setStorage(self.ptr, address, key, value);
 }
-pub fn getStorage(self: *Self, address: Address, key: u256) !u256 {
+pub fn getStorage(self: *Self, address: AddressWord, key: u256) !u256 {
     return self.vtable.getStorage(self.ptr, address, key);
 }
-pub fn loadStorage(self: *Self, address: Address, key: u256) !StorageLoadResult {
+pub fn loadStorage(self: *Self, address: AddressWord, key: u256) !StorageLoadResult {
     return self.vtable.loadStorage(self.ptr, address, key);
 }
-pub fn storeStorage(self: *Self, address: Address, key: u256, value: u256) !StorageStoreResult {
+pub fn storeStorage(self: *Self, address: AddressWord, key: u256, value: u256) !StorageStoreResult {
     return self.vtable.storeStorage(self.ptr, address, key, value);
 }
 pub fn emitLog(self: *Self, event_log: Log) !void {
@@ -404,9 +414,9 @@ pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !bool {
 pub fn call(self: *Self, msg: Message) !Result {
     return self.vtable.call(self.ptr, msg);
 }
-pub fn getTransientStorage(self: *Self, address: Address, key: u256) !u256 {
+pub fn getTransientStorage(self: *Self, address: AddressWord, key: u256) !u256 {
     return self.vtable.getTransientStorage(self.ptr, address, key);
 }
-pub fn setTransientStorage(self: *Self, address: Address, key: u256, value: u256) !void {
+pub fn setTransientStorage(self: *Self, address: AddressWord, key: u256, value: u256) !void {
     return self.vtable.setTransientStorage(self.ptr, address, key, value);
 }

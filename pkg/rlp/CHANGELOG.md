@@ -15,10 +15,21 @@ Releases are cut from `pkg/rlp` on evmz `main` and published to the generated
   caller-owned storage, leaving the destination undefined on failure.
 - `listEncodedLen` sizes a list from its payload length, so callers can reserve
   exact output storage before encoding.
+- `Optional(InnerCodec)` encodes `null` as the empty byte string, and `?T` now
+  infers it whenever the inner codec can never encode that same empty byte
+  string. Codecs report the property with `pub const may_encode_empty`, which
+  defaults to `true` for codecs that stay silent.
+- `Cursor.peek`/`Decoder.peek` parse the next item without consuming it or
+  charging the decode budget.
 
 ### Changed
 
 - Simplified encoding to reduce cycles
+
+### Removed
+
+- `OptionalFixedBytes(N)`. `?[N]u8` infers the same codec, and
+  `Optional(FixedBytes(N))` spells it explicitly.
 
 ## [0.1.0] - 2026-07-22
 

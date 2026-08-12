@@ -50,7 +50,7 @@ pub const deinit = codec.deinit;
 pub const deinitAs = codec.deinitAs;
 
 pub const FixedBytes = codec.FixedBytes;
-pub const OptionalFixedBytes = codec.OptionalFixedBytes;
+pub const Optional = codec.Optional;
 pub const Raw = codec.Raw;
 pub const Struct = codec.Struct;
 pub const ArrayOf = codec.ArrayOf;

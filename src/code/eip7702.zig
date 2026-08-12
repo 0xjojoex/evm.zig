@@ -21,9 +21,9 @@ pub fn decodeDelegation(code: []const u8) DecodeError!?Address {
     if (code.len != delegation_code_len) return error.InvalidDelegationLength;
     if (code[2] != delegation_designator[2]) return error.UnsupportedDelegationVersion;
 
-    var target: Address = undefined;
+    var target: [Address.len]u8 = undefined;
     @memcpy(&target, code[delegation_designator.len..]);
-    return target;
+    return Address.fromBytes(target);
 }
 
 /// Permissive runtime classifier: malformed delegation-shaped bytes are not a
@@ -34,7 +34,7 @@ pub fn delegationTarget(code: []const u8) ?Address {
 
 pub fn writeDelegationCode(buffer: *[delegation_code_len]u8, target: Address) void {
     @memcpy(buffer[0..delegation_designator.len], &delegation_designator);
-    @memcpy(buffer[delegation_designator.len..], &target);
+    @memcpy(buffer[delegation_designator.len..], target.asBytes());
 }
 
 test "delegation codec distinguishes valid, malformed, and unrelated code" {

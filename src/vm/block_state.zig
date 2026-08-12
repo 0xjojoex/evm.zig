@@ -5,6 +5,7 @@
 
 const std = @import("std");
 
+const address = @import("../address.zig");
 const Backend = @import("../backend.zig").Backend;
 const bal = @import("../eth/bal/model.zig");
 const bal_witness = @import("../eth/bal/witness.zig");
@@ -37,6 +38,7 @@ pub const CommitError = error{
 pub fn Tracked(comptime spec: anytype) type {
     return struct {
         pub const State = TrackedState;
+        pub const StateAddress = address.Address;
         pub const ExecutorStateInit = struct {
             reader: ?Reader = null,
         };
@@ -48,6 +50,14 @@ pub fn Tracked(comptime spec: anytype) type {
 
         pub fn initExecutorState(allocator: std.mem.Allocator, options: ExecutorStateInit) State {
             return State.initForSpec(allocator, spec, options.reader);
+        }
+
+        pub inline fn stateAddress(value: address.Address) StateAddress {
+            return value;
+        }
+
+        pub inline fn executionAddress(value: address.AddressWord) StateAddress {
+            return value.address();
         }
 
         pub fn witnessBackend(
@@ -104,6 +114,7 @@ pub fn Tracked(comptime spec: anytype) type {
 /// admissible, which today means Amsterdam but is not scoped to it.
 pub const BalStateless = struct {
     pub const State = BlockState;
+    pub const StateAddress = address.AddressWord;
     pub const ExecutorStateInit = State;
     pub const supports_block_production = false;
     pub const supports_external_observation_capture = false;
@@ -116,6 +127,14 @@ pub const BalStateless = struct {
 
     pub fn initExecutorState(_: std.mem.Allocator, state: ExecutorStateInit) State {
         return state;
+    }
+
+    pub inline fn stateAddress(value: address.Address) StateAddress {
+        return .fromAddress(value);
+    }
+
+    pub inline fn executionAddress(value: address.AddressWord) StateAddress {
+        return value;
     }
 
     pub fn witnessBackend(

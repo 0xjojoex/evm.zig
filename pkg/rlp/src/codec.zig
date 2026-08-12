@@ -335,6 +335,7 @@ pub fn FixedBytes(comptime len: usize) type {
     return struct {
         pub const Value = [len]u8;
         pub const requires_allocator = false;
+        pub const may_encode_empty = len == 0;
 
         pub fn encodedLen(value: Value) EncodeError!usize {
             return bytesEncodedLen(&value);
@@ -352,39 +353,6 @@ pub fn FixedBytes(comptime len: usize) type {
 
         pub inline fn decodeInto(decoder: anytype, value: *Value) DecodeError!void {
             @memcpy(value, try decoder.nextBytesExact(len));
-        }
-    };
-}
-
-/// An application-selected nullable fixed-width byte string.
-///
-/// `null` is the empty RLP byte string. A present value is exactly `len`
-/// bytes, including any leading zeroes. The codec is explicit because RLP has
-/// no universal optional representation.
-pub fn OptionalFixedBytes(comptime len: usize) type {
-    if (len == 0) @compileError("RLP OptionalFixedBytes requires a nonzero length");
-
-    return struct {
-        pub const Value = ?[len]u8;
-        pub const requires_allocator = false;
-
-        pub fn encodedLen(value: Value) EncodeError!usize {
-            return if (value) |bytes| bytesEncodedLen(&bytes) else 1;
-        }
-
-        pub fn encodeTo(encoder: *Encoder, value: Value) EncodeError!void {
-            if (value) |bytes| {
-                try encoder.bytes(&bytes);
-            } else {
-                try encoder.bytes("");
-            }
-        }
-
-        pub fn decodeFrom(decoder: anytype) DecodeError!Value {
-            const bytes = try decoder.nextBytes();
-            if (bytes.len == 0) return null;
-            if (bytes.len != len) return error.UnexpectedLength;
-            return bytes[0..len].*;
         }
     };
 }
@@ -475,7 +443,7 @@ pub const Raw = struct {
         var inline_stack: [inline_depth]raw.Cursor = undefined;
         var stack_len: usize = @min(max_stack_len, inline_stack.len);
         while (true) {
-            const stats = raw.validateExactCounted(
+            const items = raw.validateExactCounted(
                 value.encoded(),
                 inline_stack[0..stack_len],
                 validation_items,
@@ -487,7 +455,7 @@ pub const Raw = struct {
                 error.ValidationItemLimitExceeded => return error.DecodeItemLimitExceeded,
                 else => |parse_error| return parse_error,
             };
-            try decoder.budget.commitItems(stats.items - 1);
+            try decoder.budget.commitItems(items - 1);
             return;
         }
 
@@ -500,7 +468,7 @@ pub const Raw = struct {
             const stack = try allocator.alloc(raw.Cursor, stack_len);
             defer allocator.free(stack);
 
-            const stats = raw.validateExactCounted(
+            const items = raw.validateExactCounted(
                 value.encoded(),
                 stack,
                 validation_items,
@@ -512,7 +480,7 @@ pub const Raw = struct {
                 error.ValidationItemLimitExceeded => return error.DecodeItemLimitExceeded,
                 else => |parse_error| return parse_error,
             };
-            try decoder.budget.commitItems(stats.items - 1);
+            try decoder.budget.commitItems(items - 1);
             return;
         }
         unreachable;
@@ -525,6 +493,7 @@ pub fn Struct(comptime T: type, comptime overrides: anytype) type {
 
     const Common = struct {
         pub const Value = T;
+        pub const may_encode_empty = false;
 
         pub fn encodedLen(value: T) EncodeError!usize {
             return listEncodedLen(try fieldsEncodedLen(value));
@@ -580,6 +549,7 @@ pub fn Struct(comptime T: type, comptime overrides: anytype) type {
         return struct {
             pub const Value = Common.Value;
             pub const requires_allocator = true;
+            pub const may_encode_empty = Common.may_encode_empty;
             pub const encodedLen = Common.encodedLen;
             pub const encodeTo = Common.encodeTo;
             pub const fieldsEncodedLen = Common.fieldsEncodedLen;
@@ -591,6 +561,7 @@ pub fn Struct(comptime T: type, comptime overrides: anytype) type {
     return struct {
         pub const Value = Common.Value;
         pub const requires_allocator = false;
+        pub const may_encode_empty = Common.may_encode_empty;
         pub const encodedLen = Common.encodedLen;
         pub const encodeTo = Common.encodeTo;
         pub const fieldsEncodedLen = Common.fieldsEncodedLen;
@@ -606,6 +577,7 @@ pub fn ArrayOf(comptime ElementCodec: type, comptime len: usize) type {
 
     const Common = struct {
         pub const Value = [len]ElementCodec.Value;
+        pub const may_encode_empty = false;
 
         pub fn encodedLen(values: Value) EncodeError!usize {
             return listEncodedLen(try sequencePayloadLen(ElementCodec, values));
@@ -652,6 +624,7 @@ pub fn ArrayOf(comptime ElementCodec: type, comptime len: usize) type {
         return struct {
             pub const Value = Common.Value;
             pub const requires_allocator = true;
+            pub const may_encode_empty = Common.may_encode_empty;
             pub const encodedLen = Common.encodedLen;
             pub const encodeTo = Common.encodeTo;
             pub const decodeAllocFrom = Common.decodeAllocFrom;
@@ -661,6 +634,7 @@ pub fn ArrayOf(comptime ElementCodec: type, comptime len: usize) type {
     return struct {
         pub const Value = Common.Value;
         pub const requires_allocator = false;
+        pub const may_encode_empty = Common.may_encode_empty;
         pub const encodedLen = Common.encodedLen;
         pub const encodeTo = Common.encodeTo;
         pub const decodeFrom = Common.decodeFrom;
@@ -692,6 +666,7 @@ pub fn Mapped(comptime Host: type, comptime WireCodec: type, comptime Mapping: t
 
     const Common = struct {
         pub const Value = Host;
+        pub const may_encode_empty = mayEncodeEmpty(WireCodec);
 
         pub fn encodedLen(value: Host) EncodeError!usize {
             return WireCodec.encodedLen(Mapping.toWire(value));
@@ -721,6 +696,7 @@ pub fn Mapped(comptime Host: type, comptime WireCodec: type, comptime Mapping: t
         return struct {
             pub const Value = Common.Value;
             pub const requires_allocator = true;
+            pub const may_encode_empty = Common.may_encode_empty;
             pub const encodedLen = Common.encodedLen;
             pub const encodeTo = Common.encodeTo;
             pub const decodeAllocFrom = Common.decodeAllocFrom;
@@ -730,6 +706,86 @@ pub fn Mapped(comptime Host: type, comptime WireCodec: type, comptime Mapping: t
     return struct {
         pub const Value = Common.Value;
         pub const requires_allocator = false;
+        pub const may_encode_empty = Common.may_encode_empty;
+        pub const encodedLen = Common.encodedLen;
+        pub const encodeTo = Common.encodeTo;
+        pub const decodeFrom = Common.decodeFrom;
+    };
+}
+
+/// Ethereum's absent-as-empty-byte-string convention, inferred for every `?T`.
+///
+/// `null` is the empty RLP byte string. That is only unambiguous when
+/// `InnerCodec` can never encode to the same empty byte string, so integers,
+/// booleans, and variable-width byte strings are rejected: their zero and
+/// empty values would decode back as `null`. Codecs declare the property with
+/// `may_encode_empty`; the conservative default is that they can.
+pub fn Optional(comptime InnerCodec: type) type {
+    comptime {
+        assertCodec(InnerCodec);
+        if (mayEncodeEmpty(InnerCodec)) {
+            @compileError("RLP Optional needs an inner codec that never encodes the empty byte string");
+        }
+    }
+
+    const Common = struct {
+        pub const Value = ?InnerCodec.Value;
+        pub const may_encode_empty = true;
+
+        pub fn encodedLen(value: Value) EncodeError!usize {
+            return if (value) |inner| InnerCodec.encodedLen(inner) else 1;
+        }
+
+        pub fn encodeTo(encoder: *Encoder, value: Value) EncodeError!void {
+            if (value) |inner| {
+                try InnerCodec.encodeTo(encoder, inner);
+            } else {
+                try encoder.bytes("");
+            }
+        }
+
+        pub fn decodeFrom(decoder: anytype) DecodeError!Value {
+            if (try takeAbsent(decoder)) return null;
+            return try InnerCodec.decodeFrom(decoder);
+        }
+
+        pub fn decodeAllocFrom(
+            allocator: Allocator,
+            decoder: *decoding.Decoder,
+        ) (DecodeError || Allocator.Error)!Value {
+            if (try takeAbsent(decoder)) return null;
+            return try InnerCodec.decodeAllocFrom(allocator, decoder);
+        }
+
+        pub fn deinitValue(allocator: Allocator, value: *Value) void {
+            if (value.*) |*inner| InnerCodec.deinit(allocator, inner);
+            value.* = null;
+        }
+
+        /// Consume the empty byte string that stands for an absent value.
+        fn takeAbsent(decoder: anytype) DecodeError!bool {
+            const item = try decoder.peek();
+            if (item.kind() != .bytes or item.payload().len != 0) return false;
+            _ = try decoder.next();
+            return true;
+        }
+    };
+
+    if (InnerCodec.requires_allocator) {
+        return struct {
+            pub const Value = Common.Value;
+            pub const requires_allocator = true;
+            pub const may_encode_empty = Common.may_encode_empty;
+            pub const encodedLen = Common.encodedLen;
+            pub const encodeTo = Common.encodeTo;
+            pub const decodeAllocFrom = Common.decodeAllocFrom;
+            pub const deinit = Common.deinitValue;
+        };
+    }
+    return struct {
+        pub const Value = Common.Value;
+        pub const requires_allocator = false;
+        pub const may_encode_empty = Common.may_encode_empty;
         pub const encodedLen = Common.encodedLen;
         pub const encodeTo = Common.encodeTo;
         pub const decodeFrom = Common.decodeFrom;
@@ -741,6 +797,7 @@ fn ListCodec(comptime ElementCodec: type, comptime max_items: ?usize) type {
     return struct {
         pub const Value = []const ElementCodec.Value;
         pub const requires_allocator = true;
+        pub const may_encode_empty = false;
 
         pub const View = struct {
             decoder: decoding.Decoder,
@@ -850,6 +907,7 @@ fn codecFor(comptime T: type) type {
                 @compileError("RLP infers non-byte lists only from const slices")
         else
             @compileError("RLP pointer types need an explicit codec"),
+        .optional => |optional| Optional(codecFor(optional.child)),
         .@"struct" => |info| if (info.layout == .auto)
             Struct(T, .{})
         else
@@ -905,6 +963,13 @@ fn hasRlpDecl(comptime T: type) bool {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, "Rlp"),
         else => false,
     };
+}
+
+/// Whether a codec can encode a value as the empty RLP byte string, which is
+/// what `Optional` reserves for `null`. Codecs that never can say so with
+/// `pub const may_encode_empty = false`; anything silent is assumed to.
+pub fn mayEncodeEmpty(comptime Codec: type) bool {
+    return !@hasDecl(Codec, "may_encode_empty") or Codec.may_encode_empty;
 }
 
 pub fn assertCodec(comptime Codec: type) void {

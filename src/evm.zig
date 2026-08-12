@@ -41,6 +41,7 @@ pub const Evm = Vm(eth.latest);
 // Commonly-used types are flat-aliased here for ergonomics.
 pub const addr = address.addr;
 pub const Address = address.Address;
+pub const AddressWord = address.AddressWord;
 pub const Bytecode = code.Bytecode;
 pub const Committer = vm.Committer;
 pub const eip7702 = executor.eip7702;

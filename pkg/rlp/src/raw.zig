@@ -22,10 +22,6 @@ pub const ValidationError = ParseError || error{
     ValidationDepthExceeded,
     ValidationItemLimitExceeded,
 };
-pub const ValidationStats = struct {
-    items: usize,
-    max_depth: usize,
-};
 pub const max_length_prefix_bytes = 1 + @sizeOf(usize);
 
 pub const Writer = union(enum) {
@@ -84,34 +80,31 @@ pub const Writer = union(enum) {
     }
 
     pub fn bytes(self: *Writer, payload: []const u8) Writer.Error!void {
-        const start = self.len();
-        appendCanonicalBytes(self, payload) catch |err| {
-            self.truncate(start);
-            return err;
-        };
+        return self.allOrNothing(appendCanonicalBytes, .{payload});
     }
 
     pub fn int(self: *Writer, comptime T: type, value: T) Writer.Error!void {
-        const start = self.len();
-        appendCanonicalInt(self, T, value) catch |err| {
-            self.truncate(start);
-            return err;
-        };
+        return self.allOrNothing(appendCanonicalInt, .{ T, value });
     }
 
     /// Append a list whose payload is already a joined sequence of RLP items.
     pub fn listPayload(self: *Writer, payload: []const u8) Writer.Error!void {
-        const start = self.len();
-        appendCanonicalList(self, payload) catch |err| {
-            self.truncate(start);
-            return err;
-        };
+        return self.allOrNothing(appendCanonicalList, .{payload});
     }
 
     /// Append an item that was already parsed by the strict cursor.
     pub fn raw(self: *Writer, value: Item) Writer.Error!void {
+        return self.allOrNothing(Writer.appendSlice, .{value.encoded()});
+    }
+
+    /// Roll the output back to its starting length when `append` fails part way.
+    fn allOrNothing(
+        self: *Writer,
+        comptime append: anytype,
+        args: anytype,
+    ) Writer.Error!void {
         const start = self.len();
-        self.appendSlice(value.encoded()) catch |err| {
+        @call(.auto, append, .{self} ++ args) catch |err| {
             self.truncate(start);
             return err;
         };
@@ -159,11 +152,8 @@ const AllocatingBuffer = struct {
     out: ByteList = .empty,
 };
 
-const FixedBuffer = struct {
-    buffer: []u8,
-    len: usize = 0,
-};
-
+/// `EncodedLengthOverflow` needs a `usize` wider than 64 bits to happen, so the
+/// canonical encoder's overflow arm is unreachable through a writer.
 fn appendCanonicalBytes(writer: *Writer, payload: []const u8) Writer.Error!void {
     encoding.writeBytes(writer, payload) catch |err| switch (err) {
         error.EncodedLengthOverflow => unreachable,
@@ -184,6 +174,11 @@ fn appendCanonicalList(writer: *Writer, payload: []const u8) Writer.Error!void {
         else => |writer_error| return writer_error,
     };
 }
+
+const FixedBuffer = struct {
+    buffer: []u8,
+    len: usize = 0,
+};
 
 pub const Item = union(enum) {
     bytes: Span,
@@ -277,6 +272,12 @@ pub const Cursor = struct {
         return (try self.next()).asInt(T);
     }
 
+    /// Parse the next item without advancing past it.
+    pub fn peek(self: Cursor) ParseError!Item {
+        var probe = self;
+        return probe.next();
+    }
+
     pub fn next(self: *Cursor) ParseError!Item {
         if (self.offset >= self.input.len) return error.InputTooShort;
 
@@ -344,19 +345,19 @@ pub fn validateExact(
     _ = try validateExactCounted(input, list_stack, max_items);
 }
 
+/// Returns the number of items visited, including the root.
 pub fn validateExactCounted(
     input: []const u8,
     list_stack: []Cursor,
     max_items: usize,
-) ValidationError!ValidationStats {
+) ValidationError!usize {
     const root = try parseExact(input);
     if (max_items == 0) return error.ValidationItemLimitExceeded;
-    if (root.kind() == .bytes) return .{ .items = 1, .max_depth = 0 };
+    if (root.kind() == .bytes) return 1;
 
     var current = try root.listCursor();
     var saved_parents: usize = 0;
     var items: usize = 1;
-    var max_depth: usize = 0;
 
     while (true) {
         if (current.isDone()) {
@@ -375,11 +376,10 @@ pub fn validateExactCounted(
             if (saved_parents == list_stack.len) return error.ValidationDepthExceeded;
             list_stack[saved_parents] = current;
             saved_parents += 1;
-            max_depth = @max(max_depth, saved_parents);
             current = try child.listCursor();
         }
     }
-    return .{ .items = items, .max_depth = max_depth };
+    return items;
 }
 
 pub fn listPrefix(buffer: *[max_length_prefix_bytes]u8, payload_len: usize) []const u8 {

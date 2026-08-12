@@ -58,7 +58,7 @@ pub fn bind(comptime spec: ExactSpec) type {
         }
 
         pub fn sstoreAfterPop(frame: *CallFrame, key: u256, value: u256) !void {
-            const recipient = frame.msg.recipient;
+            const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
             const host = frame.host;
             if (spec.storage.sstore_minimum_gas) |minimum_gas| {
                 if (frame.gas_left <= minimum_gas) {
@@ -106,7 +106,7 @@ pub fn bind(comptime spec: ExactSpec) type {
 
         pub fn sloadAfterPop(frame: *CallFrame, key: u256) !?u256 {
             const host = frame.host;
-            const recipient = frame.msg.recipient;
+            const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
             if (spec.storage.sload_cold_access_gas) |cold_storage_access_gas| {
                 if (frame.gas_left >= cold_storage_access_gas) {
                     const result = try host.loadStorage(recipient, key);
@@ -128,7 +128,8 @@ pub fn bind(comptime spec: ExactSpec) type {
 
 pub fn tload(frame: *CallFrame) !void {
     const key = frame.pop() orelse return;
-    const value = try frame.host.getTransientStorage(frame.msg.recipient, key);
+    const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
+    const value = try frame.host.getTransientStorage(recipient, key);
     frame.stack.push(value);
 }
 
@@ -140,7 +141,8 @@ pub fn tstore(frame: *CallFrame) !void {
 
     const key, const value = frame.popN(2) orelse return;
 
-    try frame.host.setTransientStorage(frame.msg.recipient, key, value);
+    const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);
+    try frame.host.setTransientStorage(recipient, key, value);
 }
 
 test "transient storage opcodes are only enabled from Cancun" {

@@ -94,7 +94,7 @@ pub fn logsBloom(logs: state.LogBuffer.View) [256]u8 {
     var bloom = [_]u8{0} ** 256;
     for (0..logs.len()) |index| {
         const event_log = logs.get(index);
-        addBloomEntry(&bloom, &event_log.address);
+        addBloomEntry(&bloom, event_log.address.asBytes());
         for (event_log.topics) |topic| {
             const encoded_topic = uint256.toBytes32(topic);
             addBloomEntry(&bloom, &encoded_topic);

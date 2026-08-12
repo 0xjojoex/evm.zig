@@ -680,19 +680,19 @@ test "Amsterdam finalize calls include builder request predeploys" {
     const calls = eth_spec.amsterdam.block.finalizeBlock(context);
 
     try std.testing.expectEqual(@as(usize, 4), calls.len);
-    try std.testing.expectEqualSlices(u8, &eth_system.withdrawal_request_predeploy_address, &calls.items[0].call.recipient);
+    try std.testing.expectEqual(eth_system.withdrawal_request_predeploy_address, calls.items[0].call.recipient);
     try std.testing.expectEqual(eip7002.request_type, calls.items[0].output_prefix);
     try std.testing.expect(calls.items[0].call.require_code);
 
-    try std.testing.expectEqualSlices(u8, &eth_system.consolidation_request_predeploy_address, &calls.items[1].call.recipient);
+    try std.testing.expectEqual(eth_system.consolidation_request_predeploy_address, calls.items[1].call.recipient);
     try std.testing.expectEqual(eip7251.request_type, calls.items[1].output_prefix);
     try std.testing.expect(calls.items[1].call.require_code);
 
-    try std.testing.expectEqualSlices(u8, &eth_system.builder_deposit_request_predeploy_address, &calls.items[2].call.recipient);
+    try std.testing.expectEqual(eth_system.builder_deposit_request_predeploy_address, calls.items[2].call.recipient);
     try std.testing.expectEqual(eip8282.builder_deposit_request_type, calls.items[2].output_prefix);
     try std.testing.expect(calls.items[2].call.require_code);
 
-    try std.testing.expectEqualSlices(u8, &eth_system.builder_exit_request_predeploy_address, &calls.items[3].call.recipient);
+    try std.testing.expectEqual(eth_system.builder_exit_request_predeploy_address, calls.items[3].call.recipient);
     try std.testing.expectEqual(eip8282.builder_exit_request_type, calls.items[3].output_prefix);
     try std.testing.expect(calls.items[3].call.require_code);
 }
@@ -836,7 +836,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         .{ .address = sender },
         .{ .address = created },
     };
-    if (std.mem.order(u8, &account_claims[0].address, &account_claims[1].address) == .gt)
+    if (address.Address.order(account_claims[0].address, account_claims[1].address) == .gt)
         std.mem.swap(eth_bal.AccountChanges, &account_claims[0], &account_claims[1]);
     const account_claim = try eth_bal.encodeAlloc(scratch, &account_claims);
     const init_code = [_]u8{ 0x5f, 0x54, 0x50, 0x00 }; // PUSH0 SLOAD POP STOP
@@ -1351,7 +1351,7 @@ test "stateless receipt encoder includes logs and bloom" {
     _ = try raw_receipt.nextBytesExact(256);
     var raw_logs = try raw_receipt.nextList();
     var raw_log = try raw_logs.nextList();
-    try std.testing.expectEqualSlices(u8, &target, try raw_log.nextBytesExact(20));
+    try std.testing.expectEqualSlices(u8, target.asBytes(), try raw_log.nextBytesExact(20));
     var raw_topics = try raw_log.nextList();
     const expected_topic = uint256.toBytes32(topics[0]);
     try std.testing.expectEqualSlices(u8, &expected_topic, try raw_topics.nextBytesExact(32));
@@ -1367,7 +1367,7 @@ test "stateless receipt encoder includes logs and bloom" {
     try std.testing.expectEqual(@as(u64, 30_000), decoded.cumulative_gas_used);
     try std.testing.expect(!std.mem.allEqual(u8, &decoded.logs_bloom, 0));
     try std.testing.expectEqual(@as(usize, 1), decoded.logs.len);
-    try std.testing.expectEqualSlices(u8, &target, &decoded.logs[0].address);
+    try std.testing.expectEqual(target, decoded.logs[0].address);
     try std.testing.expectEqualSlices(u256, &topics, decoded.logs[0].topics);
     try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd }, decoded.logs[0].data);
 }

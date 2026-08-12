@@ -164,8 +164,8 @@ test "prepared tail dispatch reads frame-local values" {
         opcode: Opcode,
         expected: u256,
     }{
-        .{ .opcode = .ADDRESS, .expected = evmz.address.toU256(recipient) },
-        .{ .opcode = .CALLER, .expected = evmz.address.toU256(sender) },
+        .{ .opcode = .ADDRESS, .expected = recipient.toU256() },
+        .{ .opcode = .CALLER, .expected = sender.toU256() },
         .{ .opcode = .CALLVALUE, .expected = 42 },
         .{ .opcode = .CALLDATASIZE, .expected = input.len },
         .{ .opcode = .CODESIZE, .expected = 2 },

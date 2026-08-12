@@ -19,7 +19,7 @@ const Allocator = std.mem.Allocator;
 ///   pre-sorted by hashed trie key; commit iterates them verbatim.
 /// - `accountDirty(id)` / `storageDirty(id)` / `accountStorageDirty(id)`:
 ///   whether the row (or any of an account's slots) needs a trie write.
-/// - `accountClaim(id)` / `storageClaim(id)`: claim rows carrying `trie_key`.
+/// - `accountTrieKey(id)` / `storageTrieKey(id)`: pre-hashed trie keys.
 /// - `accountFact(id)`: authenticated parent fact; `.parent` distinguishes
 ///   absent from present-with-storage-root.
 /// - `accountChanged(id)` + `accountValue(id)`: final execution value;
@@ -31,8 +31,8 @@ pub fn assertCommitView(comptime View: type) void {
         "accountDirty",
         "storageDirty",
         "accountStorageDirty",
-        "accountClaim",
-        "storageClaim",
+        "accountTrieKey",
+        "storageTrieKey",
         "accountFact",
         "accountChanged",
         "accountValue",
@@ -71,7 +71,6 @@ pub fn stateRootAfterCatalog(
 
     for (commit.accountTrieOrder()) |account_id| {
         if (!commit.accountDirty(account_id)) continue;
-        const claim = commit.accountClaim(account_id);
         const fact = commit.accountFact(account_id);
         const account_changed = commit.accountChanged(account_id);
         const current = commit.accountValue(account_id);
@@ -107,7 +106,7 @@ pub fn stateRootAfterCatalog(
                 trie.accountValueInto(account_values.addOneAssumeCapacity(), account);
         };
         account_updates.appendAssumeCapacity(.{
-            .key = claim.trie_key,
+            .key = commit.accountTrieKey(account_id),
             .value = value,
         });
     }
@@ -151,10 +150,9 @@ fn storageRootAfterCatalog(
 
     for (commit.storageTrieOrder(account_id)) |storage_id| {
         if (!commit.storageDirty(storage_id)) continue;
-        const claim = commit.storageClaim(storage_id);
         const current = commit.storageValue(storage_id);
         updates.appendAssumeCapacity(.{
-            .key = claim.trie_key,
+            .key = commit.storageTrieKey(storage_id),
             .value = if (current == 0)
                 null
             else

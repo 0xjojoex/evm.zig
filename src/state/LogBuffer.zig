@@ -166,7 +166,7 @@ test "packed log buffer owns callback bytes and truncates to checkpoint" {
     var data = [_]u8{ 2, 3 };
     const checkpoint_value = logs.checkpoint();
     try logs.append(std.testing.allocator, .{
-        .address = [_]u8{4} ** 20,
+        .address = Address.fromBytes([_]u8{4} ** 20),
         .topics = &topics,
         .data = &data,
     });
@@ -182,12 +182,12 @@ test "log buffer rejects a fifth topic without disturbing prior rows" {
     var logs: LogBuffer = .{};
     defer logs.deinit(std.testing.allocator);
     try logs.append(std.testing.allocator, .{
-        .address = [_]u8{1} ** 20,
+        .address = Address.fromBytes([_]u8{1} ** 20),
         .topics = &.{ 1, 2, 3, 4 },
         .data = &.{5},
     });
     try std.testing.expectError(error.TooManyLogTopics, logs.append(std.testing.allocator, .{
-        .address = [_]u8{2} ** 20,
+        .address = Address.fromBytes([_]u8{2} ** 20),
         .topics = &.{ 1, 2, 3, 4, 5 },
         .data = &.{},
     }));
@@ -197,8 +197,8 @@ test "log buffer rejects a fifth topic without disturbing prior rows" {
 
 test "fromLogs packs a caller-owned slice into an equivalent buffer" {
     const logs = [_]Host.Log{
-        .{ .address = [_]u8{7} ** 20, .topics = &.{9}, .data = &.{ 1, 2 } },
-        .{ .address = [_]u8{8} ** 20, .topics = &.{}, .data = &.{} },
+        .{ .address = Address.fromBytes([_]u8{7} ** 20), .topics = &.{9}, .data = &.{ 1, 2 } },
+        .{ .address = Address.fromBytes([_]u8{8} ** 20), .topics = &.{}, .data = &.{} },
     };
     var packed_logs = try fromLogs(std.testing.allocator, &logs);
     defer packed_logs.deinit(std.testing.allocator);

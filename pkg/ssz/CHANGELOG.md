@@ -17,6 +17,9 @@ Releases are cut from `pkg/ssz` on evmz `main` and published to the generated
 ### Changed
 
 - Consolidated borrowed decoding onto a single codec surface.
+- `Mapped` takes its mapping as a namespace type with `pub fn toWire`/`fromWire`
+  instead of a struct of function pointers, so one `WireMapping` declaration now
+  serves both `ssz.Mapped` and `rlp.Mapped`.
 
 ## [0.1.0] - 2026-07-22
 

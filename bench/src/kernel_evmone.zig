@@ -1,9 +1,7 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const evmz_evmc = @import("evmz_evmc");
+const evmc = @import("evmc_bindings").c;
 const common = @import("common.zig");
-
-const evmc = evmz_evmc.evmc;
 
 extern fn evmc_create_evmone() ?*evmc.evmc_vm;
 
@@ -283,7 +281,7 @@ fn revFromSpec(revision: evmz.eth.Revision) !evmc.evmc_revision {
 }
 
 fn toEvmcAddress(address: common.Address) evmc.evmc_address {
-    return .{ .bytes = address };
+    return .{ .bytes = address.bytes };
 }
 
 test "evmone baseline executes push pop kernel" {

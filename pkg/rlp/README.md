@@ -52,17 +52,23 @@ schemas and wire projections but are not the top-level default.
 | `[N]T`, `T != u8`               | exact-length RLP list                                             |
 | `[]const T`, `T != u8`          | homogeneous RLP list                                              |
 | plain or tuple struct           | declaration-order RLP list                                        |
+| `?T`, `T` never empty           | Ethereum's absent-as-empty-byte-string convention                 |
 
 Both values and single-value pointers are accepted at the encoding boundary.
 
-Signed integers, optionals, enums, unions, non-byte mutable slices,
-packed/extern structs, and non-slice pointers require an explicit codec or a
-type-owned mapping. RLP cannot guess whether these mean omission, tagging, an
-integer policy, or some other application-level representation.
+Signed integers, enums, unions, non-byte mutable slices, packed/extern structs,
+and non-slice pointers require an explicit codec or a type-owned mapping. RLP
+cannot guess whether these mean tagging, an integer policy, or some other
+application-level representation.
 
-`OptionalFixedBytes(N)` is the explicit Ethereum-style convention where
-`null` is an empty byte string and a present value is exactly `N` bytes. It
-does not make that convention the inferred meaning of every Zig optional.
+An optional infers `Optional(T)`, where `null` is the empty byte string. That
+is unambiguous only when `T`'s codec can never encode to that same empty byte
+string, so `?[N>0]u8`, `?Address`, `?SomeStruct`, and `?[]const T` infer, while
+`?u64`, `?bool`, and `?[]const u8` are compile errors: zero, false, and the
+empty slice would decode back as `null`. Codecs declare the property with
+`pub const may_encode_empty`, defaulting to `true` when they stay silent, and
+`mayEncodeEmpty(Codec)` reads it. Any other meaning of absence — an omitted
+trailing field, a sentinel — still needs an explicit codec.
 
 ## Lower-level surfaces
 
