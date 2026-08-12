@@ -739,7 +739,8 @@ pub fn retain(self: *StatelessBlockState, id: AttemptId) void {
     std.mem.swap(LogBuffer, &self.logs, &self.retained_logs);
     if (self.transaction_scope_reverted) self.compactAcceptedAccountChanges();
     if (self.transaction_scope_reverted) self.compactAcceptedStorageWipes();
-    self.compactAcceptedStorageChanges();
+    if (self.transaction_scope_reverted or self.transaction_storage_wipes.items.len != 0)
+        self.compactAcceptedStorageChanges();
     self.accepted_generation += 1;
     self.finishTransaction();
 }
@@ -1670,23 +1671,29 @@ fn effectiveStorage(self: *const StatelessBlockState, id: StorageId) u256 {
 }
 
 /// Drops wiped-away rows and entries orphaned by scope reverts (their flag is
-/// already false), and deduplicates revert-then-redirty repeats: pass one
-/// consumes each row's flag so only the first live occurrence survives, pass
-/// two restores the flag on the kept entries.
+/// already false). Only scope reverts can create revert-then-redirty repeats;
+/// that path consumes each row's flag so only the first live occurrence
+/// survives, then restores the flag on the kept entries. Wipe-only compaction
+/// preserves unique membership and filters stale generations in one pass.
 fn compactAcceptedStorageChanges(self: *StatelessBlockState) void {
+    const deduplicate = self.transaction_scope_reverted;
     var write: usize = 0;
     for (self.dirty_storage.items) |id| {
         const row = &self.storage[@intFromEnum(id)];
         if (!row.flags.block_dirty) continue;
-        row.flags.block_dirty = false;
+        if (deduplicate) row.flags.block_dirty = false;
         const current = row.storage_generation ==
             self.accounts[@intFromEnum(self.plan.storageAccount(id))].storage_generation;
-        if (!current) continue;
+        if (!current) {
+            row.flags.block_dirty = false;
+            continue;
+        }
         self.dirty_storage.items[write] = id;
         write += 1;
     }
-    for (self.dirty_storage.items[0..write]) |id| {
-        self.storage[@intFromEnum(id)].flags.block_dirty = true;
+    if (deduplicate) {
+        for (self.dirty_storage.items[0..write]) |id|
+            self.storage[@intFromEnum(id)].flags.block_dirty = true;
     }
     self.dirty_storage.items.len = write;
 }
@@ -2073,8 +2080,9 @@ fn initTestState(
     return init(allocator, owned_plan, facts);
 }
 
+const bal = @import("../eth/bal/model.zig");
+
 test "dense state resolves required accesses and skips optional warm-only misses" {
-    const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{
         .{ .address = address.addr(1), .storage_reads = &.{7} },
         .{ .address = address.addr(2) },
@@ -2127,7 +2135,6 @@ test "dense state resolves required accesses and skips optional warm-only misses
 }
 
 test "storage-only parent residue remains authenticated while execution is absent" {
-    const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(1) }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const storage_root = [_]u8{0x77} ** 32;
@@ -2147,7 +2154,6 @@ test "storage-only parent residue remains authenticated while execution is absen
 }
 
 test "observations survive nested revert while values warmth and dirty IDs revert" {
-    const bal = @import("../eth/bal/model.zig");
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
@@ -2194,7 +2200,6 @@ test "observations survive nested revert while values warmth and dirty IDs rever
 }
 
 test "dense lifecycle candidates are compact and survive marker rollback" {
-    const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{
         .{ .address = address.addr(1) },
         .{ .address = address.addr(2) },
@@ -2241,7 +2246,6 @@ test "dense lifecycle candidates are compact and survive marker rollback" {
 }
 
 test "execution original survives checkpoints and refreshes across execution scopes" {
-    const bal = @import("../eth/bal/model.zig");
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
@@ -2272,7 +2276,6 @@ test "execution original survives checkpoints and refreshes across execution sco
 }
 
 test "scope stamps journal one row once and restore the parent stamp" {
-    const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(1) }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const account_facts = [_]records.AccountFact{
@@ -2298,7 +2301,6 @@ test "scope stamps journal one row once and restore the parent stamp" {
 }
 
 test "storage wipe uses account generation without inventing slot observations" {
-    const bal = @import("../eth/bal/model.zig");
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
@@ -2337,8 +2339,78 @@ test "storage wipe uses account generation without inventing slot observations" 
     try std.testing.expectEqual(@as(usize, 0), state.dirty_storage.items.len);
 }
 
+test "retained storage wipe compacts invalidated accepted slot IDs" {
+    const claims = [_]bal.AccountChanges{.{
+        .address = address.addr(1),
+        .storage_reads = &.{ 7, 8 },
+    }};
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{
+        .{ .parent = .{ .present = .{ .nonce = 1 } } },
+    };
+    const storage_facts = [_]records.StorageFact{
+        .{ .value = 3 },
+        .{ .value = 4 },
+    };
+    var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
+    defer state.deinit();
+    const account_id: AccountId = @enumFromInt(0);
+    const first: StorageId = @enumFromInt(0);
+    const second: StorageId = @enumFromInt(1);
+
+    var attempt = beginTestTransaction(&state);
+    try state.writeStorage(first, 9);
+    retainTestTransaction(&state, attempt);
+
+    attempt = beginTestTransaction(&state);
+    try state.writeStorage(second, 10);
+    retainTestTransaction(&state, attempt);
+    try std.testing.expectEqualSlices(StorageId, &.{ first, second }, state.dirty_storage.items);
+
+    attempt = beginTestTransaction(&state);
+    try state.wipeStorage(account_id);
+    try state.writeStorage(second, 11);
+    retainTestTransaction(&state, attempt);
+
+    try std.testing.expectEqualSlices(StorageId, &.{second}, state.dirty_storage.items);
+    try std.testing.expect(!state.storage[@intFromEnum(first)].flags.block_dirty);
+    try std.testing.expect(state.storage[@intFromEnum(second)].flags.block_dirty);
+    try std.testing.expectEqual(@as(u256, 0), state.storageValueForView(first));
+    try std.testing.expectEqual(@as(u256, 11), state.storageValueForView(second));
+}
+
+test "scope revert then redirty retains one accepted storage ID" {
+    const claims = [_]bal.AccountChanges{.{
+        .address = address.addr(1),
+        .storage_reads = &.{7},
+    }};
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{
+        .{ .parent = .{ .present = .{ .nonce = 1 } } },
+    };
+    const storage_facts = [_]records.StorageFact{.{ .value = 3 }};
+    var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
+    defer state.deinit();
+    const storage_id: StorageId = @enumFromInt(0);
+    const attempt = beginTestTransaction(&state);
+
+    const nested = state.checkpoint();
+    try state.writeStorage(storage_id, 9);
+    state.revertToCheckpoint(nested);
+    try state.writeStorage(storage_id, 10);
+    try std.testing.expectEqualSlices(
+        StorageId,
+        &.{ storage_id, storage_id },
+        state.dirty_storage.items,
+    );
+
+    retainTestTransaction(&state, attempt);
+    try std.testing.expectEqualSlices(StorageId, &.{storage_id}, state.dirty_storage.items);
+    try std.testing.expect(state.storage[0].flags.block_dirty);
+    try std.testing.expectEqual(@as(u256, 10), state.storageValueForView(storage_id));
+}
+
 test "warm undo exists only for the cold to warm transition" {
-    const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(1) }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const account_facts = [_]records.AccountFact{
@@ -2363,7 +2435,6 @@ test "warm undo exists only for the cold to warm transition" {
 test "dense state initialization cleans every allocation failure" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
-            const bal = @import("../eth/bal/model.zig");
             const claims = [_]bal.AccountChanges{.{
                 .address = address.addr(1),
                 .storage_reads = &.{7},
@@ -2383,7 +2454,6 @@ test "dense state initialization cleans every allocation failure" {
 }
 
 test "storage mutation reserves both journal entries atomically" {
-    const bal = @import("../eth/bal/model.zig");
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{
         .address = target,
@@ -2412,7 +2482,6 @@ test "storage mutation reserves both journal entries atomically" {
 test "dense transaction cleans every allocation failure" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
-            const bal = @import("../eth/bal/model.zig");
             const target = address.addr(1);
             const claims = [_]bal.AccountChanges{.{
                 .address = target,
