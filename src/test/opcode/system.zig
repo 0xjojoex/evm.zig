@@ -1,7 +1,7 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
 const Interpreter = @import("../../Interpreter.zig");
-const System = @import("../../instruction/system.zig").System;
+const system = @import("../../instruction/system.zig");
 
 test "CREATE initcode limit is independent from transaction validation" {
     const spec = evmz.eth.cancun.extend(.{
@@ -25,7 +25,7 @@ test "CREATE initcode limit is independent from transaction validation" {
     frame.frame.stack.push(2);
     frame.frame.stack.push(0);
     frame.frame.stack.push(0);
-    try System(spec).create(frame.frame);
+    try system.Handlers(spec).create(frame.frame);
 
     try std.testing.expectEqual(Interpreter.FrameHalt.out_of_gas, frame.frame.haltReason().?);
 }

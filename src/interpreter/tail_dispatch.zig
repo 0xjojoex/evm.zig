@@ -7,10 +7,10 @@ const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
 const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
-const environment_instruction = @import("../instruction/environment.zig");
-const immediate_instruction = @import("../instruction/immediate.zig");
-const storage_instruction = @import("../instruction/storage.zig");
-const system_instruction = @import("../instruction/system.zig");
+const environment = @import("../instruction/environment.zig");
+const immediate = @import("../instruction/immediate.zig");
+const storage = @import("../instruction/storage.zig");
+const system = @import("../instruction/system.zig");
 const trace = @import("../trace.zig");
 
 const CallFrame = Interpreter.CallFrame;
@@ -122,9 +122,9 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
     return struct {
         const Self = @This();
         const Instructions = instruction.Instruction(spec);
-        const EnvironmentInstructions = environment_instruction.Environment(spec);
-        const StorageInstructions = storage_instruction.Storage(spec);
-        const SystemInstructions = system_instruction.System(spec);
+        const Environment = environment.Handlers(spec);
+        const Storage = storage.Handlers(spec);
+        const System = system.Handlers(spec);
         // ip rides in a register across tail calls; it always points at the NEXT
         // byte to decode (one past the handler's own opcode byte).
         const Handler = fn ([*]const u8, [*]u256, i64, *Context) TailStatus;
@@ -627,7 +627,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
 
             const key_slot = sp - 1;
             ctx.frame.gas_left = next_gas;
-            const value = StorageInstructions.sloadAfterPop(ctx.frame, key_slot[0]) catch |err| {
+            const value = Storage.sloadAfterPop(ctx.frame, key_slot[0]) catch |err| {
                 recordError(ctx, ip, key_slot, ctx.frame.gas_left, err);
                 return .thrown;
             };
@@ -646,7 +646,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
             const key = (sp - 1)[0];
             const value = next_sp[0];
             ctx.frame.gas_left = gas;
-            StorageInstructions.sstoreAfterPop(ctx.frame, key, value) catch |err| {
+            Storage.sstoreAfterPop(ctx.frame, key, value) catch |err| {
                 ctx.spill(ip, next_sp, ctx.frame.gas_left);
                 ctx.err = err;
                 return .thrown;
@@ -849,7 +849,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
                     const slot = sp - 1;
                     const target_address: evmz.AddressWord = .fromU256(slot[0]);
                     ctx.frame.gas_left = next_gas;
-                    const result = EnvironmentInstructions.readAccountValue(ctx.frame, target_address, switch (value) {
+                    const result = Environment.readAccountValue(ctx.frame, target_address, switch (value) {
                         .balance => .balance,
                         .code_size => .code_size,
                         .code_hash => .code_hash,
@@ -876,7 +876,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
             const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .done;
 
             ctx.frame.gas_left = next_gas;
-            const access_ok = EnvironmentInstructions.trackCodeAccountAccessGas(ctx.frame, target_address) catch |err| {
+            const access_ok = Environment.trackCodeAccountAccessGas(ctx.frame, target_address) catch |err| {
                 recordError(ctx, ip, nsp, ctx.frame.gas_left, err);
                 return .thrown;
             };
@@ -947,7 +947,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
 
                     if (comptime opcode == .EXCHANGE) {
-                        const n, const m = immediate_instruction.decodeExchangeImmediate(ip[0]) orelse
+                        const n, const m = immediate.decodeExchangeImmediate(ip[0]) orelse
                             return halt(ctx, ip, sp, next_gas, .invalid_opcode);
                         if (!ctx.hasStack(sp, @max(n, m) + 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                         const top = sp - 1;
@@ -955,7 +955,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
                         return tailNext(ip + 1, sp, next_gas, ctx);
                     }
 
-                    const depth = immediate_instruction.decodeDepthImmediate(ip[0]) orelse
+                    const depth = immediate.decodeDepthImmediate(ip[0]) orelse
                         return halt(ctx, ip, sp, next_gas, .invalid_opcode);
                     if (comptime opcode == .DUPN) {
                         if (!ctx.hasStack(sp, depth)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
@@ -982,10 +982,10 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     ctx.spill(ip, sp, next_gas);
                     (switch (opcode) {
-                        .CREATE => SystemInstructions.create(ctx.frame),
-                        .CALL, .CALLCODE, .DELEGATECALL, .STATICCALL => SystemInstructions.callByOp(ctx.frame, opcode),
-                        .CREATE2 => SystemInstructions.create2(ctx.frame),
-                        .SELFDESTRUCT => SystemInstructions.selfdestruct(ctx.frame),
+                        .CREATE => System.create(ctx.frame),
+                        .CALL, .CALLCODE, .DELEGATECALL, .STATICCALL => System.callByOp(ctx.frame, opcode),
+                        .CREATE2 => System.create2(ctx.frame),
+                        .SELFDESTRUCT => System.selfdestruct(ctx.frame),
                         else => unreachable,
                     }) catch |err| {
                         ctx.err = err;
@@ -1147,8 +1147,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
                     // bytes, so a full-width big-endian load is always in bounds and
                     // preserves truncated-push zero-fill semantics.
                     const Int = std.meta.Int(.unsigned, immediate_len * 8);
-                    const immediate: *const [immediate_len]u8 = @ptrCast(ip);
-                    sp[0] = std.mem.readInt(Int, immediate, .big);
+                    const immediate_bytes: *const [immediate_len]u8 = @ptrCast(ip);
+                    sp[0] = std.mem.readInt(Int, immediate_bytes, .big);
                     return tailNext(ip + immediate_len, sp + 1, next_gas, ctx);
                 }
             };

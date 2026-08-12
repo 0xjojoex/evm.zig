@@ -15,7 +15,7 @@ fn nextDepth(depth: u16) u16 {
     return if (depth == std.math.maxInt(u16)) depth else depth + 1;
 }
 
-pub fn System(comptime spec: Spec) type {
+pub fn Handlers(comptime spec: Spec) type {
     return struct {
         const Self = @This();
 

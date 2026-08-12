@@ -4,7 +4,7 @@ const Interpreter = @import("../Interpreter.zig");
 
 const CallFrame = Interpreter.CallFrame;
 
-pub fn Storage(comptime spec: ExactSpec) type {
+pub fn Handlers(comptime spec: ExactSpec) type {
     return struct {
         pub fn sstoreAfterPop(frame: *CallFrame, key: u256, value: u256) !void {
             const recipient: evmz.AddressWord = .fromAddress(frame.msg.recipient);

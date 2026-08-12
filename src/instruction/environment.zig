@@ -9,7 +9,7 @@ pub const AccountValue = enum {
     code_hash,
 };
 
-pub fn Environment(comptime spec: ExactSpec) type {
+pub fn Handlers(comptime spec: ExactSpec) type {
     const exact_instructions = spec.instruction;
     return struct {
         pub fn trackCodeAccountAccessGas(frame: *CallFrame, target_address: evmz.AddressWord) !bool {
