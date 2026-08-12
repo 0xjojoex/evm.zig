@@ -302,7 +302,7 @@ pub const CountingHost = struct {
         return false;
     }
 
-    noinline fn getTransientStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
+    noinline fn getTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         _ = key;
@@ -310,7 +310,7 @@ pub const CountingHost = struct {
         return 0;
     }
 
-    noinline fn setTransientStorage(ptr: *anyopaque, address: Address, key: u256, value: u256) !void {
+    noinline fn setTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !void {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         _ = key;

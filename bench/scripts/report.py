@@ -54,10 +54,9 @@ def main() -> int:
 
     env = collect_environment(args)
     vm_loop_rows = run_vm_loop(args, raw_dir)
-    host_rows = run_host_matrix(args, raw_dir, out_dir)
     kernel_rows = run_kernel(args, raw_dir, out_dir)
 
-    checkpoint = build_checkpoint(env, args, vm_loop_rows, host_rows, kernel_rows)
+    checkpoint = build_checkpoint(env, args, vm_loop_rows, kernel_rows)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True) + "\n")
 
@@ -66,7 +65,6 @@ def main() -> int:
         env=env,
         args=args,
         vm_loop_rows=vm_loop_rows,
-        host_rows=host_rows,
         kernel_rows=kernel_rows,
         checkpoint_path=checkpoint_path,
         baseline_path=resolve_path(args.baseline) if args.baseline else None,
@@ -93,7 +91,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint")
     parser.add_argument("--baseline")
     parser.add_argument("--kernel-iterations", type=int, default=100_000)
-    parser.add_argument("--host-iterations", type=int, default=100_000)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=1)
     args = parser.parse_args()
@@ -311,32 +308,6 @@ def build_profile_args(args: argparse.Namespace) -> list[str]:
     ]
 
 
-def run_host_matrix(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[dict[str, Any]]:
-    stdout, _ = run_command(
-        "host-matrix",
-        [
-            args.zig_exe,
-            "build",
-            f"-Doptimize={args.optimize}",
-            *build_profile_args(args),
-            "host-matrix",
-            "--",
-            "--iterations",
-            str(args.host_iterations),
-            "--repeats",
-            str(args.repeats),
-            "--warmups",
-            str(args.warmups),
-            "--include-bytecode",
-        ],
-        BENCH_DIR,
-        raw_dir,
-    )
-    path = out_dir / "host_matrix_summary.csv"
-    path.write_text(stdout)
-    return read_csv_rows(path)
-
-
 def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[dict[str, Any]]:
     zig_stdout, _ = run_command(
         "kernel-zig",
@@ -494,18 +465,15 @@ def build_checkpoint(
     env: dict[str, Any],
     args: argparse.Namespace,
     vm_loop_rows: list[dict[str, Any]],
-    host_rows: list[dict[str, Any]],
     kernel_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     kernel = grouped_medians(kernel_rows, ("engine", "case"), "ns_per_iter")
-    host = grouped_medians(host_rows, ("op", "boundary"), "ns_per_op")
     return {
-        "schema": 1,
+        "schema": 2,
         "environment": env,
         "parameters": {
             "optimize": args.optimize,
             "kernel_iterations": args.kernel_iterations,
-            "host_iterations": args.host_iterations,
             "repeats": args.repeats,
             "warmups": args.warmups,
         },
@@ -517,11 +485,6 @@ def build_checkpoint(
                 if row.get("engine") == VM_LOOP_BASELINE_ENGINE and row.get("median_ms") is not None
             },
             "kernel_ns_per_iter": flatten_engine_map(kernel, "evmz"),
-            "host_bytecode_ns_per_op": {
-                op: value
-                for (op, boundary), value in host.items()
-                if boundary == "evmz-interpreter-zig-host" and op.startswith("bytecode_")
-            },
         },
     }
 
@@ -552,7 +515,6 @@ def render_report(
     env: dict[str, Any],
     args: argparse.Namespace,
     vm_loop_rows: list[dict[str, Any]],
-    host_rows: list[dict[str, Any]],
     kernel_rows: list[dict[str, Any]],
     checkpoint_path: Path,
     baseline_path: Path | None,
@@ -580,7 +542,6 @@ def render_report(
     lines.append("")
 
     lines.extend(render_vm_loop(vm_loop_rows))
-    lines.extend(render_host(host_rows))
     lines.extend(render_kernel(kernel_rows))
     lines.extend(render_checkpoint_delta(checkpoint, baseline))
 
@@ -618,32 +579,6 @@ def render_vm_loop(rows: list[dict[str, Any]]) -> list[str]:
         *markdown_table(table),
         "",
     ]
-
-
-def render_host(rows: list[dict[str, Any]]) -> list[str]:
-    medians = grouped_medians(rows, ("op", "boundary"), "ns_per_op")
-    selected = (
-        ("host_call", "zig-host-vtable"),
-        ("host_call", "evmc-host-to-zig"),
-        ("host_storage_read", "zig-host-vtable"),
-        ("host_storage_read", "evmc-host-to-zig"),
-        ("host_storage_write", "zig-host-vtable"),
-        ("host_storage_write", "evmc-host-to-zig"),
-        ("host_log", "zig-host-vtable"),
-        ("host_log", "evmc-host-to-zig"),
-        ("bytecode_sload", "evmz-interpreter-zig-host"),
-        ("bytecode_sstore", "evmz-interpreter-zig-host"),
-    )
-    table = [["op", "boundary", "median ns/op", "evmc/zig"]]
-    for op, boundary in selected:
-        value = medians.get((op, boundary))
-        ratio = None
-        if boundary == "evmc-host-to-zig":
-            zig = medians.get((op, "zig-host-vtable"))
-            if zig is not None and value is not None and zig != 0:
-                ratio = value / zig
-        table.append([op, boundary, fmt_float(value, 2), fmt_ratio(ratio)])
-    return ["## Host-boundary checkpoint", "", *markdown_table(table), ""]
 
 
 def render_kernel(rows: list[dict[str, Any]]) -> list[str]:

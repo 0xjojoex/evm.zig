@@ -18,7 +18,6 @@ Implemented:
   Amsterdam
 - Stateless block validation from execution witnesses
 - Native, SP1, and ZisK execution of the stateless validator
-- EVMC-compatible static and shared libraries
 
 Experimental:
 
@@ -205,19 +204,6 @@ executor benches within noise of the raw interpreter.
 
 </details>
 
-## EVMC
-
-The standalone `pkg/evmc` package builds static and shared `libevmz-evmc`
-artifacts exporting `evmc_create_evmz`:
-
-```sh
-zig build evmc -Doptimize=ReleaseFast
-zig build evmc-test
-zig build evmc-example -Doptimize=ReleaseFast
-```
-
-The root `include/evmz/evmz.h` path is reserved for a future native evmz C API.
-
 ## Packages
 
 Standalone Zig libraries under `pkg/` can be fetched independently:
@@ -260,6 +246,6 @@ Licensed under either of:
 at your option.
 
 Bundled third-party components retain their own licenses: c-kzg-4844 and blst
-(Apache-2.0), EVMC/evmone headers (Apache-2.0), and mcl (BSD-3-Clause).
+(Apache-2.0), and mcl (BSD-3-Clause).
 Distributions including them should reproduce the applicable license and NOTICE
 files.

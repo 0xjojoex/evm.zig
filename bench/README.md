@@ -232,37 +232,6 @@ is CSV:
 suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit
 ```
 
-## Host-boundary runner
-
-`zig build host-boundary` measures the native Zig host boundary. Direct
-`host-*` operations call the `Host` vtable in a tight loop; `bytecode-*`
-operations run repeated storage opcodes through the interpreter and the same
-counting host.
-
-```sh
-cd bench
-zig build host-boundary -- --op host-storage-read --iterations 1000000 --summary
-zig build host-boundary -- --boundary evmc --op host-storage-read --iterations 1000000 --summary
-zig build host-boundary -- --op bytecode-sload --iterations 100000 --summary
-zig build host-matrix -- --op host-call --op host-storage-read --repeats 5 --warmups 1
-```
-
-`--boundary zig` is the native Zig `Host` vtable baseline. `--boundary evmc`
-routes direct host operations through an EVMC-style `callconv(.c)` callback
-bridge before entering the same counting host. Bytecode operations stay on the
-interpreter + Zig host path.
-
-`zig build host-matrix` runs the same measurement primitive repeatedly and emits
-CSV:
-
-```text
-suite,op,boundary,repeat,iterations,elapsed_ns,ns_per_op,host_calls
-```
-
-By default it runs direct host operations across both `zig` and `evmc`
-boundaries. Use repeated `--op` and `--boundary` filters for a smaller matrix;
-use `--include-bytecode` to add `bytecode-sload` and `bytecode-sstore` rows.
-
 ## Opcode kernel runner
 
 `zig build kernel` generates repeated opcode patterns and times only
@@ -314,8 +283,8 @@ Case tiers:
 
 ## Comparison report
 
-`zig build report` runs the VM-loop fixtures across evmz/evmone/revm,
-the host-boundary matrix, and opcode kernels against evmz/evmone/revm. It
+`zig build report` runs the VM-loop fixtures and opcode kernels across
+evmz/evmone/revm. It
 writes raw CSVs, a Markdown report, and a compact evmz checkpoint JSON:
 
 ```sh
