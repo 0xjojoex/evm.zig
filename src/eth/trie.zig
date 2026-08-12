@@ -9,7 +9,6 @@ const crypto = @import("../crypto.zig");
 const rlp = @import("rlp");
 const mpt = @import("mpt");
 const uint256 = @import("../uint256.zig");
-const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
 const t = @import("../t.zig");
 const Withdrawal = @import("Withdrawal.zig");
 const Allocator = std.mem.Allocator;

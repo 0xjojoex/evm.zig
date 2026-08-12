@@ -83,9 +83,19 @@ pub const DepositTransaction = struct {
     is_system_transaction: bool = false,
     input: []const u8 = &.{},
 
+    const OptionalAddressRlp = rlp.Mapped(?Address, rlp.OptionalFixedBytes(Address.len), struct {
+        pub fn toWire(value: ?Address) ?[Address.len]u8 {
+            return if (value) |target| target.bytes else null;
+        }
+
+        pub fn fromWire(value: ?[Address.len]u8) ?Address {
+            return if (value) |bytes| Address.fromBytes(bytes) else null;
+        }
+    });
+
     pub const Rlp = rlp.Struct(@This(), .{
-        // TODO: rlp optional builtin
-        .to = rlp.OptionalFixedBytes(@sizeOf(Address)),
+        // OP encodes an absent recipient as the empty RLP byte string.
+        .to = OptionalAddressRlp,
     });
 
     pub const DecodeError = rlp.DecodeError || error{UnexpectedTypeId};
@@ -233,7 +243,7 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
             const gas_plan = gas_planner.gasPlan(tx.input, tx.gas_limit, .{
                 .is_create = tx.to == null,
                 .value = tx.value,
-                .is_self_transfer = if (tx.to) |to| std.mem.eql(u8, &tx.from, &to) else false,
+                .is_self_transfer = if (tx.to) |to| tx.from.eql(to) else false,
             });
             const execution_gas = resolveExecutionGas(context, gas_planner, tx, gas_plan);
 

@@ -70,7 +70,7 @@ fn storageValue(writes: evmz.state.TrackedState.StorageChanges, address: evmz.Ad
     var index: u32 = 0;
     while (index < writes.len()) : (index += 1) {
         const write = writes.at(index);
-        if (std.mem.eql(u8, &write.address, &address) and write.key == key) return write.value;
+        if (write.address.eql(address) and write.key == key) return write.value;
     }
     return 0;
 }

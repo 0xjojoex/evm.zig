@@ -417,8 +417,8 @@ fn compareRows(case: cases.Case, evmz_span: evmz.trace.CallSpan, geth_rows: []co
             local.child_ordinal != geth.child_ordinal or
             local.depth != geth.depth or
             local.kind != geth.kind or
-            !std.mem.eql(u8, &local.from, &geth.from) or
-            !std.mem.eql(u8, &local.to, &geth.to) or
+            !local.from.eql(geth.from) or
+            !local.to.eql(geth.to) or
             local.value != geth.value or
             local.gas != geth.gas or
             local.gas_used != geth.gas_used or
@@ -519,8 +519,8 @@ fn writeObservations(
 
 fn seedAccount(executor: anytype, allocator: std.mem.Allocator, address: evmz.Address, balance: u256, nonce: u64, code: []const u8) !void {
     var account = MemoryAccount.init(allocator);
-    account.balance = balance;
-    account.nonce = nonce;
+    account.account.balance = balance;
+    account.account.nonce = nonce;
     try account.setCode(code);
     try executor.state.seedAccount(address, account);
 }

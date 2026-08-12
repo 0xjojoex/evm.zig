@@ -373,7 +373,7 @@ fn appendSpuriousBalAccount(
     const candidate = evmz.addr(0xf000 + variant);
     var index: usize = 0;
     while (index < accounts.len) : (index += 1) {
-        switch (std.mem.order(u8, &accounts[index].address, &candidate)) {
+        switch (evmz.Address.order(accounts[index].address, candidate)) {
             .lt => continue,
             .eq => return null,
             .gt => break,
@@ -557,7 +557,7 @@ fn alterBlockAccessList(
         }
     }
     if (accounts.len != 1) return false;
-    accounts[0].address[0] ^= 1;
+    accounts[0].address.bytes[0] ^= 1;
     return true;
 }
 

@@ -30,7 +30,7 @@ const CustomSet = struct {
     };
 
     pub fn resolve(target: evmz.Address) ?Entry {
-        if (std.mem.eql(u8, &target, &reverse_address)) return .reverse;
+        if (target.eql(reverse_address)) return .reverse;
         if (StandardSet.resolve(target)) |entry| return .{ .standard = entry };
         return null;
     }

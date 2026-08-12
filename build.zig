@@ -228,6 +228,7 @@ pub fn build(b: *std.Build) void {
         debug_cli_mod.addImport("ssz", ssz_mod);
         debug_cli_mod.addImport("rlp", rlp_mod);
         debug_cli_mod.addImport("mpt", mpt_mod);
+        debug_cli_mod.addImport("rewindable_region", packages.rewindable_region);
         debug_cli_mod.addIncludePath(b.path("include"));
         addPrecompileNative(b, debug_cli_mod, native_precompile_deps);
         addNativeKeccak(debug_cli_mod, xkcp_object);
@@ -257,6 +258,7 @@ pub fn build(b: *std.Build) void {
     call_fixture_oracle_mod.addImport("ssz", ssz_mod);
     call_fixture_oracle_mod.addImport("rlp", rlp_mod);
     call_fixture_oracle_mod.addImport("mpt", mpt_mod);
+    call_fixture_oracle_mod.addImport("rewindable_region", packages.rewindable_region);
     call_fixture_oracle_mod.addIncludePath(b.path("include"));
     if (is_native_profile) addPrecompileNative(b, call_fixture_oracle_mod, native_precompile_deps);
     addNativeKeccak(call_fixture_oracle_mod, xkcp_object);

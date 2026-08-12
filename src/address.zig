@@ -3,6 +3,7 @@
 const std = @import("std");
 const crypto = @import("crypto.zig");
 const rlp = @import("rlp");
+const ssz = @import("ssz");
 
 /// A canonical 20-byte Ethereum account address.
 ///
@@ -91,7 +92,7 @@ pub const Address = extern struct {
         return std.HashMap(Address, Value, HashContext, std.hash_map.default_max_load_percentage);
     }
 
-    pub const Rlp = rlp.Mapped(@This(), rlp.FixedBytes(len), struct {
+    const WireMapping = struct {
         pub fn toWire(value: Address) [len]u8 {
             return value.bytes;
         }
@@ -99,6 +100,12 @@ pub const Address = extern struct {
         pub fn fromWire(bytes: [len]u8) Address {
             return Address.fromBytes(bytes);
         }
+    };
+
+    pub const Rlp = rlp.Mapped(@This(), rlp.FixedBytes(len), WireMapping);
+    pub const Ssz = ssz.Mapped(@This(), ssz.ByteVector(len), .{
+        .toWire = WireMapping.toWire,
+        .fromWire = WireMapping.fromWire,
     });
 };
 
@@ -312,10 +319,29 @@ test "address conversion uses Ethereum byte order" {
     try std.testing.expectEqual(@as(u256, 0x1234), canonical.toU256());
 }
 
+test "address hex formatting preserves leading zeroes" {
+    var buffer: [2 * Address.len]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&buffer, "{x}", .{addr(0x1234)});
+    try std.testing.expectEqualStrings("0000000000000000000000000000000000001234", formatted);
+}
+
 test "address hash preserves canonical byte hashing" {
     const value = addr("123456789abcdef00123456789abcdef00123456");
     const ByteContext = std.hash_map.AutoContext([Address.len]u8);
     try std.testing.expectEqual(ByteContext.hash(.{}, value.bytes), Address.HashContext.hash(.{}, value));
+}
+
+test "address SSZ preserves the canonical byte-vector schema" {
+    const value = addr("123456789abcdef00123456789abcdef00123456");
+    comptime std.debug.assert(Address.Ssz.wire_codec == ssz.ByteVector(Address.len));
+
+    var encoded: [Address.len]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, value.asBytes(), try Address.Ssz.encode(&encoded, value));
+    try std.testing.expectEqual(value, try Address.Ssz.decode(&encoded));
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(ssz.ByteVector(Address.len), value.bytes),
+        try ssz.hashTreeRoot(Address.Ssz, value),
+    );
 }
 
 test "Address.fromHex" {
