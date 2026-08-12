@@ -106,16 +106,16 @@ pub fn gas(frame: *CallFrame) !void {
 }
 
 pub fn address(frame: *CallFrame) !void {
-    _ = frame.push(evmz.address.toU256(frame.msg.recipient));
+    _ = frame.push(frame.msg.recipient.toU256());
 }
 
 pub fn caller(frame: *CallFrame) !void {
-    _ = frame.push(evmz.address.toU256(frame.msg.sender));
+    _ = frame.push(frame.msg.sender.toU256());
 }
 
 pub fn origin(frame: *CallFrame) !void {
     const execution_context = try frame.host.executionContext();
-    _ = frame.push(evmz.address.toU256(execution_context.transaction.origin));
+    _ = frame.push(execution_context.transaction.origin.toU256());
 }
 
 pub fn gasprice(frame: *CallFrame) !void {
@@ -130,7 +130,7 @@ pub fn basefee(frame: *CallFrame) !void {
 
 pub fn coinbase(frame: *CallFrame) !void {
     const execution_context = try frame.host.executionContext();
-    _ = frame.push(evmz.address.toU256(execution_context.block.coinbase));
+    _ = frame.push(execution_context.block.coinbase.toU256());
 }
 
 pub fn timestamp(frame: *CallFrame) !void {
@@ -254,7 +254,7 @@ test "BALANCE cold account access gas comes from the exact spec" {
     });
     defer frame.deinit();
 
-    frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
+    frame.frame.stack.push(evmz.addr(2).toU256());
     try bind(spec).balance(frame.frame);
 
     try std.testing.expect(frame.frame.isRunning());
@@ -287,7 +287,7 @@ test "EXTCODESIZE account access gas comes from the exact spec" {
     });
     defer frame.deinit();
 
-    frame.frame.stack.push(evmz.address.toU256(evmz.addr(2)));
+    frame.frame.stack.push(evmz.addr(2).toU256());
     try bind(spec).extcodesize(frame.frame);
 
     try std.testing.expect(frame.frame.isRunning());

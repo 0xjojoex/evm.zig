@@ -437,7 +437,7 @@ pub fn ImplType(
                 return if (gas.apply(authorization_spec.invalid_gas_adjustment)) .invalid else .out_of_gas;
             }
 
-            const clears_delegation = Address.eql(tuple.target, address.zero_address);
+            const clears_delegation = Address.eql(tuple.target, .zero);
             const adjustment = authorization_spec.successGasAdjustment(.{
                 .account_exists = account_exists,
                 .account_already_written = authority_state.written,

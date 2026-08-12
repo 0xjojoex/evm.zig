@@ -62,7 +62,7 @@ pub fn recoverSender(allocator: std.mem.Allocator, bytes: []const u8) SenderReco
     public_key[0] = 0x04;
     @memcpy(public_key[1..], &recovered);
     return .{
-        .sender = address.fromPublicKey(recovered),
+        .sender = Address.fromPublicKey(recovered),
         .signing_hash = message.signing_hash,
         .public_key = public_key,
     };
@@ -264,7 +264,7 @@ fn nextTransactionSignatureUint(cursor: *rlp.Cursor) SenderRecoveryError!u256 {
 }
 
 fn recoverAddress(message_hash: [32]u8, y_parity: u8, r: u256, s: u256) SenderRecoveryError!Address {
-    return address.fromPublicKey(try recoverPublicKey(message_hash, y_parity, r, s));
+    return Address.fromPublicKey(try recoverPublicKey(message_hash, y_parity, r, s));
 }
 
 fn recoverPublicKey(message_hash: [32]u8, y_parity: u8, r: u256, s: u256) SenderRecoveryError![64]u8 {
@@ -287,7 +287,7 @@ test "sender recovery reproduces EIP-155 legacy vector" {
     try t.expectHex(recovered.sender.asBytes(), "9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f");
     try t.expectHex(&recovered.signing_hash, "daf5a779ae972f972197303d7b574746c7ef83eadac0f2791ad23db92e4c8e53");
     try std.testing.expectEqual(@as(u8, 0x04), recovered.public_key[0]);
-    const public_address = address.fromPublicKey(recovered.public_key[1..65].*);
+    const public_address = Address.fromPublicKey(recovered.public_key[1..65].*);
     try std.testing.expectEqual(recovered.sender, public_address);
     const hash_only = try signingHash(std.testing.allocator, &bytes);
     try std.testing.expectEqualSlices(u8, &recovered.signing_hash, &hash_only);
@@ -356,7 +356,7 @@ const TestSigner = struct {
         @memcpy(&public_key, sec1[1..65]);
         return .{
             .key_pair = key_pair,
-            .sender = address.fromPublicKey(public_key),
+            .sender = Address.fromPublicKey(public_key),
         };
     }
 };

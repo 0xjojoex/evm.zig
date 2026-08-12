@@ -124,11 +124,10 @@ fn emitHeader(fields: anytype, header: *const ExecutionHeader) rlp.EncodeError!v
 
 test "execution header reproduces Ethereum mainnet genesis hash" {
     const zero_hash = [_]u8{0} ** 32;
-    const zero_address = Address.fromBytes([_]u8{0} ** 20);
     const empty_root = testHex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
     const header = ExecutionHeader{
         .parent_hash = zero_hash,
-        .coinbase = zero_address,
+        .coinbase = .zero,
         .state_root = testHex("d7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544"),
         .transactions_root = empty_root,
         .receipts_root = empty_root,

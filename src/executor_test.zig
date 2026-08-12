@@ -1489,8 +1489,8 @@ test "prepared call transaction create opcodes deploy code" {
     });
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(evmz.address.toU256(create_address), try executor.getStorage(contract, 0));
-    try std.testing.expectEqual(evmz.address.toU256(create2_address), try executor.getStorage(contract, 1));
+    try std.testing.expectEqual(create_address.toU256(), try executor.getStorage(contract, 0));
+    try std.testing.expectEqual(create2_address.toU256(), try executor.getStorage(contract, 1));
     try std.testing.expectEqualSlices(u8, &.{0x00}, try executor.getCode(create_address));
     try std.testing.expectEqualSlices(u8, &.{0x00}, try executor.getCode(create2_address));
 }
@@ -1606,7 +1606,7 @@ test "captured runtime records nested call and create frames without generic ste
     const replay_create_start = replay.firstIndex(.start, .CREATE, 0).?;
     const replay_create_end = replay.firstIndex(.end, .CREATE, 0).?;
     try std.testing.expect(replay.hasDepthStartBetween(1, replay_create_start, replay_create_end));
-    try std.testing.expectEqual(evmz.address.toU256(create_address), replay.events[replay_create_end].stack_top.?);
+    try std.testing.expectEqual(create_address.toU256(), replay.events[replay_create_end].stack_top.?);
 }
 
 test "captured span is inspectable before executed transaction resolution" {
@@ -2018,8 +2018,8 @@ fn expectTransferLog(event_log: Host.Log, from: Address, to: Address, amount: u2
     try std.testing.expectEqual(evmz.eth.system_address, event_log.address);
     try std.testing.expectEqual(@as(usize, 3), event_log.topics.len);
     try std.testing.expectEqual(evmz.eth.value_transfer_log_topic, event_log.topics[0]);
-    try std.testing.expectEqual(evmz.address.toU256(from), event_log.topics[1]);
-    try std.testing.expectEqual(evmz.address.toU256(to), event_log.topics[2]);
+    try std.testing.expectEqual(from.toU256(), event_log.topics[1]);
+    try std.testing.expectEqual(to.toU256(), event_log.topics[2]);
     try std.testing.expectEqual(@as(usize, 32), event_log.data.len);
     var expected_data: [32]u8 = undefined;
     std.mem.writeInt(u256, &expected_data, amount, .big);

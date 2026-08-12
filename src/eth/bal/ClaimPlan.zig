@@ -228,7 +228,7 @@ pub const ClaimPlan = struct {
     pub fn accountIdWord(self: *const ClaimPlan, target: address.AddressWord) ?AccountId {
         if (self.account_positions.len == 0) return null;
         const mask: u64 = self.account_positions.len - 1;
-        var slot: usize = @intCast(target.hash() & mask);
+        var slot: usize = @intCast(accountPositionHash(target) & mask);
         while (true) {
             const entry = self.account_positions[slot];
             if (entry == 0) return null;
@@ -265,6 +265,18 @@ pub const ClaimPlan = struct {
     }
 };
 
+/// Mix an address into the initial slot of `account_positions`.
+/// This is not cryptographic; lookups verify the full address before returning an ID.
+inline fn accountPositionHash(value: address.AddressWord) u64 {
+    var mixed = value.words[0] ^ std.math.rotl(u64, value.words[1], 23) ^
+        value.words[2] *% 0x9e3779b97f4a7c15;
+    mixed ^= mixed >> 30;
+    mixed *%= 0xbf58476d1ce4e5b9;
+    mixed ^= mixed >> 27;
+    mixed *%= 0x94d049bb133111eb;
+    return mixed ^ (mixed >> 31);
+}
+
 fn accountTableCapacity(account_count: usize) InitError!usize {
     if (account_count == 0) return 0;
     const doubled = std.math.mul(usize, account_count, 2) catch
@@ -279,7 +291,7 @@ fn insertAccountPosition(
     id: AccountId,
 ) void {
     const mask: u64 = positions.len - 1;
-    var slot: usize = @intCast(addresses[@intFromEnum(id)].hash() & mask);
+    var slot: usize = @intCast(accountPositionHash(addresses[@intFromEnum(id)]) & mask);
     while (positions[slot] != 0) slot = @intCast((slot + 1) & mask);
     positions[slot] = @intFromEnum(id) + 1;
 }
@@ -381,7 +393,7 @@ test "account position table resolves collisions and terminates on a colliding m
     var found = false;
     for (1..100) |value| {
         const candidate = address.addr(@as(u64, @intCast(value)));
-        const slot: usize = @intCast(address.AddressWord.fromAddress(candidate).hash() & 3);
+        const slot: usize = @intCast(accountPositionHash(.fromAddress(candidate)) & 3);
         if (first[slot] == null) {
             first[slot] = candidate;
         } else if (second[slot] == null) {

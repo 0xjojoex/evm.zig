@@ -259,14 +259,14 @@ fn runEvmzCase(
     const Executor = evmz.Vm(evmz.eth.specAt(revision)).Executor;
     var executor = Executor.init(allocator, .{});
     defer executor.deinit();
-    try seedAccount(&executor, allocator, try evmz.address.fromHex(cases.sender), try parseHexInt(u256, case.sender_balance), 0, &.{});
+    try seedAccount(&executor, allocator, try evmz.Address.fromHex(cases.sender), try parseHexInt(u256, case.sender_balance), 0, &.{});
     for (case.accounts) |account| {
         const code = try decodeHexAlloc(allocator, account.code);
         defer allocator.free(code);
         try seedAccount(
             &executor,
             allocator,
-            try evmz.address.fromHex(account.address),
+            try evmz.Address.fromHex(account.address),
             try parseHexInt(u256, account.balance),
             account.nonce,
             code,
@@ -278,12 +278,12 @@ fn runEvmzCase(
     defer capture.deinit();
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
-    const sender = try evmz.address.fromHex(cases.sender);
+    const sender = try evmz.Address.fromHex(cases.sender);
     _ = try executor.capture(&capture.context).execute(
         evmz.t.defaultExecutionContext(sender, case.gas),
         .{ .call = .{
             .sender = sender,
-            .recipient = try evmz.address.fromHex(case.recipient),
+            .recipient = try evmz.Address.fromHex(case.recipient),
             .value = try parseHexInt(u256, case.value),
         } },
         .legacy(case.gas),
@@ -388,8 +388,8 @@ fn parseTrace(allocator: std.mem.Allocator, trace: []const u8) ![]GethRow {
                 .child_ordinal = ordinal,
                 .depth = @intCast(active.items.len),
                 .kind = try callKind(kind_text),
-                .from = try evmz.address.fromHex(event.from orelse return error.MissingGethFrom),
-                .to = try evmz.address.fromHex(event.to orelse return error.MissingGethTo),
+                .from = try evmz.Address.fromHex(event.from orelse return error.MissingGethFrom),
+                .to = try evmz.Address.fromHex(event.to orelse return error.MissingGethTo),
                 .value = try parseHexInt(u256, event.value orelse "0x0"),
                 .gas = try parseHexInt(i64, event.gas orelse return error.MissingGethGas),
                 .input = try decodeHexAlloc(allocator, event.input orelse "0x"),

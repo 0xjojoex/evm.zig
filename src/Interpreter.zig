@@ -357,7 +357,7 @@ pub const CallFrame = struct {
         if (child.outcome.status == .success) {
             // A deployed contract yields its address, never return data.
             try self.replaceReturnData(&.{});
-            self.stack.push(evmz.address.toU256(child.address));
+            self.stack.push(child.address.toU256());
         } else {
             try self.replaceReturnData(child.output_data);
             self.stack.push(0);

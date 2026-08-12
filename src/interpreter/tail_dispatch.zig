@@ -655,8 +655,8 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
                     sp[0] = switch (value) {
-                        .address => evmz.address.toU256(ctx.frame.msg.recipient),
-                        .caller => evmz.address.toU256(ctx.frame.msg.sender),
+                        .address => ctx.frame.msg.recipient.toU256(),
+                        .caller => ctx.frame.msg.sender.toU256(),
                         .call_value => ctx.frame.msg.value,
                         .calldata_size => @intCast(ctx.frame.msg.input_data.len),
                         .code_size => @intCast(ctx.frame.code.len),
