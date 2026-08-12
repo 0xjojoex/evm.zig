@@ -10,10 +10,9 @@
 //! and are the reason a debugger does not slow down or enlarge normal execution:
 //!
 //! - **I0 no third dispatch table.** The driver steps through
-//!   `Instruction(spec).execute`, the same cold route production tail dispatch
-//!   already falls to for host-bound opcodes (`interpreter/tail_dispatch.zig`,
-//!   `executeColdOpcode`). Opcode semantics here are production semantics, and no
-//!   table is generated for this lane.
+//!   `Instruction(spec).execute`, the same frame-materialized fallback used by
+//!   production tail dispatch. Opcode semantics here are production semantics,
+//!   and no table is generated for this lane.
 //! - **I1 no field growth.** Nothing here adds a field to `Executor`,
 //!   `CallFrame`, `FrameStore`, `CaptureContext`, or `Bytecode.View`.
 //! - **I2 no branch in the run loops.** `CallRuntime.run` and the captured

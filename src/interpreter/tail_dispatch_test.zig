@@ -49,6 +49,19 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
     }
 }
 
+test "prepared tail dispatch executes promoted modular and fork arithmetic" {
+    try evmz.t.expectLatestForkBytecodeStackTop(.{
+        .PUSH1, 5, .PUSH1, 4, .PUSH1, 3, .ADDMOD,
+    }, 2);
+    try evmz.t.expectLatestForkBytecodeStackTop(.{
+        .PUSH1, 5, .PUSH1, 4, .PUSH1, 3, .MULMOD,
+    }, 2);
+    try evmz.t.expectLatestForkBytecodeStackTop(.{
+        .PUSH1, 0x80, .PUSH0, .SIGNEXTEND,
+    }, std.math.maxInt(u256) - 0x7f);
+    try evmz.t.expectBytecodeStackTopByRevision(.{ .PUSH1, 1, .CLZ }, .osaka, 255);
+}
+
 test "prepared tail dispatch executes promoted mcopy and exp" {
     // Store 0xaa..bb word at 0, MCOPY 2 bytes from offset 30 to 64, MLOAD 64.
     const mcopy_code = evmz.t.bytecode(.{
@@ -198,6 +211,106 @@ test "prepared tail dispatch reads frame-local values" {
 
         try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(u16, 1), interpreter.call_frame.stack.len);
+        try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
+    }
+}
+
+test "prepared tail dispatch reads execution-context values" {
+    const origin = evmz.addr(0x1001);
+    const coinbase = evmz.addr(0x1002);
+    const execution_context: evmz.execution.ExecutionContext = .{
+        .chain = .{ .chain_id = 41 },
+        .block = .{
+            .coinbase = coinbase,
+            .number = 42,
+            .slot_number = 43,
+            .timestamp = 44,
+            .gas_limit = 45,
+            .difficulty_or_prev_randao = 46,
+            .base_fee = 47,
+            .blob_base_fee = 48,
+        },
+        .transaction = .{ .origin = origin, .gas_price = 49 },
+    };
+    const cases = [_]struct {
+        opcode: Opcode,
+        expected: u256,
+    }{
+        .{ .opcode = .ORIGIN, .expected = origin.toU256() },
+        .{ .opcode = .GASPRICE, .expected = 49 },
+        .{ .opcode = .BASEFEE, .expected = 47 },
+        .{ .opcode = .COINBASE, .expected = coinbase.toU256() },
+        .{ .opcode = .TIMESTAMP, .expected = 44 },
+        .{ .opcode = .NUMBER, .expected = 42 },
+        .{ .opcode = .SLOTNUM, .expected = 43 },
+        .{ .opcode = .PREVRANDAO, .expected = 46 },
+        .{ .opcode = .GASLIMIT, .expected = 45 },
+        .{ .opcode = .CHAINID, .expected = 41 },
+        .{ .opcode = .BLOBBASEFEE, .expected = 48 },
+    };
+
+    for (cases) |case| {
+        const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
+        var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+        defer bytecode.deinit(std.testing.allocator);
+
+        var mock_host = evmz.t.MockHost.init(std.testing.allocator, execution_context);
+        defer mock_host.deinit();
+        var host = mock_host.host();
+        var msg = evmz.t.defaultMessage();
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .source = .{ .bytecode = bytecode.view() },
+        });
+        defer frame.deinit();
+        var interpreter = frame.interpreter();
+
+        const result = try interpreter.execute();
+
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
+        try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
+    }
+}
+
+test "prepared tail dispatch reads host account values" {
+    const target = evmz.addr(0x1234);
+    var target_code = [_]u8{0xaa} ** 1024;
+    const cases = [_]struct {
+        opcode: Opcode,
+        expected: u256,
+        takes_address: bool,
+    }{
+        .{ .opcode = .BALANCE, .expected = 51, .takes_address = true },
+        .{ .opcode = .EXTCODESIZE, .expected = target_code.len, .takes_address = true },
+        .{ .opcode = .EXTCODEHASH, .expected = evmz.uint256.fromBytes32(&evmz.crypto.keccak256(&target_code)), .takes_address = true },
+        .{ .opcode = .SELFBALANCE, .expected = 51, .takes_address = false },
+    };
+
+    for (cases) |case| {
+        const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
+        var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+        defer bytecode.deinit(std.testing.allocator);
+
+        var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+        defer mock_host.deinit();
+        try mock_host.local_account.put(target, .{ .balance = 51 });
+        try mock_host.code.put(target, &target_code);
+        var host = mock_host.host();
+        var msg = evmz.t.defaultMessage();
+        msg.recipient = target;
+        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .source = .{ .bytecode = bytecode.view() },
+        });
+        defer frame.deinit();
+        if (case.takes_address) frame.frame.stack.push(target.toU256());
+        var interpreter = frame.interpreter();
+
+        const result = try interpreter.execute();
+
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqual(case.expected, interpreter.call_frame.stack.peek().?);
     }
 }

@@ -8,6 +8,7 @@ const Stack = @import("../Stack.zig");
 const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
 const arithmetic_instruction = @import("../instruction/arithmetic.zig");
+const environment_instruction = @import("../instruction/environment.zig");
 const storage_instruction = @import("../instruction/storage.zig");
 const trace = @import("../trace.zig");
 
@@ -36,11 +37,18 @@ const BinaryOp = enum {
     bit_and,
     bit_or,
     bit_xor,
+    sign_extend,
 };
 
 const UnaryOp = enum {
     iszero,
     bit_not,
+    count_leading_zeros,
+};
+
+const TernaryOp = enum {
+    add_mod,
+    mul_mod,
 };
 
 const ShiftOp = enum {
@@ -56,6 +64,27 @@ const FrameValue = enum {
     calldata_size,
     code_size,
     return_data_size,
+};
+
+const ContextValue = enum {
+    origin,
+    gas_price,
+    base_fee,
+    coinbase,
+    timestamp,
+    number,
+    slot_number,
+    prev_randao,
+    gas_limit,
+    chain_id,
+    blob_base_fee,
+};
+
+const HostValue = enum {
+    balance,
+    code_size,
+    code_hash,
+    self_balance,
 };
 
 const CopySource = enum {
@@ -78,6 +107,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
     return struct {
         const Self = @This();
         const Instructions = instruction.Instruction(spec);
+        const EnvironmentInstructions = environment_instruction.bind(spec);
         const StorageInstructions = storage_instruction.bind(spec);
         // ip rides in a register across tail calls; it always points at the NEXT
         // byte to decode (one past the handler's own opcode byte).
@@ -135,7 +165,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 return self.stack_base + self.frame.stack.len;
             }
 
-            /// Cold/custom handlers may synchronously re-enter the host and grow
+            /// Fallback/custom handlers may synchronously re-enter the host and grow
             /// the packed arena. Refresh activation-local pointers before the
             /// tail loop resumes.
             inline fn refreshStackBase(self: *Context) void {
@@ -156,10 +186,10 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             }
         };
 
-        const direct_entries = [_]Entry{
+        const stable_tail_entries = [_]Entry{
             // LLVM currently emits these table-referenced handlers in reverse
             // declaration order. Keep this accepted block stable; later
-            // selective additions grow through promoted_entries below.
+            // selective additions grow through prepended_tail_entries below.
             .{ .opcode = .SMOD, .handler = &BinaryHandler(.SMOD, .smod).run },
             .{ .opcode = .BYTE, .handler = &BinaryHandler(.BYTE, .byte).run },
             .{ .opcode = .SDIV, .handler = &BinaryHandler(.SDIV, .sdiv).run },
@@ -197,7 +227,26 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         // Reverse emission makes the final entry the stable edge nearest the
         // accepted direct block. Prepend later promotions to preserve addresses.
-        const promoted_entries = [_]Entry{
+        const prepended_tail_entries = [_]Entry{
+            .{ .opcode = .SELFBALANCE, .handler = &HostValueHandler(.SELFBALANCE, .self_balance).run },
+            .{ .opcode = .EXTCODEHASH, .handler = &HostValueHandler(.EXTCODEHASH, .code_hash).run },
+            .{ .opcode = .EXTCODESIZE, .handler = &HostValueHandler(.EXTCODESIZE, .code_size).run },
+            .{ .opcode = .BALANCE, .handler = &HostValueHandler(.BALANCE, .balance).run },
+            .{ .opcode = .CLZ, .handler = &UnaryHandler(.CLZ, .count_leading_zeros).run },
+            .{ .opcode = .SIGNEXTEND, .handler = &BinaryHandler(.SIGNEXTEND, .sign_extend).run },
+            .{ .opcode = .MULMOD, .handler = &TernaryHandler(.MULMOD, .mul_mod).run },
+            .{ .opcode = .ADDMOD, .handler = &TernaryHandler(.ADDMOD, .add_mod).run },
+            .{ .opcode = .BLOBBASEFEE, .handler = &ContextValueHandler(.BLOBBASEFEE, .blob_base_fee).run },
+            .{ .opcode = .SLOTNUM, .handler = &ContextValueHandler(.SLOTNUM, .slot_number).run },
+            .{ .opcode = .CHAINID, .handler = &ContextValueHandler(.CHAINID, .chain_id).run },
+            .{ .opcode = .GASLIMIT, .handler = &ContextValueHandler(.GASLIMIT, .gas_limit).run },
+            .{ .opcode = .PREVRANDAO, .handler = &ContextValueHandler(.PREVRANDAO, .prev_randao).run },
+            .{ .opcode = .NUMBER, .handler = &ContextValueHandler(.NUMBER, .number).run },
+            .{ .opcode = .TIMESTAMP, .handler = &ContextValueHandler(.TIMESTAMP, .timestamp).run },
+            .{ .opcode = .COINBASE, .handler = &ContextValueHandler(.COINBASE, .coinbase).run },
+            .{ .opcode = .BASEFEE, .handler = &ContextValueHandler(.BASEFEE, .base_fee).run },
+            .{ .opcode = .GASPRICE, .handler = &ContextValueHandler(.GASPRICE, .gas_price).run },
+            .{ .opcode = .ORIGIN, .handler = &ContextValueHandler(.ORIGIN, .origin).run },
             .{ .opcode = .EXP, .handler = &tailExp },
             .{ .opcode = .MCOPY, .handler = &tailMcopy },
             .{ .opcode = .TSTORE, .handler = &tailTstore },
@@ -221,7 +270,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             .{ .opcode = .SAR, .handler = &ShiftHandler(.SAR, .arithmetic).run },
         };
 
-        const runtime_entries = [_]Entry{
+        const trailing_tail_entries = [_]Entry{
             .{ .opcode = .PUSH0, .handler = &tailPush0 },
             .{ .opcode = .SHL, .handler = &ShiftHandler(.SHL, .left).run },
             .{ .opcode = .SHR, .handler = &ShiftHandler(.SHR, .right).run },
@@ -231,18 +280,18 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         // resolves the active opcode to the same builtin.
         const table: [256]*const Handler = blk: {
             @setEvalBranchQuota(20_000);
-            var handlers: [256]*const Handler = @splat(&tailCold);
-            for (promoted_entries) |entry| {
+            var handlers: [256]*const Handler = @splat(&tailFallback);
+            for (prepended_tail_entries) |entry| {
                 if (tailFastPath(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
                 }
             }
-            for (direct_entries) |entry| {
+            for (stable_tail_entries) |entry| {
                 if (tailFastPath(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
                 }
             }
-            for (runtime_entries) |entry| {
+            for (trailing_tail_entries) |entry| {
                 if (tailFastPath(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
                 }
@@ -457,12 +506,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return halt(ctx, ip, sp, gas, .invalid_opcode);
         }
 
-        // All halt() exits are exceptional (invalid opcode/stack/static, OOG).
-        // noinline + cold marks every call site unlikely, so LLVM sinks the
-        // exit blocks below each handler's fall-through fast path; an inline
-        // @branchHint does not propagate to the caller's branch.
-        noinline fn halt(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, reason: Interpreter.FrameHalt) TailStatus {
-            @branchHint(.cold);
+        inline fn halt(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, reason: Interpreter.FrameHalt) TailStatus {
             _ = gas;
             ctx.frame.halt(reason);
             return ctx.finish(ip, sp, 0, .done);
@@ -479,10 +523,10 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return ctx.finish(ip, sp, gas, .done);
         }
 
-        fn tailCold(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+        fn tailFallback(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             ctx.spill(ip, sp, gas);
             const opcode_byte = (ip - 1)[0];
-            executeColdOpcode(opcode_byte, ctx.frame) catch |err| {
+            Instructions.execute(opcode_byte, ctx.frame) catch |err| {
                 ctx.err = err;
                 return .thrown;
             };
@@ -491,23 +535,6 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
             }
             return tailNext(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, ctx);
-        }
-
-        noinline fn executeColdOpcode(opcode_byte: u8, frame: *CallFrame) anyerror!void {
-            // Common host-bound opcodes already paid the tail spill. Resolve their
-            // specification entry directly instead of crossing the generic cold switch again.
-            return switch (opcode_byte) {
-                @intFromEnum(Opcode.LOG0) => executeResolvedCold(.LOG0, frame),
-                @intFromEnum(Opcode.LOG1) => executeResolvedCold(.LOG1, frame),
-                @intFromEnum(Opcode.LOG2) => executeResolvedCold(.LOG2, frame),
-                @intFromEnum(Opcode.LOG3) => executeResolvedCold(.LOG3, frame),
-                @intFromEnum(Opcode.LOG4) => executeResolvedCold(.LOG4, frame),
-                else => Instructions.execute(opcode_byte, frame),
-            };
-        }
-
-        inline fn executeResolvedCold(comptime opcode: Opcode, frame: *CallFrame) anyerror!void {
-            return Instructions.executeDispatchEntryForByte(@intFromEnum(opcode), frame);
         }
 
         fn tailSload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
@@ -642,8 +669,31 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                         .bit_and => a & b,
                         .bit_or => a | b,
                         .bit_xor => a ^ b,
+                        .sign_extend => blk: {
+                            if (a >= 32) break :blk b;
+                            const sign_bit: u8 = @as(u8, @intCast(a)) * 8 + 7;
+                            const mask = std.math.shl(u256, 1, sign_bit) - 1;
+                            break :blk if (((b >> sign_bit) & 1) != 0) b | ~mask else b & mask;
+                        },
                     };
                     return tailNext(ip, nsp, next_gas, ctx);
+                }
+            };
+        }
+
+        fn TernaryHandler(comptime opcode: Opcode, comptime op: TernaryOp) type {
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+                    if (!ctx.hasStack(sp, 3)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                    const a = (sp - 1)[0];
+                    const b = (sp - 2)[0];
+                    const result_slot = sp - 3;
+                    result_slot[0] = switch (op) {
+                        .add_mod => uint256.addMod(a, b, result_slot[0]),
+                        .mul_mod => uint256.mulMod(a, b, result_slot[0]),
+                    };
+                    return tailNext(ip, sp - 2, next_gas, ctx);
                 }
             };
         }
@@ -663,6 +713,69 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                         .return_data_size => @intCast(ctx.frame.return_data.len),
                     };
                     return tailNext(ip, sp + 1, next_gas, ctx);
+                }
+            };
+        }
+
+        fn ContextValueHandler(comptime opcode: Opcode, comptime value: ContextValue) type {
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                    const execution_context = ctx.frame.host.executionContext() catch |err| {
+                        recordError(ctx, ip, sp, next_gas, err);
+                        return .thrown;
+                    };
+                    sp[0] = switch (value) {
+                        .origin => execution_context.transaction.origin.toU256(),
+                        .gas_price => execution_context.transaction.gas_price,
+                        .base_fee => execution_context.block.base_fee,
+                        .coinbase => execution_context.block.coinbase.toU256(),
+                        .timestamp => execution_context.block.timestamp,
+                        .number => execution_context.block.number,
+                        .slot_number => execution_context.block.slot_number,
+                        .prev_randao => execution_context.block.difficulty_or_prev_randao,
+                        .gas_limit => execution_context.block.gas_limit,
+                        .chain_id => execution_context.chain.chain_id,
+                        .blob_base_fee => execution_context.block.blob_base_fee,
+                    };
+                    return tailNext(ip, sp + 1, next_gas, ctx);
+                }
+            };
+        }
+
+        fn HostValueHandler(comptime opcode: Opcode, comptime value: HostValue) type {
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+
+                    if (comptime value == .self_balance) {
+                        if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                        const result = environment_instruction.readSelfBalance(ctx.frame) catch |err| {
+                            recordError(ctx, ip, sp, next_gas, err);
+                            return .thrown;
+                        };
+                        sp[0] = result;
+                        return tailNext(ip, sp + 1, next_gas, ctx);
+                    }
+
+                    if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                    const slot = sp - 1;
+                    const target_address: evmz.AddressWord = .fromU256(slot[0]);
+                    ctx.frame.gas_left = next_gas;
+                    const result = EnvironmentInstructions.readAccountValue(ctx.frame, target_address, switch (value) {
+                        .balance => .balance,
+                        .code_size => .code_size,
+                        .code_hash => .code_hash,
+                        .self_balance => unreachable,
+                    }) catch |err| {
+                        recordError(ctx, ip, slot, ctx.frame.gas_left, err);
+                        return .thrown;
+                    };
+                    slot[0] = result orelse return ctx.finish(ip, slot, ctx.frame.gas_left, .done);
+                    return tailNext(ip, sp, ctx.frame.gas_left, ctx);
                 }
             };
         }
@@ -783,6 +896,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                     slot[0] = switch (op) {
                         .iszero => @intFromBool(slot[0] == 0),
                         .bit_not => ~slot[0],
+                        .count_leading_zeros => @clz(slot[0]),
                     };
                     return tailNext(ip, sp, next_gas, ctx);
                 }

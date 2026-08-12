@@ -6,6 +6,12 @@ const CallFrame = Interpreter.CallFrame;
 const Host = evmz.Host;
 const AccountAccessStatus = evmz.execution.AccountAccessStatus;
 
+pub const AccountValue = enum {
+    balance,
+    code_size,
+    code_hash,
+};
+
 fn trackCopyGas(frame: *CallFrame, size: usize) bool {
     const size_i64 = std.math.cast(i64, size) orelse {
         @branchHint(.unlikely);
@@ -40,26 +46,40 @@ pub fn bind(comptime spec: ExactSpec) type {
             return frame.trackGas(access_gas);
         }
 
-        pub fn balance(frame: *CallFrame) !void {
+        pub fn readAccountValue(frame: *CallFrame, target_address: evmz.AddressWord, comptime value: AccountValue) !?u256 {
+            const access_gas = switch (value) {
+                .balance, .code_hash => blk: {
+                    const cold_gas = exact_instructions.account_read_cold_access_gas orelse break :blk 0;
+                    break :blk if (try frame.host.accessAccount(target_address) == .cold) cold_gas else 0;
+                },
+                .code_size => blk: {
+                    if (exact_instructions.codeAccountAccessGas(.warm) == null) break :blk 0;
+                    const status = accountAccessStatus(try frame.host.accessAccount(target_address));
+                    break :blk exact_instructions.codeAccountAccessGas(status) orelse 0;
+                },
+            };
+            if (!frame.trackGas(access_gas)) return null;
+            try frame.traceAccountAccess(target_address);
+            return switch (value) {
+                .balance => try frame.host.getBalance(target_address),
+                .code_size => try frame.host.getCodeSize(target_address),
+                .code_hash => try frame.host.getCodeHash(target_address),
+            };
+        }
+
+        fn replaceAddressWithValue(frame: *CallFrame, comptime value: AccountValue) !void {
             const target_address_word = frame.pop() orelse return;
             const target_address: evmz.AddressWord = .fromU256(target_address_word);
-            if (exact_instructions.account_read_cold_access_gas) |cold_access_gas| {
-                if (try frame.host.accessAccount(target_address) == .cold) {
-                    if (!frame.trackGas(cold_access_gas)) return;
-                }
-            }
-            try frame.traceAccountAccess(target_address);
-            const address_balance = try frame.host.getBalance(target_address);
-            frame.stack.push(address_balance);
+            const result = try Self.readAccountValue(frame, target_address, value) orelse return;
+            frame.stack.push(result);
+        }
+
+        pub fn balance(frame: *CallFrame) !void {
+            return Self.replaceAddressWithValue(frame, .balance);
         }
 
         pub fn extcodesize(frame: *CallFrame) !void {
-            const target_address_word = frame.pop() orelse return;
-            const target_address: evmz.AddressWord = .fromU256(target_address_word);
-            if (!try Self.trackCodeAccountAccessGas(frame, target_address)) return;
-            try frame.traceAccountAccess(target_address);
-            const size = try frame.host.getCodeSize(target_address);
-            frame.stack.push(size);
+            return Self.replaceAddressWithValue(frame, .code_size);
         }
 
         pub fn extcodecopy(frame: *CallFrame) !void {
@@ -85,16 +105,7 @@ pub fn bind(comptime spec: ExactSpec) type {
         }
 
         pub fn extcodehash(frame: *CallFrame) !void {
-            const address_word = frame.pop() orelse return;
-            const target_address: evmz.AddressWord = .fromU256(address_word);
-            if (exact_instructions.account_read_cold_access_gas) |cold_access_gas| {
-                if (try frame.host.accessAccount(target_address) == .cold) {
-                    if (!frame.trackGas(cold_access_gas)) return;
-                }
-            }
-            try frame.traceAccountAccess(target_address);
-            const code_hash = try frame.host.getCodeHash(target_address);
-            frame.stack.push(code_hash);
+            return Self.replaceAddressWithValue(frame, .code_hash);
         }
     };
 }
@@ -226,8 +237,11 @@ pub fn codecopy(frame: *CallFrame) !void {
 }
 
 pub fn selfbalance(frame: *CallFrame) !void {
-    const address_balance = try frame.host.getBalance(.fromAddress(frame.msg.recipient));
-    _ = frame.push(address_balance);
+    _ = frame.push(try readSelfBalance(frame));
+}
+
+pub fn readSelfBalance(frame: *CallFrame) !u256 {
+    return frame.host.getBalance(.fromAddress(frame.msg.recipient));
 }
 
 test "BALANCE cold account access gas comes from the exact spec" {

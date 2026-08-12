@@ -4,9 +4,9 @@
 //! same frame stack, checkpoints, and typed continuations one boundary at a time
 //! instead, so a caller can inspect or intervene between opcodes.
 //!
-//! The driver deliberately reuses `Instruction(spec).execute` — the same cold
-//! route production tail dispatch already falls to for host-bound opcodes. It
-//! adds no dispatch table, so opcode semantics here are production semantics.
+//! The driver deliberately reuses `Instruction(spec).execute` — the same
+//! frame-materialized fallback used by production tail dispatch. It adds no
+//! dispatch table, so opcode semantics here are production semantics.
 //!
 //! `Session` owns the runtime frame span and prepared-code execution scope across
 //! pauses. The caller keeps ownership of the transaction attempt, root bytecode,
