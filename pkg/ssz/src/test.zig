@@ -13,18 +13,18 @@ test "SSZ Mapped preserves a basic wire schema for a domain newtype" {
     const Slot = struct {
         value: u64,
 
-        fn toWire(value: @This()) u64 {
-            return value.value;
-        }
+        const Host = @This();
+        const WireMapping = struct {
+            pub fn toWire(value: Host) u64 {
+                return value.value;
+            }
 
-        fn fromWire(value: u64) @This() {
-            return .{ .value = value };
-        }
+            pub fn fromWire(value: u64) Host {
+                return .{ .value = value };
+            }
+        };
 
-        pub const Ssz = ssz.Mapped(@This(), ssz.Fixed(u64), .{
-            .toWire = toWire,
-            .fromWire = fromWire,
-        });
+        pub const Ssz = ssz.Mapped(@This(), ssz.Fixed(u64), WireMapping);
     };
     const Message = struct { slot: Slot, enabled: bool };
     const MessageSsz = ssz.Container(Message, .{});
@@ -54,18 +54,18 @@ test "SSZ Mapped keeps basic element packing inside lists" {
     const Slot = struct {
         value: u64,
 
-        fn toWire(value: @This()) u64 {
-            return value.value;
-        }
+        const Host = @This();
+        const WireMapping = struct {
+            pub fn toWire(value: Host) u64 {
+                return value.value;
+            }
 
-        fn fromWire(value: u64) @This() {
-            return .{ .value = value };
-        }
+            pub fn fromWire(value: u64) Host {
+                return .{ .value = value };
+            }
+        };
 
-        pub const Ssz = ssz.Mapped(@This(), ssz.Fixed(u64), .{
-            .toWire = toWire,
-            .fromWire = fromWire,
-        });
+        pub const Ssz = ssz.Mapped(@This(), ssz.Fixed(u64), WireMapping);
     };
     const Slots = ssz.ListOf(Slot.Ssz, 4);
     const Integers = ssz.List(u64, 4);
@@ -93,18 +93,18 @@ test "SSZ Mapped transfers allocator-backed wire ownership" {
     const Bytes = struct {
         value: []const u8,
 
-        fn toWire(value: @This()) []const u8 {
-            return value.value;
-        }
+        const Host = @This();
+        const WireMapping = struct {
+            pub fn toWire(value: Host) []const u8 {
+                return value.value;
+            }
 
-        fn fromWire(value: []const u8) @This() {
-            return .{ .value = value };
-        }
+            pub fn fromWire(value: []const u8) Host {
+                return .{ .value = value };
+            }
+        };
 
-        pub const Ssz = ssz.Mapped(@This(), ssz.ByteList(8), .{
-            .toWire = toWire,
-            .fromWire = fromWire,
-        });
+        pub const Ssz = ssz.Mapped(@This(), ssz.ByteList(8), WireMapping);
     };
 
     const borrowed = try Bytes.Ssz.decode("mapped");

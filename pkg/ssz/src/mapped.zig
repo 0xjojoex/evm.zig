@@ -4,7 +4,7 @@ const Error = @import("error.zig").Error;
 
 /// Adapt a host representation to an existing canonical SSZ codec.
 ///
-/// `mapping.toWire` and `mapping.fromWire` must be infallible, lossless, and
+/// `Mapping.toWire` and `Mapping.fromWire` must be infallible, lossless, and
 /// ownership-preserving. Serialization, validation, and Merkleization remain
 /// defined by `WireCodec`; the mapping changes only the in-memory value type.
 /// Both round trips must preserve the value. For allocator-backed wire codecs,
@@ -13,8 +13,10 @@ const Error = @import("error.zig").Error;
 pub fn Mapped(
     comptime Host: type,
     comptime WireCodec: type,
-    comptime mapping: Mapping(Host, WireCodec),
+    comptime Mapping: type,
 ) type {
+    comptime assertMapping(Host, WireCodec, Mapping);
+
     const Common = struct {
         pub const Value = Host;
         pub const kind = WireCodec.kind;
@@ -22,33 +24,33 @@ pub fn Mapped(
         pub const is_variable_size = WireCodec.is_variable_size;
         pub const fixed_size = WireCodec.fixed_size;
         pub const requires_allocator = WireCodec.requires_allocator;
-        pub const toWire = mapping.toWire;
+        pub const toWire = Mapping.toWire;
 
         pub fn encodedLen(value: Host) Error!usize {
-            return WireCodec.encodedLen(mapping.toWire(value));
+            return WireCodec.encodedLen(Mapping.toWire(value));
         }
 
         pub fn encode(out: []u8, value: Host) Error![]u8 {
-            return WireCodec.encode(out, mapping.toWire(value));
+            return WireCodec.encode(out, Mapping.toWire(value));
         }
 
         pub fn decodeAlloc(
             allocator: std.mem.Allocator,
             bytes: []const u8,
         ) (Error || std.mem.Allocator.Error)!Host {
-            return mapping.fromWire(try codec.decodeOwned(WireCodec, allocator, bytes));
+            return Mapping.fromWire(try codec.decodeOwned(WireCodec, allocator, bytes));
         }
 
         pub fn decode(bytes: []const u8) Error!Host {
-            return mapping.fromWire(try WireCodec.decode(bytes));
+            return Mapping.fromWire(try WireCodec.decode(bytes));
         }
 
         pub const validate = WireCodec.validate;
 
         pub fn deinit(allocator: std.mem.Allocator, value: *Host) void {
-            var wire = mapping.toWire(value.*);
+            var wire = Mapping.toWire(value.*);
             codec.deinitOwned(WireCodec, allocator, &wire);
-            value.* = mapping.fromWire(wire);
+            value.* = Mapping.fromWire(wire);
         }
     };
 
@@ -100,10 +102,15 @@ pub fn Mapped(
     };
 }
 
-fn Mapping(comptime Host: type, comptime WireCodec: type) type {
-    comptime codec.assertCodec(WireCodec);
-    return struct {
-        toWire: *const fn (Host) WireCodec.Value,
-        fromWire: *const fn (WireCodec.Value) Host,
-    };
+fn assertMapping(comptime Host: type, comptime WireCodec: type, comptime Mapping: type) void {
+    codec.assertCodec(WireCodec);
+    inline for (.{ "toWire", "fromWire" }) |decl| {
+        if (!@hasDecl(Mapping, decl)) @compileError("SSZ Mapping is missing " ++ decl);
+    }
+    if (@TypeOf(Mapping.toWire) != fn (Host) WireCodec.Value) {
+        @compileError("SSZ Mapping.toWire must be fn (Host) WireCodec.Value");
+    }
+    if (@TypeOf(Mapping.fromWire) != fn (WireCodec.Value) Host) {
+        @compileError("SSZ Mapping.fromWire must be fn (WireCodec.Value) Host");
+    }
 }

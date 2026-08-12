@@ -103,10 +103,7 @@ pub const Address = extern struct {
     };
 
     pub const Rlp = rlp.Mapped(@This(), rlp.FixedBytes(len), WireMapping);
-    pub const Ssz = ssz.Mapped(@This(), ssz.ByteVector(len), .{
-        .toWire = WireMapping.toWire,
-        .fromWire = WireMapping.fromWire,
-    });
+    pub const Ssz = ssz.Mapped(@This(), ssz.ByteVector(len), WireMapping);
 };
 
 /// Word-aligned account identity used across execution callbacks and dense

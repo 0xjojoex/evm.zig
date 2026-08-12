@@ -83,20 +83,9 @@ pub const DepositTransaction = struct {
     is_system_transaction: bool = false,
     input: []const u8 = &.{},
 
-    const OptionalAddressRlp = rlp.Mapped(?Address, rlp.OptionalFixedBytes(Address.len), struct {
-        pub fn toWire(value: ?Address) ?[Address.len]u8 {
-            return if (value) |target| target.bytes else null;
-        }
-
-        pub fn fromWire(value: ?[Address.len]u8) ?Address {
-            return if (value) |bytes| Address.fromBytes(bytes) else null;
-        }
-    });
-
-    pub const Rlp = rlp.Struct(@This(), .{
-        // OP encodes an absent recipient as the empty RLP byte string.
-        .to = OptionalAddressRlp,
-    });
+    // `to` infers `rlp.Optional`: OP encodes an absent recipient as the empty
+    // RLP byte string, and a 20-byte address can never collide with it.
+    pub const Rlp = rlp.Struct(@This(), .{});
 
     pub const DecodeError = rlp.DecodeError || error{UnexpectedTypeId};
     pub const EncodeError = rlp.EncodeError || std.mem.Allocator.Error;

@@ -529,21 +529,51 @@ test "integer and boolean codecs enforce Ethereum minimal integers" {
     try std.testing.expectError(error.IntTooLarge, rlp.decode(bool, &.{0x02}));
 }
 
-test "optional fixed bytes distinguish empty from exact-width values" {
-    const OptionalAddress = rlp.OptionalFixedBytes(2);
+test "inferred optionals distinguish empty from exact-width values" {
     var out: [3]u8 = undefined;
 
-    const absent = try rlp.encodeAs(OptionalAddress, &out, null);
+    const absent = try rlp.encode(?[2]u8, &out, null);
     try std.testing.expectEqualSlices(u8, &.{0x80}, absent);
-    try std.testing.expectEqual(null, try rlp.decodeAs(OptionalAddress, absent));
+    try std.testing.expectEqual(null, try rlp.decode(?[2]u8, absent));
 
     const address = [2]u8{ 0x00, 0x01 };
-    const present = try rlp.encodeAs(OptionalAddress, &out, address);
+    const present = try rlp.encode(?[2]u8, &out, address);
     try std.testing.expectEqualSlices(u8, &.{ 0x82, 0x00, 0x01 }, present);
-    try std.testing.expectEqual(address, (try rlp.decodeAs(OptionalAddress, present)).?);
+    try std.testing.expectEqual(address, (try rlp.decode(?[2]u8, present)).?);
 
-    try std.testing.expectError(error.UnexpectedLength, rlp.decodeAs(OptionalAddress, &.{0x01}));
-    try std.testing.expectError(error.ExpectedBytes, rlp.decodeAs(OptionalAddress, &.{0xc0}));
+    try std.testing.expectError(error.UnexpectedLength, rlp.decode(?[2]u8, &.{0x01}));
+    try std.testing.expectError(error.ExpectedBytes, rlp.decode(?[2]u8, &.{0xc0}));
+}
+
+test "optional allocating lists tell an absent value from an empty one" {
+    const allocator = std.testing.allocator;
+
+    const absent = try rlp.encodeAlloc(?[]const u16, allocator, null);
+    defer allocator.free(absent);
+    try std.testing.expectEqualSlices(u8, &.{0x80}, absent);
+    try std.testing.expectEqual(null, try rlp.decodeAlloc(?[]const u16, allocator, absent));
+
+    const empty = try rlp.encodeAlloc(?[]const u16, allocator, @as([]const u16, &.{}));
+    defer allocator.free(empty);
+    try std.testing.expectEqualSlices(u8, &.{0xc0}, empty);
+
+    var decoded = try rlp.decodeAlloc(?[]const u16, allocator, empty);
+    defer rlp.deinit(?[]const u16, allocator, &decoded);
+    try std.testing.expectEqual(0, decoded.?.len);
+}
+
+test "optional struct fields tell an absent value from an empty list" {
+    const Inner = struct { count: u8 };
+    const Outer = struct { nested: ?Inner, tail: u8 };
+    var out: [8]u8 = undefined;
+
+    const absent = try rlp.encode(Outer, &out, Outer{ .nested = null, .tail = 7 });
+    try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x80, 0x07 }, absent);
+    try std.testing.expectEqual(null, (try rlp.decode(Outer, absent)).nested);
+
+    const present = try rlp.encode(Outer, &out, Outer{ .nested = .{ .count = 0 }, .tail = 7 });
+    try std.testing.expectEqualSlices(u8, &.{ 0xc3, 0xc1, 0x80, 0x07 }, present);
+    try std.testing.expectEqual(0, (try rlp.decode(Outer, present)).nested.?.count);
 }
 
 test "typed byte codecs cover the canonical 55 and 56 byte boundary" {
