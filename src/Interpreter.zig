@@ -78,7 +78,6 @@ pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
     bytecode: Bytecode.View,
-    io: ?*frame_io.Slot = null,
 };
 
 pub fn Interpreter(comptime spec: Spec) type {
@@ -248,15 +247,50 @@ pub const CallFrame = struct {
         msg_storage: *Host.Message,
         stack: Stack,
         memory_storage: *Memory.Storage,
-    ) !void {
+        io: *frame_io.Slot,
+    ) void {
+        self.initFields(
+            options,
+            msg_storage,
+            stack,
+            Memory.init(memory_storage, allocator),
+            io,
+        );
+    }
+
+    pub fn initRetainingMemoryCapacity(
+        self: *CallFrame,
+        allocator: std.mem.Allocator,
+        options: Init,
+        msg_storage: *Host.Message,
+        stack: Stack,
+        memory_storage: *Memory.Storage,
+        io: *frame_io.Slot,
+    ) void {
+        self.initFields(
+            options,
+            msg_storage,
+            stack,
+            Memory.initRetainingCapacity(memory_storage, allocator),
+            io,
+        );
+    }
+
+    fn initFields(
+        self: *CallFrame,
+        options: Init,
+        msg_storage: *Host.Message,
+        stack: Stack,
+        memory: Memory,
+        io: *frame_io.Slot,
+    ) void {
         const code = options.bytecode.bytes;
-        const io = options.io orelse return error.MissingFrameIoStorage;
 
         self.host = options.host;
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
         self.stack = stack;
-        self.memory = Memory.init(memory_storage, allocator);
+        self.memory = memory;
         self.pc = 0;
         self.code = code;
         self.gas_left = options.msg.gas;
@@ -274,6 +308,12 @@ pub const CallFrame = struct {
 
     pub fn deinit(self: *CallFrame) void {
         self.memory.deinit();
+        self.deinitOwnedFields();
+        self.* = undefined;
+    }
+
+    pub fn deinitRetainingMemoryCapacity(self: *CallFrame) void {
+        self.memory.deinitRetainingCapacity();
         self.deinitOwnedFields();
         self.* = undefined;
     }
@@ -593,18 +633,15 @@ pub const CallFrameSlot = struct {
         std.debug.assert(@offsetOf(CallFrameSlot, "memory_storage") == @offsetOf(CallFrameSlot, "frame") + @sizeOf(CallFrame));
     }
 
-    pub fn init(self: *CallFrameSlot, allocator: std.mem.Allocator, options: Init) !void {
+    pub fn init(self: *CallFrameSlot, allocator: std.mem.Allocator, options: Init) void {
         self.io_storage.init(allocator);
-        errdefer self.io_storage.deinit();
-
-        var frame_options = options;
-        frame_options.io = &self.io_storage;
-        try self.frame.init(
+        self.frame.init(
             allocator,
-            frame_options,
+            options,
             &self.msg,
             Stack.init(&self.stack_storage, 0),
             &self.memory_storage,
+            &self.io_storage,
         );
     }
 
@@ -640,12 +677,18 @@ test "call frame can execute with externally supplied stack storage" {
     var bytecode = try Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
     var frame: CallFrame = undefined;
-    try frame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .bytecode = bytecode.view(),
-        .io = &io_storage,
-    }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
+    frame.init(
+        std.testing.allocator,
+        .{
+            .host = &host,
+            .msg = &msg,
+            .bytecode = bytecode.view(),
+        },
+        &msg_storage,
+        Stack.init(&stack_storage, 0),
+        &memory_storage,
+        &io_storage,
+    );
     defer frame.deinit();
     try std.testing.expectEqual(@intFromPtr(&stack_storage), @intFromPtr(frame.stack.base));
     try std.testing.expectEqual(@as(u32, 0), frame.stack.base_word);
@@ -679,12 +722,18 @@ test "call frame can execute with externally supplied memory storage" {
     var bytecode = try Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
     var frame: CallFrame = undefined;
-    try frame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .bytecode = bytecode.view(),
-        .io = &io_storage,
-    }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
+    frame.init(
+        std.testing.allocator,
+        .{
+            .host = &host,
+            .msg = &msg,
+            .bytecode = bytecode.view(),
+        },
+        &msg_storage,
+        Stack.init(&stack_storage, 0),
+        &memory_storage,
+        &io_storage,
+    );
     defer frame.deinit();
     try std.testing.expectEqual(@intFromPtr(&memory_storage), @intFromPtr(frame.memory.bytes));
 
@@ -839,12 +888,18 @@ test "captured tail memory exhaustion remains a resource error" {
     io_storage.init(std.testing.allocator);
     defer io_storage.deinit();
     var frame: CallFrame = undefined;
-    try frame.init(no_growth_allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .bytecode = bytecode.view(),
-        .io = &io_storage,
-    }, &msg_storage, Stack.init(&stack_storage, 0), &memory_storage);
+    frame.init(
+        no_growth_allocator,
+        .{
+            .host = &host,
+            .msg = &msg,
+            .bytecode = bytecode.view(),
+        },
+        &msg_storage,
+        Stack.init(&stack_storage, 0),
+        &memory_storage,
+        &io_storage,
+    );
     defer frame.deinit();
 
     var tape = trace.TraceTape.initGrowable(std.testing.allocator);
@@ -1221,7 +1276,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
 
             const slot = try allocator.create(CallFrameSlot);
             errdefer allocator.destroy(slot);
-            try slot.init(allocator, .{
+            slot.init(allocator, .{
                 .host = options.host,
                 .msg = options.msg,
                 .bytecode = bytecode,

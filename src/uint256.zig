@@ -1,8 +1,15 @@
 //! 256-bit unsigned integer helpers for EVM word arithmetic and byte conversion.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const use_limb_div_mod = true;
+
+const native_endian = builtin.target.cpu.arch.endian();
+
+inline fn wireLimbIndex(comptime wire_index: usize) usize {
+    return if (native_endian == .little) 3 - wire_index else wire_index;
+}
 
 pub inline fn fromBytes32(bytes: *const [32]u8) u256 {
     return std.mem.readInt(u256, bytes, .big);
@@ -16,6 +23,40 @@ pub inline fn toBytes32(value: u256) [32]u8 {
 
 pub inline fn writeBytes32(bytes: *[32]u8, value: u256) void {
     std.mem.writeInt(u256, bytes, value, .big);
+}
+
+pub inline fn readBytes32Into(bytes: *const [32]u8, destination: *u256) void {
+    const limbs: *[4]u64 = @ptrCast(destination);
+    inline for (0..4) |wire_index| {
+        limbs[wireLimbIndex(wire_index)] = std.mem.readInt(
+            u64,
+            bytes[wire_index * 8 ..][0..8],
+            .big,
+        );
+    }
+}
+
+pub inline fn readAlignedBytes32Into(bytes: *align(8) const [32]u8, destination: *u256) void {
+    const limbs: *[4]u64 = @ptrCast(destination);
+    inline for (0..4) |wire_index| {
+        const wire_limb = @as(*align(8) const u64, @ptrCast(&bytes[wire_index * 8])).*;
+        limbs[wireLimbIndex(wire_index)] = if (native_endian == .little)
+            @byteSwap(wire_limb)
+        else
+            wire_limb;
+    }
+}
+
+pub inline fn writeBytes32From(bytes: *[32]u8, source: *const u256) void {
+    const limbs: *const [4]u64 = @ptrCast(source);
+    inline for (0..4) |wire_index| {
+        std.mem.writeInt(
+            u64,
+            bytes[wire_index * 8 ..][0..8],
+            limbs[wireLimbIndex(wire_index)],
+            .big,
+        );
+    }
 }
 
 pub inline fn sdiv(a: u256, b: u256) u256 {
@@ -198,14 +239,7 @@ inline fn toLimbs(out: *Word4, value: u256) void {
     out[3] = @truncate(value >> 192);
 }
 
-inline fn fromLimbs(limbs: Word4) u256 {
-    return @as(u256, limbs[0]) |
-        (@as(u256, limbs[1]) << 64) |
-        (@as(u256, limbs[2]) << 128) |
-        (@as(u256, limbs[3]) << 192);
-}
-
-inline fn fromLimbsPtr(limbs: *const Word4) u256 {
+inline fn fromLimbs(limbs: *const Word4) u256 {
     return @as(u256, limbs[0]) |
         (@as(u256, limbs[1]) << 64) |
         (@as(u256, limbs[2]) << 128) |
@@ -640,7 +674,7 @@ inline fn divKnuth(value: u256, denominator: u256) u256 {
     toLimbs(&numerator, value);
     toLimbs(&divisor, denominator);
     divModKnuth(&quotient, &remainder, &numerator, &divisor);
-    return fromLimbsPtr(&quotient);
+    return fromLimbs(&quotient);
 }
 
 inline fn modKnuth(value: u256, denominator: u256) u256 {
@@ -652,7 +686,7 @@ inline fn modKnuth(value: u256, denominator: u256) u256 {
     toLimbs(&numerator, value);
     toLimbs(&divisor, denominator);
     divModKnuth(&quotient, &remainder, &numerator, &divisor);
-    return fromLimbsPtr(&remainder);
+    return fromLimbs(&remainder);
 }
 
 fn mulModKnuth(lhs: u256, rhs: u256, modulo: u256) u256 {
@@ -667,7 +701,7 @@ fn mulModKnuth(lhs: u256, rhs: u256, modulo: u256) u256 {
     toLimbs(&modulo_limbs, modulo);
     mulFull4(&product, &lhs_limbs, &rhs_limbs);
     mod8By4Knuth(&reduced, &product, &modulo_limbs);
-    return fromLimbs(reduced);
+    return fromLimbs(&reduced);
 }
 
 fn expectDivModMatchesBuiltin(numerator: u256, denominator: u256) !void {
@@ -814,6 +848,27 @@ test "bytes32 conversion uses Ethereum byte order" {
 
     writeBytes32(&bytes, 1);
     try std.testing.expectEqual(@as(u8, 1), bytes[31]);
+}
+
+test "limb-oriented bytes32 conversion matches the integer oracle" {
+    var random = std.Random.DefaultPrng.init(0x6d6c6f61645f6576);
+    for (0..1_000) |_| {
+        var bytes: [32]u8 = undefined;
+        random.random().bytes(&bytes);
+
+        var value: u256 = undefined;
+        readBytes32Into(&bytes, &value);
+        try std.testing.expectEqual(std.mem.readInt(u256, &bytes, .big), value);
+
+        var aligned_bytes: [32]u8 align(8) = bytes;
+        var aligned_value: u256 = undefined;
+        readAlignedBytes32Into(&aligned_bytes, &aligned_value);
+        try std.testing.expectEqual(value, aligned_value);
+
+        var encoded: [32]u8 = undefined;
+        writeBytes32From(&encoded, &value);
+        try std.testing.expectEqualSlices(u8, &bytes, &encoded);
+    }
 }
 
 test addMod {

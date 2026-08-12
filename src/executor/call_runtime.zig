@@ -991,7 +991,7 @@ pub fn bind(comptime Executor: type) type {
             std.debug.assert(self.prepared_code_execution != null);
             var host_iface = self.host();
             var slot: Interpreter.CallFrameSlot = undefined;
-            try slot.init(self.allocator, .{
+            slot.init(self.allocator, .{
                 .host = &host_iface,
                 .msg = &message,
                 .bytecode = bytecode,

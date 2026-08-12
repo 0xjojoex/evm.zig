@@ -943,7 +943,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
-            (sp - 1)[0] = ctx.frame.memory.read(offset);
+            ctx.frame.memory.readInto(offset, &(sp - 1)[0]);
             return tailNext(ip, sp, mem_gas, ctx);
         }
 
@@ -953,7 +953,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
-            ctx.frame.memory.write(offset, nsp[0]);
+            ctx.frame.memory.writeFrom(offset, &nsp[0]);
             return tailNext(ip, nsp, mem_gas, ctx);
         }
 
