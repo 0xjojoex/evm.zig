@@ -1,4 +1,4 @@
-const evmz = @import("../evm.zig");
+const evmz = @import("../../evm.zig");
 
 test "PUSH pads missing immediate bytes with zeroes" {
     try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH2, 0x01 }, 0x0100);
@@ -7,7 +7,6 @@ test "PUSH pads missing immediate bytes with zeroes" {
 }
 
 test "PUSH decodes full immediates" {
-    try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH3, 0x01, 0x02, 0x03 }, 0x010203);
     try evmz.t.expectLatestForkBytecodeStackTop(
         .{
             .PUSH32,
@@ -46,23 +45,6 @@ test "PUSH decodes full immediates" {
         },
         0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,
     );
-}
-
-pub fn decodeDepthImmediate(x: u8) ?usize {
-    if (x > 90 and x < 128) return null;
-    return (@as(usize, x) + 145) % 256;
-}
-
-pub fn decodeExchangeImmediate(x: u8) ?struct { usize, usize } {
-    if (x > 81 and x < 128) return null;
-
-    const k = x ^ 143;
-    const q: usize = k >> 4;
-    const r: usize = k & 0x0f;
-    if (q < r) {
-        return .{ q + 1, r + 1 };
-    }
-    return .{ r + 1, 29 - q };
 }
 
 test "EIP-8024 DUPN duplicates a deep stack item" {

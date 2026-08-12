@@ -1,4 +1,4 @@
-const evmz = @import("../evm.zig");
+const evmz = @import("../../evm.zig");
 
 test "MSTORE overwrites already expanded memory" {
     try evmz.t.expectLatestForkBytecodeStackTop(.{

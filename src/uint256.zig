@@ -126,8 +126,68 @@ pub inline fn bitLength(value: u256) u16 {
     return 256 - @clz(value);
 }
 
+/// Returns how many bytes are needed to represent the significant part of a 256-bit integer.
+pub inline fn countSignificantBytesSize(value: u256) i64 {
+    return @divFloor(256 - @as(i64, @intCast(@clz(value))) + 7, 8);
+}
+
+test countSignificantBytesSize {
+    try std.testing.expectEqual(countSignificantBytesSize(0), 0);
+    try std.testing.expectEqual(countSignificantBytesSize(1), 1);
+    try std.testing.expectEqual(countSignificantBytesSize(255), 1);
+    try std.testing.expectEqual(countSignificantBytesSize(256), 2);
+    try std.testing.expectEqual(countSignificantBytesSize(1000), 2);
+    try std.testing.expectEqual(countSignificantBytesSize(std.math.maxInt(u256)), 32);
+}
+
 pub inline fn ceilDiv(value: u256, denominator: u256) u256 {
     return @divFloor(value, denominator) + @intFromBool(value % denominator != 0);
+}
+
+/// Wrapping exponentiation. Early-exits the cases where the result is fully
+/// determined (or known to overflow to zero) before the square-and-multiply
+/// loop, which is what EXP relies on for large exponents.
+pub inline fn wrapExp(a: u256, expo: u256) u256 {
+    if (expo == 0) return 1;
+    if (a == 0) return 0;
+    if (a == 1) return 1;
+    if (a == 2) {
+        if (expo >= 256) return 0;
+        return std.math.shl(u256, 1, @as(u16, @intCast(expo)));
+    }
+
+    const trailing_zero_bits: u16 = @intCast(@ctz(a));
+    if (trailing_zero_bits != 0) {
+        const zero_threshold = std.math.divCeil(u16, 256, trailing_zero_bits) catch unreachable;
+        if (expo >= zero_threshold) return 0;
+    }
+
+    var value = a;
+    var exponent = expo;
+    var result: u256 = 1;
+    while (exponent > 0) : (exponent >>= 1) {
+        if ((exponent & 1) == 1) {
+            result *%= value;
+        }
+        value *%= value;
+    }
+
+    return result;
+}
+
+test wrapExp {
+    try std.testing.expectEqual(@as(u256, 1), wrapExp(0, 0));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(0, 3));
+    try std.testing.expectEqual(@as(u256, 1), wrapExp(1, std.math.maxInt(u256)));
+    try std.testing.expectEqual(wrapExp(2, 2), 4);
+    try std.testing.expectEqual(@as(u256, 1) << 255, wrapExp(2, 255));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(2, 256));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(4, 128));
+
+    const a = 2;
+    const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+    const result = wrapExp(a, exponent);
+    try std.testing.expectEqual(@as(u256, 0), result);
 }
 
 /// Left shift via a u128 limb funnel. LLVM lowers a variable-amount u256 `<<`

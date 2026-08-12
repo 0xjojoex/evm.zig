@@ -836,3 +836,15 @@ pub fn specAt(comptime revision: Revision) Spec {
 
 pub const stable: Spec = osaka;
 pub const latest: Spec = amsterdam;
+
+test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 200, .refund = 4800 }, constantinople.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 5000, .refund = 0 }, petersburg.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 800, .refund = 4200 }, istanbul.storage.sstoreGas(.modified_restored));
+}
+
+test "Amsterdam SSTORE separates access and write gas from state gas" {
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 10_000, .refund = 0 }, amsterdam.storage.sstoreGas(.added));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 0, .refund = 10_000 }, amsterdam.storage.sstoreGas(.added_deleted));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 0, .refund = -2_480 }, amsterdam.storage.sstoreGas(.deleted_restored));
+}

@@ -7,9 +7,8 @@ const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
 const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
-const arithmetic_instruction = @import("../instruction/arithmetic.zig");
 const environment_instruction = @import("../instruction/environment.zig");
-const stack_instruction = @import("../instruction/stack.zig");
+const immediate_instruction = @import("../instruction/immediate.zig");
 const storage_instruction = @import("../instruction/storage.zig");
 const system_instruction = @import("../instruction/system.zig");
 const trace = @import("../trace.zig");
@@ -123,7 +122,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
     return struct {
         const Self = @This();
         const Instructions = instruction.Instruction(spec);
-        const EnvironmentInstructions = environment_instruction.Enviroment(spec);
+        const EnvironmentInstructions = environment_instruction.Environment(spec);
         const StorageInstructions = storage_instruction.Storage(spec);
         const SystemInstructions = system_instruction.System(spec);
         // ip rides in a register across tail calls; it always points at the NEXT
@@ -723,7 +722,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
             const exponent = (sp - 2)[0];
             const nsp = sp - 1;
             const byte_gas = spec.instruction.exp_byte_gas;
-            const dynamic_gas = byte_gas * arithmetic_instruction.countSignificantBytesSize(exponent);
+            const dynamic_gas = byte_gas * uint256.countSignificantBytesSize(exponent);
             const final_gas = chargeGas(ip, nsp - 1, next_gas, ctx, dynamic_gas) orelse return .out_of_gas;
             (nsp - 1)[0] = expOutlined(base, exponent);
             return tailNext(ip, nsp, final_gas, ctx);
@@ -948,7 +947,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
                     const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
 
                     if (comptime opcode == .EXCHANGE) {
-                        const n, const m = stack_instruction.decodeExchangeImmediate(ip[0]) orelse
+                        const n, const m = immediate_instruction.decodeExchangeImmediate(ip[0]) orelse
                             return halt(ctx, ip, sp, next_gas, .invalid_opcode);
                         if (!ctx.hasStack(sp, @max(n, m) + 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                         const top = sp - 1;
@@ -956,7 +955,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct {
                         return tailNext(ip + 1, sp, next_gas, ctx);
                     }
 
-                    const depth = stack_instruction.decodeDepthImmediate(ip[0]) orelse
+                    const depth = immediate_instruction.decodeDepthImmediate(ip[0]) orelse
                         return halt(ctx, ip, sp, next_gas, .invalid_opcode);
                     if (comptime opcode == .DUPN) {
                         if (!ctx.hasStack(sp, depth)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
@@ -1453,7 +1452,7 @@ noinline fn smodOutlined(a: u256, b: u256) u256 {
 }
 
 noinline fn expOutlined(base: u256, exponent: u256) u256 {
-    return arithmetic_instruction.wrapExp(base, exponent);
+    return uint256.wrapExp(base, exponent);
 }
 
 fn tapeStepOutcome(state: *const Interpreter.FrameState) trace.TraceStepOutcome {

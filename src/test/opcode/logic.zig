@@ -1,4 +1,4 @@
-const evmz = @import("../evm.zig");
+const evmz = @import("../../evm.zig");
 
 test "BYTE with large offset pushes zero" {
     try evmz.t.expectLatestForkBytecodeStackTop(.{ .PUSH1, 0x01, .PUSH1, 0xff, .BYTE }, 0);
