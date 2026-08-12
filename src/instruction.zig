@@ -154,6 +154,56 @@ test "untraced interpreter tail dispatch respects resolved dispatch target" {
     try std.testing.expectEqual(interpreter.Status.invalid, result.status());
 }
 
+test "untraced interpreter tail dispatch rejects invalid and undefined bytes" {
+    inline for (.{ @intFromEnum(Opcode.INVALID), 0x0c }) |opcode_byte| {
+        var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+        defer mock_host.deinit();
+        var host = mock_host.host();
+        var msg = evmz.t.defaultMessage();
+        const code = [_]u8{opcode_byte};
+        var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+        defer bytecode.deinit(std.testing.allocator);
+
+        var frame = try Interpreter(evmz.eth.amsterdam).OwnedCallFrame.init(std.testing.allocator, .{
+            .host = &host,
+            .msg = &msg,
+            .source = .{ .bytecode = bytecode.view() },
+        });
+        defer frame.deinit();
+        var intpr = frame.interpreter();
+
+        const result = try intpr.execute();
+
+        try std.testing.expectEqual(interpreter.Status.invalid, result.status());
+        try std.testing.expectEqual(@as(i64, 0), frame.frame.gas_left);
+    }
+}
+
+test "untraced interpreter tail dispatch executes a repointed builtin" {
+    const spec = instructionOverrideSpec(.ADD, .{ .builtin = .SUB });
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = evmz.t.bytecode(.{ .PUSH1, 7, .PUSH1, 2, .ADD, .STOP });
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .source = .{ .bytecode = bytecode.view() },
+    });
+    defer frame.deinit();
+    var intpr = frame.interpreter();
+
+    const result = try intpr.execute();
+
+    try std.testing.expectEqual(interpreter.Status.success, result.status());
+    try std.testing.expectEqual(@as(u256, 2) -% 7, frame.frame.stack.pop());
+}
+
 test "execute calls custom dispatch target directly" {
     const CustomHandler = struct {
         pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
@@ -179,6 +229,38 @@ test "execute calls custom dispatch target directly" {
     try Instruction(spec).execute(@intFromEnum(Opcode.ADD), frame.frame);
 
     try std.testing.expect(frame.frame.isRunning());
+    try std.testing.expectEqual(@as(u256, 42), frame.frame.stack.pop());
+    try std.testing.expectEqual(msg.gas - staticGas(.ADD), frame.frame.gas_left);
+}
+
+test "untraced interpreter tail dispatch calls a custom target directly" {
+    const CustomHandler = struct {
+        pub inline fn execute(comptime Instructions: type, frame: *CallFrame) anyerror!void {
+            if (!Instructions.chargeStaticGas(frame, .ADD)) return;
+            _ = frame.push(42);
+        }
+    };
+    const spec = instructionOverrideSpec(.ADD, .{ .custom = CustomHandler });
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = evmz.t.bytecode(.{ .ADD, .STOP });
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var frame = try Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .source = .{ .bytecode = bytecode.view() },
+    });
+    defer frame.deinit();
+    var intpr = frame.interpreter();
+
+    const result = try intpr.execute();
+
+    try std.testing.expectEqual(interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(u256, 42), frame.frame.stack.pop());
     try std.testing.expectEqual(msg.gas - staticGas(.ADD), frame.frame.gas_left);
 }

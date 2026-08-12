@@ -1,9 +1,9 @@
 //! Interactive front end for the internal controlled-execution session.
 //!
 //! Paste bytecode, then either walk it a boundary at a time or run it out. Every
-//! opcode executes through `Instruction(spec).execute`, the same route the
-//! production interpreter falls to for host-bound opcodes, so what this prints
-//! is what the engine does.
+//! opcode executes through definition-owned `Instruction(spec).execute`, sharing
+//! builtin and custom semantics with the production tail table while remaining
+//! frame-materialized so the session can pause after exactly one opcode.
 //!
 //! This is deliberately not an example of a public API: it imports the internal
 //! session directly so the POC can be driven without exporting debugger

@@ -45,7 +45,7 @@ pub fn dup(frame: *CallFrame, comptime n: u8) !void {
 
 pub fn dupn(frame: *CallFrame) !void {
     const immediate = immediateByte(frame);
-    const n = decodeSingle(immediate) orelse {
+    const n = decodeDepthImmediate(immediate) orelse {
         frame.halt(.invalid_opcode);
         return;
     };
@@ -108,7 +108,7 @@ pub fn swap(frame: *CallFrame, comptime n: u8) !void {
 
 pub fn swapn(frame: *CallFrame) !void {
     const immediate = immediateByte(frame);
-    const n = decodeSingle(immediate) orelse {
+    const n = decodeDepthImmediate(immediate) orelse {
         frame.halt(.invalid_opcode);
         return;
     };
@@ -118,7 +118,7 @@ pub fn swapn(frame: *CallFrame) !void {
 
 pub fn exchange(frame: *CallFrame) !void {
     const immediate = immediateByte(frame);
-    const n, const m = decodePair(immediate) orelse {
+    const n, const m = decodeExchangeImmediate(immediate) orelse {
         frame.halt(.invalid_opcode);
         return;
     };
@@ -130,12 +130,12 @@ fn immediateByte(frame: *CallFrame) u8 {
     return if (frame.pc < frame.code.len) frame.code[frame.pc] else 0;
 }
 
-fn decodeSingle(x: u8) ?usize {
+pub fn decodeDepthImmediate(x: u8) ?usize {
     if (x > 90 and x < 128) return null;
     return (@as(usize, x) + 145) % 256;
 }
 
-fn decodePair(x: u8) ?struct { usize, usize } {
+pub fn decodeExchangeImmediate(x: u8) ?struct { usize, usize } {
     if (x > 81 and x < 128) return null;
 
     const k = x ^ 143;

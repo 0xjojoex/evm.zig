@@ -9,7 +9,9 @@ const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
 const arithmetic_instruction = @import("../instruction/arithmetic.zig");
 const environment_instruction = @import("../instruction/environment.zig");
+const stack_instruction = @import("../instruction/stack.zig");
 const storage_instruction = @import("../instruction/storage.zig");
+const system_instruction = @import("../instruction/system.zig");
 const trace = @import("../trace.zig");
 
 const CallFrame = Interpreter.CallFrame;
@@ -109,6 +111,7 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         const Instructions = instruction.Instruction(spec);
         const EnvironmentInstructions = environment_instruction.bind(spec);
         const StorageInstructions = storage_instruction.bind(spec);
+        const SystemInstructions = system_instruction.bind(spec);
         // ip rides in a register across tail calls; it always points at the NEXT
         // byte to decode (one past the handler's own opcode byte).
         const Handler = fn ([*]const u8, [*]u256, i64, *Context) TailStatus;
@@ -228,6 +231,19 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
         // Reverse emission makes the final entry the stable edge nearest the
         // accepted direct block. Prepend later promotions to preserve addresses.
         const prepended_tail_entries = [_]Entry{
+            .{ .opcode = .SELFDESTRUCT, .handler = &SystemHandler(.SELFDESTRUCT).run },
+            .{ .opcode = .STATICCALL, .handler = &SystemHandler(.STATICCALL).run },
+            .{ .opcode = .CREATE2, .handler = &SystemHandler(.CREATE2).run },
+            .{ .opcode = .DELEGATECALL, .handler = &SystemHandler(.DELEGATECALL).run },
+            .{ .opcode = .CALLCODE, .handler = &SystemHandler(.CALLCODE).run },
+            .{ .opcode = .CALL, .handler = &SystemHandler(.CALL).run },
+            .{ .opcode = .CREATE, .handler = &SystemHandler(.CREATE).run },
+            .{ .opcode = .EXCHANGE, .handler = &ExtendedStackHandler(.EXCHANGE).run },
+            .{ .opcode = .SWAPN, .handler = &ExtendedStackHandler(.SWAPN).run },
+            .{ .opcode = .DUPN, .handler = &ExtendedStackHandler(.DUPN).run },
+            .{ .opcode = .BLOBHASH, .handler = &tailBlobhash },
+            .{ .opcode = .BLOCKHASH, .handler = &tailBlockhash },
+            .{ .opcode = .EXTCODECOPY, .handler = &tailExtcodecopy },
             .{ .opcode = .SELFBALANCE, .handler = &HostValueHandler(.SELFBALANCE, .self_balance).run },
             .{ .opcode = .EXTCODEHASH, .handler = &HostValueHandler(.EXTCODEHASH, .code_hash).run },
             .{ .opcode = .EXTCODESIZE, .handler = &HostValueHandler(.EXTCODESIZE, .code_size).run },
@@ -276,11 +292,12 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             .{ .opcode = .SHR, .handler = &ShiftHandler(.SHR, .right).run },
         };
 
-        // Direct handlers are installed only when the exact dispatch table
-        // resolves the active opcode to the same builtin.
+        // Direct handlers are installed when the exact dispatch table resolves
+        // the byte to the same builtin. Invalid targets fail immediately;
+        // custom and repointed targets are patched in after the canonical set.
         const table: [256]*const Handler = blk: {
             @setEvalBranchQuota(20_000);
-            var handlers: [256]*const Handler = @splat(&tailFallback);
+            var handlers: [256]*const Handler = @splat(&tailInvalid);
             for (prepended_tail_entries) |entry| {
                 if (tailFastPath(entry.opcode)) {
                     handlers[@intFromEnum(entry.opcode)] = entry.handler;
@@ -312,6 +329,16 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                 const opcode: Opcode = @enumFromInt(opcode_byte);
                 if (tailFastPath(opcode)) {
                     handlers[opcode_byte] = &SwapHandler(opcode).run;
+                }
+            }
+            for (0..handlers.len) |opcode_index| {
+                const opcode_byte: u8 = @intCast(opcode_index);
+                switch (Instructions.entry(opcode_byte).dispatchTarget()) {
+                    .invalid => {},
+                    .custom => |Custom| handlers[opcode_index] = &CustomHandler(Custom).run,
+                    .builtin => |opcode| if (!tailFastPath(@enumFromInt(opcode_byte))) {
+                        handlers[opcode_index] = builtinTailHandler(opcode);
+                    },
                 }
             }
             break :blk handlers;
@@ -389,6 +416,21 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
 
         inline fn tailFastPath(comptime opcode: Opcode) bool {
             return Instructions.tailFastPathBuiltin(opcode);
+        }
+
+        inline fn builtinTailHandler(comptime opcode: Opcode) *const Handler {
+            inline for (prepended_tail_entries ++ stable_tail_entries ++ trailing_tail_entries) |entry| {
+                if (opcode == entry.opcode) return entry.handler;
+            }
+            const opcode_byte = @intFromEnum(opcode);
+            if (opcode_byte >= @intFromEnum(Opcode.PUSH1) and opcode_byte <= @intFromEnum(Opcode.PUSH32))
+                return &PushHandler(opcode).run;
+            if (opcode_byte >= @intFromEnum(Opcode.DUP1) and opcode_byte <= @intFromEnum(Opcode.DUP16))
+                return &DupHandler(opcode).run;
+            if (opcode_byte >= @intFromEnum(Opcode.SWAP1) and opcode_byte <= @intFromEnum(Opcode.SWAP16))
+                return &SwapHandler(opcode).run;
+            if (opcode == .INVALID) return &tailInvalid;
+            @compileError("missing tail handler for builtin " ++ @tagName(opcode));
         }
 
         pub fn execute(frame: *CallFrame) anyerror!void {
@@ -523,18 +565,25 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
             return ctx.finish(ip, sp, gas, .done);
         }
 
-        fn tailFallback(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            ctx.spill(ip, sp, gas);
-            const opcode_byte = (ip - 1)[0];
-            Instructions.execute(opcode_byte, ctx.frame) catch |err| {
-                ctx.err = err;
-                return .thrown;
+        fn tailInvalid(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            return halt(ctx, ip, sp, gas, .invalid_opcode);
+        }
+
+        fn CustomHandler(comptime Custom: type) type {
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    ctx.spill(ip, sp, gas);
+                    Custom.execute(Instructions, ctx.frame) catch |err| {
+                        ctx.err = err;
+                        return .thrown;
+                    };
+                    ctx.refreshStackBase();
+                    if (!ctx.frame.isRunning()) {
+                        return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
+                    }
+                    return tailNext(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, ctx);
+                }
             };
-            ctx.refreshStackBase();
-            if (!ctx.frame.isRunning()) {
-                return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
-            }
-            return tailNext(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, ctx);
         }
 
         fn tailSload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
@@ -776,6 +825,142 @@ pub fn Dispatch(comptime spec: ExactSpec, comptime cfg: struct { traced: bool })
                     };
                     slot[0] = result orelse return ctx.finish(ip, slot, ctx.frame.gas_left, .done);
                     return tailNext(ip, sp, ctx.frame.gas_left, ctx);
+                }
+            };
+        }
+
+        fn tailExtcodecopy(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            const next_gas = charge(.EXTCODECOPY, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 4)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+
+            const nsp = sp - 4;
+            const target_address: evmz.AddressWord = .fromU256((sp - 1)[0]);
+            const dest_offset_word = (sp - 2)[0];
+            const source_offset_word = (sp - 3)[0];
+            const size = wordToUsizeOrOog(nsp[0], ip, nsp, next_gas, ctx) orelse return .done;
+            const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .done;
+
+            ctx.frame.gas_left = next_gas;
+            const access_ok = EnvironmentInstructions.trackCodeAccountAccessGas(ctx.frame, target_address) catch |err| {
+                recordError(ctx, ip, nsp, ctx.frame.gas_left, err);
+                return .thrown;
+            };
+            if (!access_ok) return ctx.finish(ip, nsp, ctx.frame.gas_left, .done);
+
+            const memory_gas = expandMemory(dest_offset, size, ip, nsp, ctx.frame.gas_left, ctx) orelse return memoryFailureStatus(ctx);
+            const copy_gas = copyWordGas(size, ip, nsp, memory_gas, ctx) orelse return .done;
+            const final_gas = chargeGas(ip, nsp, memory_gas, ctx, copy_gas) orelse return .out_of_gas;
+            ctx.frame.traceAccountAccess(target_address) catch |err| {
+                recordError(ctx, ip, nsp, final_gas, err);
+                return .thrown;
+            };
+
+            const dest = ctx.frame.memory.writeSlice(dest_offset, size);
+            var copied: usize = 0;
+            if (std.math.cast(usize, source_offset_word)) |source_offset| {
+                copied = @min(ctx.frame.host.copyCode(target_address, source_offset, dest) catch |err| {
+                    recordError(ctx, ip, nsp, final_gas, err);
+                    return .thrown;
+                }, dest.len);
+            }
+            if (copied < dest.len) @memset(dest[copied..], 0);
+            return tailNext(ip, nsp, final_gas, ctx);
+        }
+
+        fn tailBlockhash(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            const next_gas = charge(.BLOCKHASH, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+            const slot = sp - 1;
+            const execution_context = ctx.frame.host.executionContext() catch |err| {
+                recordError(ctx, ip, sp, next_gas, err);
+                return .thrown;
+            };
+            const current_number: u256 = execution_context.block.number;
+            const oldest_hashable = if (current_number > 256) current_number - 256 else 0;
+            slot[0] = if (slot[0] < current_number and slot[0] >= oldest_hashable)
+                ctx.frame.host.getBlockHash(slot[0]) catch |err| {
+                    recordError(ctx, ip, sp, next_gas, err);
+                    return .thrown;
+                }
+            else
+                0;
+            return tailNext(ip, sp, next_gas, ctx);
+        }
+
+        fn tailBlobhash(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+            if (requireOpcode(.BLOBHASH, ip, sp, gas, ctx)) |status| return status;
+            const next_gas = charge(.BLOBHASH, ip, sp, gas, ctx) orelse return .out_of_gas;
+            if (!ctx.hasStack(sp, 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+            const slot = sp - 1;
+            const execution_context = ctx.frame.host.executionContext() catch |err| {
+                recordError(ctx, ip, sp, next_gas, err);
+                return .thrown;
+            };
+            const index = std.math.cast(usize, slot[0]);
+            slot[0] = if (index) |i|
+                if (i < execution_context.transaction.blob_hashes.len) execution_context.transaction.blob_hashes[i] else 0
+            else
+                0;
+            return tailNext(ip, sp, next_gas, ctx);
+        }
+
+        fn ExtendedStackHandler(comptime opcode: Opcode) type {
+            comptime std.debug.assert(opcode == .DUPN or opcode == .SWAPN or opcode == .EXCHANGE);
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+
+                    if (comptime opcode == .EXCHANGE) {
+                        const n, const m = stack_instruction.decodeExchangeImmediate(ip[0]) orelse
+                            return halt(ctx, ip, sp, next_gas, .invalid_opcode);
+                        if (!ctx.hasStack(sp, @max(n, m) + 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                        const top = sp - 1;
+                        std.mem.swap(u256, &((top - n)[0]), &((top - m)[0]));
+                        return tailNext(ip + 1, sp, next_gas, ctx);
+                    }
+
+                    const depth = stack_instruction.decodeDepthImmediate(ip[0]) orelse
+                        return halt(ctx, ip, sp, next_gas, .invalid_opcode);
+                    if (comptime opcode == .DUPN) {
+                        if (!ctx.hasStack(sp, depth)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                        if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                        sp[0] = (sp - depth)[0];
+                        return tailNext(ip + 1, sp + 1, next_gas, ctx);
+                    }
+
+                    if (!ctx.hasStack(sp, depth + 1)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                    const top = sp - 1;
+                    std.mem.swap(u256, &top[0], &((top - depth)[0]));
+                    return tailNext(ip + 1, sp, next_gas, ctx);
+                }
+            };
+        }
+
+        fn SystemHandler(comptime opcode: Opcode) type {
+            comptime std.debug.assert(opcode == .CREATE or opcode == .CALL or opcode == .CALLCODE or
+                opcode == .DELEGATECALL or opcode == .CREATE2 or opcode == .STATICCALL or
+                opcode == .SELFDESTRUCT);
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
+                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
+                    ctx.spill(ip, sp, next_gas);
+                    (switch (opcode) {
+                        .CREATE => SystemInstructions.create(ctx.frame),
+                        .CALL, .CALLCODE, .DELEGATECALL, .STATICCALL => SystemInstructions.callByOp(ctx.frame, opcode),
+                        .CREATE2 => SystemInstructions.create2(ctx.frame),
+                        .SELFDESTRUCT => SystemInstructions.selfdestruct(ctx.frame),
+                        else => unreachable,
+                    }) catch |err| {
+                        ctx.err = err;
+                        return .thrown;
+                    };
+                    ctx.refreshStackBase();
+                    if (!ctx.frame.isRunning()) {
+                        return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
+                    }
+                    return tailNext(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, ctx);
                 }
             };
         }

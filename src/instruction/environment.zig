@@ -39,7 +39,7 @@ pub fn bind(comptime spec: ExactSpec) type {
     return struct {
         const Self = @This();
 
-        fn trackCodeAccountAccessGas(frame: *CallFrame, target_address: evmz.AddressWord) !bool {
+        pub fn trackCodeAccountAccessGas(frame: *CallFrame, target_address: evmz.AddressWord) !bool {
             if (exact_instructions.codeAccountAccessGas(.warm) == null) return true;
             const access_status = accountAccessStatus(try frame.host.accessAccount(target_address));
             const access_gas = exact_instructions.codeAccountAccessGas(access_status) orelse 0;
