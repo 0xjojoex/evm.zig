@@ -244,11 +244,9 @@ pub const CountingHost = struct {
         };
     }
 
-    noinline fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
+    noinline fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        _ = address;
-        _ = topics;
-        _ = data;
+        _ = event_log;
         self.counters.log += 1;
     }
 

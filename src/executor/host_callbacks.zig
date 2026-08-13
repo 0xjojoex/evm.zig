@@ -182,13 +182,9 @@ pub fn bind(comptime Executor: type) type {
             return size;
         }
 
-        fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
+        fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            try self.state.emitLog(.{
-                .address = address,
-                .topics = topics,
-                .data = data,
-            });
+            try self.state.emitLog(event_log);
         }
 
         fn getBlockHash(ptr: *anyopaque, number: u256) !u256 {

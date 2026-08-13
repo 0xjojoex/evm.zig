@@ -28,7 +28,6 @@ const ReentrantInstruction = struct {
                     .input_data = &.{},
                     .value = 0,
                     .is_static = frame.msg.is_static,
-                    .real_sender = frame.msg.real_sender,
                     .code_address = child,
                 })).expectCall();
                 if (result.status() != .success) return error.ReentrantChildFailed;

@@ -21,11 +21,6 @@ const TerminalCause = execution.TerminalCause;
 
 pub const max_call_depth: u16 = 1024;
 
-pub const Account = struct {
-    nonce: u64 = 0,
-    balance: u256,
-};
-
 pub const StorageLoadResult = struct {
     value: u256,
     access_status: AccessStatus,
@@ -48,7 +43,6 @@ pub const Message = struct {
     input_data: []const u8,
     value: u256,
     is_static: bool = false,
-    real_sender: Address align(8) = addr(0),
     code_address: Address align(8) = addr(0),
 
     /// Terminal validation already resolved by the opcode handler. The
@@ -57,7 +51,7 @@ pub const Message = struct {
     precheck_failure: ?TerminalCause = null,
 
     comptime {
-        std.debug.assert(@sizeOf(Message) == 176);
+        std.debug.assert(@sizeOf(Message) == 144);
         std.debug.assert(@alignOf(Message) == 16);
     }
 };
@@ -270,25 +264,23 @@ pub fn precheckResult(msg: Message) ?Result {
 }
 
 pub const CallKind = enum(u8) {
-    call = 0,
-    delegatecall = 1,
-    callcode = 2,
-    create = 3,
-    create2 = 4,
-    staticcall = 5,
+    call,
+    staticcall,
+    delegatecall,
+    callcode,
+    create,
+    create2,
 
     pub fn fromOpcode(opcode: Opcode) CallKind {
-        switch (opcode) {
-            Opcode.CALL => return CallKind.call,
-            Opcode.STATICCALL => return CallKind.staticcall,
-            Opcode.DELEGATECALL => return CallKind.delegatecall,
-            Opcode.CALLCODE => return CallKind.callcode,
-            Opcode.CREATE => return CallKind.create,
-            Opcode.CREATE2 => return CallKind.create2,
-            else => {
-                unreachable;
-            },
-        }
+        return switch (opcode) {
+            .CALL => .call,
+            .STATICCALL => .staticcall,
+            .DELEGATECALL => .delegatecall,
+            .CALLCODE => .callcode,
+            .CREATE => .create,
+            .CREATE2 => .create2,
+            else => unreachable,
+        };
     }
 };
 
@@ -311,7 +303,7 @@ pub const VTable = struct {
     getCodeSize: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
     getCodeHash: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
     copyCode: *const fn (ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) anyerror!usize,
-    emitLog: *const fn (ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) anyerror!void,
+    emitLog: *const fn (ptr: *anyopaque, event_log: Log) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
     /// Project the immutable opcode context without copying it. The pointer is
     /// valid while the host owner's current execution scope remains active.
@@ -391,7 +383,7 @@ pub fn storeStorage(self: *Self, address: AddressWord, key: u256, value: u256) !
     return self.vtable.storeStorage(self.ptr, address, key, value);
 }
 pub fn emitLog(self: *Self, event_log: Log) !void {
-    return self.vtable.emitLog(self.ptr, event_log.address, event_log.topics, event_log.data);
+    return self.vtable.emitLog(self.ptr, event_log);
 }
 pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !bool {
     return self.vtable.selfDestruct(self.ptr, address, beneficiary);

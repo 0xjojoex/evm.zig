@@ -154,13 +154,18 @@ fn bytecodeByte(comptime item: anytype) u8 {
 pub const MockHost = struct {
     const Self = @This();
 
+    pub const Account = struct {
+        nonce: u64 = 0,
+        balance: u256,
+    };
+
     alloc: std.mem.Allocator,
     store: std.AutoHashMap(u256, u256),
     logs: std.ArrayList(Host.Log),
     execution_context: ExecutionContext,
     original_store: std.AutoHashMap(u256, u256),
     code: Address.HashMap([]u8),
-    local_account: Address.HashMap(Host.Account),
+    local_account: Address.HashMap(Account),
     removed_account: Address.HashMap(bool),
     storage_reads: u64,
     access_storage_reads: u64,
@@ -176,7 +181,7 @@ pub const MockHost = struct {
             .store = std.AutoHashMap(u256, u256).init(alloc),
             .logs = .empty,
             .original_store = std.AutoHashMap(u256, u256).init(alloc),
-            .local_account = Address.HashMap(Host.Account).init(alloc),
+            .local_account = Address.HashMap(Account).init(alloc),
             .removed_account = Address.HashMap(bool).init(alloc),
             .code = Address.HashMap([]u8).init(alloc),
             .storage_reads = 0,
@@ -219,14 +224,14 @@ pub const MockHost = struct {
         return self.store.get(key) orelse 0;
     }
 
-    fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
+    fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const topics_copy = try self.alloc.dupe(u256, topics);
+        const topics_copy = try self.alloc.dupe(u256, event_log.topics);
         errdefer self.alloc.free(topics_copy);
-        const data_copy = try self.alloc.dupe(u8, data);
+        const data_copy = try self.alloc.dupe(u8, event_log.data);
         errdefer self.alloc.free(data_copy);
         try self.logs.append(self.alloc, .{
-            .address = address,
+            .address = event_log.address,
             .topics = topics_copy,
             .data = data_copy,
         });

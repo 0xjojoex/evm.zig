@@ -625,7 +625,7 @@ pub const CallFrameSlot = struct {
     msg: Host.Message = undefined,
 
     comptime {
-        std.debug.assert(@sizeOf(CallFrameSlot) == 33424);
+        std.debug.assert(@sizeOf(CallFrameSlot) == 33360);
         std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == 0);
         std.debug.assert(@offsetOf(CallFrameSlot, "io_storage") == @sizeOf(Stack.Storage));
         std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @offsetOf(CallFrameSlot, "io_storage") + @sizeOf(frame_io.Slot));
