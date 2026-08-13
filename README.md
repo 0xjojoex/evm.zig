@@ -9,8 +9,11 @@ RV64 guest on SP1 and ZisK.
 ## Status
 
 evmz is pre-release. The version is `0.0.0`, the public API may change between
-commits, and the project has not been audited. `67,066/67,066` EEST vectors
-pass for Glamsterdam devnet-7.
+commits, and the project has not been audited. The pinned
+`tests-glamsterdam-devnet@v8.1.0` state corpus passes `76,450/76,450` vectors,
+and native stateless validation passes all `27,184` runnable
+`tests-zkevm@v0.8.0` fixtures. ZisK matches `27,162/27,184`; the remaining 22
+are tracked crashes in the pinned ZisK alpha BLS12-381 provider.
 
 Implemented:
 

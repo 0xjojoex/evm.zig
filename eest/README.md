@@ -31,8 +31,11 @@ not cached because the state tree alone is roughly 1.5 GB.
 The `Execution spec tests` workflow has independent execution-fixture and
 consensus-SSZ jobs. The execution job runs the full sidecar tests, state corpus,
 and regular BlockSTF corpus with four workers. The SSZ job uses its separately
-pinned consensus-spec archives. zkEVM remains a separate future CI lane until
-its full-corpus baseline is a green required check.
+pinned consensus-spec archives. A third job runs the complete pinned
+`tests-zkevm@v0.8.0` native corpus, tracked-state differential, and mutation
+matrix. The guest workflow runs the same 27,184 fixtures on ZisK: 27,162 match,
+while 22 pinned ZisK alpha BLS12-381 provider crashes remain explicitly tracked;
+the strict release gate does not waive them.
 
 ## Consensus SSZ Fixtures
 
