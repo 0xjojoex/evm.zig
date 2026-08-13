@@ -1337,6 +1337,9 @@ pub fn bind(comptime Executor: type) type {
         /// Host.call resolver for direct `Interpreter.execute()` users. Top-level call
         /// and create transactions enter `CallRuntime` through their executor entrypoints.
         pub fn resolveHostCall(self: *Executor, msg: Host.Message) !Host.Result {
+            // Write protection is enforced through `is_static` alone; a
+            // static call kind that fails to inherit it is a constructor bug.
+            std.debug.assert(msg.kind != .staticcall or msg.is_static);
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 

@@ -41,18 +41,33 @@ pub const StorageStoreResult = struct {
     access_status: AccessStatus,
 };
 
+/// The sub-computation request: what a child frame needs to run, plus what
+/// `call` needs to route it. The interpreter reads only the frame-identity
+/// fields (depth, gas, gas_reservoir, recipient, sender, input_data, value,
+/// is_static); `kind`, `code_address`, and `precheck_failure` are routing
+/// data the host alone consumes.
+///
 /// Address fields are `align(8)` for their by-value field copies on the call
 /// path. The layout this pins is asserted in `Interpreter.zig`.
 pub const Message = struct {
+    /// This frame's own depth; the parent increments before constructing.
+    /// `max_call_depth` is enforced against the parent's depth.
     depth: u16,
     kind: CallKind,
     gas: i64,
     gas_reservoir: i64 = 0,
-    recipient: Address align(8) = addr(0),
+    recipient: Address align(8),
     sender: Address align(8),
     input_data: []const u8,
+    /// For DELEGATECALL this is the parent's value, preserved so CALLVALUE
+    /// answers unchanged; no transfer occurs.
     value: u256,
+    /// Inherited staticness. A `.staticcall` message must set this; the
+    /// executor asserts the implication instead of re-deriving it.
     is_static: bool = false,
+    /// Which account's code runs, for call kinds only: it differs from
+    /// `recipient` under DELEGATECALL/CALLCODE. Creates carry their code in
+    /// `input_data` and leave this at the zero-address sentinel.
     code_address: Address align(8) = addr(0),
 
     /// Terminal validation already resolved by the opcode handler. The
