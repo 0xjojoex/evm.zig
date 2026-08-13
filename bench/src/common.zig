@@ -44,9 +44,8 @@ pub const HostCounters = struct {
     account_exists: u64 = 0,
     balance: u64 = 0,
     nonce: u64 = 0,
-    code_size: u64 = 0,
+    code_read: u64 = 0,
     code_hash: u64 = 0,
-    copy_code: u64 = 0,
     storage_read: u64 = 0,
     storage_write: u64 = 0,
     storage_load: u64 = 0,
@@ -120,8 +119,7 @@ pub const CountingHost = struct {
             .accountExists = accountExists,
             .getBalance = getBalance,
             .getNonce = getNonce,
-            .copyCode = copyCode,
-            .getCodeSize = getCodeSize,
+            .getCode = getCode,
             .getCodeHash = getCodeHash,
             .getStorage = getStorage,
             .setStorage = setStorage,
@@ -160,20 +158,11 @@ pub const CountingHost = struct {
         return 0;
     }
 
-    noinline fn copyCode(ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
+    noinline fn getCode(ptr: *anyopaque, address: AddressWord) ![]const u8 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
-        _ = code_offset;
-        _ = buffer_data;
-        self.counters.copy_code += 1;
-        return 0;
-    }
-
-    noinline fn getCodeSize(ptr: *anyopaque, address: AddressWord) !u256 {
-        const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        _ = address;
-        self.counters.code_size += 1;
-        return 0;
+        self.counters.code_read += 1;
+        return &.{};
     }
 
     noinline fn getCodeHash(ptr: *anyopaque, address: AddressWord) !u256 {

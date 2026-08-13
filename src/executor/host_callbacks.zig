@@ -18,8 +18,7 @@ pub fn bind(comptime Executor: type) type {
                 .accountExists = accountExists,
                 .getBalance = getBalance,
                 .getNonce = getNonce,
-                .copyCode = copyCode,
-                .getCodeSize = getCodeSize,
+                .getCode = getCode,
                 .getCodeHash = getCodeHash,
                 .getStorage = hostGetStorage,
                 .setStorage = setStorage,
@@ -157,23 +156,14 @@ pub fn bind(comptime Executor: type) type {
             return self.state.storeStorage(Executor.executionAddress(address), key, value);
         }
 
-        fn getCodeSize(ptr: *anyopaque, address: AddressWord) !u256 {
+        fn getCode(ptr: *anyopaque, address: AddressWord) ![]const u8 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
-            return (try self.state.getCode(Executor.executionAddress(address))).len;
+            return self.state.getCode(Executor.executionAddress(address));
         }
 
         fn getCodeHash(ptr: *anyopaque, address: AddressWord) !u256 {
             const self: *Executor = @ptrCast(@alignCast(ptr));
             return self.state.getCodeHash(Executor.executionAddress(address));
-        }
-
-        fn copyCode(ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
-            const self: *Executor = @ptrCast(@alignCast(ptr));
-            const code = try self.state.getCode(Executor.executionAddress(address));
-            if (code_offset >= code.len) return 0;
-            const size = @min(buffer_data.len, code.len - code_offset);
-            @memcpy(buffer_data[0..size], code[code_offset .. code_offset + size]);
-            return size;
         }
 
         fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {

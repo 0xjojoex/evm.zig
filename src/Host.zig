@@ -1,8 +1,19 @@
-//! The environment interface the interpreter calls back into.
+//! The interpreter's effect port.
 //!
-//! `Host` is the boundary between the bytecode interpreter and the outside
-//! world — account/storage access, call context, balances, and sub-calls. The
-//! executor supplies the concrete implementation.
+//! `Host` is everything an opcode does to the world outside its own frame:
+//! priced state access, logs, destruction, sub-computation, and the
+//! block-hash capability. Data known before a frame runs (environment,
+//! message, create targets) is not Host's business — it enters at frame
+//! creation. The executor supplies the concrete implementation; the
+//! interpreter is the only consumer, and entries are shaped for it.
+//!
+//! Borrow contract: slices returned by or passed into a callback are valid
+//! until the next call into the same Host, unless an entry documents
+//! otherwise. Implementations that retain borrowed data must copy it.
+//!
+//! This seam is deliberately unstable — it changes when opcode needs change.
+//! A stable external embedding surface (a future C API) is an adapter built
+//! over Host, never a constraint on it.
 
 const std = @import("std");
 const evmz = @import("./evm.zig");
@@ -169,9 +180,10 @@ pub const VTable = struct {
     setStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256, value: u256) anyerror!StorageStatus,
     getBalance: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
     getNonce: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u64,
-    getCodeSize: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
     getCodeHash: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
-    copyCode: *const fn (ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) anyerror!usize,
+    /// Raw account code, including an EIP-7702 delegation designator; EXTCODE*
+    /// opcodes observe the designator itself, never the delegated code.
+    getCode: *const fn (ptr: *anyopaque, address: AddressWord) anyerror![]const u8,
     emitLog: *const fn (ptr: *anyopaque, event_log: Log) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
     accessAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!AccessStatus,
@@ -218,11 +230,8 @@ pub fn observeAccountAccess(self: *Self, address: AddressWord, depth: u16) !void
     const callback = self.vtable.observeAccountAccess orelse return;
     return callback(self.ptr, address, depth);
 }
-pub fn copyCode(self: *Self, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
-    return self.vtable.copyCode(self.ptr, address, code_offset, buffer_data);
-}
-pub fn getCodeSize(self: *Self, address: AddressWord) !u256 {
-    return self.vtable.getCodeSize(self.ptr, address);
+pub fn getCode(self: *Self, address: AddressWord) ![]const u8 {
+    return self.vtable.getCode(self.ptr, address);
 }
 pub fn getCodeHash(self: *Self, address: AddressWord) !u256 {
     return self.vtable.getCodeHash(self.ptr, address);

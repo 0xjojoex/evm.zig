@@ -796,12 +796,16 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             };
 
             const dest = ctx.frame.memory.writeSlice(dest_offset, size);
+            const code = ctx.frame.host.getCode(target_address) catch |err| {
+                recordError(ctx, ip, nsp, final_gas, err);
+                return .thrown;
+            };
             var copied: usize = 0;
             if (std.math.cast(usize, source_offset_word)) |source_offset| {
-                copied = @min(ctx.frame.host.copyCode(target_address, source_offset, dest) catch |err| {
-                    recordError(ctx, ip, nsp, final_gas, err);
-                    return .thrown;
-                }, dest.len);
+                if (source_offset < code.len) {
+                    copied = @min(dest.len, code.len - source_offset);
+                    @memcpy(dest[0..copied], code[source_offset..][0..copied]);
+                }
             }
             if (copied < dest.len) @memset(dest[copied..], 0);
             return tailNext(ip, nsp, final_gas, ctx);

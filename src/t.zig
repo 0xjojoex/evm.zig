@@ -287,42 +287,11 @@ pub const MockHost = struct {
         return 1;
     }
 
-    fn getCodeBuf(self: Self, address: Address, out: []u8) ![]u8 {
-        const removed = self.removed_account.get(address);
-
-        if (removed) |_| {
-            return &.{};
-        }
-
-        const local = self.code.get(address);
-
-        if (local) |code| {
-            @memcpy(out, code);
-            return code;
-        }
-
-        return &.{};
-    }
-
-    pub fn copyCode(ptr: *anyopaque, address_word: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
+    fn getCode(ptr: *anyopaque, address_word: AddressWord) ![]const u8 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const address = address_word.address();
-
-        if (self.removed_account.get(address)) |_| {
-            return 0;
-        }
-
-        const local = self.code.get(address);
-
-        if (local) |code| {
-            if (code_offset >= code.len) return 0;
-            const copied = @min(buffer_data.len, code.len - code_offset);
-            @memcpy(buffer_data[0..copied], code[code_offset..][0..copied]);
-
-            return copied;
-        }
-
-        return 0;
+        if (self.removed_account.get(address)) |_| return &.{};
+        return self.code.get(address) orelse &.{};
     }
 
     fn getBalance(ptr: *anyopaque, address_word: AddressWord) !u256 {
@@ -344,34 +313,12 @@ pub const MockHost = struct {
         return if (self.local_account.get(address)) |account| account.nonce else 0;
     }
 
-    fn getCodeSize(ptr: *anyopaque, address_word: AddressWord) !u256 {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        var buf: [1024]u8 = undefined;
-        const code = try self.getCodeBuf(address_word.address(), &buf);
-        return code.len;
-    }
-
     fn getCodeHash(ptr: *anyopaque, address_word: AddressWord) !u256 {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        const address = address_word.address();
-        var buf: [1024]u8 = undefined;
-        const a = @This();
-
-        const exist = try a.accountExists(self, address_word);
-
-        if (!exist) {
-            return 0;
-        }
-
-        const code = try self.getCodeBuf(address, &buf);
-
-        if (code.len == 0) {
-            return evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
-        }
-        const result = evmz.crypto.keccak256(code);
-        const final_result = evmz.uint256.fromBytes32(&result);
-
-        return final_result;
+        if (!(try accountExists(ptr, address_word))) return 0;
+        const code = try getCode(ptr, address_word);
+        if (code.len == 0) return evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
+        const digest = evmz.crypto.keccak256(code);
+        return evmz.uint256.fromBytes32(&digest);
     }
 
     fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
@@ -469,8 +416,7 @@ pub const MockHost = struct {
             .accountExists = accountExists,
             .getBalance = getBalance,
             .getNonce = getNonce,
-            .copyCode = copyCode,
-            .getCodeSize = getCodeSize,
+            .getCode = getCode,
             .getCodeHash = getCodeHash,
             .getStorage = getStorage,
             .setStorage = setStorage,

@@ -285,7 +285,7 @@ test "prepared tail dispatch reads execution-context values" {
 
 test "prepared tail dispatch reads host account values" {
     const target = evmz.addr(0x1234);
-    var target_code = [_]u8{0xaa} ** 1024;
+    var target_code = [_]u8{0xaa} ** 1337;
     const cases = [_]struct {
         opcode: Opcode,
         expected: u256,
