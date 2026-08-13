@@ -9,7 +9,9 @@ const OpInfo = opcode_info.OpInfo;
 
 pub const Target = union(enum) {
     invalid,
-    builtin: Opcode,
+    builtin,
+    /// The interpreter charges `Entry.info.static_gas` before calling
+    /// `Handler.execute(spec, frame)`; the handler owns dynamic gas and behavior.
     custom: type,
 
     pub fn assertValid(comptime self: Target) void {
@@ -84,13 +86,19 @@ pub const Spec = struct {
         inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].info.static_gas = gas;
     }
 
-    /// Repoint dispatch for one byte, keeping its activation and gas.
+    /// Change dispatch for one byte while keeping its activation and metadata.
+    /// `.builtin` restores that byte's canonical builtin behavior.
     pub fn setTarget(self: *Spec, opcode_byte: u8, comptime target: Target) void {
         self.table[opcode_byte].target = target;
     }
 
     /// Install a complete fork-new instruction on any byte — typically an
-    /// unassigned one.
+    /// unassigned one. Installation cannot change bytecode framing: jumpdest
+    /// analysis and disassembly skip only PUSH immediates, regardless of the
+    /// table. A custom instruction needing an operand must read it from the
+    /// code stream in its handler and keep the operand encoding outside
+    /// 0x5b..0x7f (EIP-8024-style) so the byte never aliases JUMPDEST or a
+    /// PUSH.
     pub fn install(
         self: *Spec,
         comptime name: @EnumLiteral(),
@@ -110,7 +118,7 @@ pub const Spec = struct {
         };
     }
 
-    pub fn codeAccountAccessGas(comptime self: Spec, status: execution.AccountAccessStatus) ?i64 {
+    pub fn codeAccountAccessGas(comptime self: Spec, status: execution.AccessStatus) ?i64 {
         return switch (status) {
             .cold => self.code_account_cold_access_gas,
             .warm => self.code_account_warm_access_gas,
@@ -155,8 +163,17 @@ fn assertNameAvailable(comptime spec: Spec, comptime name: @EnumLiteral(), compt
 pub fn validate(comptime table: Table) void {
     // Covers evaluating the full fork-derivation chain when this forces it.
     @setEvalBranchQuota(100_000);
-    for (table) |entry| {
+    for (table, 0..) |entry, source_index| {
         std.debug.assert(!entry.active or entry.defined());
         entry.target.assertValid();
+        switch (entry.target) {
+            .builtin => {
+                const opcode_byte: u8 = @intCast(source_index);
+                const canonical = opcode_info.info(opcode_byte);
+                std.debug.assert(canonical.defined);
+                std.debug.assert(entry.info.stack_in >= canonical.stack_in);
+            },
+            .invalid, .custom => {},
+        }
     }
 }

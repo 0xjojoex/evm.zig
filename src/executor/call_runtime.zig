@@ -991,7 +991,7 @@ pub fn bind(comptime Executor: type) type {
             std.debug.assert(self.prepared_code_execution != null);
             var host_iface = self.host();
             var slot: Interpreter.CallFrameSlot = undefined;
-            try slot.init(self.allocator, .{
+            slot.init(self.allocator, .{
                 .host = &host_iface,
                 .msg = &message,
                 .bytecode = bytecode,
@@ -1741,7 +1741,7 @@ test "nested runtime error restores its transferred checkpoint once" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const fail_byte: u8 = 0xb0;
     const Fail = struct {
-        pub inline fn execute(comptime _: type, _: *Interpreter.CallFrame) anyerror!void {
+        pub inline fn execute(comptime _: evmz.spec.Spec, _: *Interpreter.CallFrame) anyerror!void {
             return error.ForcedRuntimeFailure;
         }
     };
@@ -1750,7 +1750,6 @@ test "nested runtime error restores its transferred checkpoint once" {
         instructions.install(.SQUARE, fail_byte, .{
             .static_gas = 0,
             .stack_in = 0,
-            .stack_out = 0,
         }, .{ .custom = Fail });
         break :instructions instructions;
     };

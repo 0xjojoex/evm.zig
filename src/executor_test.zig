@@ -19,6 +19,7 @@ const TransactionExecutionStage = executor_module.TransactionExecutionStage;
 const Address = evmz.Address;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
+const Opcode = evmz.Opcode;
 const TrackedState = evmz.state.TrackedState;
 const prepared_code = evmz.prepared_code;
 const eip7702 = executor_module.eip7702;
@@ -1979,7 +1980,7 @@ test "rollback transaction restores branch checkpoint and closes execution conte
     var pre_execution = try executor.branchCheckpoint();
     defer pre_execution.deinit();
 
-    try std.testing.expectEqual(Host.StorageStatus.added, try executor.state.setStorage(contract, 7, 2));
+    try std.testing.expectEqual(execution_values.StorageStatus.added, try executor.state.setStorage(contract, 7, 2));
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
 
     executor.rollbackTransaction(&pre_execution);
@@ -2375,14 +2376,14 @@ test "exact spec drives precompile warm access" {
     try default_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer default_executor.discardStateTransition();
     var default_host = default_executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.warm, try default_host.accessAccount(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(execution_values.AccessStatus.warm, try default_host.accessAccount(.fromAddress(precompile_address)));
 
     var custom_executor = NoPrecompile.Executor.init(std.testing.allocator, .{});
     defer custom_executor.deinit();
     try custom_executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     defer custom_executor.discardStateTransition();
     var custom_host = custom_executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.cold, try custom_host.accessAccount(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(execution_values.AccessStatus.cold, try custom_host.accessAccount(.fromAddress(precompile_address)));
 }
 
 test "exact spec drives precompile execution" {
@@ -2899,13 +2900,79 @@ test "active precompiles are warm but not existing state accounts" {
 
     var host_iface = executor.host();
     try std.testing.expect(!try host_iface.accountExists(.fromAddress(precompile_address)));
-    try std.testing.expectEqual(Host.AccessStatus.warm, try host_iface.accessAccount(.fromAddress(precompile_address)));
+    try std.testing.expectEqual(execution_values.AccessStatus.warm, try host_iface.accessAccount(.fromAddress(precompile_address)));
     try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(.fromAddress(precompile_address)));
 
     // Alive, so the address is a real state account: an EIP-161-empty one is
     // dead and would still report zero.
     try evmz.t.seedExecutorAccount(&executor, precompile_address, .{ .balance = 1 });
     try std.testing.expectEqual(uint256.fromBytes32(&evmz.crypto.keccak256_empty), try host_iface.getCodeHash(.fromAddress(precompile_address)));
+}
+
+test "EXTCODESIZE and CALL canonicalize and share warmth for high-bit address words" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const root = evmz.addr(0xbbbb);
+    const target = evmz.addr(0x1234);
+    const address_word = (@as(u256, 0xdeadbeef) << 224) | target.toU256();
+    const address_bytes = uint256.toBytes32(address_word);
+    const child_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .MSTORE, .PUSH1, 0x20, .PUSH0, .RETURN });
+    var gas_left: [2]i64 = undefined;
+
+    inline for (.{ false, true }, 0..) |prewarm, index| {
+        const root_code = highBitAddressCallCode(prewarm, address_bytes);
+        var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+        defer executor.deinit();
+        try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+        try evmz.t.seedExecutorAccount(&executor, root, .{ .code = &root_code });
+        try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &child_code });
+
+        try executor.beginTransaction(testExecutionContext(sender, 200_000), sender, root);
+        const result = try executor.executeCallTransaction(sender, root, &.{}, .legacy(200_000), 0);
+
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
+        try std.testing.expectEqual(@as(usize, 32), result.output_data.len);
+        try std.testing.expectEqual(@as(u8, 0x2a), result.output_data[31]);
+        try std.testing.expect(executor.state.isAccountWarm(target));
+        gas_left[index] = result.gas_left;
+    }
+
+    // The EXTCODESIZE prefix costs PUSH32 + cold EXTCODESIZE + POP (2705),
+    // while making CALL warm saves 2500 versus the direct-call program.
+    try std.testing.expectEqual(gas_left[0] - 205, gas_left[1]);
+}
+
+fn highBitAddressCallCode(comptime prewarm: bool, address_bytes: [32]u8) [if (prewarm) 83 else 48]u8 {
+    var code: [if (prewarm) 83 else 48]u8 = undefined;
+    var pc: usize = 0;
+    if (prewarm) {
+        code[pc] = Opcode.PUSH32.toByte();
+        @memcpy(code[pc + 1 ..][0..32], &address_bytes);
+        pc += 33;
+        code[pc] = Opcode.EXTCODESIZE.toByte();
+        code[pc + 1] = Opcode.POP.toByte();
+        pc += 2;
+    }
+
+    code[pc] = Opcode.PUSH1.toByte();
+    code[pc + 1] = 0x20;
+    @memset(code[pc + 2 ..][0..4], Opcode.PUSH0.toByte());
+    pc += 6;
+    code[pc] = Opcode.PUSH32.toByte();
+    @memcpy(code[pc + 1 ..][0..32], &address_bytes);
+    pc += 33;
+    code[pc] = Opcode.PUSH2.toByte();
+    code[pc + 1] = 0xff;
+    code[pc + 2] = 0xff;
+    code[pc + 3] = Opcode.CALL.toByte();
+    code[pc + 4] = Opcode.POP.toByte();
+    code[pc + 5] = Opcode.PUSH1.toByte();
+    code[pc + 6] = 0x20;
+    code[pc + 7] = Opcode.PUSH0.toByte();
+    code[pc + 8] = Opcode.RETURN.toByte();
+    pc += 9;
+    std.debug.assert(pc == code.len);
+    return code;
 }
 
 test "delegated precompile targets are warm" {
@@ -2926,7 +2993,7 @@ fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {
     try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &code });
 
     var host_iface = executor.host();
-    try std.testing.expectEqual(Host.AccessStatus.warm, (try host_iface.accessDelegatedAccount(.fromAddress(authority))).?);
+    try std.testing.expectEqual(execution_values.AccessStatus.warm, (try host_iface.accessDelegatedAccount(.fromAddress(authority))).?);
 }
 
 test "sealed observations expose storage state without a trace tape" {

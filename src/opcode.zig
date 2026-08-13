@@ -1,4 +1,13 @@
 //! Shared EVM opcode vocabulary and static per-opcode metadata.
+//!
+//! PUSH1..PUSH32 payloads are the only bytes that are not
+//! instructions. Framing belongs to the code format, not to any instruction
+//! table — a fork may reimplement or reprice a builtin opcode, but never
+//! change what it means; new semantics only land on free bytes. Jumpdest
+//! analysis, code scanning, and disassembly all hardcode this rule and stay
+//! correct for every spec. Opcodes that need an operand (EIP-8024
+//! DUPN/SWAPN/EXCHANGE) read it in the handler with an encoding that avoids
+//! 0x5b..0x7f, so the operand byte stays an instruction boundary.
 
 const std = @import("std");
 
@@ -160,20 +169,15 @@ pub const Opcode = enum(u8) {
     SELFDESTRUCT = 0xff,
     _,
 
-    pub fn isPush(self: Opcode) bool {
-        return self.toByte() >= Opcode.PUSH0.toByte() and self.toByte() <= Opcode.PUSH32.toByte();
-    }
-
     pub fn isPushN(self: Opcode) bool {
         return self.toByte() >= Opcode.PUSH1.toByte() and self.toByte() <= Opcode.PUSH32.toByte();
     }
 
-    pub fn oprand(self: Opcode) usize {
-        if (self.isPushN()) {
-            return self.toByte() - Opcode.PUSH0.toByte();
-        } else {
-            return 0;
-        }
+    /// PUSH payload bytes following this opcode; zero for everything else.
+    /// The single framing rule of the code format (see module doc).
+    pub fn pushImmediateLen(self: Opcode) u8 {
+        if (!self.isPushN()) return 0;
+        return self.toByte() - Opcode.PUSH0.toByte();
     }
 
     pub inline fn toByte(self: Opcode) u8 {
@@ -188,58 +192,22 @@ pub const Opcode = enum(u8) {
     }
 };
 
-/// Control-flow class of an instruction. `.eof` is never produced per-opcode;
-/// callers that group code into blocks derive it when fallthrough reaches EOF.
-pub const ExitKind = enum(u8) {
-    fallthrough,
-    jump,
-    jumpi,
-    stop,
-    return_,
-    revert,
-    invalid,
-    selfdestruct,
-    eof,
-};
-
-/// Per-opcode behavioral flags. Unknown opcode handling is derived from
-/// `!OpInfo.defined` by callers that need that classification.
-pub const Flags = struct {
-    uses_gas_left: bool = false,
-    has_dynamic_gas: bool = false,
-    touches_host: bool = false,
-    writes_state: bool = false,
-};
-
-/// Everything statically known about a single opcode byte — the single source of
-/// truth that the gas / stack / flags / exit / push-width switches collapse into.
-/// Indexed by raw byte via `table`; undefined bytes get the default (invalid) row.
+/// Metadata consumed by exact instruction configuration and trace capture.
+/// Indexed by raw byte via `table`; undefined bytes get the zeroed default row.
 pub const OpInfo = struct {
-    /// false for the 106 unused byte values in 0x00..0xff (and only those;
-    /// INVALID/0xfe is a *defined* opcode with `.exit = .invalid`).
+    /// False for unused byte values; INVALID/0xfe remains a defined opcode.
     defined: bool = false,
     /// Static gas for this row. The shared opcode table holds the baseline;
     /// exact instruction specs copy and reprice the same field.
     static_gas: i64 = 0,
-    /// Minimum stack height required to execute without underflow.
+    /// Minimum stack height required before execution. Variable-depth
+    /// instructions may require more after decoding their immediate operand.
     stack_in: u8 = 0,
-    /// Stack height after execution, relative to `stack_in` (height contribution,
-    /// not "items pushed" — DUP/SWAP read deep without popping).
-    stack_out: u8 = 0,
-    /// PUSH immediate width in bytes (0 for everything else).
-    immediate: u8 = 0,
-    exit: ExitKind = .fallthrough,
-    flags: Flags = .{},
-
-    /// Net stack delta (`stack_out - stack_in`); range -6..+1.
-    pub fn stackChange(self: OpInfo) i16 {
-        return @as(i16, self.stack_out) - @as(i16, self.stack_in);
-    }
 };
 
-/// 256-entry opcode property table. Gap bytes default to the invalid row.
+/// 256-entry opcode property table. Gap bytes default to an undefined row.
 pub const table: [256]OpInfo = blk: {
-    var t = [_]OpInfo{.{ .exit = .invalid }} ** 256;
+    var t = [_]OpInfo{.{}} ** 256;
     for (std.enums.values(Opcode)) |op| {
         var row = infoFor(op);
         row.defined = true;
@@ -253,98 +221,96 @@ pub inline fn info(opcode_byte: u8) OpInfo {
     return table[opcode_byte];
 }
 
-/// The declarative spec: one row per named opcode. `defined` is stamped by
-/// `table`, `exit` defaults to `.fallthrough`, flags default to empty — so a
-/// plain arithmetic op is just gas + stack heights. The `_` prong covers only
-/// unnamed opcode bytes; the compiler still errors if a new named opcode is
-/// added without a row here.
+/// One baseline gas/trace row per named opcode. `defined` is stamped by
+/// `table`. The `_` prong covers unnamed bytes; the compiler still errors if a
+/// new named opcode is added without a row here.
 fn infoFor(op: Opcode) OpInfo {
     return switch (op) {
         // 0x00s — arithmetic
-        .STOP => .{ .exit = .stop },
-        .ADD => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .MUL => .{ .static_gas = 5, .stack_in = 2, .stack_out = 1 },
-        .SUB => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .DIV => .{ .static_gas = 5, .stack_in = 2, .stack_out = 1 },
-        .SDIV => .{ .static_gas = 5, .stack_in = 2, .stack_out = 1 },
-        .MOD => .{ .static_gas = 5, .stack_in = 2, .stack_out = 1 },
-        .SMOD => .{ .static_gas = 5, .stack_in = 2, .stack_out = 1 },
-        .ADDMOD => .{ .static_gas = 8, .stack_in = 3, .stack_out = 1 },
-        .MULMOD => .{ .static_gas = 8, .stack_in = 3, .stack_out = 1 },
-        .EXP => .{ .static_gas = 10, .stack_in = 2, .stack_out = 1, .flags = .{ .has_dynamic_gas = true } },
-        .SIGNEXTEND => .{ .static_gas = 5, .stack_in = 2, .stack_out = 1 },
+        .STOP => .{},
+        .ADD => .{ .static_gas = 3, .stack_in = 2 },
+        .MUL => .{ .static_gas = 5, .stack_in = 2 },
+        .SUB => .{ .static_gas = 3, .stack_in = 2 },
+        .DIV => .{ .static_gas = 5, .stack_in = 2 },
+        .SDIV => .{ .static_gas = 5, .stack_in = 2 },
+        .MOD => .{ .static_gas = 5, .stack_in = 2 },
+        .SMOD => .{ .static_gas = 5, .stack_in = 2 },
+        .ADDMOD => .{ .static_gas = 8, .stack_in = 3 },
+        .MULMOD => .{ .static_gas = 8, .stack_in = 3 },
+        .EXP => .{ .static_gas = 10, .stack_in = 2 },
+        .SIGNEXTEND => .{ .static_gas = 5, .stack_in = 2 },
 
         // 0x10s — comparison & bitwise
-        .LT => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .GT => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .SLT => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .SGT => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .EQ => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .ISZERO => .{ .static_gas = 3, .stack_in = 1, .stack_out = 1 },
-        .AND => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .OR => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .XOR => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .NOT => .{ .static_gas = 3, .stack_in = 1, .stack_out = 1 },
-        .BYTE => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .SHL => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .SHR => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .SAR => .{ .static_gas = 3, .stack_in = 2, .stack_out = 1 },
-        .CLZ => .{ .static_gas = 5, .stack_in = 1, .stack_out = 1 },
+        .LT => .{ .static_gas = 3, .stack_in = 2 },
+        .GT => .{ .static_gas = 3, .stack_in = 2 },
+        .SLT => .{ .static_gas = 3, .stack_in = 2 },
+        .SGT => .{ .static_gas = 3, .stack_in = 2 },
+        .EQ => .{ .static_gas = 3, .stack_in = 2 },
+        .ISZERO => .{ .static_gas = 3, .stack_in = 1 },
+        .AND => .{ .static_gas = 3, .stack_in = 2 },
+        .OR => .{ .static_gas = 3, .stack_in = 2 },
+        .XOR => .{ .static_gas = 3, .stack_in = 2 },
+        .NOT => .{ .static_gas = 3, .stack_in = 1 },
+        .BYTE => .{ .static_gas = 3, .stack_in = 2 },
+        .SHL => .{ .static_gas = 3, .stack_in = 2 },
+        .SHR => .{ .static_gas = 3, .stack_in = 2 },
+        .SAR => .{ .static_gas = 3, .stack_in = 2 },
+        .CLZ => .{ .static_gas = 5, .stack_in = 1 },
 
         // 0x20 — keccak
-        .KECCAK256 => .{ .static_gas = 30, .stack_in = 2, .stack_out = 1, .flags = .{ .has_dynamic_gas = true } },
+        .KECCAK256 => .{ .static_gas = 30, .stack_in = 2 },
 
         // 0x30s — environment / calldata / code
-        .ADDRESS => .{ .static_gas = 2, .stack_out = 1 },
-        .BALANCE => .{ .static_gas = 20, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
-        .ORIGIN => .{ .static_gas = 2, .stack_out = 1 },
-        .CALLER => .{ .static_gas = 2, .stack_out = 1 },
-        .CALLVALUE => .{ .static_gas = 2, .stack_out = 1 },
-        .CALLDATALOAD => .{ .static_gas = 3, .stack_in = 1, .stack_out = 1 },
-        .CALLDATASIZE => .{ .static_gas = 2, .stack_out = 1 },
-        .CALLDATACOPY => .{ .static_gas = 3, .stack_in = 3, .flags = .{ .has_dynamic_gas = true } },
-        .CODESIZE => .{ .static_gas = 2, .stack_out = 1 },
-        .CODECOPY => .{ .static_gas = 3, .stack_in = 3, .flags = .{ .has_dynamic_gas = true } },
-        .GASPRICE => .{ .static_gas = 2, .stack_out = 1 },
-        .EXTCODESIZE => .{ .static_gas = 20, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
-        .EXTCODECOPY => .{ .static_gas = 20, .stack_in = 4, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
-        .RETURNDATASIZE => .{ .static_gas = 2, .stack_out = 1 },
-        .RETURNDATACOPY => .{ .static_gas = 3, .stack_in = 3, .flags = .{ .has_dynamic_gas = true } },
-        .EXTCODEHASH => .{ .static_gas = 400, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
+        .ADDRESS => .{ .static_gas = 2 },
+        .BALANCE => .{ .static_gas = 20, .stack_in = 1 },
+        .ORIGIN => .{ .static_gas = 2 },
+        .CALLER => .{ .static_gas = 2 },
+        .CALLVALUE => .{ .static_gas = 2 },
+        .CALLDATALOAD => .{ .static_gas = 3, .stack_in = 1 },
+        .CALLDATASIZE => .{ .static_gas = 2 },
+        .CALLDATACOPY => .{ .static_gas = 3, .stack_in = 3 },
+        .CODESIZE => .{ .static_gas = 2 },
+        .CODECOPY => .{ .static_gas = 3, .stack_in = 3 },
+        .GASPRICE => .{ .static_gas = 2 },
+        .EXTCODESIZE => .{ .static_gas = 20, .stack_in = 1 },
+        .EXTCODECOPY => .{ .static_gas = 20, .stack_in = 4 },
+        .RETURNDATASIZE => .{ .static_gas = 2 },
+        .RETURNDATACOPY => .{ .static_gas = 3, .stack_in = 3 },
+        .EXTCODEHASH => .{ .static_gas = 400, .stack_in = 1 },
 
         // 0x40s — block context
-        .BLOCKHASH => .{ .static_gas = 20, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
-        .COINBASE => .{ .static_gas = 2, .stack_out = 1 },
-        .TIMESTAMP => .{ .static_gas = 2, .stack_out = 1 },
-        .NUMBER => .{ .static_gas = 2, .stack_out = 1 },
-        .PREVRANDAO => .{ .static_gas = 2, .stack_out = 1 },
-        .GASLIMIT => .{ .static_gas = 2, .stack_out = 1 },
-        .CHAINID => .{ .static_gas = 2, .stack_out = 1 },
-        .SELFBALANCE => .{ .static_gas = 5, .stack_out = 1 },
-        .BASEFEE => .{ .static_gas = 2, .stack_out = 1 },
-        .BLOBHASH => .{ .static_gas = 3, .stack_in = 1, .stack_out = 1 },
-        .BLOBBASEFEE => .{ .static_gas = 2, .stack_out = 1 },
-        .SLOTNUM => .{ .static_gas = 2, .stack_out = 1 },
+        .BLOCKHASH => .{ .static_gas = 20, .stack_in = 1 },
+        .COINBASE => .{ .static_gas = 2 },
+        .TIMESTAMP => .{ .static_gas = 2 },
+        .NUMBER => .{ .static_gas = 2 },
+        .PREVRANDAO => .{ .static_gas = 2 },
+        .GASLIMIT => .{ .static_gas = 2 },
+        .CHAINID => .{ .static_gas = 2 },
+        .SELFBALANCE => .{ .static_gas = 5 },
+        .BASEFEE => .{ .static_gas = 2 },
+        .BLOBHASH => .{ .static_gas = 3, .stack_in = 1 },
+        .BLOBBASEFEE => .{ .static_gas = 2 },
+        .SLOTNUM => .{ .static_gas = 2 },
 
         // 0x50s — stack / memory / storage / flow
         .POP => .{ .static_gas = 2, .stack_in = 1 },
-        .MLOAD => .{ .static_gas = 3, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true } },
-        .MSTORE => .{ .static_gas = 3, .stack_in = 2, .flags = .{ .has_dynamic_gas = true } },
-        .MSTORE8 => .{ .static_gas = 3, .stack_in = 2, .flags = .{ .has_dynamic_gas = true } },
-        .SLOAD => .{ .static_gas = 50, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
-        .SSTORE => .{ .static_gas = 0, .stack_in = 2, .flags = .{ .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .JUMP => .{ .static_gas = 8, .stack_in = 1, .exit = .jump },
-        .JUMPI => .{ .static_gas = 10, .stack_in = 2, .exit = .jumpi },
-        .PC => .{ .static_gas = 2, .stack_out = 1 },
-        .MSIZE => .{ .static_gas = 2, .stack_out = 1 },
-        .GAS => .{ .static_gas = 2, .stack_out = 1, .flags = .{ .uses_gas_left = true } },
+        .MLOAD => .{ .static_gas = 3, .stack_in = 1 },
+        .MSTORE => .{ .static_gas = 3, .stack_in = 2 },
+        .MSTORE8 => .{ .static_gas = 3, .stack_in = 2 },
+        .SLOAD => .{ .static_gas = 50, .stack_in = 1 },
+        .SSTORE => .{ .static_gas = 0, .stack_in = 2 },
+        .JUMP => .{ .static_gas = 8, .stack_in = 1 },
+        .JUMPI => .{ .static_gas = 10, .stack_in = 2 },
+        .PC => .{ .static_gas = 2 },
+        .MSIZE => .{ .static_gas = 2 },
+        .GAS => .{ .static_gas = 2 },
         .JUMPDEST => .{ .static_gas = 1 },
-        .TLOAD => .{ .static_gas = 100, .stack_in = 1, .stack_out = 1, .flags = .{ .has_dynamic_gas = true, .touches_host = true } },
-        .TSTORE => .{ .static_gas = 100, .stack_in = 2, .flags = .{ .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .MCOPY => .{ .static_gas = 3, .stack_in = 3, .flags = .{ .has_dynamic_gas = true } },
-        .PUSH0 => .{ .static_gas = 2, .stack_out = 1 },
+        .TLOAD => .{ .static_gas = 100, .stack_in = 1 },
+        .TSTORE => .{ .static_gas = 100, .stack_in = 2 },
+        .MCOPY => .{ .static_gas = 3, .stack_in = 3 },
+        .PUSH0 => .{ .static_gas = 2 },
 
-        // 0x60..0x7f — PUSH1..PUSH32 (immediate = N bytes)
+        // 0x60..0x7f — PUSH1..PUSH32
         .PUSH1,
         .PUSH2,
         .PUSH3,
@@ -377,9 +343,9 @@ fn infoFor(op: Opcode) OpInfo {
         .PUSH30,
         .PUSH31,
         .PUSH32,
-        => .{ .static_gas = 3, .stack_out = 1, .immediate = @intFromEnum(op) - @intFromEnum(Opcode.PUSH0) },
+        => .{ .static_gas = 3 },
 
-        // 0x80..0x8f — DUP1..DUP16 (need N deep, leave N+1)
+        // 0x80..0x8f — DUP1..DUP16
         .DUP1,
         .DUP2,
         .DUP3,
@@ -398,10 +364,10 @@ fn infoFor(op: Opcode) OpInfo {
         .DUP16,
         => blk2: {
             const n: u8 = @intFromEnum(op) - @intFromEnum(Opcode.DUP1) + 1;
-            break :blk2 .{ .static_gas = 3, .stack_in = n, .stack_out = n + 1 };
+            break :blk2 .{ .static_gas = 3, .stack_in = n };
         },
 
-        // 0x90..0x9f — SWAP1..SWAP16 (need N+1 deep, height unchanged)
+        // 0x90..0x9f — SWAP1..SWAP16
         .SWAP1,
         .SWAP2,
         .SWAP3,
@@ -420,7 +386,7 @@ fn infoFor(op: Opcode) OpInfo {
         .SWAP16,
         => blk2: {
             const n: u8 = @intFromEnum(op) - @intFromEnum(Opcode.SWAP1) + 1;
-            break :blk2 .{ .static_gas = 3, .stack_in = n + 1, .stack_out = n + 1 };
+            break :blk2 .{ .static_gas = 3, .stack_in = n + 1 };
         },
 
         // 0xa0..0xa4 — LOG0..LOG4 (pops mem offset+size + N topics)
@@ -429,44 +395,41 @@ fn infoFor(op: Opcode) OpInfo {
             break :blk2 .{
                 .static_gas = 375 * (@as(u16, n) + 1),
                 .stack_in = n + 2,
-                .flags = .{ .has_dynamic_gas = true, .touches_host = true, .writes_state = true },
             };
         },
 
-        .DUPN => .{ .static_gas = 3, .stack_in = 235, .stack_out = 236 },
-        .SWAPN => .{ .static_gas = 3, .stack_in = 236, .stack_out = 236 },
-        .EXCHANGE => .{ .static_gas = 3, .stack_in = 30, .stack_out = 30 },
+        // Variable-depth instructions declare their fixed minimum; handlers
+        // enforce the decoded depth.
+        .DUPN => .{ .static_gas = 3, .stack_in = 17 },
+        .SWAPN => .{ .static_gas = 3, .stack_in = 18 },
+        .EXCHANGE => .{ .static_gas = 3, .stack_in = 3 },
 
-        // 0xf0s — system / calls (all share uses_gas_left + dynamic + host + state)
-        .CREATE => .{ .static_gas = 32000, .stack_in = 3, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .CALL => .{ .static_gas = 40, .stack_in = 7, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .CALLCODE => .{ .static_gas = 40, .stack_in = 7, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .RETURN => .{ .static_gas = 0, .stack_in = 2, .exit = .return_, .flags = .{ .has_dynamic_gas = true } },
-        .DELEGATECALL => .{ .static_gas = 40, .stack_in = 6, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .CREATE2 => .{ .static_gas = 32000, .stack_in = 4, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .STATICCALL => .{ .static_gas = 40, .stack_in = 6, .stack_out = 1, .flags = .{ .uses_gas_left = true, .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        .REVERT => .{ .static_gas = 0, .stack_in = 2, .exit = .revert, .flags = .{ .has_dynamic_gas = true } },
-        .INVALID => .{ .exit = .invalid },
-        .SELFDESTRUCT => .{ .static_gas = 0, .stack_in = 1, .exit = .selfdestruct, .flags = .{ .has_dynamic_gas = true, .touches_host = true, .writes_state = true } },
-        _ => .{ .exit = .invalid },
+        // 0xf0s — system / calls
+        .CREATE => .{ .static_gas = 32000, .stack_in = 3 },
+        .CALL => .{ .static_gas = 40, .stack_in = 7 },
+        .CALLCODE => .{ .static_gas = 40, .stack_in = 7 },
+        .RETURN => .{ .static_gas = 0, .stack_in = 2 },
+        .DELEGATECALL => .{ .static_gas = 40, .stack_in = 6 },
+        .CREATE2 => .{ .static_gas = 32000, .stack_in = 4 },
+        .STATICCALL => .{ .static_gas = 40, .stack_in = 6 },
+        .REVERT => .{ .static_gas = 0, .stack_in = 2 },
+        .INVALID => .{},
+        .SELFDESTRUCT => .{ .static_gas = 0, .stack_in = 1 },
+        _ => .{},
     };
 }
 
-test "opcode table reproduces the per-opcode switches" {
+test "opcode table carries baseline gas and trace stack suffixes" {
     const expectEqual = std.testing.expectEqual;
 
-    // gap byte -> undefined, invalid exit, zeroed
+    // Gap bytes are undefined; INVALID remains a named, defined opcode.
     try std.testing.expect(!table[0x0c].defined);
-    try expectEqual(ExitKind.invalid, table[0x0c].exit);
-
-    // INVALID (0xfe) is a *defined* opcode that also exits invalid
     try std.testing.expect(table[@intFromEnum(Opcode.INVALID)].defined);
-    try expectEqual(ExitKind.invalid, table[@intFromEnum(Opcode.INVALID)].exit);
 
-    // gas + stack delta for a plain binary op
+    // A plain binary op charges its baseline gas and captures two inputs.
     const add = table[@intFromEnum(Opcode.ADD)];
     try expectEqual(@as(i64, 3), add.static_gas);
-    try expectEqual(@as(i16, -1), add.stackChange());
+    try expectEqual(@as(u8, 2), add.stack_in);
 
     // Historically repriced opcodes keep base gas here; fork-resolved gas
     // belongs to the exact instruction spec.
@@ -477,31 +440,21 @@ test "opcode table reproduces the per-opcode switches" {
     try expectEqual(@as(i64, 50), table[@intFromEnum(Opcode.SLOAD)].static_gas);
     try expectEqual(@as(i64, 0), table[@intFromEnum(Opcode.SELFDESTRUCT)].static_gas);
 
-    // PUSH immediate width
-    try expectEqual(@as(u8, 1), table[@intFromEnum(Opcode.PUSH1)].immediate);
-    try expectEqual(@as(u8, 32), table[@intFromEnum(Opcode.PUSH32)].immediate);
-
-    // DUP/SWAP height bookkeeping (read deep, no pop)
+    // Fixed-depth stack operations retain the suffix needed by tracing.
     try expectEqual(@as(u8, 3), table[@intFromEnum(Opcode.DUP3)].stack_in);
-    try expectEqual(@as(u8, 4), table[@intFromEnum(Opcode.DUP3)].stack_out);
-    try expectEqual(@as(i16, 0), table[@intFromEnum(Opcode.SWAP5)].stackChange());
+    try expectEqual(@as(u8, 6), table[@intFromEnum(Opcode.SWAP5)].stack_in);
 
-    // EIP-8024 opcodes carry execution immediates but do not mask JUMPDEST analysis.
-    try expectEqual(@as(u8, 0), table[@intFromEnum(Opcode.DUPN)].immediate);
+    // Variable-depth EIP-8024 operations declare their fixed minimum.
     try expectEqual(@as(i64, 3), table[@intFromEnum(Opcode.DUPN)].static_gas);
-    try expectEqual(@as(i16, 1), table[@intFromEnum(Opcode.DUPN)].stackChange());
-    try expectEqual(@as(i16, 0), table[@intFromEnum(Opcode.SWAPN)].stackChange());
-    try expectEqual(@as(u8, 30), table[@intFromEnum(Opcode.EXCHANGE)].stack_in);
+    try expectEqual(@as(u8, 17), table[@intFromEnum(Opcode.DUPN)].stack_in);
+    try expectEqual(@as(u8, 18), table[@intFromEnum(Opcode.SWAPN)].stack_in);
+    try expectEqual(@as(u8, 3), table[@intFromEnum(Opcode.EXCHANGE)].stack_in);
 
-    // LOG family gas + flags
+    // LOG4 consumes offset, size, and four topics.
     try expectEqual(@as(i64, 1875), table[@intFromEnum(Opcode.LOG4)].static_gas);
-    try std.testing.expect(table[@intFromEnum(Opcode.LOG4)].flags.writes_state);
-
-    // exits + flags on the spicy ones
-    try expectEqual(ExitKind.jump, table[@intFromEnum(Opcode.JUMP)].exit);
-    try expectEqual(ExitKind.selfdestruct, table[@intFromEnum(Opcode.SELFDESTRUCT)].exit);
-    try std.testing.expect(table[@intFromEnum(Opcode.CALL)].flags.uses_gas_left);
-    try std.testing.expect(table[@intFromEnum(Opcode.SSTORE)].flags.writes_state);
+    try expectEqual(@as(u8, 6), table[@intFromEnum(Opcode.LOG4)].stack_in);
+    try expectEqual(@as(u8, 7), table[@intFromEnum(Opcode.CALL)].stack_in);
+    try expectEqual(@as(u8, 2), table[@intFromEnum(Opcode.SSTORE)].stack_in);
 }
 
 test "opcode table defined rows match Opcode enum exactly" {
@@ -518,18 +471,12 @@ test "opcode table defined rows match Opcode enum exactly" {
         }
 
         try std.testing.expectEqual(is_named_opcode, row.defined);
-        try std.testing.expect(row.exit != .eof);
 
         if (row.defined) {
             defined_count += 1;
-            try std.testing.expect(row.immediate <= 32);
         } else {
             try std.testing.expectEqual(@as(i64, 0), row.static_gas);
             try std.testing.expectEqual(@as(u8, 0), row.stack_in);
-            try std.testing.expectEqual(@as(u8, 0), row.stack_out);
-            try std.testing.expectEqual(@as(u8, 0), row.immediate);
-            try std.testing.expectEqual(ExitKind.invalid, row.exit);
-            try std.testing.expectEqual(Flags{}, row.flags);
         }
     }
     try std.testing.expectEqual(std.enums.values(Opcode).len, defined_count);

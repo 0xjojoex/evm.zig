@@ -2,7 +2,7 @@ const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Host = @import("../Host.zig");
 const evmz = @import("../evm.zig");
-const ExactSpec = @import("../spec.zig").Spec;
+const Spec = @import("../spec.zig").Spec;
 const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
@@ -15,39 +15,7 @@ fn nextDepth(depth: u16) u16 {
     return if (depth == std.math.maxInt(u16)) depth else depth + 1;
 }
 
-pub inline fn stop(frame: *CallFrame) !void {
-    frame.halt(.success);
-}
-
-pub inline fn invalid(frame: *CallFrame) !void {
-    frame.halt(.invalid_opcode);
-}
-
-/// `RETURN` Halt the execution returning the output data
-pub inline fn ret(frame: *CallFrame) !void {
-    const offset, const size = frame.popN(2) orelse return;
-
-    const size_usize = frame.wordToUsizeOrOog(size) orelse return;
-    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
-
-    if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    frame.setOutputRange(offset_usize, size_usize);
-    frame.halt(.success);
-}
-
-/// `REVERT` Halt the execution reverting state changes but returning data and remaining gas
-pub inline fn revert(frame: *CallFrame) !void {
-    const offset, const size = frame.popN(2) orelse return;
-
-    const size_usize = frame.wordToUsizeOrOog(size) orelse return;
-    const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, size_usize) orelse return;
-
-    if (!try frame.expandMemory(offset_usize, size_usize)) return;
-    frame.setOutputRange(offset_usize, size_usize);
-    frame.halt(.revert);
-}
-
-pub fn bind(comptime spec: ExactSpec) type {
+pub fn Handlers(comptime spec: Spec) type {
     return struct {
         const Self = @This();
 
@@ -72,7 +40,8 @@ pub fn bind(comptime spec: ExactSpec) type {
                 return;
             }
 
-            if (!frame.trackGas(spec.call.base_gas - evmz.instruction.Instruction(spec).staticGasForFrame(frame, op))) return;
+            const static_gas = spec.instruction.entry(@intFromEnum(op)).info.static_gas;
+            if (!frame.trackGas(spec.call.base_gas - static_gas)) return;
 
             if (spec.call.cold_account_access_gas) |cold_account_access_gas| {
                 if (try frame.host.accessAccount(address) == .cold) {
@@ -332,54 +301,4 @@ pub fn bind(comptime spec: ExactSpec) type {
             frame.halt(.success);
         }
     };
-}
-
-test "CREATE initcode limit is independent from transaction validation" {
-    const spec = evmz.eth.cancun.extend(.{
-        .transaction = .{ .max_initcode_size = 64 },
-        .create = .{ .initcode_size_limit = .{ .replace = 1 } },
-    });
-
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    var msg = evmz.t.defaultMessage();
-
-    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-    });
-    defer frame.deinit();
-
-    // Direct handler tests must model a frame that is still executing.
-    frame.frame.state = .running;
-    frame.frame.stack.push(2);
-    frame.frame.stack.push(0);
-    frame.frame.stack.push(0);
-    try bind(spec).create(frame.frame);
-
-    try std.testing.expectEqual(Interpreter.FrameHalt.out_of_gas, frame.frame.haltReason().?);
-}
-
-test "RETURN zero length ignores oversized offset" {
-    try evmz.t.expectLatestForkBytecodeStatus(.{
-        .PUSH0,  .PUSH32,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        0xff,    0xff,
-        .RETURN,
-    }, .success);
 }

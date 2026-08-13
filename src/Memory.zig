@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -6,14 +8,21 @@ const uint256 = @import("./uint256.zig");
 
 const Memory = @This();
 
-const word_size = 32;
+const word_size = @sizeOf(u256);
+const limb_alignment = @alignOf(u64);
+const use_limb_word_io =
+    build_options.profile == .zkvm and builtin.target.cpu.arch == .riscv64;
 
 pub const Expansion = struct {
     cost: i64,
     next_size: usize,
 };
 
-pub const Storage = ArrayList(u8);
+pub const Storage = if (use_limb_word_io)
+    std.array_list.Aligned(u8, .of(u64))
+else
+    // non-rv64 probably do no need align, need test
+    ArrayList(u8);
 
 /// Stable coordinates into EVM memory. Resolve only while the owning frame is
 /// alive; the backing allocation may move as memory expands.
@@ -62,6 +71,23 @@ pub fn read(self: *const Memory, offset: usize) u256 {
     return uint256.fromBytes32(bytes);
 }
 
+pub inline fn readInto(self: *const Memory, offset: usize, destination: *u256) void {
+    if (comptime use_limb_word_io) {
+        assert(offset + word_size <= self.bytes.items.len);
+        const bytes = self.bytes.items[offset..][0..word_size];
+        assert(std.mem.isAligned(@intFromPtr(self.bytes.items.ptr), limb_alignment));
+        // if offset is 8-byte aligned, read aligned bytes for better lowering
+        // unusual contract remain valid for non-aligned reads
+        if (std.mem.isAligned(offset, limb_alignment)) {
+            uint256.readAlignedBytes32Into(@alignCast(bytes), destination);
+        } else {
+            uint256.readBytes32Into(bytes, destination);
+        }
+    } else {
+        destination.* = self.read(offset);
+    }
+}
+
 pub fn readBytes(self: *const Memory, offset: usize, size: usize) []u8 {
     assert(offset + size <= self.bytes.items.len);
 
@@ -106,6 +132,16 @@ pub fn write(self: *Memory, offset: usize, value: u256) void {
 
     const bytes = self.bytes.items[offset..][0..word_size];
     uint256.writeBytes32(bytes, value);
+}
+
+pub inline fn writeFrom(self: *Memory, offset: usize, source: *const u256) void {
+    if (comptime use_limb_word_io) {
+        assert(offset + word_size <= self.bytes.items.len);
+        const bytes = self.bytes.items[offset..][0..word_size];
+        uint256.writeBytes32From(bytes, source);
+    } else {
+        self.write(offset, source.*);
+    }
 }
 
 pub fn writeBytes(self: *Memory, offset: usize, value: []const u8) void {

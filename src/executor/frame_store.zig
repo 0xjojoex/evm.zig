@@ -83,18 +83,17 @@ pub fn push(
     errdefer self.popUninitialized();
     self.controls.appendAssumeCapacity(control_value);
 
-    var frame_options = options;
-    frame_options.io = &self.ios.items[index];
     const stack_base = self.nextStackBase();
     try self.ensureStackRange(allocator, stack_base);
     errdefer self.restoreStackRange(index);
 
-    try self.frames.items[index].init(
+    self.frames.items[index].initRetainingMemoryCapacity(
         allocator,
-        frame_options,
+        options,
         &self.messages.items[index],
         Stack.init(self.stack_words.items, @intCast(stack_base)),
         &self.memories.items[index],
+        &self.ios.items[index],
     );
 
     return index;
@@ -121,7 +120,7 @@ pub fn pop(self: *FrameStore) void {
     std.debug.assert(row_count != 0);
     const index = row_count - 1;
 
-    self.frames.items[index].deinit();
+    self.frames.items[index].deinitRetainingMemoryCapacity();
     self.frames.items.len = index;
     self.controls.items.len = index;
     self.messages.items.len = index;
@@ -415,6 +414,35 @@ test "frame store rebinds active rows after growth" {
     );
     try std.testing.expectEqual(sibling_base, store.frame(sibling).stack.base_word);
     try std.testing.expectEqual(@as(u16, 0), store.frame(sibling).stack.len);
+}
+
+test "frame store reuses cleared memory capacity for sibling calls" {
+    var store: FrameStore = .{ .stable_metadata_capacity = 2 };
+    defer store.deinit(std.testing.allocator);
+
+    var host: Host = undefined;
+    var root_msg = evmz.t.defaultMessage();
+    root_msg.gas = 100;
+    _ = try pushTestFrame(&store, std.testing.allocator, &host, &root_msg);
+
+    var child_msg = root_msg;
+    child_msg.depth = 1;
+    const child = try pushTestFrame(&store, std.testing.allocator, &host, &child_msg);
+    try store.frame(child).memory.expandToFit(0, 4096);
+    store.frame(child).memory.writeBytes(0, "dirty");
+
+    const retained_capacity = store.frame(child).memory.bytes.capacity;
+    store.pop();
+    try std.testing.expectEqual(@as(usize, 0), store.memories.items[child].items.len);
+    try std.testing.expectEqual(retained_capacity, store.memories.items[child].capacity);
+
+    const sibling = try pushTestFrame(&store, no_growth_allocator, &host, &child_msg);
+    try store.frame(sibling).memory.expandToFit(0, 4096);
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        store.frame(sibling).memory.readBytes(0, 4096),
+        0,
+    ));
 }
 
 test "stack arena growth failure leaves the parent row usable" {

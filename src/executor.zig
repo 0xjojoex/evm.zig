@@ -597,7 +597,7 @@ pub fn ExecutorType(
             try self.state.reserveAcceptedAccessHint(hint);
         }
 
-        /// Release state, frame pools, scratch arenas, and retained return-data buffers.
+        /// Release state, frame pools, scratch arenas, and retained frame buffers.
         pub fn deinit(self: *Self) void {
             std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.frame_store.len() == 0);

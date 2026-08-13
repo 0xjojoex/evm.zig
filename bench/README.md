@@ -35,7 +35,7 @@ Current VM-core rows:
 
 | engine             | level                         | prepared outside timing                                                                           | timed window                                    | transaction/overlay work |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------ |
-| `evmz`             | direct interpreter            | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | bound-interpreter `execute()`                   | no                       |
+| `evmz`             | exact-spec tail interpreter   | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | bound-interpreter `execute()`                   | no                       |
 | `evmone-baseline`  | analyzed baseline interpreter | fixture loading, init-code deployment through EVMC, `baseline::analyze`                           | `baseline::execute` over `CodeAnalysis`         | no                       |
 | `evmone-advanced`  | analyzed advanced interpreter | fixture loading, init-code deployment through EVMC, `advanced::analyze`                           | `advanced::execute` over `AdvancedCodeAnalysis` | no                       |
 | `revm-interpreter` | raw interpreter loop          | fixture loading, init-code deployment, `Bytecode` legacy analysis; per-run interpreter/host setup | `Interpreter::run_plain`                        | no                       |
@@ -46,16 +46,20 @@ Future transaction/integration rows should stay separate, for example
 
 ## Published snapshots
 
-The full native snapshots the root README excerpts. Both are fixed-Osaka, native
+The native snapshots the root README excerpts. Both are fixed-Osaka, native
 `ReleaseFast`, with frame pointers omitted for every engine. Lower is better.
-`base/evmz` and `revm/evmz` above `1.00×` mean evmz is faster.
+`base/evmz` and `revm/evmz` above `1.00×` mean evmz is faster. The M1 snapshot
+is refreshed from the current tail-dispatch tree; the AMD snapshot is retained
+as earlier x86-64 context.
 
-### Apple M1 Max / macOS arm64
+### Apple M1 Max / macOS arm64 — 2026-08-13
 
 This snapshot enables evmz's optional XKCP Keccak and libsecp256k1 providers for
 its maximum-performance configuration. It uses a 100 ms discarded warmup and five
 complete repeats; each cell is the median of five 100-run medians per
-deployed-runtime call:
+deployed-runtime call. Run the command five times with a distinct `--out-dir`;
+the table takes the median `median_ms` for each fixture/engine row from those
+five `summary.csv` files:
 
 ```sh
 zig build bench-compare -Dbench-optimize=ReleaseFast \
@@ -66,20 +70,20 @@ zig build bench-compare -Dbench-optimize=ReleaseFast \
 
 | VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
 | ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
-| Arithmetic loop         |  0.119 ms |    0.099 ms |   0.325 ms |  0.489 ms |     0.83× |     4.11× |
-| Memory MSTORE loop      |  0.136 ms |    0.083 ms |   0.252 ms |  0.403 ms |     0.61× |     2.96× |
-| Keccak loop             |  2.652 ms |    3.508 ms |   3.589 ms |  2.697 ms |     1.32× |     1.02× |
-| Ten-thousand hashes     |  0.916 ms |    0.742 ms |   1.629 ms |  2.036 ms |     0.81× |     2.22× |
-| Storage SLOAD loop      |  0.189 ms |    0.589 ms |   0.644 ms |  0.350 ms |     3.12× |     1.85× |
-| Storage SSTORE loop     |  0.196 ms |    0.866 ms |   0.879 ms |  0.858 ms |     4.42× |     4.38× |
-| LOG0 / 0-byte data      |  0.045 ms |    0.030 ms |   0.081 ms |  0.127 ms |     0.66× |     2.81× |
-| LOG0 / 32-byte data     |  0.050 ms |    0.033 ms |   0.081 ms |  0.308 ms |     0.66× |     6.17× |
-| LOG4 / 0-byte data      |  0.086 ms |    0.078 ms |   0.148 ms |  0.264 ms |     0.90× |     3.08× |
-| LOG4 / 32-byte data     |  0.102 ms |    0.082 ms |   0.147 ms |  0.409 ms |     0.81× |     4.01× |
-| ERC20 mint              |  1.869 ms |    3.817 ms |   4.717 ms |  3.625 ms |     2.04× |     1.94× |
-| ERC20 transfer          |  3.859 ms |    6.183 ms |   7.423 ms |  6.088 ms |     1.60× |     1.58× |
-| ERC20 approval+transfer |  3.485 ms |    4.936 ms |   5.950 ms |  4.665 ms |     1.42× |     1.34× |
-| Snailtracer             | 20.495 ms |   59.606 ms |  78.840 ms | 37.704 ms |     2.91× |     1.84× |
+| Arithmetic loop         |  0.104 ms |    0.109 ms |   0.325 ms |  0.501 ms |     1.05× |     4.82× |
+| Memory MSTORE loop      |  0.125 ms |    0.084 ms |   0.252 ms |  0.400 ms |     0.67× |     3.20× |
+| Keccak loop             |  2.657 ms |    3.508 ms |   3.592 ms |  2.705 ms |     1.32× |     1.02× |
+| Ten-thousand hashes     |  0.865 ms |    0.741 ms |   1.630 ms |  2.057 ms |     0.86× |     2.38× |
+| Storage SLOAD loop      |  0.150 ms |    0.595 ms |   0.642 ms |  0.351 ms |     3.97× |     2.34× |
+| Storage SSTORE loop     |  0.162 ms |    0.854 ms |   0.882 ms |  0.875 ms |     5.27× |     5.40× |
+| LOG0 / 0-byte data      |  0.043 ms |    0.030 ms |   0.082 ms |  0.126 ms |     0.69× |     2.94× |
+| LOG0 / 32-byte data     |  0.057 ms |    0.033 ms |   0.083 ms |  0.308 ms |     0.58× |     5.40× |
+| LOG4 / 0-byte data      |  0.090 ms |    0.072 ms |   0.148 ms |  0.265 ms |     0.80× |     2.94× |
+| LOG4 / 32-byte data     |  0.084 ms |    0.082 ms |   0.148 ms |  0.408 ms |     0.98× |     4.86× |
+| ERC20 mint              |  1.770 ms |    3.847 ms |   4.709 ms |  3.641 ms |     2.17× |     2.06× |
+| ERC20 transfer          |  3.761 ms |    6.247 ms |   7.415 ms |  6.084 ms |     1.66× |     1.62× |
+| ERC20 approval+transfer |  3.453 ms |    4.957 ms |   5.961 ms |  4.682 ms |     1.44× |     1.36× |
+| Snailtracer             | 19.965 ms |   59.804 ms |  79.322 ms | 37.990 ms |     3.00× |     1.90× |
 
 ### AMD EPYC Genoa / Linux x86-64
 

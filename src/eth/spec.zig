@@ -321,15 +321,15 @@ const semantics = struct {
         return if (input.target_alive) 0 else @intCast(eth_tx.amsterdam_new_account_state_gas);
     }
 
-    fn noStorageAccess(_: execution.AccountAccessStatus) ?i64 {
+    fn noStorageAccess(_: execution.AccessStatus) ?i64 {
         return null;
     }
 
-    fn berlinStorageAccess(status: execution.AccountAccessStatus) ?i64 {
+    fn berlinStorageAccess(status: execution.AccessStatus) ?i64 {
         return if (status == .cold) cold_sload_cost else 0;
     }
 
-    fn amsterdamStorageAccess(status: execution.AccountAccessStatus) ?i64 {
+    fn amsterdamStorageAccess(status: execution.AccessStatus) ?i64 {
         return if (status == .cold) @intCast(eth_tx.amsterdam_cold_storage_access_cost) else warm_storage_read_cost;
     }
 
@@ -836,3 +836,15 @@ pub fn specAt(comptime revision: Revision) Spec {
 
 pub const stable: Spec = osaka;
 pub const latest: Spec = amsterdam;
+
+test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 200, .refund = 4800 }, constantinople.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 5000, .refund = 0 }, petersburg.storage.sstoreGas(.modified_restored));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 800, .refund = 4200 }, istanbul.storage.sstoreGas(.modified_restored));
+}
+
+test "Amsterdam SSTORE separates access and write gas from state gas" {
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 10_000, .refund = 0 }, amsterdam.storage.sstoreGas(.added));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 0, .refund = 10_000 }, amsterdam.storage.sstoreGas(.added_deleted));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 0, .refund = -2_480 }, amsterdam.storage.sstoreGas(.deleted_restored));
+}

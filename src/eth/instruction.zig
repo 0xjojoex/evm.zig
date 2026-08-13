@@ -46,7 +46,7 @@ fn defaultTarget(comptime opcode_byte: u8, comptime defined: bool) instruction_t
     const opcode: Opcode = @enumFromInt(opcode_byte);
     return switch (opcode) {
         .INVALID => .invalid,
-        else => .{ .builtin = opcode },
+        else => .builtin,
     };
 }
 
@@ -180,10 +180,7 @@ test "exact instruction specs extend activation and gas values" {
 
 test "instruction spec mutation helpers derive one table value from another" {
     const Noop = struct {
-        pub inline fn execute(comptime Instructions: type, frame: anytype) anyerror!void {
-            _ = Instructions;
-            _ = frame;
-        }
+        pub inline fn execute(comptime _: anytype, _: anytype) anyerror!void {}
     };
     const unassigned_byte: u8 = 0xb0;
     comptime std.debug.assert(!opcode_info.info(unassigned_byte).defined);
@@ -193,7 +190,6 @@ test "instruction spec mutation helpers derive one table value from another" {
         result.install(.NOOP, unassigned_byte, .{
             .static_gas = 5,
             .stack_in = 1,
-            .stack_out = 1,
         }, .{ .custom = Noop });
         result.deactivate(&.{.SELFDESTRUCT});
         result.setStaticGas(&.{.BALANCE}, 1_000);
@@ -205,7 +201,6 @@ test "instruction spec mutation helpers derive one table value from another" {
     try std.testing.expectEqual(@as(i64, 5), derived.table[unassigned_byte].info.static_gas);
     try std.testing.expect(derived.table[unassigned_byte].defined());
     try std.testing.expectEqual(@as(u8, 1), derived.table[unassigned_byte].info.stack_in);
-    try std.testing.expectEqual(@as(u8, 1), derived.table[unassigned_byte].info.stack_out);
     try std.testing.expect(derived.table[unassigned_byte].target == .custom);
     try std.testing.expectEqualStrings("NOOP", @tagName(derived.table[unassigned_byte].name.?));
     try std.testing.expect(!derived.table[@intFromEnum(Opcode.SELFDESTRUCT)].active);

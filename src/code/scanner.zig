@@ -35,9 +35,7 @@ fn referenceMark(map: *BitSet, bytes: []const u8) void {
         const opcode: Opcode = @enumFromInt(bytes[pc]);
         if (opcode == .JUMPDEST) map.set(pc);
 
-        var next = pc + 1;
-        if (opcode.isPushN()) next += opcode.toByte() - Opcode.PUSH0.toByte();
-        pc = @min(bytes.len, next);
+        pc = @min(bytes.len, pc + 1 + opcode.pushImmediateLen());
     }
 }
 

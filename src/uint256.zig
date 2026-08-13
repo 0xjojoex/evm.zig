@@ -1,8 +1,15 @@
 //! 256-bit unsigned integer helpers for EVM word arithmetic and byte conversion.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const use_limb_div_mod = true;
+
+const native_endian = builtin.target.cpu.arch.endian();
+
+inline fn wireLimbIndex(comptime wire_index: usize) usize {
+    return if (native_endian == .little) 3 - wire_index else wire_index;
+}
 
 pub inline fn fromBytes32(bytes: *const [32]u8) u256 {
     return std.mem.readInt(u256, bytes, .big);
@@ -18,7 +25,41 @@ pub inline fn writeBytes32(bytes: *[32]u8, value: u256) void {
     std.mem.writeInt(u256, bytes, value, .big);
 }
 
-pub inline fn sdiv(a: u256, b: u256) u256 {
+pub inline fn readBytes32Into(bytes: *const [32]u8, destination: *u256) void {
+    const limbs: *[4]u64 = @ptrCast(destination);
+    inline for (0..4) |wire_index| {
+        limbs[wireLimbIndex(wire_index)] = std.mem.readInt(
+            u64,
+            bytes[wire_index * 8 ..][0..8],
+            .big,
+        );
+    }
+}
+
+pub inline fn readAlignedBytes32Into(bytes: *align(8) const [32]u8, destination: *u256) void {
+    const limbs: *[4]u64 = @ptrCast(destination);
+    inline for (0..4) |wire_index| {
+        const wire_limb = @as(*align(8) const u64, @ptrCast(&bytes[wire_index * 8])).*;
+        limbs[wireLimbIndex(wire_index)] = if (native_endian == .little)
+            @byteSwap(wire_limb)
+        else
+            wire_limb;
+    }
+}
+
+pub inline fn writeBytes32From(bytes: *[32]u8, source: *const u256) void {
+    const limbs: *const [4]u64 = @ptrCast(source);
+    inline for (0..4) |wire_index| {
+        std.mem.writeInt(
+            u64,
+            bytes[wire_index * 8 ..][0..8],
+            limbs[wireLimbIndex(wire_index)],
+            .big,
+        );
+    }
+}
+
+pub fn sdiv(a: u256, b: u256) u256 {
     if (b == 0) return 0;
 
     const ia: i256 = @bitCast(a);
@@ -27,7 +68,7 @@ pub inline fn sdiv(a: u256, b: u256) u256 {
     return if ((ia < 0) != (ib < 0)) 0 -% quotient else quotient;
 }
 
-pub inline fn smod(a: u256, b: u256) u256 {
+pub fn smod(a: u256, b: u256) u256 {
     if (b == 0) return 0;
 
     const ia: i256 = @bitCast(a);
@@ -36,7 +77,7 @@ pub inline fn smod(a: u256, b: u256) u256 {
     return if (ia < 0) 0 -% remainder else remainder;
 }
 
-pub inline fn div(a: u256, b: u256) u256 {
+pub fn div(a: u256, b: u256) u256 {
     if (b == 0) return 0;
     if ((a | b) <= std.math.maxInt(u64)) {
         return @as(u64, @truncate(a)) / @as(u64, @truncate(b));
@@ -45,7 +86,7 @@ pub inline fn div(a: u256, b: u256) u256 {
     return divKnuth(a, b);
 }
 
-pub inline fn mod(a: u256, b: u256) u256 {
+pub fn mod(a: u256, b: u256) u256 {
     if (b == 0) return 0;
     if ((a | b) <= std.math.maxInt(u64)) {
         return @as(u64, @truncate(a)) % @as(u64, @truncate(b));
@@ -85,8 +126,68 @@ pub inline fn bitLength(value: u256) u16 {
     return 256 - @clz(value);
 }
 
+/// Returns how many bytes are needed to represent the significant part of a 256-bit integer.
+pub inline fn countSignificantBytesSize(value: u256) i64 {
+    return @divFloor(256 - @as(i64, @intCast(@clz(value))) + 7, 8);
+}
+
+test countSignificantBytesSize {
+    try std.testing.expectEqual(countSignificantBytesSize(0), 0);
+    try std.testing.expectEqual(countSignificantBytesSize(1), 1);
+    try std.testing.expectEqual(countSignificantBytesSize(255), 1);
+    try std.testing.expectEqual(countSignificantBytesSize(256), 2);
+    try std.testing.expectEqual(countSignificantBytesSize(1000), 2);
+    try std.testing.expectEqual(countSignificantBytesSize(std.math.maxInt(u256)), 32);
+}
+
 pub inline fn ceilDiv(value: u256, denominator: u256) u256 {
     return @divFloor(value, denominator) + @intFromBool(value % denominator != 0);
+}
+
+/// Wrapping exponentiation. Early-exits the cases where the result is fully
+/// determined (or known to overflow to zero) before the square-and-multiply
+/// loop, which is what EXP relies on for large exponents.
+pub fn wrapExp(a: u256, expo: u256) u256 {
+    if (expo == 0) return 1;
+    if (a == 0) return 0;
+    if (a == 1) return 1;
+    if (a == 2) {
+        if (expo >= 256) return 0;
+        return std.math.shl(u256, 1, @as(u16, @intCast(expo)));
+    }
+
+    const trailing_zero_bits: u16 = @intCast(@ctz(a));
+    if (trailing_zero_bits != 0) {
+        const zero_threshold = std.math.divCeil(u16, 256, trailing_zero_bits) catch unreachable;
+        if (expo >= zero_threshold) return 0;
+    }
+
+    var value = a;
+    var exponent = expo;
+    var result: u256 = 1;
+    while (exponent > 0) : (exponent >>= 1) {
+        if ((exponent & 1) == 1) {
+            result *%= value;
+        }
+        value *%= value;
+    }
+
+    return result;
+}
+
+test wrapExp {
+    try std.testing.expectEqual(@as(u256, 1), wrapExp(0, 0));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(0, 3));
+    try std.testing.expectEqual(@as(u256, 1), wrapExp(1, std.math.maxInt(u256)));
+    try std.testing.expectEqual(wrapExp(2, 2), 4);
+    try std.testing.expectEqual(@as(u256, 1) << 255, wrapExp(2, 255));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(2, 256));
+    try std.testing.expectEqual(@as(u256, 0), wrapExp(4, 128));
+
+    const a = 2;
+    const exponent = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+    const result = wrapExp(a, exponent);
+    try std.testing.expectEqual(@as(u256, 0), result);
 }
 
 /// Left shift via a u128 limb funnel. LLVM lowers a variable-amount u256 `<<`
@@ -198,14 +299,7 @@ inline fn toLimbs(out: *Word4, value: u256) void {
     out[3] = @truncate(value >> 192);
 }
 
-inline fn fromLimbs(limbs: Word4) u256 {
-    return @as(u256, limbs[0]) |
-        (@as(u256, limbs[1]) << 64) |
-        (@as(u256, limbs[2]) << 128) |
-        (@as(u256, limbs[3]) << 192);
-}
-
-inline fn fromLimbsPtr(limbs: *const Word4) u256 {
+inline fn fromLimbs(limbs: *const Word4) u256 {
     return @as(u256, limbs[0]) |
         (@as(u256, limbs[1]) << 64) |
         (@as(u256, limbs[2]) << 128) |
@@ -640,7 +734,7 @@ inline fn divKnuth(value: u256, denominator: u256) u256 {
     toLimbs(&numerator, value);
     toLimbs(&divisor, denominator);
     divModKnuth(&quotient, &remainder, &numerator, &divisor);
-    return fromLimbsPtr(&quotient);
+    return fromLimbs(&quotient);
 }
 
 inline fn modKnuth(value: u256, denominator: u256) u256 {
@@ -652,7 +746,7 @@ inline fn modKnuth(value: u256, denominator: u256) u256 {
     toLimbs(&numerator, value);
     toLimbs(&divisor, denominator);
     divModKnuth(&quotient, &remainder, &numerator, &divisor);
-    return fromLimbsPtr(&remainder);
+    return fromLimbs(&remainder);
 }
 
 fn mulModKnuth(lhs: u256, rhs: u256, modulo: u256) u256 {
@@ -667,7 +761,7 @@ fn mulModKnuth(lhs: u256, rhs: u256, modulo: u256) u256 {
     toLimbs(&modulo_limbs, modulo);
     mulFull4(&product, &lhs_limbs, &rhs_limbs);
     mod8By4Knuth(&reduced, &product, &modulo_limbs);
-    return fromLimbs(reduced);
+    return fromLimbs(&reduced);
 }
 
 fn expectDivModMatchesBuiltin(numerator: u256, denominator: u256) !void {
@@ -814,6 +908,27 @@ test "bytes32 conversion uses Ethereum byte order" {
 
     writeBytes32(&bytes, 1);
     try std.testing.expectEqual(@as(u8, 1), bytes[31]);
+}
+
+test "limb-oriented bytes32 conversion matches the integer oracle" {
+    var random = std.Random.DefaultPrng.init(0x6d6c6f61645f6576);
+    for (0..1_000) |_| {
+        var bytes: [32]u8 = undefined;
+        random.random().bytes(&bytes);
+
+        var value: u256 = undefined;
+        readBytes32Into(&bytes, &value);
+        try std.testing.expectEqual(std.mem.readInt(u256, &bytes, .big), value);
+
+        var aligned_bytes: [32]u8 align(8) = bytes;
+        var aligned_value: u256 = undefined;
+        readAlignedBytes32Into(&aligned_bytes, &aligned_value);
+        try std.testing.expectEqual(value, aligned_value);
+
+        var encoded: [32]u8 = undefined;
+        writeBytes32From(&encoded, &value);
+        try std.testing.expectEqualSlices(u8, &bytes, &encoded);
+    }
 }
 
 test addMod {

@@ -9,11 +9,10 @@
 //! The lane is additive by construction, not by convention. Five properties hold
 //! and are the reason a debugger does not slow down or enlarge normal execution:
 //!
-//! - **I0 no third dispatch table.** The driver steps through
-//!   `Instruction(spec).execute`, the same cold route production tail dispatch
-//!   already falls to for host-bound opcodes (`interpreter/tail_dispatch.zig`,
-//!   `executeColdOpcode`). Opcode semantics here are production semantics, and no
-//!   table is generated for this lane.
+//! - **I0 semantics stay singular.** The driver instantiates a debugger-only
+//!   comptime switch into the production tail handlers. It adds code only when
+//!   this module is referenced, but it does not maintain a second implementation
+//!   of opcode semantics.
 //! - **I1 no field growth.** Nothing here adds a field to `Executor`,
 //!   `CallFrame`, `FrameStore`, `CaptureContext`, or `Bytecode.View`.
 //! - **I2 no branch in the run loops.** `CallRuntime.run` and the captured
@@ -25,22 +24,15 @@
 //! - **I4 capture stays a recorder.** Session construction rejects an active
 //!   capture context. Combining live control with capture is a later decision,
 //!   not an accident.
-//!
-//! I0 through I4 are the merge gate for every stage. The dependency
-//! direction enforcing them is one-way — `debug` reaches into `executor`, and no
-//! execution module imports `debug`.
 
 const std = @import("std");
 
-pub const pause = @import("./debug/pause.zig");
 pub const session = @import("./debug/session.zig");
 
-pub const Pause = pause.Pause;
-pub const Site = pause.Site;
-pub const Completion = pause.Completion;
-
 /// Bind the pull-driven driver to one exact executor.
-pub const bind = session.bind;
+pub const SessionType = session.SessionType;
+
+pub const Pause = session.Pause;
 
 test {
     std.testing.refAllDecls(@This());

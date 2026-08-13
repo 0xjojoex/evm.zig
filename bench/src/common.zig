@@ -191,7 +191,7 @@ pub const CountingHost = struct {
         return slot.value;
     }
 
-    noinline fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStatus {
+    noinline fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !evmz.execution.StorageStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.storage_write += 1;
 
@@ -230,7 +230,7 @@ pub const CountingHost = struct {
         result.value_ptr.value = value;
         result.value_ptr.warm = true;
 
-        const storage_status: Host.StorageStatus = if (previous == value)
+        const storage_status: evmz.execution.StorageStatus = if (previous == value)
             .assigned
         else if (previous == 0 and value != 0)
             .added
@@ -259,14 +259,14 @@ pub const CountingHost = struct {
         return 0;
     }
 
-    noinline fn accessAccount(ptr: *anyopaque, address: AddressWord) !Host.AccessStatus {
+    noinline fn accessAccount(ptr: *anyopaque, address: AddressWord) !evmz.execution.AccessStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.access_account += 1;
         return .cold;
     }
 
-    noinline fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !Host.AccessStatus {
+    noinline fn accessStorage(ptr: *anyopaque, address: AddressWord, key: u256) !evmz.execution.AccessStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.access_storage += 1;
         const result = try self.storage.getOrPut(.{ .address = address, .key = key });
@@ -276,7 +276,7 @@ pub const CountingHost = struct {
         return if (was_warm) .warm else .cold;
     }
 
-    noinline fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?Host.AccessStatus {
+    noinline fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?evmz.execution.AccessStatus {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         self.counters.access_delegated_account += 1;
@@ -325,11 +325,11 @@ test "counting host classifies same-value storage writes as assigned" {
     var host = counting_host.host();
     const contract_word: AddressWord = .fromAddress(contract_address);
 
-    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_word, 0, 0));
-    try std.testing.expectEqual(Host.StorageStatus.added, try host.setStorage(contract_word, 0, 1));
-    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_word, 0, 1));
-    try std.testing.expectEqual(Host.StorageStatus.deleted, try host.setStorage(contract_word, 0, 0));
-    try std.testing.expectEqual(Host.StorageStatus.assigned, try host.setStorage(contract_word, 0, 0));
+    try std.testing.expectEqual(evmz.execution.StorageStatus.assigned, try host.setStorage(contract_word, 0, 0));
+    try std.testing.expectEqual(evmz.execution.StorageStatus.added, try host.setStorage(contract_word, 0, 1));
+    try std.testing.expectEqual(evmz.execution.StorageStatus.assigned, try host.setStorage(contract_word, 0, 1));
+    try std.testing.expectEqual(evmz.execution.StorageStatus.deleted, try host.setStorage(contract_word, 0, 0));
+    try std.testing.expectEqual(evmz.execution.StorageStatus.assigned, try host.setStorage(contract_word, 0, 0));
 }
 
 test "counting host tracks storage warmth independently from values" {
@@ -341,13 +341,13 @@ test "counting host tracks storage warmth independently from values" {
     const contract_word: AddressWord = .fromAddress(contract_address);
     const other_word: AddressWord = .fromAddress(other_address);
 
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_word, 0));
-    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_word, 0));
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_word, 1));
-    try std.testing.expectEqual(Host.AccessStatus.warm, try host.accessStorage(contract_word, 1));
+    try std.testing.expectEqual(evmz.execution.AccessStatus.cold, try host.accessStorage(contract_word, 0));
+    try std.testing.expectEqual(evmz.execution.AccessStatus.warm, try host.accessStorage(contract_word, 0));
+    try std.testing.expectEqual(evmz.execution.AccessStatus.cold, try host.accessStorage(contract_word, 1));
+    try std.testing.expectEqual(evmz.execution.AccessStatus.warm, try host.accessStorage(contract_word, 1));
     _ = try host.setStorage(contract_word, 2, 1);
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(contract_word, 2));
-    try std.testing.expectEqual(Host.AccessStatus.cold, try host.accessStorage(other_word, 0));
+    try std.testing.expectEqual(evmz.execution.AccessStatus.cold, try host.accessStorage(contract_word, 2));
+    try std.testing.expectEqual(evmz.execution.AccessStatus.cold, try host.accessStorage(other_word, 0));
 }
 
 pub fn monotonicNowNs() !u64 {
