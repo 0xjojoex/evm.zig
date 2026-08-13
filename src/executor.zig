@@ -1211,7 +1211,6 @@ pub fn ExecutorType(
                 .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
                 .captured => runtime.executePreparedCallMessage(self, message, bytecode),
             };
-            _ = host_result.expectCall();
 
             if (executionRolledBack(host_result.status())) {
                 execution_checkpoint.restore();

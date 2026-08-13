@@ -138,7 +138,7 @@ test "generated depth-limit tree and nested projection cross 1000 frames" {
         evmz.t.defaultExecutionContext(sender, gas),
         .{ .call = .{ .sender = sender, .recipient = recursive } },
         .legacy(gas),
-    )).expectCall();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());

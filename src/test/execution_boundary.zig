@@ -337,7 +337,7 @@ test "executeStandalone owns success and revert scope lifecycles" {
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &success_code });
 
-        const result = (try executor.executeStandalone(request(sender, contract), .{})).expectCall();
+        const result = (try executor.executeStandalone(request(sender, contract), .{}));
 
         try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
@@ -349,7 +349,7 @@ test "executeStandalone owns success and revert scope lifecycles" {
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &revert_code });
 
-        const result = (try executor.executeStandalone(request(sender, contract), .{})).expectCall();
+        const result = (try executor.executeStandalone(request(sender, contract), .{}));
 
         try std.testing.expectEqual(evmz.interpreter.Status.revert, result.status());
         try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
@@ -500,7 +500,7 @@ test "nested CREATE revert output survives child frame release" {
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    const result = (try executor.executeStandalone(request(sender, contract), .{})).expectCall();
+    const result = (try executor.executeStandalone(request(sender, contract), .{}));
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);

@@ -439,12 +439,12 @@ pub const MockHost = struct {
         if (Host.precheckResult(msg)) |result| return result;
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.call_error) |err| return err;
-        return Host.Result.fromCall(.{
+        return .{
             .gas_left = 0,
             .gas_refund = 0,
             .output_data = &.{},
             .outcome = .{ .status = .success, .cause = .none },
-        });
+        };
     }
 
     fn getTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {

@@ -73,7 +73,6 @@ test "EIP-2200 child frame refunds merge only from committed frames" {
         .output_data = &.{},
         .gas_left = 4,
         .gas_refund = 7,
-        .address = evmz.addr(0xbeef),
     });
     try std.testing.expectEqual(@as(i64, 74), frame.frame.gas_left);
     try std.testing.expectEqual(@as(i64, 4_807), frame.frame.gas_refund);

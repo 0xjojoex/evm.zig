@@ -338,11 +338,7 @@ pub fn bind(comptime Executor: type) type {
                         const continuation = call_action.continuation;
                         if (try self.startCall(&call_action.msg)) |host_result| {
                             try self.frames.frame(frame_index).resumeWith(host_result);
-                            const call_result = switch (host_result) {
-                                .call => |value| value,
-                                .create => unreachable,
-                            };
-                            self.captureCallOutput(frame_index, continuation, call_result.output_data.len);
+                            self.captureCallOutput(frame_index, continuation, host_result.output_data.len);
                             try self.captureReturnData(frame_index);
                         }
                     },
@@ -364,11 +360,7 @@ pub fn bind(comptime Executor: type) type {
                 };
                 try frame.resumeWith(result);
                 if (call_continuation) |continuation| {
-                    const call_result = switch (result) {
-                        .call => |value| value,
-                        .create => unreachable,
-                    };
-                    self.captureCallOutput(frame_index, continuation, call_result.output_data.len);
+                    self.captureCallOutput(frame_index, continuation, result.output_data.len);
                 }
                 try self.captureReturnData(frame_index);
             }
@@ -432,7 +424,7 @@ pub fn bind(comptime Executor: type) type {
                     return result;
                 }
                 if (msg.depth > Host.max_call_depth) {
-                    const result = createFailureWithCause(self.executor, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
+                    const result = createFailureWithCause(self.executor, msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
                     if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
                     return result;
                 }
@@ -479,15 +471,15 @@ pub fn bind(comptime Executor: type) type {
                 }
 
                 const host_result = switch (frame_kind) {
-                    .root_call => Host.Result.fromCall(.fromExecution(result.executionResult(), false)),
+                    .root_call => Host.Result.fromExecution(result.executionResult(), false),
                     .call => blk: {
                         if (checkpoint) |*guard| {
                             guard.finish(result.status());
                         } else unreachable;
-                        break :blk Host.Result.fromCall(.fromExecution(
+                        break :blk Host.Result.fromExecution(
                             result.executionResult(),
                             result.status() != .success,
-                        ));
+                        );
                     },
                     .create => |child| blk: {
                         if (checkpoint) |*guard| {
@@ -589,9 +581,9 @@ pub fn bind(comptime Executor: type) type {
         fn callCaptureFinish(result: Host.Result) evmz.trace.CallFinish {
             return .{
                 .status = callCaptureStatus(result.status(), result.terminalCause()),
-                .gas_left = result.gasLeft(),
-                .output = result.outputData(),
-                .checkpoint_reverted = result.checkpointReverted(),
+                .gas_left = result.gas_left,
+                .output = result.output_data,
+                .checkpoint_reverted = result.checkpoint_reverted,
             };
         }
 
@@ -711,7 +703,7 @@ pub fn bind(comptime Executor: type) type {
                 gas,
                 options.value,
             );
-            return Host.Result.fromCall(.fromExecution(result, false));
+            return Host.Result.fromExecution(result, false);
         }
 
         pub fn executeCallTransaction(
@@ -928,7 +920,7 @@ pub fn bind(comptime Executor: type) type {
                 .code_address = recipient,
             };
             const call_result = (try runNativeCall(self, &message)) orelse unreachable;
-            return Host.Result.fromCall(call_result).executionResult(self.lastOutputData());
+            return call_result.executionResult(self.lastOutputData());
         }
 
         pub fn executePreparedCallTransaction(
@@ -1005,7 +997,7 @@ pub fn bind(comptime Executor: type) type {
             const result = try interpreter.execute();
             return stabilizeFinalResult(
                 self,
-                Host.Result.fromCall(.fromExecution(result.executionResult(), false)),
+                Host.Result.fromExecution(result.executionResult(), false),
             );
         }
 
@@ -1160,21 +1152,12 @@ pub fn bind(comptime Executor: type) type {
         }
 
         pub fn stabilizeFinalResult(self: *Executor, result: Host.Result) !Host.Result {
-            return switch (result) {
-                .call => |call_result| stable: {
-                    var value = call_result;
-                    value.output_data = try self.setLastOutput(call_result.output_data);
-                    break :stable .{ .call = value };
-                },
-                .create => |create_result| stable: {
-                    var value = create_result;
-                    value.output_data = if (aliasesLastOutput(self, create_result.output_data))
-                        self.lastOutputData()
-                    else
-                        try self.setLastOutput(create_result.output_data);
-                    break :stable .{ .create = value };
-                },
-            };
+            var value = result;
+            value.output_data = if (aliasesLastOutput(self, result.output_data))
+                self.lastOutputData()
+            else
+                try self.setLastOutput(result.output_data);
+            return value;
         }
 
         fn aliasesLastOutput(self: *const Executor, output_data: []const u8) bool {
@@ -1186,13 +1169,13 @@ pub fn bind(comptime Executor: type) type {
 
         fn beginCall(self: *Executor, msg: *const Host.Message) !StartedCall {
             if (msg.depth > Host.max_call_depth) {
-                return .{ .immediate = Host.Result.fromCall(.{
+                return .{ .immediate = .{
                     .outcome = .{ .status = .invalid, .cause = .call_depth_exceeded },
                     .output_data = &.{},
                     .gas_left = msg.gas,
                     .gas_refund = 0,
                     .gas_reservoir = msg.gas_reservoir,
-                }) };
+                } };
             }
 
             const resolved = try resolveCode(self, msg.code_address);
@@ -1209,13 +1192,13 @@ pub fn bind(comptime Executor: type) type {
                     try hasBalance(self, msg.recipient, msg.value);
                 if (!value_ok) {
                     checkpoint.restore();
-                    return .{ .immediate = Host.Result.fromCall(.{
+                    return .{ .immediate = .{
                         .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
                         .output_data = &.{},
                         .gas_left = msg.gas,
                         .gas_refund = 0,
                         .gas_reservoir = msg.gas_reservoir,
-                    }) };
+                    } };
                 }
             }
 
@@ -1227,20 +1210,20 @@ pub fn bind(comptime Executor: type) type {
                     }
                     checkpoint.finish(result.status());
                     result.checkpoint_reverted = result.status() != .success;
-                    return .{ .immediate = Host.Result.fromCall(result) };
+                    return .{ .immediate = result };
                 }
             }
 
             if (code.bytes.len == 0) {
                 try touchEmptyCallRecipient(self, msg);
                 checkpoint.commit();
-                return .{ .immediate = Host.Result.fromCall(.{
+                return .{ .immediate = .{
                     .outcome = .{ .status = .success, .cause = .none },
                     .output_data = &.{},
                     .gas_left = msg.gas,
                     .gas_refund = 0,
                     .gas_reservoir = msg.gas_reservoir,
-                }) };
+                } };
             }
 
             const bytecode = try resolveExecutionCodeView(self, code);
@@ -1254,7 +1237,7 @@ pub fn bind(comptime Executor: type) type {
         fn runNativeCall(
             self: *Executor,
             msg: *const Host.Message,
-        ) !?Host.CallResult {
+        ) !?Host.Result {
             self.clearLastOutput();
             var scratch = try callScratch(self, msg.depth);
             defer scratch.deinit();
@@ -1365,7 +1348,7 @@ pub fn bind(comptime Executor: type) type {
                 // Direct Host callers may still submit an over-depth message.
                 // Opcode-generated terminal attempts were resolved above.
                 if (msg.depth > Host.max_call_depth) {
-                    break :result createFailureWithCause(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
+                    break :result createFailureWithCause(self, msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
                 }
                 break :result try executeCreateMessage(self, msg);
             } else switch (try beginCall(self, &msg)) {
@@ -1404,7 +1387,7 @@ pub fn bind(comptime Executor: type) type {
             self.trace_depth = msg.depth;
             defer self.trace_depth = previous_depth;
 
-            if (msg.depth > Host.max_call_depth) return createFailureWithCause(self, evmz.addr(0), msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
+            if (msg.depth > Host.max_call_depth) return createFailureWithCause(self, msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
 
             return switch (try begin(self, &msg)) {
                 .immediate => |result| result,
@@ -1429,7 +1412,7 @@ pub fn bind(comptime Executor: type) type {
                 .nonce => |nonce| nonce,
             };
             const next_nonce = std.math.add(u64, caller_nonce, 1) catch
-                return .{ .immediate = createFailureWithCause(self, msg.recipient, msg.gas, msg.gas_reservoir, .invalid, .nonce_overflow) };
+                return .{ .immediate = createFailureWithCause(self, msg.gas, msg.gas_reservoir, .invalid, .nonce_overflow) };
             try warmCreatedAddressIfNeeded(self, msg.recipient);
             try self.state.setNonce(Executor.stateAddress(msg.sender), next_nonce);
             return beginPreparedCreate(self, msg);
@@ -1446,9 +1429,8 @@ pub fn bind(comptime Executor: type) type {
 
         fn prepareCreateCaller(self: *Executor, msg: *const Host.Message) !CreateCallerPreparation {
             const caller = try self.getAccountOrLoad(msg.sender) orelse evmz.state.Account{};
-            const create_address = msg.recipient;
             if (caller.balance < msg.value) {
-                return .{ .rejected = createFailureWithCause(self, create_address, msg.gas, msg.gas_reservoir, .invalid, .insufficient_balance) };
+                return .{ .rejected = createFailureWithCause(self, msg.gas, msg.gas_reservoir, .invalid, .insufficient_balance) };
             }
             return .{ .nonce = caller.nonce };
         }
@@ -1468,7 +1450,6 @@ pub fn bind(comptime Executor: type) type {
                 checkpoint.commit();
                 return .{ .immediate = createFailureWithCause(
                     self,
-                    create_address,
                     0,
                     msg.gas_reservoir,
                     .invalid,
@@ -1504,78 +1485,76 @@ pub fn bind(comptime Executor: type) type {
             const output = result.output_data;
             if (result.outcome.status != .success) {
                 checkpoint.restore();
-                return Host.Result.fromCreate(child.address, .fromExecution(result, true));
+                return Host.Result.fromExecution(result, true);
             }
 
             if (spec.create.code_size_limit) |limit| {
                 if (output.len > limit) {
                     checkpoint.restore();
-                    return createFailureFromResult(self, child.address, result, .out_of_gas, .max_code_size_exceeded);
+                    return createFailureFromResult(self, result, .out_of_gas, .max_code_size_exceeded);
                 }
             }
             if (spec.create.rejectsCode(output)) {
                 checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .invalid, .invalid_code);
+                return createFailureFromResult(self, result, .invalid, .invalid_code);
             }
 
             const runtime_size = std.math.cast(i64, output.len) orelse {
                 checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .out_of_gas, .code_store_out_of_gas);
+                return createFailureFromResult(self, result, .out_of_gas, .code_store_out_of_gas);
             };
             const deposit_regular_cost = spec.create.depositRegularGas(runtime_size) orelse {
                 checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .out_of_gas, .code_store_out_of_gas);
+                return createFailureFromResult(self, result, .out_of_gas, .code_store_out_of_gas);
             };
             if (result.gas_left < deposit_regular_cost) {
                 if (spec.create.deposit_regular_gas_oog_commits) {
                     checkpoint.commit();
                     var failed_deposit = result;
                     failed_deposit.outcome = .{ .status = .success, .cause = .code_store_out_of_gas };
-                    return Host.Result.fromCreate(child.address, .fromExecution(failed_deposit, false));
+                    return Host.Result.fromExecution(failed_deposit, false);
                 }
                 checkpoint.restore();
-                return createFailureFromResult(self, child.address, result, .out_of_gas, .code_store_out_of_gas);
+                return createFailureFromResult(self, result, .out_of_gas, .code_store_out_of_gas);
             }
 
             var deposit_result = result;
             deposit_result.gas_left -= deposit_regular_cost;
             const deposit_state_gas = spec.create.depositStateGas(runtime_size) orelse {
                 checkpoint.restore();
-                return createFailureFromResult(self, child.address, deposit_result, .out_of_gas, .code_store_out_of_gas);
+                return createFailureFromResult(self, deposit_result, .out_of_gas, .code_store_out_of_gas);
             };
             deposit_result.trackStateGas(deposit_state_gas);
             if (deposit_result.outcome.status != .success) {
                 checkpoint.restore();
-                return createFailureFromResult(self, child.address, deposit_result, deposit_result.outcome.status, .code_store_out_of_gas);
+                return createFailureFromResult(self, deposit_result, deposit_result.outcome.status, .code_store_out_of_gas);
             }
 
             try self.state.setCode(Executor.stateAddress(child.address), output);
             checkpoint.commit();
 
-            return Host.Result.fromCreate(child.address, .fromExecution(deposit_result, false));
+            return Host.Result.fromExecution(deposit_result, false);
         }
 
         fn createFailureWithCause(
             self: *Executor,
-            create_address: Address,
             gas_left: i64,
             gas_reservoir: i64,
             status: execution_values.Status,
             cause: execution_values.TerminalCause,
         ) Host.Result {
             self.clearLastOutput();
-            return Host.Result.fromCreate(create_address, .{
+            return .{
                 .outcome = .{ .status = status, .cause = cause },
                 .output_data = &.{},
                 .gas_left = gas_left,
                 .gas_refund = 0,
                 .gas_reservoir = gas_reservoir,
-            });
+            };
         }
 
         fn createFailureFromResult(
             self: *Executor,
-            create_address: Address,
             result: ExecutionResult,
             status: execution_values.Status,
             cause: execution_values.TerminalCause,
@@ -1587,7 +1566,7 @@ pub fn bind(comptime Executor: type) type {
             execution_values.finalizeStateGas(&failed);
             self.clearLastOutput();
             failed.output_data = &.{};
-            return Host.Result.fromCreate(create_address, .fromExecution(failed, true));
+            return Host.Result.fromExecution(failed, true);
         }
 
         fn createCollision(self: *Executor, address: Address) !bool {
@@ -1623,12 +1602,12 @@ test "CREATE final stabilization reuses already-stable output" {
     executor.last_call_output.deinit();
     executor.last_call_output = @import("../frame_io.zig").ByteSlot.init(std.testing.allocator);
     _ = try executor.setLastOutput(&.{0xaa});
-    const result = (try runtime.stabilizeFinalResult(&executor, Host.Result.fromCreate(evmz.addr(0x1234), .{
+    const result = try runtime.stabilizeFinalResult(&executor, .{
         .outcome = .{ .status = .success, .cause = .none },
         .output_data = executor.lastOutputData(),
         .gas_left = 7,
         .gas_refund = 0,
-    }))).expectCreate();
+    });
 
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);
@@ -1856,13 +1835,13 @@ test "nested call runtime owns its segment and keeps capture indices global" {
         .input_data = &.{},
         .value = 0,
         .code_address = child_address,
-    })).expectCall();
+    }));
     try std.testing.expectEqual(Interpreter.Status.success, child_result.status());
     try std.testing.expectEqual(@as(usize, 1), executor.frame_store.len());
     try std.testing.expectEqual(@as(usize, 1), capture.frame_captures.items.len);
     try std.testing.expectEqual(@as(u256, 7), try executor.state.getStorage(child_address, 0));
 
-    const root_result = (try outer.run()).expectCall();
+    const root_result = try outer.run();
     try std.testing.expectEqual(Interpreter.Status.success, root_result.status());
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 

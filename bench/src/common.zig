@@ -284,12 +284,12 @@ pub const CountingHost = struct {
     noinline fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.call += 1;
-        return Host.Result.fromCall(.{
+        return .{
             .outcome = .{ .status = .success, .cause = .none },
             .gas_left = msg.gas,
             .gas_refund = 0,
             .output_data = &.{},
-        });
+        };
     }
 
     noinline fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {

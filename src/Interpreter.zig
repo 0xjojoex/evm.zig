@@ -370,16 +370,19 @@ pub const CallFrame = struct {
         self.return_data = io.return_data.slice();
     }
 
-    /// Resume from an engine result while preserving its CALL/CREATE type.
+    /// Resume from an engine result. The suspended action decides whether the
+    /// result settles a CALL or a CREATE; the frame, not the result, is the
+    /// authority for that kind.
     pub fn resumeWith(self: *CallFrame, child: Host.Result) !void {
-        switch (child) {
-            .call => |call_result| try self.resumeWithCall(call_result),
-            .create => |create_result| try self.resumeWithCreate(create_result),
+        const action = self.suspendedAction() orelse return error.FrameNotSuspended;
+        switch (action.*) {
+            .call => try self.resumeWithCall(child),
+            .create => try self.resumeWithCreate(child),
         }
     }
 
     /// Resume only a CALL action. A mismatch leaves the frame suspended.
-    pub fn resumeWithCall(self: *CallFrame, child: Host.CallResult) !void {
+    pub fn resumeWithCall(self: *CallFrame, child: Host.Result) !void {
         const continuation = (try self.takeSuspended(.call)).continuation;
         if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
 
@@ -390,14 +393,17 @@ pub const CallFrame = struct {
     }
 
     /// Resume only a CREATE action. A mismatch leaves the frame suspended.
-    pub fn resumeWithCreate(self: *CallFrame, child: Host.CreateResult) !void {
-        const continuation = (try self.takeSuspended(.create)).continuation;
+    pub fn resumeWithCreate(self: *CallFrame, child: Host.Result) !void {
+        const suspended = try self.takeSuspended(.create);
+        const continuation = suspended.continuation;
         if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
 
         if (child.outcome.status == .success) {
-            // A deployed contract yields its address, never return data.
+            // A deployed contract yields its address, never return data. The
+            // address comes from the suspended message: the create target was
+            // computed by this frame before dispatch.
             try self.replaceReturnData(&.{});
-            self.stack.push(child.address.toU256());
+            self.stack.push(suspended.msg.recipient.toU256());
         } else {
             try self.replaceReturnData(child.output_data);
             self.stack.push(0);
@@ -419,7 +425,7 @@ pub const CallFrame = struct {
 
     /// Fold a returned child frame's gas accounting into this one. Returns
     /// whether execution may continue.
-    fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charged: i64, child: anytype) bool {
+    fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charged: i64, child: Host.Result) bool {
         const succeeded = child.outcome.status == .success;
         const gas_charged = self.trackGas(gas_limit - @max(child.gas_left, 0));
         self.gas_reservoir = child.gas_reservoir;
@@ -1096,18 +1102,17 @@ test "call and create resumes reject mismatched suspended actions" {
     });
     defer owned.deinit();
 
-    const call_result = Host.CallResult{
+    const call_result = Host.Result{
         .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = 10,
         .gas_refund = 0,
     };
-    const create_result = Host.CreateResult{
+    const create_result = Host.Result{
         .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = 10,
         .gas_refund = 0,
-        .address = evmz.addr(0xbeef),
     };
 
     owned.frame.state = .running;

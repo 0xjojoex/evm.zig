@@ -56,9 +56,15 @@ pub const Message = struct {
     }
 };
 
-pub const CallResult = struct {
+/// Settlement of a finished child frame, CALL and CREATE alike. The created
+/// address is deliberately absent: create targets are computed by the caller
+/// before dispatch and travel in `Message.recipient`, so the frame that
+/// initiated the create is the authority for the deployed address.
+pub const Result = struct {
     outcome: ExecutionOutcome,
     frame_halt: ?FrameHalt = null,
+    /// Whether this frame restored its own execution checkpoint. Precheck
+    /// rejection and the pre-Homestead code-deposit exception do not.
     checkpoint_reverted: bool = false,
     output_data: []const u8,
     gas_left: i64,
@@ -70,7 +76,7 @@ pub const CallResult = struct {
     pub fn fromExecution(
         result: execution.ExecutionResult,
         checkpoint_reverted: bool,
-    ) CallResult {
+    ) Result {
         return .{
             .outcome = result.outcome,
             .frame_halt = result.frame_halt,
@@ -84,132 +90,12 @@ pub const CallResult = struct {
         };
     }
 
-    pub fn status(self: CallResult) Status {
-        return self.outcome.status;
-    }
-
-    pub fn terminalCause(self: CallResult) TerminalCause {
-        return self.outcome.cause;
-    }
-
-    comptime {
-        std.debug.assert(@sizeOf(CallResult) == 64);
-        std.debug.assert(@alignOf(CallResult) == 8);
-    }
-};
-
-pub const CreateResult = struct {
-    outcome: ExecutionOutcome,
-    frame_halt: ?FrameHalt = null,
-    checkpoint_reverted: bool = false,
-    output_data: []const u8,
-    gas_left: i64,
-    gas_refund: i64,
-    gas_reservoir: i64 = 0,
-    state_gas_spent: i64 = 0,
-    state_gas_from_gas_left: i64 = 0,
-    address: Address,
-
-    pub fn status(self: CreateResult) Status {
-        return self.outcome.status;
-    }
-
-    pub fn terminalCause(self: CreateResult) TerminalCause {
-        return self.outcome.cause;
-    }
-
-    comptime {
-        std.debug.assert(@sizeOf(CreateResult) == 88);
-        std.debug.assert(@alignOf(CreateResult) == 8);
-    }
-};
-
-pub const Result = union(enum) {
-    call: CallResult,
-    create: CreateResult,
-
-    pub fn fromCall(result: CallResult) Result {
-        return .{ .call = result };
-    }
-
-    pub fn fromCreate(address: Address, result: CallResult) Result {
-        return .{ .create = .{
-            .outcome = result.outcome,
-            .frame_halt = result.frame_halt,
-            .checkpoint_reverted = result.checkpoint_reverted,
-            .output_data = result.output_data,
-            .gas_left = result.gas_left,
-            .gas_refund = result.gas_refund,
-            .gas_reservoir = result.gas_reservoir,
-            .state_gas_spent = result.state_gas_spent,
-            .state_gas_from_gas_left = result.state_gas_from_gas_left,
-            .address = address,
-        } };
-    }
-
     pub fn status(self: Result) Status {
-        return switch (self) {
-            .call => |result| result.outcome.status,
-            .create => |result| result.outcome.status,
-        };
+        return self.outcome.status;
     }
 
     pub fn terminalCause(self: Result) TerminalCause {
-        return switch (self) {
-            .call => |result| result.outcome.cause,
-            .create => |result| result.outcome.cause,
-        };
-    }
-
-    pub fn outputData(self: Result) []const u8 {
-        return switch (self) {
-            .call => |result| result.output_data,
-            .create => |result| result.output_data,
-        };
-    }
-
-    /// Whether this frame restored its own execution checkpoint. Precheck
-    /// rejection and the pre-Homestead code-deposit exception do not.
-    pub fn checkpointReverted(self: Result) bool {
-        return switch (self) {
-            .call => |result| result.checkpoint_reverted,
-            .create => |result| result.checkpoint_reverted,
-        };
-    }
-
-    pub fn gasLeft(self: Result) i64 {
-        return switch (self) {
-            .call => |result| result.gas_left,
-            .create => |result| result.gas_left,
-        };
-    }
-
-    pub fn gasRefund(self: Result) i64 {
-        return switch (self) {
-            .call => |result| result.gas_refund,
-            .create => |result| result.gas_refund,
-        };
-    }
-
-    pub fn gasReservoir(self: Result) i64 {
-        return switch (self) {
-            .call => |result| result.gas_reservoir,
-            .create => |result| result.gas_reservoir,
-        };
-    }
-
-    pub fn stateGasSpent(self: Result) i64 {
-        return switch (self) {
-            .call => |result| result.state_gas_spent,
-            .create => |result| result.state_gas_spent,
-        };
-    }
-
-    pub fn stateGasFromGasLeft(self: Result) i64 {
-        return switch (self) {
-            .call => |result| result.state_gas_from_gas_left,
-            .create => |result| result.state_gas_from_gas_left,
-        };
+        return self.outcome.cause;
     }
 
     /// Convert a resolved host result into the engine result boundary. The
@@ -217,32 +103,20 @@ pub const Result = union(enum) {
     /// frame or scratch arena that is about to be released.
     pub fn executionResult(self: Result, output_data: []u8) execution.ExecutionResult {
         return .{
-            .outcome = .{ .status = self.status(), .cause = self.terminalCause() },
-            .frame_halt = switch (self) {
-                .call => |result| result.frame_halt,
-                .create => |result| result.frame_halt,
-            },
-            .gas_left = self.gasLeft(),
-            .gas_refund = self.gasRefund(),
-            .gas_reservoir = self.gasReservoir(),
-            .state_gas_spent = self.stateGasSpent(),
-            .state_gas_from_gas_left = self.stateGasFromGasLeft(),
+            .outcome = self.outcome,
+            .frame_halt = self.frame_halt,
+            .gas_left = self.gas_left,
+            .gas_refund = self.gas_refund,
+            .gas_reservoir = self.gas_reservoir,
+            .state_gas_spent = self.state_gas_spent,
+            .state_gas_from_gas_left = self.state_gas_from_gas_left,
             .output_data = output_data,
         };
     }
 
-    pub fn expectCall(self: Result) CallResult {
-        return switch (self) {
-            .call => |result| result,
-            .create => unreachable,
-        };
-    }
-
-    pub fn expectCreate(self: Result) CreateResult {
-        return switch (self) {
-            .call => unreachable,
-            .create => |result| result,
-        };
+    comptime {
+        std.debug.assert(@sizeOf(Result) == 64);
+        std.debug.assert(@alignOf(Result) == 8);
     }
 };
 
@@ -250,16 +124,12 @@ pub const Result = union(enum) {
 /// host. The supplied child gas is returned in full, matching EVM prechecks.
 pub fn precheckResult(msg: Message) ?Result {
     const cause = msg.precheck_failure orelse return null;
-    const result = CallResult{
+    return .{
         .outcome = .{ .status = .invalid, .cause = cause },
         .output_data = &.{},
         .gas_left = msg.gas,
         .gas_refund = 0,
         .gas_reservoir = msg.gas_reservoir,
-    };
-    return switch (msg.kind) {
-        .call, .staticcall, .delegatecall, .callcode => Result.fromCall(result),
-        .create, .create2 => Result.fromCreate(msg.recipient, result),
     };
 }
 
