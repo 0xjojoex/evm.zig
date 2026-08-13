@@ -292,7 +292,7 @@ const Repl = struct {
         };
         const loaded = &self.loaded.?;
         errdefer {
-            // A no-op if the.session never opened; otherwise it closes the
+            // A no-op if the session never opened; otherwise it closes the
             // prepared-code scope before `discardStateTransition` demands it.
             loaded.session.deinit();
             loaded.bytecode.deinit(self.allocator);
@@ -318,7 +318,7 @@ const Repl = struct {
     fn unload(self: *Repl) void {
         if (self.loaded == null) return;
         const loaded = &self.loaded.?;
-        // A no-op once the.session closed itself; otherwise it restores every
+        // A no-op once the session closed itself; otherwise it restores every
         // unresolved child checkpoint before the transaction goes.
         loaded.session.deinit();
         loaded.bytecode.deinit(self.allocator);
@@ -330,7 +330,7 @@ const Repl = struct {
     /// Advance one boundary: execute an opcode, or dispatch a pending call.
     ///
     /// The single chokepoint for touching a closed.session: after an abort the
-    /// last pause still names an opcode the.session can no longer execute.
+    /// last pause still names an opcode the session can no longer execute.
     fn stepOnce(self: *Repl, loaded: *Loaded) !void {
         if (loaded.closed) return;
         switch (loaded.pause) {

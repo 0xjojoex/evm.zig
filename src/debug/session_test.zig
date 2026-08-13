@@ -307,6 +307,45 @@ test "debug session matches call, create, precompile, and terminal outcomes" {
     try expectCallParity(Exact, "static write protection", &static_violation, 100, true, .invalid, .write_protection);
 }
 
+test "debug stepping respects finalized specialized builtin admission" {
+    if (comptime !evmz.t.forkEnabled(.amsterdam)) return error.SkipZigTest;
+    const instructions = comptime instructions: {
+        @setEvalBranchQuota(100_000);
+        var exact = evmz.eth.amsterdam.instruction;
+        for (.{
+            .{ evmz.Opcode.STOP, 1 },
+            .{ evmz.Opcode.PUSH1, 1 },
+            .{ evmz.Opcode.ADDRESS, 1 },
+            .{ evmz.Opcode.RETURN, 3 },
+            .{ evmz.Opcode.SSTORE, 3 },
+            .{ evmz.Opcode.JUMPDEST, 1 },
+        }) |entry| {
+            const info = &exact.table[@intFromEnum(entry[0])].info;
+            info.static_gas = 7;
+            info.stack_in = entry[1];
+        }
+        break :instructions exact;
+    };
+    const Exact = evmz.t.CustomVm(.amsterdam, .{ .instruction = instructions }) orelse return error.SkipZigTest;
+
+    inline for (.{
+        evmz.Opcode.STOP,
+        evmz.Opcode.PUSH1,
+        evmz.Opcode.ADDRESS,
+        evmz.Opcode.RETURN,
+        evmz.Opcode.SSTORE,
+        evmz.Opcode.JUMPDEST,
+    }) |opcode| {
+        const code = [_]u8{@intFromEnum(opcode)};
+        try expectCallParity(Exact, @tagName(opcode) ++ " static OOG", &code, 6, false, .out_of_gas, .out_of_gas);
+        try expectCallParity(Exact, @tagName(opcode) ++ " final stack minimum", &code, 7, false, .invalid, .stack_underflow);
+    }
+
+    const sstore = [_]u8{@intFromEnum(evmz.Opcode.SSTORE)};
+    try expectCallParity(Exact, "SSTORE static OOG order", &sstore, 6, true, .out_of_gas, .out_of_gas);
+    try expectCallParity(Exact, "SSTORE write protection order", &sstore, 7, true, .invalid, .write_protection);
+}
+
 test "debug session dispatches a child and resumes its parent" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;

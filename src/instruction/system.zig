@@ -40,7 +40,8 @@ pub fn Handlers(comptime spec: Spec) type {
                 return;
             }
 
-            if (!frame.trackGas(spec.call.base_gas - evmz.instruction.Instruction(spec).staticGasForFrame(frame, op))) return;
+            const static_gas = spec.instruction.entry(@intFromEnum(op)).info.static_gas;
+            if (!frame.trackGas(spec.call.base_gas - static_gas)) return;
 
             if (spec.call.cold_account_access_gas) |cold_account_access_gas| {
                 if (try frame.host.accessAccount(address) == .cold) {

@@ -169,7 +169,7 @@ sizing, schema pinning, and proof-readiness checks.
 ## Performance
 
 Representative Apple M1 Max VM-loop results from the fixed-Osaka `ReleaseFast`
-napshot measured on 2026-08-13; lower is better:
+snapshot measured on 2026-08-13; lower is better:
 
 | Fixture             |          evmz | evmone-base |  revm-int |
 | ------------------- | ------------: | ----------: | --------: |

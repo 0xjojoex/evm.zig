@@ -86,7 +86,7 @@ pub fn div(a: u256, b: u256) u256 {
     return divKnuth(a, b);
 }
 
-pub inline fn mod(a: u256, b: u256) u256 {
+pub fn mod(a: u256, b: u256) u256 {
     if (b == 0) return 0;
     if ((a | b) <= std.math.maxInt(u64)) {
         return @as(u64, @truncate(a)) % @as(u64, @truncate(b));

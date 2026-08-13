@@ -9,7 +9,7 @@ const OpInfo = opcode_info.OpInfo;
 
 pub const Target = union(enum) {
     invalid,
-    builtin: Opcode,
+    builtin,
     /// The interpreter charges `Entry.info.static_gas` before calling
     /// `Handler.execute(spec, frame)`; the handler owns dynamic gas and behavior.
     custom: type,
@@ -86,8 +86,8 @@ pub const Spec = struct {
         inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].info.static_gas = gas;
     }
 
-    /// Repoint dispatch for one byte, keeping its activation and metadata.
-    /// Builtin targets must share the target entry's stack requirement.
+    /// Change dispatch for one byte while keeping its activation and metadata.
+    /// `.builtin` restores that byte's canonical builtin behavior.
     pub fn setTarget(self: *Spec, opcode_byte: u8, comptime target: Target) void {
         self.table[opcode_byte].target = target;
     }
@@ -163,14 +163,15 @@ fn assertNameAvailable(comptime spec: Spec, comptime name: @EnumLiteral(), compt
 pub fn validate(comptime table: Table) void {
     // Covers evaluating the full fork-derivation chain when this forces it.
     @setEvalBranchQuota(100_000);
-    for (table) |entry| {
+    for (table, 0..) |entry, source_index| {
         std.debug.assert(!entry.active or entry.defined());
         entry.target.assertValid();
         switch (entry.target) {
-            .builtin => |opcode| {
-                const target_stack_in = table[@intFromEnum(opcode)].info.stack_in;
-                std.debug.assert(target_stack_in >= opcode_info.info(@intFromEnum(opcode)).stack_in);
-                std.debug.assert(entry.info.stack_in == target_stack_in);
+            .builtin => {
+                const opcode_byte: u8 = @intCast(source_index);
+                const canonical = opcode_info.info(opcode_byte);
+                std.debug.assert(canonical.defined);
+                std.debug.assert(entry.info.stack_in >= canonical.stack_in);
             },
             .invalid, .custom => {},
         }

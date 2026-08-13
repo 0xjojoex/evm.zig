@@ -50,12 +50,12 @@ pub fn Iterator(comptime spec: instruction_table.Spec) type {
     };
 
     // Peek only bytes that dispatch as the builtin EIP-8024 instructions in
-    // this spec; a repointed or disabled byte carries no operand.
+    // this spec; a custom or disabled byte carries no operand.
     const peek_kinds = comptime blk: {
         var kinds: [256]PeekKind = @splat(.none);
         for ([_]Opcode{ .DUPN, .SWAPN, .EXCHANGE }) |op| {
             switch (spec.table[@intFromEnum(op)].dispatchTarget()) {
-                .builtin => |builtin| if (builtin == op) {
+                .builtin => {
                     kinds[@intFromEnum(op)] = if (op == .EXCHANGE) .exchange else .depth;
                 },
                 else => {},

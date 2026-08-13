@@ -46,7 +46,7 @@ fn defaultTarget(comptime opcode_byte: u8, comptime defined: bool) instruction_t
     const opcode: Opcode = @enumFromInt(opcode_byte);
     return switch (opcode) {
         .INVALID => .invalid,
-        else => .{ .builtin = opcode },
+        else => .builtin,
     };
 }
 

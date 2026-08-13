@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const evmz = @import("../evm.zig");
 const Spec = @import("../spec.zig").Spec;
@@ -130,11 +129,6 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         // byte to decode (one past the handler's own opcode byte).
         const Handler = fn ([*]const u8, [*]u256, i64, *Context) TailStatus;
 
-        const Entry = struct {
-            opcode: Opcode,
-            handler: *const Handler,
-        };
-
         const JumpDestMaskInt = std.DynamicBitSetUnmanaged.MaskInt;
 
         const Context = struct {
@@ -203,100 +197,8 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             }
         };
 
-        const tail_entries = [_]Entry{
-            .{ .opcode = .STOP, .handler = &tailStop },
-            .{ .opcode = .ADD, .handler = &BinaryHandler(.ADD, .add).run },
-            .{ .opcode = .MUL, .handler = &BinaryHandler(.MUL, .mul).run },
-            .{ .opcode = .SUB, .handler = &BinaryHandler(.SUB, .sub).run },
-            .{ .opcode = .DIV, .handler = &BinaryHandler(.DIV, .div).run },
-            .{ .opcode = .SDIV, .handler = &BinaryHandler(.SDIV, .sdiv).run },
-            .{ .opcode = .MOD, .handler = &BinaryHandler(.MOD, .mod).run },
-            .{ .opcode = .SMOD, .handler = &BinaryHandler(.SMOD, .smod).run },
-            .{ .opcode = .ADDMOD, .handler = &TernaryHandler(.ADDMOD, .add_mod).run },
-            .{ .opcode = .MULMOD, .handler = &TernaryHandler(.MULMOD, .mul_mod).run },
-            .{ .opcode = .EXP, .handler = &tailExp },
-            .{ .opcode = .SIGNEXTEND, .handler = &BinaryHandler(.SIGNEXTEND, .sign_extend).run },
-            .{ .opcode = .LT, .handler = &BinaryHandler(.LT, .lt).run },
-            .{ .opcode = .GT, .handler = &BinaryHandler(.GT, .gt).run },
-            .{ .opcode = .SLT, .handler = &BinaryHandler(.SLT, .slt).run },
-            .{ .opcode = .SGT, .handler = &BinaryHandler(.SGT, .sgt).run },
-            .{ .opcode = .EQ, .handler = &BinaryHandler(.EQ, .eq).run },
-            .{ .opcode = .ISZERO, .handler = &UnaryHandler(.ISZERO, .iszero).run },
-            .{ .opcode = .AND, .handler = &BinaryHandler(.AND, .bit_and).run },
-            .{ .opcode = .OR, .handler = &BinaryHandler(.OR, .bit_or).run },
-            .{ .opcode = .XOR, .handler = &BinaryHandler(.XOR, .bit_xor).run },
-            .{ .opcode = .NOT, .handler = &UnaryHandler(.NOT, .bit_not).run },
-            .{ .opcode = .BYTE, .handler = &BinaryHandler(.BYTE, .byte).run },
-            .{ .opcode = .SHL, .handler = &ShiftHandler(.SHL, .left).run },
-            .{ .opcode = .SHR, .handler = &ShiftHandler(.SHR, .right).run },
-            .{ .opcode = .SAR, .handler = &ShiftHandler(.SAR, .arithmetic).run },
-            .{ .opcode = .CLZ, .handler = &UnaryHandler(.CLZ, .count_leading_zeros).run },
-            .{ .opcode = .KECCAK256, .handler = &tailKeccak256 },
-            .{ .opcode = .ADDRESS, .handler = &FrameValueHandler(.ADDRESS, .address).run },
-            .{ .opcode = .BALANCE, .handler = &HostValueHandler(.BALANCE, .balance).run },
-            .{ .opcode = .ORIGIN, .handler = &ContextValueHandler(.ORIGIN, .origin).run },
-            .{ .opcode = .CALLER, .handler = &FrameValueHandler(.CALLER, .caller).run },
-            .{ .opcode = .CALLVALUE, .handler = &FrameValueHandler(.CALLVALUE, .call_value).run },
-            .{ .opcode = .CALLDATALOAD, .handler = &tailCalldataLoad },
-            .{ .opcode = .CALLDATASIZE, .handler = &FrameValueHandler(.CALLDATASIZE, .calldata_size).run },
-            .{ .opcode = .CALLDATACOPY, .handler = &CopyHandler(.CALLDATACOPY, .calldata).run },
-            .{ .opcode = .CODESIZE, .handler = &FrameValueHandler(.CODESIZE, .code_size).run },
-            .{ .opcode = .CODECOPY, .handler = &CopyHandler(.CODECOPY, .code).run },
-            .{ .opcode = .GASPRICE, .handler = &ContextValueHandler(.GASPRICE, .gas_price).run },
-            .{ .opcode = .EXTCODESIZE, .handler = &HostValueHandler(.EXTCODESIZE, .code_size).run },
-            .{ .opcode = .EXTCODECOPY, .handler = &tailExtcodecopy },
-            .{ .opcode = .RETURNDATASIZE, .handler = &FrameValueHandler(.RETURNDATASIZE, .return_data_size).run },
-            .{ .opcode = .RETURNDATACOPY, .handler = &CopyHandler(.RETURNDATACOPY, .return_data).run },
-            .{ .opcode = .EXTCODEHASH, .handler = &HostValueHandler(.EXTCODEHASH, .code_hash).run },
-            .{ .opcode = .BLOCKHASH, .handler = &tailBlockhash },
-            .{ .opcode = .COINBASE, .handler = &ContextValueHandler(.COINBASE, .coinbase).run },
-            .{ .opcode = .TIMESTAMP, .handler = &ContextValueHandler(.TIMESTAMP, .timestamp).run },
-            .{ .opcode = .NUMBER, .handler = &ContextValueHandler(.NUMBER, .number).run },
-            .{ .opcode = .PREVRANDAO, .handler = &ContextValueHandler(.PREVRANDAO, .prev_randao).run },
-            .{ .opcode = .GASLIMIT, .handler = &ContextValueHandler(.GASLIMIT, .gas_limit).run },
-            .{ .opcode = .CHAINID, .handler = &ContextValueHandler(.CHAINID, .chain_id).run },
-            .{ .opcode = .SELFBALANCE, .handler = &HostValueHandler(.SELFBALANCE, .self_balance).run },
-            .{ .opcode = .BASEFEE, .handler = &ContextValueHandler(.BASEFEE, .base_fee).run },
-            .{ .opcode = .BLOBHASH, .handler = &tailBlobhash },
-            .{ .opcode = .BLOBBASEFEE, .handler = &ContextValueHandler(.BLOBBASEFEE, .blob_base_fee).run },
-            .{ .opcode = .SLOTNUM, .handler = &ContextValueHandler(.SLOTNUM, .slot_number).run },
-            .{ .opcode = .POP, .handler = &tailPop },
-            .{ .opcode = .MLOAD, .handler = &tailMload },
-            .{ .opcode = .MSTORE, .handler = &tailMstore },
-            .{ .opcode = .MSTORE8, .handler = &tailMstore8 },
-            .{ .opcode = .SLOAD, .handler = &tailSload },
-            .{ .opcode = .SSTORE, .handler = &tailSstore },
-            .{ .opcode = .JUMP, .handler = &tailJump },
-            .{ .opcode = .JUMPI, .handler = &tailJumpi },
-            .{ .opcode = .PC, .handler = &tailPc },
-            .{ .opcode = .MSIZE, .handler = &tailMsize },
-            .{ .opcode = .GAS, .handler = &tailGas },
-            .{ .opcode = .JUMPDEST, .handler = &tailJumpdest },
-            .{ .opcode = .TLOAD, .handler = &tailTload },
-            .{ .opcode = .TSTORE, .handler = &tailTstore },
-            .{ .opcode = .MCOPY, .handler = &tailMcopy },
-            .{ .opcode = .PUSH0, .handler = &tailPush0 },
-            .{ .opcode = .LOG0, .handler = &LogHandler(.LOG0, 0).run },
-            .{ .opcode = .LOG1, .handler = &LogHandler(.LOG1, 1).run },
-            .{ .opcode = .LOG2, .handler = &LogHandler(.LOG2, 2).run },
-            .{ .opcode = .LOG3, .handler = &LogHandler(.LOG3, 3).run },
-            .{ .opcode = .LOG4, .handler = &LogHandler(.LOG4, 4).run },
-            .{ .opcode = .DUPN, .handler = &ExtendedStackHandler(.DUPN).run },
-            .{ .opcode = .SWAPN, .handler = &ExtendedStackHandler(.SWAPN).run },
-            .{ .opcode = .EXCHANGE, .handler = &ExtendedStackHandler(.EXCHANGE).run },
-            .{ .opcode = .CREATE, .handler = &SystemHandler(.CREATE).run },
-            .{ .opcode = .CALL, .handler = &SystemHandler(.CALL).run },
-            .{ .opcode = .CALLCODE, .handler = &SystemHandler(.CALLCODE).run },
-            .{ .opcode = .RETURN, .handler = &TerminalHandler(.RETURN, .success).run },
-            .{ .opcode = .DELEGATECALL, .handler = &SystemHandler(.DELEGATECALL).run },
-            .{ .opcode = .CREATE2, .handler = &SystemHandler(.CREATE2).run },
-            .{ .opcode = .STATICCALL, .handler = &SystemHandler(.STATICCALL).run },
-            .{ .opcode = .REVERT, .handler = &TerminalHandler(.REVERT, .revert).run },
-            .{ .opcode = .SELFDESTRUCT, .handler = &SystemHandler(.SELFDESTRUCT).run },
-        };
-
         // Resolve every byte directly to its exact invalid, custom, or builtin
-        // target. Repointed builtins share the canonical target handler.
+        // target. Builtins use the source byte's finalized admission metadata.
         const table: [256]*const Handler = blk: {
             @setEvalBranchQuota(20_000);
             var handlers: [256]*const Handler = undefined;
@@ -305,7 +207,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 handlers[opcode_index] = switch (Instructions.entry(opcode_byte).dispatchTarget()) {
                     .invalid => &tailInvalid,
                     .custom => |Custom| &CustomHandler(opcode_byte, Custom).run,
-                    .builtin => |opcode| builtinTailHandler(opcode),
+                    .builtin => &BuiltinHandler(opcode_byte).run,
                 };
             }
             break :blk handlers;
@@ -368,7 +270,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                         .stack_prefix_len = stackPrefixLen(opcode_byte, ctx.stackLen(sp)),
                         .memory_size = ctx.frame.memory.len(),
                         .memory_write = if (ctx.capture.capturesMemoryWrites())
-                            memoryWritePlan(opcode_byte, ctx.stackSlice(sp))
+                            builtinMemoryWritePlan(opcode_byte, ctx.stackSlice(sp))
                         else
                             null,
                     }) catch |err| {
@@ -381,19 +283,127 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             };
         }
 
-        inline fn builtinTailHandler(comptime opcode: Opcode) *const Handler {
-            inline for (tail_entries) |entry| {
-                if (opcode == entry.opcode) return entry.handler;
-            }
-            const opcode_byte = @intFromEnum(opcode);
-            if (opcode_byte >= @intFromEnum(Opcode.PUSH1) and opcode_byte <= @intFromEnum(Opcode.PUSH32))
-                return &PushHandler(opcode).run;
-            if (opcode_byte >= @intFromEnum(Opcode.DUP1) and opcode_byte <= @intFromEnum(Opcode.DUP16))
-                return &DupHandler(opcode).run;
-            if (opcode_byte >= @intFromEnum(Opcode.SWAP1) and opcode_byte <= @intFromEnum(Opcode.SWAP16))
-                return &SwapHandler(opcode).run;
-            if (opcode == .INVALID) return &tailInvalid;
-            @compileError("missing tail handler for builtin " ++ @tagName(opcode));
+        fn BuiltinHandler(comptime opcode_byte: u8) type {
+            const opcode: Opcode = @enumFromInt(opcode_byte);
+            return struct {
+                fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
+                    const info = spec.instruction.entry(opcode_byte).info;
+                    const next_gas = chargeGas(ip, sp, gas, ctx, info.static_gas) orelse return .out_of_gas;
+                    if (comptime writeProtectedBuiltin(opcode)) {
+                        if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
+                    }
+                    if (!ctx.hasStack(sp, info.stack_in)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                    return @call(.always_tail, builtinBehaviorHandler(opcode), .{ ip, sp, next_gas, ctx });
+                }
+            };
+        }
+
+        inline fn writeProtectedBuiltin(comptime target: Opcode) bool {
+            return switch (target) {
+                .SSTORE,
+                .TSTORE,
+                .LOG0,
+                .LOG1,
+                .LOG2,
+                .LOG3,
+                .LOG4,
+                .CREATE,
+                .CREATE2,
+                .SELFDESTRUCT,
+                => true,
+                else => false,
+            };
+        }
+
+        inline fn builtinBehaviorHandler(comptime opcode: Opcode) *const Handler {
+            return switch (opcode) {
+                .STOP => &tailStop,
+                .ADD => &BinaryHandler(.add).run,
+                .MUL => &BinaryHandler(.mul).run,
+                .SUB => &BinaryHandler(.sub).run,
+                .DIV => &BinaryHandler(.div).run,
+                .SDIV => &BinaryHandler(.sdiv).run,
+                .MOD => &BinaryHandler(.mod).run,
+                .SMOD => &BinaryHandler(.smod).run,
+                .ADDMOD => &TernaryHandler(.add_mod).run,
+                .MULMOD => &TernaryHandler(.mul_mod).run,
+                .EXP => &tailExp,
+                .SIGNEXTEND => &BinaryHandler(.sign_extend).run,
+                .LT => &BinaryHandler(.lt).run,
+                .GT => &BinaryHandler(.gt).run,
+                .SLT => &BinaryHandler(.slt).run,
+                .SGT => &BinaryHandler(.sgt).run,
+                .EQ => &BinaryHandler(.eq).run,
+                .ISZERO => &UnaryHandler(.iszero).run,
+                .AND => &BinaryHandler(.bit_and).run,
+                .OR => &BinaryHandler(.bit_or).run,
+                .XOR => &BinaryHandler(.bit_xor).run,
+                .NOT => &UnaryHandler(.bit_not).run,
+                .BYTE => &BinaryHandler(.byte).run,
+                .SHL => &ShiftHandler(.left).run,
+                .SHR => &ShiftHandler(.right).run,
+                .SAR => &ShiftHandler(.arithmetic).run,
+                .CLZ => &UnaryHandler(.count_leading_zeros).run,
+                .KECCAK256 => &tailKeccak256,
+                .ADDRESS => &FrameValueHandler(.address).run,
+                .BALANCE => &HostValueHandler(.balance).run,
+                .ORIGIN => &ContextValueHandler(.origin).run,
+                .CALLER => &FrameValueHandler(.caller).run,
+                .CALLVALUE => &FrameValueHandler(.call_value).run,
+                .CALLDATALOAD => &tailCalldataLoad,
+                .CALLDATASIZE => &FrameValueHandler(.calldata_size).run,
+                .CALLDATACOPY => &CopyHandler(.calldata).run,
+                .CODESIZE => &FrameValueHandler(.code_size).run,
+                .CODECOPY => &CopyHandler(.code).run,
+                .GASPRICE => &ContextValueHandler(.gas_price).run,
+                .EXTCODESIZE => &HostValueHandler(.code_size).run,
+                .EXTCODECOPY => &tailExtcodecopy,
+                .RETURNDATASIZE => &FrameValueHandler(.return_data_size).run,
+                .RETURNDATACOPY => &CopyHandler(.return_data).run,
+                .EXTCODEHASH => &HostValueHandler(.code_hash).run,
+                .BLOCKHASH => &tailBlockhash,
+                .COINBASE => &ContextValueHandler(.coinbase).run,
+                .TIMESTAMP => &ContextValueHandler(.timestamp).run,
+                .NUMBER => &ContextValueHandler(.number).run,
+                .PREVRANDAO => &ContextValueHandler(.prev_randao).run,
+                .GASLIMIT => &ContextValueHandler(.gas_limit).run,
+                .CHAINID => &ContextValueHandler(.chain_id).run,
+                .SELFBALANCE => &HostValueHandler(.self_balance).run,
+                .BASEFEE => &ContextValueHandler(.base_fee).run,
+                .BLOBHASH => &tailBlobhash,
+                .BLOBBASEFEE => &ContextValueHandler(.blob_base_fee).run,
+                .SLOTNUM => &ContextValueHandler(.slot_number).run,
+                .POP => &tailPop,
+                .MLOAD => &tailMload,
+                .MSTORE => &tailMstore,
+                .MSTORE8 => &tailMstore8,
+                .SLOAD => &tailSload,
+                .SSTORE => &tailSstore,
+                .JUMP => &tailJump,
+                .JUMPI => &tailJumpi,
+                .PC => &tailPc,
+                .MSIZE => &tailMsize,
+                .GAS => &tailGas,
+                .JUMPDEST => &tailJumpdest,
+                .TLOAD => &tailTload,
+                .TSTORE => &tailTstore,
+                .MCOPY => &tailMcopy,
+                .PUSH0 => &tailPush0,
+                .PUSH1, .PUSH2, .PUSH3, .PUSH4, .PUSH5, .PUSH6, .PUSH7, .PUSH8, .PUSH9, .PUSH10, .PUSH11, .PUSH12, .PUSH13, .PUSH14, .PUSH15, .PUSH16, .PUSH17, .PUSH18, .PUSH19, .PUSH20, .PUSH21, .PUSH22, .PUSH23, .PUSH24, .PUSH25, .PUSH26, .PUSH27, .PUSH28, .PUSH29, .PUSH30, .PUSH31, .PUSH32 => &PushHandler(opcode).run,
+                .DUP1, .DUP2, .DUP3, .DUP4, .DUP5, .DUP6, .DUP7, .DUP8, .DUP9, .DUP10, .DUP11, .DUP12, .DUP13, .DUP14, .DUP15, .DUP16 => &DupHandler(opcode).run,
+                .SWAP1, .SWAP2, .SWAP3, .SWAP4, .SWAP5, .SWAP6, .SWAP7, .SWAP8, .SWAP9, .SWAP10, .SWAP11, .SWAP12, .SWAP13, .SWAP14, .SWAP15, .SWAP16 => &SwapHandler(opcode).run,
+                .LOG0 => &LogHandler(0).run,
+                .LOG1 => &LogHandler(1).run,
+                .LOG2 => &LogHandler(2).run,
+                .LOG3 => &LogHandler(3).run,
+                .LOG4 => &LogHandler(4).run,
+                .DUPN, .SWAPN, .EXCHANGE => &ExtendedStackHandler(opcode).run,
+                .CREATE, .CALL, .CALLCODE, .DELEGATECALL, .CREATE2, .STATICCALL, .SELFDESTRUCT => &SystemHandler(opcode).run,
+                .RETURN => &TerminalHandler(.success).run,
+                .REVERT => &TerminalHandler(.revert).run,
+                .INVALID => &tailInvalid,
+                else => @compileError("missing tail handler for builtin " ++ @tagName(opcode)),
+            };
         }
 
         pub fn execute(frame: *CallFrame) anyerror!void {
@@ -509,16 +519,6 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             return @call(.always_tail, next_table[ip[0]], .{ ip + 1, sp, gas, ctx });
         }
 
-        inline fn charge(comptime opcode: Opcode, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
-            const cost = Instructions.staticGasForFrame(ctx.frame, opcode);
-            if (cost > gas) {
-                @branchHint(.unlikely);
-                _ = ctx.finish(ip, sp, gas, .out_of_gas);
-                return null;
-            }
-            return gas - cost;
-        }
-
         inline fn chargeGas(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, cost: i64) ?i64 {
             if (cost > gas) {
                 @branchHint(.unlikely);
@@ -526,19 +526,6 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 return null;
             }
             return gas - cost;
-        }
-
-        inline fn stackIn(comptime opcode: Opcode) usize {
-            return spec.instruction.entry(@intFromEnum(opcode)).info.stack_in;
-        }
-
-        inline fn hasStackFor(comptime opcode: Opcode, sp: [*]u256, ctx: *const Context) bool {
-            return ctx.hasStack(sp, stackIn(opcode));
-        }
-
-        inline fn requireOpcode(comptime opcode: Opcode, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?TailStatus {
-            if (comptime Instructions.tailFastPathBuiltin(opcode)) return null;
-            return halt(ctx, ip, sp, gas, .invalid_opcode);
         }
 
         inline fn halt(ctx: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, reason: Interpreter.FrameHalt) TailStatus {
@@ -583,11 +570,8 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn tailSload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.SLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.SLOAD, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
             const key_slot = sp - 1;
-            ctx.frame.gas_left = next_gas;
+            ctx.frame.gas_left = gas;
             const value = Storage.sloadAfterPop(ctx.frame, key_slot[0]) catch |err| {
                 recordError(ctx, ip, key_slot, ctx.frame.gas_left, err);
                 return .thrown;
@@ -598,11 +582,6 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn tailSstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            // Canonical SSTORE has no static-gas charge; all accounting is
-            // performed by sstoreAfterPop after the static/stack checks.
-            if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, gas, .write_protection);
-            if (!hasStackFor(.SSTORE, sp, ctx)) return halt(ctx, ip, sp, gas, .stack_underflow);
-
             const next_sp = sp - 2;
             const key = (sp - 1)[0];
             const value = next_sp[0];
@@ -619,53 +598,40 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn tailTload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            if (requireOpcode(.TLOAD, ip, sp, gas, ctx)) |status| return status;
-            const next_gas = charge(.TLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.TLOAD, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
             const slot = sp - 1;
             const recipient: evmz.AddressWord = .fromAddress(ctx.frame.msg.recipient);
             const value = ctx.frame.host.getTransientStorage(recipient, slot[0]) catch |err| {
-                recordError(ctx, ip, slot, next_gas, err);
+                recordError(ctx, ip, slot, gas, err);
                 return .thrown;
             };
             slot[0] = value;
-            return tailNext(ip, sp, next_gas, ctx);
+            return tailNext(ip, sp, gas, ctx);
         }
 
         fn tailTstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            if (requireOpcode(.TSTORE, ip, sp, gas, ctx)) |status| return status;
-            const next_gas = charge(.TSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
-            if (!hasStackFor(.TSTORE, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
             const nsp = sp - 2;
             const key = (sp - 1)[0];
             const recipient: evmz.AddressWord = .fromAddress(ctx.frame.msg.recipient);
             ctx.frame.host.setTransientStorage(recipient, key, nsp[0]) catch |err| {
-                recordError(ctx, ip, nsp, next_gas, err);
+                recordError(ctx, ip, nsp, gas, err);
                 return .thrown;
             };
-            return tailNext(ip, nsp, next_gas, ctx);
+            return tailNext(ip, nsp, gas, ctx);
         }
 
         fn tailMcopy(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            if (requireOpcode(.MCOPY, ip, sp, gas, ctx)) |status| return status;
-            const next_gas = charge(.MCOPY, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.MCOPY, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
             const nsp = sp - 3;
             const dest_word = (sp - 1)[0];
             const source_word = (sp - 2)[0];
             const size_word = nsp[0];
-            if (size_word == 0) return tailNext(ip, nsp, next_gas, ctx);
+            if (size_word == 0) return tailNext(ip, nsp, gas, ctx);
 
-            const dest = wordToUsizeOrOog(dest_word, ip, nsp, next_gas, ctx) orelse return .done;
-            const source = wordToUsizeOrOog(source_word, ip, nsp, next_gas, ctx) orelse return .done;
-            const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .done;
+            const dest = wordToUsizeOrOog(dest_word, ip, nsp, gas, ctx) orelse return .done;
+            const source = wordToUsizeOrOog(source_word, ip, nsp, gas, ctx) orelse return .done;
+            const size = wordToUsizeOrOog(size_word, ip, nsp, gas, ctx) orelse return .done;
 
             // Canonical MCOPY expands the source range before the destination.
-            const source_gas = expandMemory(source, size, ip, nsp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+            const source_gas = expandMemory(source, size, ip, nsp, gas, ctx) orelse return memoryFailureStatus(ctx);
             const dest_gas = expandMemory(dest, size, ip, nsp, source_gas, ctx) orelse return memoryFailureStatus(ctx);
             const copy_gas = copyWordGas(size, ip, nsp, dest_gas, ctx) orelse return .done;
             const final_gas = chargeGas(ip, nsp, dest_gas, ctx, copy_gas) orelse return .out_of_gas;
@@ -675,25 +641,19 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn tailExp(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            if (requireOpcode(.EXP, ip, sp, gas, ctx)) |status| return status;
-            const next_gas = charge(.EXP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.EXP, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
             const base = (sp - 1)[0];
             const exponent = (sp - 2)[0];
             const nsp = sp - 1;
             const byte_gas = spec.instruction.exp_byte_gas;
             const dynamic_gas = byte_gas * uint256.countSignificantBytesSize(exponent);
-            const final_gas = chargeGas(ip, nsp - 1, next_gas, ctx, dynamic_gas) orelse return .out_of_gas;
+            const final_gas = chargeGas(ip, nsp - 1, gas, ctx, dynamic_gas) orelse return .out_of_gas;
             (nsp - 1)[0] = @call(.always_inline, uint256.wrapExp, .{ base, exponent });
             return tailNext(ip, nsp, final_gas, ctx);
         }
 
-        fn BinaryHandler(comptime opcode: Opcode, comptime op: BinaryOp) type {
+        fn BinaryHandler(comptime op: BinaryOp) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const a = (sp - 1)[0];
                     const b = (sp - 2)[0];
                     const nsp = sp - 1;
@@ -701,10 +661,6 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                         .add => a +% b,
                         .mul => a *% b,
                         .sub => a -% b,
-                        .div => @call(.always_inline, uint256.div, .{ a, b }),
-                        .sdiv => @call(.always_inline, uint256.sdiv, .{ a, b }),
-                        .mod => @call(.always_inline, uint256.mod, .{ a, b }),
-                        .smod => @call(.always_inline, uint256.smod, .{ a, b }),
                         .lt => @intFromBool(a < b),
                         .gt => @intFromBool(a > b),
                         .slt => @intFromBool(@as(i256, @bitCast(a)) < @as(i256, @bitCast(b))),
@@ -714,6 +670,10 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                         .bit_and => a & b,
                         .bit_or => a | b,
                         .bit_xor => a ^ b,
+                        .div => @call(.always_inline, uint256.div, .{ a, b }),
+                        .sdiv => @call(.always_inline, uint256.sdiv, .{ a, b }),
+                        .mod => @call(.always_inline, uint256.mod, .{ a, b }),
+                        .smod => @call(.always_inline, uint256.smod, .{ a, b }),
                         .sign_extend => blk: {
                             if (a >= 32) break :blk b;
                             const sign_bit: u8 = @as(u8, @intCast(a)) * 8 + 7;
@@ -721,16 +681,14 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                             break :blk if (((b >> sign_bit) & 1) != 0) b | ~mask else b & mask;
                         },
                     };
-                    return tailNext(ip, nsp, next_gas, ctx);
+                    return tailNext(ip, nsp, gas, ctx);
                 }
             };
         }
 
-        fn TernaryHandler(comptime opcode: Opcode, comptime op: TernaryOp) type {
+        fn TernaryHandler(comptime op: TernaryOp) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const a = (sp - 1)[0];
                     const b = (sp - 2)[0];
                     const result_slot = sp - 3;
@@ -738,17 +696,15 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                         .add_mod => uint256.addMod(a, b, result_slot[0]),
                         .mul_mod => uint256.mulMod(a, b, result_slot[0]),
                     };
-                    return tailNext(ip, sp - 2, next_gas, ctx);
+                    return tailNext(ip, sp - 2, gas, ctx);
                 }
             };
         }
 
-        fn FrameValueHandler(comptime opcode: Opcode, comptime value: FrameValue) type {
+        fn FrameValueHandler(comptime value: FrameValue) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
                     sp[0] = switch (value) {
                         .address => ctx.frame.msg.recipient.toU256(),
                         .caller => ctx.frame.msg.sender.toU256(),
@@ -757,19 +713,17 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                         .code_size => @intCast(ctx.frame.code.len),
                         .return_data_size => @intCast(ctx.frame.return_data.len),
                     };
-                    return tailNext(ip, sp + 1, next_gas, ctx);
+                    return tailNext(ip, sp + 1, gas, ctx);
                 }
             };
         }
 
-        fn ContextValueHandler(comptime opcode: Opcode, comptime value: ContextValue) type {
+        fn ContextValueHandler(comptime value: ContextValue) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
                     const execution_context = ctx.frame.host.executionContext() catch |err| {
-                        recordError(ctx, ip, sp, next_gas, err);
+                        recordError(ctx, ip, sp, gas, err);
                         return .thrown;
                     };
                     sp[0] = switch (value) {
@@ -785,31 +739,27 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                         .chain_id => execution_context.chain.chain_id,
                         .blob_base_fee => execution_context.block.blob_base_fee,
                     };
-                    return tailNext(ip, sp + 1, next_gas, ctx);
+                    return tailNext(ip, sp + 1, gas, ctx);
                 }
             };
         }
 
-        fn HostValueHandler(comptime opcode: Opcode, comptime value: HostValue) type {
+        fn HostValueHandler(comptime value: HostValue) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-
                     if (comptime value == .self_balance) {
-                        if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                        if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
                         const result = ctx.frame.host.getBalance(.fromAddress(ctx.frame.msg.recipient)) catch |err| {
-                            recordError(ctx, ip, sp, next_gas, err);
+                            recordError(ctx, ip, sp, gas, err);
                             return .thrown;
                         };
                         sp[0] = result;
-                        return tailNext(ip, sp + 1, next_gas, ctx);
+                        return tailNext(ip, sp + 1, gas, ctx);
                     }
 
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const slot = sp - 1;
                     const target_address: evmz.AddressWord = .fromU256(slot[0]);
-                    ctx.frame.gas_left = next_gas;
+                    ctx.frame.gas_left = gas;
                     const result = Environment.readAccountValue(ctx.frame, target_address, switch (value) {
                         .balance => .balance,
                         .code_size => .code_size,
@@ -826,17 +776,14 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn tailExtcodecopy(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.EXTCODECOPY, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.EXTCODECOPY, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
             const nsp = sp - 4;
             const target_address: evmz.AddressWord = .fromU256((sp - 1)[0]);
             const dest_offset_word = (sp - 2)[0];
             const source_offset_word = (sp - 3)[0];
-            const size = wordToUsizeOrOog(nsp[0], ip, nsp, next_gas, ctx) orelse return .done;
-            const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .done;
+            const size = wordToUsizeOrOog(nsp[0], ip, nsp, gas, ctx) orelse return .done;
+            const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, gas, ctx) orelse return .done;
 
-            ctx.frame.gas_left = next_gas;
+            ctx.frame.gas_left = gas;
             const access_ok = Environment.trackCodeAccountAccessGas(ctx.frame, target_address) catch |err| {
                 recordError(ctx, ip, nsp, ctx.frame.gas_left, err);
                 return .thrown;
@@ -864,32 +811,27 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn tailBlockhash(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.BLOCKHASH, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.BLOCKHASH, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const slot = sp - 1;
             const execution_context = ctx.frame.host.executionContext() catch |err| {
-                recordError(ctx, ip, sp, next_gas, err);
+                recordError(ctx, ip, sp, gas, err);
                 return .thrown;
             };
             const current_number: u256 = execution_context.block.number;
             const oldest_hashable = if (current_number > 256) current_number - 256 else 0;
             slot[0] = if (slot[0] < current_number and slot[0] >= oldest_hashable)
                 ctx.frame.host.getBlockHash(slot[0]) catch |err| {
-                    recordError(ctx, ip, sp, next_gas, err);
+                    recordError(ctx, ip, sp, gas, err);
                     return .thrown;
                 }
             else
                 0;
-            return tailNext(ip, sp, next_gas, ctx);
+            return tailNext(ip, sp, gas, ctx);
         }
 
         fn tailBlobhash(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            if (requireOpcode(.BLOBHASH, ip, sp, gas, ctx)) |status| return status;
-            const next_gas = charge(.BLOBHASH, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.BLOBHASH, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const slot = sp - 1;
             const execution_context = ctx.frame.host.executionContext() catch |err| {
-                recordError(ctx, ip, sp, next_gas, err);
+                recordError(ctx, ip, sp, gas, err);
                 return .thrown;
             };
             const index = std.math.cast(usize, slot[0]);
@@ -897,39 +839,35 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 if (i < execution_context.transaction.blob_hashes.len) execution_context.transaction.blob_hashes[i] else 0
             else
                 0;
-            return tailNext(ip, sp, next_gas, ctx);
+            return tailNext(ip, sp, gas, ctx);
         }
 
         fn ExtendedStackHandler(comptime opcode: Opcode) type {
             comptime std.debug.assert(opcode == .DUPN or opcode == .SWAPN or opcode == .EXCHANGE);
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-
                     if (comptime opcode == .EXCHANGE) {
                         const n, const m = immediate.decodeExchangeImmediate(ip[0]) orelse
-                            return halt(ctx, ip, sp, next_gas, .invalid_opcode);
-                        const required = @max(stackIn(opcode), @max(n, m) + 1);
-                        if (!ctx.hasStack(sp, required)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                            return halt(ctx, ip, sp, gas, .invalid_opcode);
+                        if (!ctx.hasStack(sp, @max(n, m) + 1)) return halt(ctx, ip, sp, gas, .stack_underflow);
                         const top = sp - 1;
                         std.mem.swap(u256, &((top - n)[0]), &((top - m)[0]));
-                        return tailNext(ip + 1, sp, next_gas, ctx);
+                        return tailNext(ip + 1, sp, gas, ctx);
                     }
 
                     const depth = immediate.decodeDepthImmediate(ip[0]) orelse
-                        return halt(ctx, ip, sp, next_gas, .invalid_opcode);
+                        return halt(ctx, ip, sp, gas, .invalid_opcode);
                     if (comptime opcode == .DUPN) {
-                        if (!ctx.hasStack(sp, @max(stackIn(opcode), depth))) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-                        if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                        if (!ctx.hasStack(sp, depth)) return halt(ctx, ip, sp, gas, .stack_underflow);
+                        if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
                         sp[0] = (sp - depth)[0];
-                        return tailNext(ip + 1, sp + 1, next_gas, ctx);
+                        return tailNext(ip + 1, sp + 1, gas, ctx);
                     }
 
-                    if (!ctx.hasStack(sp, @max(stackIn(opcode), depth + 1))) return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (!ctx.hasStack(sp, depth + 1)) return halt(ctx, ip, sp, gas, .stack_underflow);
                     const top = sp - 1;
                     std.mem.swap(u256, &top[0], &((top - depth)[0]));
-                    return tailNext(ip + 1, sp, next_gas, ctx);
+                    return tailNext(ip + 1, sp, gas, ctx);
                 }
             };
         }
@@ -940,13 +878,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 opcode == .SELFDESTRUCT);
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (comptime opcode == .CREATE or opcode == .CREATE2 or opcode == .SELFDESTRUCT) {
-                        if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
-                    }
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-                    ctx.spill(ip, sp, next_gas);
+                    ctx.spill(ip, sp, gas);
                     (switch (opcode) {
                         .CREATE => System.create(ctx.frame),
                         .CALL, .CALLCODE, .DELEGATECALL, .STATICCALL => System.callByOp(ctx.frame, opcode),
@@ -966,20 +898,16 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             };
         }
 
-        fn CopyHandler(comptime opcode: Opcode, comptime source_kind: CopySource) type {
+        fn CopyHandler(comptime source_kind: CopySource) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
                     const nsp = sp - 3;
                     const dest_offset_word = (sp - 1)[0];
                     const source_offset_word = (sp - 2)[0];
                     const size_word = nsp[0];
-                    const size = wordToUsizeOrOog(size_word, ip, nsp, next_gas, ctx) orelse return .done;
-                    const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, next_gas, ctx) orelse return .done;
-                    const memory_gas = expandMemory(dest_offset, size, ip, nsp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+                    const size = wordToUsizeOrOog(size_word, ip, nsp, gas, ctx) orelse return .done;
+                    const dest_offset = memoryOffsetToUsizeOrOog(dest_offset_word, size, ip, nsp, gas, ctx) orelse return .done;
+                    const memory_gas = expandMemory(dest_offset, size, ip, nsp, gas, ctx) orelse return memoryFailureStatus(ctx);
                     const copy_gas = copyWordGas(size, ip, nsp, memory_gas, ctx) orelse return .done;
                     const final_gas = chargeGas(ip, nsp, memory_gas, ctx, copy_gas) orelse return .out_of_gas;
 
@@ -1011,12 +939,9 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             };
         }
 
-        fn TerminalHandler(comptime opcode: Opcode, comptime terminal_status: TerminalStatus) type {
+        fn TerminalHandler(comptime terminal_status: TerminalStatus) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, gas, .stack_underflow);
-
                     const nsp = sp - 2;
                     const offset_word = (sp - 1)[0];
                     const size_word = nsp[0];
@@ -1033,23 +958,18 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             };
         }
 
-        fn LogHandler(comptime opcode: Opcode, comptime topic_count: usize) type {
+        fn LogHandler(comptime topic_count: usize) type {
             if (topic_count > 4) @compileError("LOG supports at most four topics");
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-
                     // Canonical logging pops offset/size before dynamic gas, then
                     // topics only after memory and data gas have succeeded.
                     const args_sp = sp - 2;
                     const offset_word = (sp - 1)[0];
                     const size_word = args_sp[0];
-                    const size = wordToUsizeOrOog(size_word, ip, args_sp, next_gas, ctx) orelse return .done;
-                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, args_sp, next_gas, ctx) orelse return .done;
-                    const memory_gas = expandMemory(offset, size, ip, args_sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+                    const size = wordToUsizeOrOog(size_word, ip, args_sp, gas, ctx) orelse return .done;
+                    const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, args_sp, gas, ctx) orelse return .done;
+                    const memory_gas = expandMemory(offset, size, ip, args_sp, gas, ctx) orelse return memoryFailureStatus(ctx);
                     const data_gas = logDataGas(size, ip, args_sp, memory_gas, ctx) orelse return .done;
                     const final_gas = chargeGas(ip, args_sp, memory_gas, ctx, data_gas) orelse return .out_of_gas;
 
@@ -1073,41 +993,34 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             };
         }
 
-        fn UnaryHandler(comptime opcode: Opcode, comptime op: UnaryOp) type {
+        fn UnaryHandler(comptime op: UnaryOp) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const slot = sp - 1;
                     slot[0] = switch (op) {
                         .iszero => @intFromBool(slot[0] == 0),
                         .bit_not => ~slot[0],
                         .count_leading_zeros => @clz(slot[0]),
                     };
-                    return tailNext(ip, sp, next_gas, ctx);
+                    return tailNext(ip, sp, gas, ctx);
                 }
             };
         }
 
         fn tailPop(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.POP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.POP, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-            return tailNext(ip, sp - 1, next_gas, ctx);
+            return tailNext(ip, sp - 1, gas, ctx);
         }
 
         fn tailPush0(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            if (requireOpcode(.PUSH0, ip, sp, gas, ctx)) |status| return status;
-            const next_gas = charge(.PUSH0, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
             sp[0] = 0;
-            return tailNext(ip, sp + 1, next_gas, ctx);
+            return tailNext(ip, sp + 1, gas, ctx);
         }
 
         fn PushHandler(comptime opcode: Opcode) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
                     const immediate_len: usize = @intFromEnum(opcode) - @intFromEnum(Opcode.PUSH0);
                     // `code_base` carries Bytecode.zero_padding_len (33) trailing zero
                     // bytes, so a full-width big-endian load is always in bounds and
@@ -1115,7 +1028,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     const Int = std.meta.Int(.unsigned, immediate_len * 8);
                     const immediate_bytes: *const [immediate_len]u8 = @ptrCast(ip);
                     sp[0] = std.mem.readInt(Int, immediate_bytes, .big);
-                    return tailNext(ip + immediate_len, sp + 1, next_gas, ctx);
+                    return tailNext(ip + immediate_len, sp + 1, gas, ctx);
                 }
             };
         }
@@ -1123,12 +1036,10 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         fn DupHandler(comptime opcode: Opcode) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.DUP1) + 1;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+                    if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
                     sp[0] = (sp - depth)[0];
-                    return tailNext(ip, sp + 1, next_gas, ctx);
+                    return tailNext(ip, sp + 1, gas, ctx);
                 }
             };
         }
@@ -1136,25 +1047,20 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         fn SwapHandler(comptime opcode: Opcode) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
                     const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.SWAP1) + 1;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const top = sp - 1;
                     const target = top - depth;
                     const tmp = target[0];
                     target[0] = top[0];
                     top[0] = tmp;
-                    return tailNext(ip, sp, next_gas, ctx);
+                    return tailNext(ip, sp, gas, ctx);
                 }
             };
         }
 
-        fn ShiftHandler(comptime opcode: Opcode, comptime op: ShiftOp) type {
+        fn ShiftHandler(comptime op: ShiftOp) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-                    if (requireOpcode(opcode, ip, sp, gas, ctx)) |status| return status;
-                    const next_gas = charge(opcode, ip, sp, gas, ctx) orelse return .out_of_gas;
-                    if (!hasStackFor(opcode, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
                     const shift = (sp - 1)[0];
                     const value = (sp - 2)[0];
                     const nsp = sp - 1;
@@ -1163,7 +1069,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                         .right => if (shift > std.math.maxInt(u8)) 0 else value >> @as(u8, @intCast(shift)),
                         .arithmetic => arithmeticShiftRight(value, shift),
                     };
-                    return tailNext(ip, nsp, next_gas, ctx);
+                    return tailNext(ip, nsp, gas, ctx);
                 }
             };
         }
@@ -1177,53 +1083,43 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn tailJump(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.JUMP, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.JUMP, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const nsp = sp - 1;
-            const target = std.math.cast(usize, nsp[0]) orelse return halt(ctx, ip, nsp, next_gas, .invalid_jump);
-            if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, next_gas, .invalid_jump);
-            return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
+            const target = std.math.cast(usize, nsp[0]) orelse return halt(ctx, ip, nsp, gas, .invalid_jump);
+            if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, gas, .invalid_jump);
+            return tailNext(ctx.code_base + target, nsp, gas, ctx);
         }
 
         fn tailJumpi(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.JUMPI, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.JUMPI, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const nsp = sp - 2;
-            if (nsp[0] == 0) return tailNext(ip, nsp, next_gas, ctx);
-            const target = std.math.cast(usize, (nsp + 1)[0]) orelse return halt(ctx, ip, nsp, next_gas, .invalid_jump);
-            if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, next_gas, .invalid_jump);
-            return tailNext(ctx.code_base + target, nsp, next_gas, ctx);
+            if (nsp[0] == 0) return tailNext(ip, nsp, gas, ctx);
+            const target = std.math.cast(usize, (nsp + 1)[0]) orelse return halt(ctx, ip, nsp, gas, .invalid_jump);
+            if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, gas, .invalid_jump);
+            return tailNext(ctx.code_base + target, nsp, gas, ctx);
         }
 
         fn tailPc(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.PC, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
             sp[0] = ctx.pcOf(ip) - 1;
-            return tailNext(ip, sp + 1, next_gas, ctx);
+            return tailNext(ip, sp + 1, gas, ctx);
         }
 
         fn tailMsize(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.MSIZE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
             sp[0] = ctx.frame.memory.len();
-            return tailNext(ip, sp + 1, next_gas, ctx);
+            return tailNext(ip, sp + 1, gas, ctx);
         }
 
         fn tailGas(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.GAS, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, next_gas, .stack_overflow);
-            sp[0] = @intCast(next_gas);
-            return tailNext(ip, sp + 1, next_gas, ctx);
+            if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
+            sp[0] = @intCast(gas);
+            return tailNext(ip, sp + 1, gas, ctx);
         }
 
         fn tailJumpdest(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.JUMPDEST, ip, sp, gas, ctx) orelse return .out_of_gas;
-            return tailNext(ip, sp, next_gas, ctx);
+            return tailNext(ip, sp, gas, ctx);
         }
 
         fn tailCalldataLoad(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.CALLDATALOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.CALLDATALOAD, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const offset_word = (sp - 1)[0];
             var buffer: [32]u8 = [_]u8{0} ** 32;
             if (std.math.cast(usize, offset_word)) |offset| {
@@ -1235,46 +1131,38 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 }
             }
             (sp - 1)[0] = evmz.uint256.fromBytes32(&buffer);
-            return tailNext(ip, sp, next_gas, ctx);
+            return tailNext(ip, sp, gas, ctx);
         }
 
         fn tailMload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.MLOAD, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.MLOAD, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
-            const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, gas, ctx) orelse return .done;
+            const mem_gas = expandMemory(offset, 32, ip, sp, gas, ctx) orelse return memoryFailureStatus(ctx);
             ctx.frame.memory.readInto(offset, &(sp - 1)[0]);
             return tailNext(ip, sp, mem_gas, ctx);
         }
 
         fn tailMstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.MSTORE, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.MSTORE, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
-            const mem_gas = expandMemory(offset, 32, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, gas, ctx) orelse return .done;
+            const mem_gas = expandMemory(offset, 32, ip, sp, gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
             ctx.frame.memory.writeFrom(offset, &nsp[0]);
             return tailNext(ip, nsp, mem_gas, ctx);
         }
 
         fn tailMstore8(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.MSTORE8, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.MSTORE8, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
-            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, next_gas, ctx) orelse return .done;
-            const mem_gas = expandMemory(offset, 1, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+            const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, gas, ctx) orelse return .done;
+            const mem_gas = expandMemory(offset, 1, ip, sp, gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
             ctx.frame.memory.write8(offset, nsp[0]);
             return tailNext(ip, nsp, mem_gas, ctx);
         }
 
         fn tailKeccak256(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
-            const next_gas = charge(.KECCAK256, ip, sp, gas, ctx) orelse return .out_of_gas;
-            if (!hasStackFor(.KECCAK256, sp, ctx)) return halt(ctx, ip, sp, next_gas, .stack_underflow);
             const offset_word = (sp - 1)[0];
             const size_word = (sp - 2)[0];
-            const size = wordToUsizeOrOog(size_word, ip, sp, next_gas, ctx) orelse return .done;
-            const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, sp, next_gas, ctx) orelse return .done;
-            const mem_gas = expandMemory(offset, size, ip, sp, next_gas, ctx) orelse return memoryFailureStatus(ctx);
+            const size = wordToUsizeOrOog(size_word, ip, sp, gas, ctx) orelse return .done;
+            const offset = memoryOffsetToUsizeOrOog(offset_word, size, ip, sp, gas, ctx) orelse return .done;
+            const mem_gas = expandMemory(offset, size, ip, sp, gas, ctx) orelse return memoryFailureStatus(ctx);
             const word_gas = keccakWordGas(size, ip, sp, mem_gas, ctx) orelse return .done;
             const final_gas = chargeGas(ip, sp, mem_gas, ctx, word_gas) orelse return .out_of_gas;
             const input = ctx.frame.memory.readBytes(offset, size);
@@ -1391,10 +1279,6 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 return 0;
             }
             return before_len - entry.info.stack_in;
-        }
-
-        fn memoryWritePlan(comptime opcode_byte: u8, stack: []const u256) ?trace.tape.MemoryWritePlan {
-            return builtinMemoryWritePlan(opcode_byte, stack);
         }
     };
 }

@@ -4,9 +4,6 @@ const std = @import("std");
 const ExactSpec = @import("./spec.zig").Spec;
 const instruction_table = @import("./instruction/table.zig");
 const evmz = @import("./evm.zig");
-const interpreter = @import("./Interpreter.zig");
-
-const CallFrame = interpreter.CallFrame;
 
 // [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929)
 pub const cold_sload_cost = 2100;
@@ -32,7 +29,6 @@ pub fn Instruction(comptime spec: ExactSpec) type {
     const exact_instructions = spec.instruction;
     comptime instruction_table.validate(exact_instructions.table);
     return struct {
-        const Self = @This();
         const dispatch_table = exact_instructions.table;
 
         pub const specification = spec;
@@ -40,22 +36,6 @@ pub fn Instruction(comptime spec: ExactSpec) type {
 
         pub fn entry(comptime opcode_byte: u8) instruction_table.Entry {
             return dispatch_table[opcode_byte];
-        }
-
-        pub inline fn staticGasForFrame(_: *CallFrame, comptime opcode: Opcode) i64 {
-            return Self.dispatchEntryForOpcode(opcode).info.static_gas;
-        }
-
-        pub inline fn tailFastPathBuiltin(comptime opcode: Opcode) bool {
-            const dispatch_entry = comptime Self.dispatchEntryForOpcode(opcode);
-            return switch (comptime dispatch_entry.dispatchTarget()) {
-                .builtin => |builtin| builtin == opcode,
-                .invalid, .custom => false,
-            };
-        }
-
-        inline fn dispatchEntryForOpcode(comptime opcode: Opcode) instruction_table.Entry {
-            return dispatch_table[@intFromEnum(opcode)];
         }
     };
 }
@@ -111,33 +91,6 @@ test "fork-dependent static gas follows legacy schedules" {
     try std.testing.expectEqual(@as(i64, 5000), staticGasAt(.tangerine_whistle, .SELFDESTRUCT));
 }
 
-fn instructionGasSpec(comptime opcode: Opcode, comptime gas: i64) evmz.eth.Spec {
-    var exact = evmz.eth.frontier.instruction;
-    exact.table[@intFromEnum(opcode)].info.static_gas = gas;
-    return evmz.eth.frontier.extend(.{
-        .instruction = exact,
-    });
-}
-
 fn staticGasAt(comptime revision: evmz.eth.Revision, comptime opcode: Opcode) i64 {
     return evmz.eth.specAt(revision).instruction.entry(@intFromEnum(opcode)).info.static_gas;
-}
-
-test "static gas helper uses resolved rule gas" {
-    if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(Opcode.CALL)};
-
-    var frame = try evmz.Vm(evmz.eth.frontier).Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .source = .{ .code = &code },
-    });
-    defer frame.deinit();
-
-    try std.testing.expectEqual(@as(i64, 7), Instruction(instructionGasSpec(.CALL, 7)).staticGasForFrame(frame.frame, .CALL));
-    try std.testing.expectEqual(@as(i64, 11), Instruction(instructionGasSpec(.CALL, 11)).staticGasForFrame(frame.frame, .CALL));
 }

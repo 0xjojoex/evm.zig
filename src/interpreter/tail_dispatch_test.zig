@@ -642,32 +642,7 @@ test "untraced interpreter tail dispatch rejects invalid and undefined bytes" {
     }
 }
 
-test "untraced interpreter tail dispatch executes a repointed builtin" {
-    const spec = instructionOverrideSpec(.ADD, .{ .builtin = .SUB });
-
-    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    var msg = evmz.t.defaultMessage();
-    const code = evmz.t.bytecode(.{ .PUSH1, 7, .PUSH1, 2, .ADD, .STOP });
-    var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
-    defer bytecode.deinit(std.testing.allocator);
-
-    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
-        .host = &host,
-        .msg = &msg,
-        .source = .{ .bytecode = bytecode.view() },
-    });
-    defer frame.deinit();
-    var intpr = frame.interpreter();
-
-    const result = try intpr.execute();
-
-    try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(u256, 2) -% 7, frame.frame.stack.pop());
-}
-
-test "builtin target enforces the final derived stack minimum" {
+test "builtin enforces the final derived stack minimum" {
     const spec = comptime spec: {
         var exact = evmz.eth.amsterdam.instruction;
         exact.table[@intFromEnum(Opcode.ADD)].info.stack_in = 3;
@@ -693,6 +668,31 @@ test "builtin target enforces the final derived stack minimum" {
     _ = try intpr.execute();
 
     try std.testing.expectEqual(Interpreter.FrameHalt.stack_underflow, frame.frame.haltReason().?);
+}
+
+test "specialized builtins use final gas and stack metadata in normal and captured execution" {
+    const spec = specializedMetadataSpec();
+    inline for (.{
+        Opcode.STOP,
+        Opcode.PUSH1,
+        Opcode.ADDRESS,
+        Opcode.RETURN,
+        Opcode.SSTORE,
+        Opcode.JUMPDEST,
+    }) |opcode| {
+        inline for (.{ false, true }) |captured| {
+            try expectSpecializedAdmission(spec, opcode, 6, false, captured, .out_of_gas, .out_of_gas);
+            try expectSpecializedAdmission(spec, opcode, 7, false, captured, .invalid, .stack_underflow);
+        }
+    }
+}
+
+test "SSTORE admission faults before host storage callbacks" {
+    const spec = specializedMetadataSpec();
+    inline for (.{ false, true }) |captured| {
+        try expectSpecializedAdmission(spec, .SSTORE, 6, true, captured, .out_of_gas, .out_of_gas);
+        try expectSpecializedAdmission(spec, .SSTORE, 7, true, captured, .invalid, .write_protection);
+    }
 }
 
 test "custom target receives and charges the final derived spec" {
@@ -855,6 +855,61 @@ fn instructionOverrideSpec(
     return evmz.eth.amsterdam.extend(.{
         .instruction = exact,
     });
+}
+
+fn specializedMetadataSpec() evmz.eth.Spec {
+    @setEvalBranchQuota(100_000);
+    var exact = evmz.eth.amsterdam.instruction;
+    inline for (.{
+        .{ Opcode.STOP, 1 },
+        .{ Opcode.PUSH1, 1 },
+        .{ Opcode.ADDRESS, 1 },
+        .{ Opcode.RETURN, 3 },
+        .{ Opcode.SSTORE, 3 },
+        .{ Opcode.JUMPDEST, 1 },
+    }) |entry| {
+        const info = &exact.table[@intFromEnum(entry[0])].info;
+        info.static_gas = 7;
+        info.stack_in = entry[1];
+    }
+    return evmz.eth.amsterdam.extend(.{ .instruction = exact });
+}
+
+fn expectSpecializedAdmission(
+    comptime spec: evmz.eth.Spec,
+    comptime opcode: Opcode,
+    gas: i64,
+    is_static: bool,
+    comptime captured: bool,
+    expected_status: Interpreter.Status,
+    expected_halt: Interpreter.FrameHalt,
+) !void {
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    msg.gas = gas;
+    msg.is_static = is_static;
+    const code = [_]u8{@intFromEnum(opcode)};
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .source = .{ .code = &code },
+    });
+    defer frame.deinit();
+    var intpr = frame.interpreter();
+
+    const status = if (captured) status: {
+        var tape = trace.TraceTape.initGrowable(std.testing.allocator);
+        defer tape.deinit();
+        const result = try intpr.capture(&tape, .{});
+        defer tape.resolve(result.span) catch unreachable;
+        break :status result.result.status();
+    } else (try intpr.execute()).status();
+
+    try std.testing.expectEqual(expected_status, status);
+    try std.testing.expectEqual(expected_halt, frame.frame.haltReason().?);
+    try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
 }
 
 fn expectOpcodeHalt(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: Interpreter.FrameHalt) !void {
