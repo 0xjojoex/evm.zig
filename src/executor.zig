@@ -995,22 +995,9 @@ pub fn ExecutorType(
             return Bytecode.init(self.allocator, code);
         }
 
-        /// Duplicate the effective execution code for an address.
-        ///
-        /// EIP-7702 delegation is resolved here so callers execute target code while
-        /// preserving the original message address semantics.
-        pub fn dupeExecutionCode(self: *Self, address: Address) ![]u8 {
-            return runtime.dupeExecutionCodeAlloc(self, self.allocator, address);
-        }
-
         /// Return this executor's `Host` adapter for interpreter frames.
         pub fn host(self: *Self) Host {
             return callbacks.host(self);
-        }
-
-        /// Execute a raw call inside an already-open tx scope.
-        pub fn executeCall(self: *Self, message: Call, gas: execution_values.ExecutionGas) !EvmResult {
-            return runtime.executeCall(self, message, gas);
         }
 
         /// Execute a raw call by loading and preparing recipient code first.
@@ -1028,11 +1015,6 @@ pub fn ExecutorType(
         /// Execute a raw call with caller-provided prepared bytecode.
         pub fn executePreparedCallTransaction(self: *Self, options: PreparedCallTransaction) !execution_values.ExecutionResult {
             return runtime.executePreparedCallTransaction(self, options);
-        }
-
-        /// Execute a raw create/create2 message inside an already-open tx scope.
-        pub fn executeCreate(self: *Self, message: Create, gas: execution_values.ExecutionGas) !EvmResult {
-            return runtime.executeCreate(self, message, gas);
         }
 
         /// Execute a raw call/create message inside an already-open tx scope.
@@ -1237,7 +1219,7 @@ pub fn ExecutorType(
         }
 
         /// Increment an account nonce, saturating at `maxInt(u64)`.
-        pub fn incrementNonce(self: *Self, address: Address) !void {
+        fn incrementNonce(self: *Self, address: Address) !void {
             const account = try self.getAccountOrLoad(address) orelse AccountState{};
             try self.state.setNonce(stateAddress(address), std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
         }

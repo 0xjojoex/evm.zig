@@ -1089,18 +1089,6 @@ pub fn bind(comptime Executor: type) type {
             });
         }
 
-        pub fn dupeExecutionCodeAlloc(self: *Executor, allocator: std.mem.Allocator, address: Address) ![]u8 {
-            const code = try self.getCode(address);
-            if (eip7702.delegationTarget(code)) |target| {
-                return dupeCodeAlloc(self, allocator, target);
-            }
-            return allocator.dupe(u8, code);
-        }
-
-        fn dupeCodeAlloc(self: *Executor, allocator: std.mem.Allocator, address: Address) ![]u8 {
-            return allocator.dupe(u8, try self.getCode(address));
-        }
-
         pub fn executeInterpreter(self: *Executor, interpreter: *BoundInterpreter, depth: u16) !FrameResult {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();

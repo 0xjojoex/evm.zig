@@ -9,8 +9,8 @@
 //!   warm sets, fee accounting, receipts.
 //! - `Message` — what the EVM runs once transaction accounting is stripped:
 //!   the root `call | create` identity. Run it with
-//!   `Executor.executeMessage` (or `executeCall` / `executeCreate`) against
-//!   an `ExecutionContext` and a gas budget. The union lives at this tier
+//!   `Executor.executeMessage` inside an open scope, or `executeStandalone`
+//!   for the managed lifecycle. The union lives at this tier
 //!   only, because this is where call and create still disagree (init code
 //!   and salt, computed vs given recipient).
 //! - `Host.Message` — engine-internal: the sub-computation request one call
