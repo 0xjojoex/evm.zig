@@ -20,7 +20,8 @@ test "stateless wire v1 smoke validates and returns SSZ output" {
 
     const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output_bytes);
     try std.testing.expect(result.successful_validation);
-    try std.testing.expectEqual(@as(u64, 1), result.chain_config.chain_id);
+    try std.testing.expectEqual(@as(u64, 1), result.chain_id);
+    try std.testing.expectEqual(wire.schema_id, result.schema_id);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -113,28 +114,20 @@ test "stateless wire v1 declares Amsterdam semantics at its type boundary" {
     try std.testing.expect(normalized.blob_params == null);
 }
 
-test "stateless wire v1 validates chain configuration after decoding" {
+test "stateless wire v1 carries chain id without host-supplied fork configuration" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     var input = try smoke.smokeInput(arena.allocator());
-    input.chain_config.active_fork.activation.timestamp = std.math.maxInt(u64);
+    input.chain_id = 42;
     const encoded = try input.encodeSchemaPrefixed(std.testing.allocator);
     defer std.testing.allocator.free(encoded);
 
     var decoded = try wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded);
     defer decoded.deinit(std.testing.allocator);
-    try std.testing.expectError(
-        error.InactiveForkConfig,
-        wire.normalize(std.testing.allocator, decoded),
-    );
-
-    const output = try wire.validateStatelessBytesReusable(std.testing.allocator, encoded);
-    defer std.testing.allocator.free(output);
-    const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output);
-    const request_root = try input.new_payload_request.hashTreeRoot(std.testing.allocator);
-    try std.testing.expectEqualSlices(u8, &request_root, &result.new_payload_request_root);
-    try std.testing.expect(!result.successful_validation);
+    try std.testing.expectEqual(@as(u64, 42), decoded.chain_id);
+    const normalized = try wire.normalize(std.testing.allocator, decoded);
+    try std.testing.expectEqual(@as(u256, 42), normalized.chain_id);
 }
 
 test "stateless wire v1 exposes successful decode ownership cleanup" {
@@ -143,7 +136,7 @@ test "stateless wire v1 exposes successful decode ownership cleanup" {
     var decoded = try wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded);
     defer decoded.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u64, 1), decoded.chain_config.chain_id);
+    try std.testing.expectEqual(@as(u64, 1), decoded.chain_id);
 }
 
 test "stateless wire v1 rejects unknown schema ids" {
@@ -197,55 +190,44 @@ test "stateless wire v1 enforces witness resource bounds before execution" {
     try std.testing.expectError(error.InvalidListLength, wire.ExecutionWitness.decode(std.testing.allocator, encoded));
 }
 
-test "stateless wire v1 rejects oversized withdrawals before allocation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const input = try smoke.amsterdamSmokeInput(arena.allocator(), .{});
-    var payload = switch (input.new_payload_request) {
-        .amsterdam => |request| request.execution_payload.v3,
-        else => unreachable,
-    };
-    payload.v2.withdrawals = &.{};
-    const valid = try payload.encode(std.testing.allocator);
-    defer std.testing.allocator.free(valid);
-    const encoded = try std.testing.allocator.alloc(u8, valid.len + 17 * ssz.encodedSize(wire.Withdrawal));
-    defer std.testing.allocator.free(encoded);
-    @memcpy(encoded[0..valid.len], valid);
-    @memset(encoded[valid.len..], 0);
-
-    var no_memory: [0]u8 = .{};
-    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
-    try std.testing.expectError(error.InvalidListLength, wire.ExecutionPayloadV3.decode(fixed.allocator(), encoded));
-}
-
-test "stateless wire v1 rejects oversized execution request families before allocation" {
+test "stateless wire v1 accepts progressive withdrawals beyond the former local limit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const deposits = try scratch.alloc(wire.DepositRequest, 8193);
-    @memset(deposits, std.mem.zeroes(wire.DepositRequest));
-    try expectOversizedExecutionRequestsRejected(.{ .deposits = deposits });
+    const input = try smoke.amsterdamSmokeInput(scratch, .{});
+    var payload = switch (input.new_payload_request) {
+        .amsterdam => |request| request.execution_payload.v3,
+        else => unreachable,
+    };
+    const withdrawals = try scratch.alloc(wire.Withdrawal, 17);
+    @memset(withdrawals, std.mem.zeroes(wire.Withdrawal));
+    payload.v2.withdrawals = withdrawals;
+    const encoded = try payload.encode(scratch);
+    const decoded = try wire.ExecutionPayloadV3.decode(scratch, encoded);
+    try std.testing.expectEqual(@as(usize, 17), decoded.v2.withdrawals.len);
+}
 
-    const withdrawals = try scratch.alloc(wire.WithdrawalRequest, 17);
-    @memset(withdrawals, std.mem.zeroes(wire.WithdrawalRequest));
-    try expectOversizedExecutionRequestsRejected(.{ .withdrawals = withdrawals });
-
-    const consolidations = try scratch.alloc(wire.ConsolidationRequest, 3);
-    @memset(consolidations, std.mem.zeroes(wire.ConsolidationRequest));
-    try expectOversizedExecutionRequestsRejected(.{ .consolidations = consolidations });
+test "stateless wire v1 accepts progressive request families beyond former local limits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
 
     const builder_deposits = try scratch.alloc(wire.BuilderDepositRequest, 65);
     @memset(builder_deposits, std.mem.zeroes(wire.BuilderDepositRequest));
-    try expectOversizedExecutionRequestsRejected(.{ .builder_deposits = builder_deposits });
-
     const builder_exits = try scratch.alloc(wire.BuilderExitRequest, 17);
     @memset(builder_exits, std.mem.zeroes(wire.BuilderExitRequest));
-    try expectOversizedExecutionRequestsRejected(.{ .builder_exits = builder_exits });
+    const requests = wire.ExecutionRequests{
+        .builder_deposits = builder_deposits,
+        .builder_exits = builder_exits,
+    };
+    const encoded = try requests.encode(scratch);
+    const decoded = try wire.ExecutionRequests.decode(scratch, encoded);
+    try std.testing.expectEqual(@as(usize, 65), decoded.builder_deposits.len);
+    try std.testing.expectEqual(@as(usize, 17), decoded.builder_exits.len);
 }
 
-test "stateless wire v1 bounded fixed struct lists preserve valid bytes" {
+test "stateless wire v1 progressive collections preserve valid bytes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -328,57 +310,27 @@ test "stateless wire v1 returns failure result for malformed guest input" {
         const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output_bytes);
         try std.testing.expect(!result.successful_validation);
         try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &result.new_payload_request_root);
-        try std.testing.expectEqual(@as(u64, 0), result.chain_config.chain_id);
-        try std.testing.expectEqual(@as(?u64, null), result.chain_config.active_fork.activation.block_number);
-        try std.testing.expectEqual(@as(?u64, null), result.chain_config.active_fork.activation.timestamp);
+        try std.testing.expectEqual(@as(u64, 0), result.chain_id);
+        try std.testing.expectEqual(@as(u16, 0), result.schema_id);
     }
 }
 
-test "stateless wire v1 protocol fork values match tests-zkevm v0.6.2" {
+test "stateless wire v1 protocol fork values match tests-zkevm v0.8.0" {
     try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(0x0e));
     try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(0x15));
     try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(0));
     try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(0x16));
 }
 
-test "stateless wire v1 ChainConfig owns its activation-only schema" {
-    const configs = [_]wire.ChainConfig{
-        .{
-            .chain_id = 1,
-            .active_fork = .{
-                .activation = .{},
-            },
-        },
-        .{
-            .chain_id = 2,
-            .active_fork = .{
-                .activation = .{
-                    .block_number = 42,
-                    .timestamp = 1_234,
-                },
-            },
-        },
+test "stateless wire v1 output exposes chain and full schema id" {
+    const result = wire.StatelessValidationResult{
+        .new_payload_request_root = [_]u8{0xaa} ** 32,
+        .successful_validation = true,
+        .chain_id = 1,
+        .schema_id = wire.schema_id,
     };
-
-    for (configs) |config| {
-        const encoded = try ssz.encodeAlloc(wire.ChainConfig.Ssz, std.testing.allocator, config);
-        defer std.testing.allocator.free(encoded);
-        try std.testing.expectEqualDeep(config, try wire.ChainConfig.Ssz.decode(encoded));
-    }
-}
-
-fn expectOversizedExecutionRequestsRejected(requests: wire.ExecutionRequests) !void {
-    const TestRequestsSsz = ssz.Container(wire.ExecutionRequests, .{
-        .deposits = ssz.List(wire.DepositRequest, 8193),
-        .withdrawals = ssz.List(wire.WithdrawalRequest, 17),
-        .consolidations = ssz.List(wire.ConsolidationRequest, 3),
-        .builder_deposits = ssz.List(wire.BuilderDepositRequest, 65),
-        .builder_exits = ssz.List(wire.BuilderExitRequest, 17),
-    });
-    const encoded = try ssz.encodeAlloc(TestRequestsSsz, std.testing.allocator, requests);
+    const encoded = try result.encode(std.testing.allocator);
     defer std.testing.allocator.free(encoded);
-
-    var no_memory: [0]u8 = .{};
-    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
-    try std.testing.expectError(error.InvalidListLength, wire.ExecutionRequests.decode(fixed.allocator(), encoded));
+    try std.testing.expectEqual(@as(usize, 43), encoded.len);
+    try std.testing.expectEqualDeep(result, try wire.StatelessValidationResult.decode(std.testing.allocator, encoded));
 }

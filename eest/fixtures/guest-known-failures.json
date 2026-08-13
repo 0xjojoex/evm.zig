@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus": "tests-zkevm@v0.6.2",
+  "corpus": "tests-zkevm@v0.8.0",
   "comment": "Fixtures expected to fail on a pinned guest backend, with the upstream cause. Diagnostic and release runs may allow exact matches. The report fails on unexpected failures or if an entry passes or disappears from this corpus, forcing stale entries to be removed.",
   "zisk": {
     "eest__tests_prague_eip2537_bls_12_381_precompiles_test_bls12_g1msm_py_test_invalid_fork_Amsterdam-blockchain_test_from_state_test---not_in_subgroup_1_pos_0-__block0": "ZisK 1.0.0-alpha BLS12-381 precompile divides by zero in the field (ark-ff DivAssign unwraps inverse() of zero); panics on isogeny-kernel and invalid-point inputs",

@@ -4,7 +4,7 @@ const mutation = @import("../stateless_mutation.zig");
 
 pub const about = "Run typed stateless mutation rejection fixtures";
 
-const default_manifest = "fixtures/stateless-mutations-tests-zkevm-v0.6.2.txt";
+const default_manifest = "fixtures/stateless-mutations-tests-zkevm-v0.8.0.txt";
 
 pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;

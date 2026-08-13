@@ -84,6 +84,11 @@ pub const ExecutionHeader = struct {
         };
     }
 
+    pub fn encodedLen(self: ExecutionHeader, revision: Revision) Error!usize {
+        try self.validate(revision);
+        return rlp.encodedListLen(emitHeader, &self) catch unreachable;
+    }
+
     pub fn hash(self: ExecutionHeader, allocator: std.mem.Allocator, revision: Revision) Error![32]u8 {
         const encoded = try self.encodeAlloc(allocator, revision);
         defer allocator.free(encoded);

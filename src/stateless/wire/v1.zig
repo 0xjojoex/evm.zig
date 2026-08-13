@@ -1,6 +1,6 @@
 //! Amsterdam schema `0x1501` wire contract for the stateless zkEVM guest interface.
 //! Defines the SSZ-encoded `StatelessInput`/`StatelessValidationResult` types
-//! (per tests-zkevm v0.6.2) and the schema-prefixed validate entry points.
+//! (per tests-zkevm v0.8.0) and the schema-prefixed validate entry points.
 //! The two-byte schema id gates decoding; unknown ids are rejected.
 //!
 //! This module implements exactly one `fork || revision` pair, so its id is
@@ -37,20 +37,7 @@ pub const schema_id: u16 = schema.id(schema_fork, schema_revision);
 pub const schema_id_size = schema.id_size;
 
 const max_extra_data_bytes = 32;
-const max_withdrawals_per_payload = 16;
-const max_transactions_per_payload = 1 << 20;
-const max_bytes_per_transaction = 1 << 30;
-const max_blob_commitments_per_block = 4096;
-const max_deposit_requests_per_payload = 8192;
-const max_withdrawal_requests_per_payload = 16;
-const max_consolidation_requests_per_payload = 2;
-const max_builder_deposit_requests_per_payload = 64;
-const max_builder_exit_requests_per_payload = 16;
-const max_block_access_list_bytes = max_bytes_per_transaction;
-const max_public_keys = 1 << 15;
 const public_key_bytes = 65;
-const max_witness_nodes = 1 << 22;
-const max_witness_codes = 1 << 18;
 const max_witness_headers = 256;
 const max_bytes_per_witness_node = 1 << 10;
 const max_bytes_per_code = 1 << 16;
@@ -67,34 +54,9 @@ pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Err
     InvalidRequest,
     MissingParentHeader,
     InvalidHeaderWitness,
-    InactiveForkConfig,
-    InvalidForkActivation,
     InvalidPayloadForFork,
     InvalidPublicKey,
     ExtraDataTooLong,
-};
-
-pub const ForkActivation = struct {
-    block_number: ?u64 = null,
-    timestamp: ?u64 = null,
-
-    pub const Ssz = ssz.Container(@This(), .{
-        .block_number = ssz.OptionalList(u64),
-        .timestamp = ssz.OptionalList(u64),
-    });
-};
-
-pub const ForkConfig = struct {
-    activation: ForkActivation,
-
-    pub const Ssz = ssz.Container(@This(), .{});
-};
-
-pub const ChainConfig = struct {
-    chain_id: u64,
-    active_fork: ForkConfig,
-
-    pub const Ssz = ssz.Container(@This(), .{});
 };
 
 pub const ExecutionWitness = struct {
@@ -103,8 +65,8 @@ pub const ExecutionWitness = struct {
     headers: []const []const u8 = &.{},
 
     pub const Ssz = ssz.Container(@This(), .{
-        .state = ssz.ListOf(ssz.ByteList(max_bytes_per_witness_node), max_witness_nodes),
-        .codes = ssz.ListOf(ssz.ByteList(max_bytes_per_code), max_witness_codes),
+        .state = ssz.ProgressiveListOf(ssz.ByteList(max_bytes_per_witness_node)),
+        .codes = ssz.ProgressiveListOf(ssz.ByteList(max_bytes_per_code)),
         .headers = ssz.ListOf(ssz.ByteList(max_bytes_per_header), max_witness_headers),
     });
 
@@ -144,12 +106,12 @@ pub const ExecutionRequests = struct {
     builder_deposits: []const BuilderDepositRequest = &.{},
     builder_exits: []const BuilderExitRequest = &.{},
 
-    pub const Ssz = ssz.Container(@This(), .{
-        .deposits = ssz.List(DepositRequest, max_deposit_requests_per_payload),
-        .withdrawals = ssz.List(WithdrawalRequest, max_withdrawal_requests_per_payload),
-        .consolidations = ssz.List(ConsolidationRequest, max_consolidation_requests_per_payload),
-        .builder_deposits = ssz.List(BuilderDepositRequest, max_builder_deposit_requests_per_payload),
-        .builder_exits = ssz.List(BuilderExitRequest, max_builder_exit_requests_per_payload),
+    pub const Ssz = ssz.ProgressiveContainer(@This(), [_]bool{true} ** 5, .{
+        .deposits = ssz.ProgressiveList(DepositRequest),
+        .withdrawals = ssz.ProgressiveList(WithdrawalRequest),
+        .consolidations = ssz.ProgressiveList(ConsolidationRequest),
+        .builder_deposits = ssz.ProgressiveList(BuilderDepositRequest),
+        .builder_exits = ssz.ProgressiveList(BuilderExitRequest),
     });
 
     pub fn encode(self: ExecutionRequests, allocator: std.mem.Allocator) Error![]u8 {
@@ -639,7 +601,7 @@ pub const NewPayloadRequest = union(enum) {
 pub const StatelessInput = struct {
     new_payload_request: NewPayloadRequest,
     witness: ExecutionWitness,
-    chain_config: ChainConfig,
+    chain_id: u64,
     public_keys: []const [public_key_bytes]u8 = &.{},
 
     pub fn encode(self: StatelessInput, allocator: std.mem.Allocator) Error![]u8 {
@@ -647,11 +609,10 @@ pub const StatelessInput = struct {
             .amsterdam => |value| amsterdamRequestWire(value),
             else => return error.UnsupportedFork,
         };
-        if (self.public_keys.len > max_public_keys) return error.InvalidListLength;
         return encodeWire(StatelessInputWire.Ssz, allocator, .{
             .new_payload_request = request,
             .witness = self.witness,
-            .chain_config = self.chain_config,
+            .chain_id = self.chain_id,
             .public_keys = self.public_keys,
         });
     }
@@ -678,13 +639,12 @@ pub const StatelessInput = struct {
         var owns_value = true;
         errdefer if (owns_value) StatelessInputWire.Ssz.deinit(allocator, &value);
 
-        const chain_config = value.chain_config;
         const new_payload_request = NewPayloadRequest{ .amsterdam = amsterdamRequestFromWire(value.new_payload_request) };
         owns_value = false;
         return .{
             .new_payload_request = new_payload_request,
             .witness = value.witness,
-            .chain_config = chain_config,
+            .chain_id = value.chain_id,
             .public_keys = value.public_keys,
         };
     }
@@ -694,7 +654,7 @@ pub const StatelessInput = struct {
         return .{
             .new_payload_request = .{ .amsterdam = amsterdamRequestFromWire(value.new_payload_request) },
             .witness = value.witness,
-            .chain_config = value.chain_config,
+            .chain_id = value.chain_id,
             .public_keys = value.public_keys,
         };
     }
@@ -709,13 +669,15 @@ pub const StatelessInput = struct {
 pub const StatelessValidationResult = struct {
     new_payload_request_root: [32]u8,
     successful_validation: bool,
-    chain_config: ChainConfig,
+    chain_id: u64,
+    schema_id: u16,
 
     pub fn encode(self: StatelessValidationResult, allocator: std.mem.Allocator) Error![]u8 {
         return encodeWire(StatelessValidationResultWire.Ssz, allocator, .{
             .new_payload_request_root = self.new_payload_request_root,
             .successful_validation = self.successful_validation,
-            .chain_config = self.chain_config,
+            .chain_id = self.chain_id,
+            .schema_id = self.schema_id,
         });
     }
 
@@ -724,25 +686,23 @@ pub const StatelessValidationResult = struct {
         return .{
             .new_payload_request_root = value.new_payload_request_root,
             .successful_validation = value.successful_validation,
-            .chain_config = value.chain_config,
+            .chain_id = value.chain_id,
+            .schema_id = value.schema_id,
         };
     }
 };
 
 // Shared across multiple wire containers.
-const WithdrawalsSsz = ssz.List(Withdrawal, max_withdrawals_per_payload);
-const TransactionsSsz = ssz.ListOf(ssz.ByteList(max_bytes_per_transaction), max_transactions_per_payload);
-const VersionedHashesSsz = ssz.List([32]u8, max_blob_commitments_per_block);
-const BlockAccessListSsz = ssz.ByteList(max_block_access_list_bytes);
-const PublicKeysSsz = ssz.List([public_key_bytes]u8, max_public_keys);
+const WithdrawalsSsz = ssz.ProgressiveList(Withdrawal);
+const TransactionsSsz = ssz.ProgressiveListOf(ssz.ProgressiveByteList);
+const VersionedHashesSsz = ssz.ProgressiveList([32]u8);
+const BlockAccessListSsz = ssz.ProgressiveByteList;
+const PublicKeysSsz = ssz.ProgressiveList([public_key_bytes]u8);
 
-const BorrowedTransactionsSsz = ssz.ListOf(
-    ssz.Borrowed(ssz.ByteList(max_bytes_per_transaction)),
-    max_transactions_per_payload,
-);
+const BorrowedTransactionsSsz = ssz.ProgressiveListOf(ssz.Borrowed(ssz.ProgressiveByteList));
 const BorrowedExecutionWitnessSsz = ssz.Container(ExecutionWitness, .{
-    .state = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_witness_node)), max_witness_nodes),
-    .codes = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_code)), max_witness_codes),
+    .state = ssz.ProgressiveListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_witness_node))),
+    .codes = ssz.ProgressiveListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_code))),
     .headers = ssz.ListOf(ssz.Borrowed(ssz.ByteList(max_bytes_per_header)), max_witness_headers),
 });
 
@@ -817,7 +777,7 @@ const ExecutionPayloadV4Wire = struct {
     block_access_list: []const u8,
     slot_number: u64,
 
-    pub const Ssz = ssz.Container(@This(), .{
+    pub const Ssz = ssz.ProgressiveContainer(@This(), [_]bool{true} ** 19, .{
         .extra_data = ssz.ByteList(max_extra_data_bytes),
         .transactions = TransactionsSsz,
         .withdrawals = WithdrawalsSsz,
@@ -886,7 +846,7 @@ fn amsterdamRequestFromWire(value: NewPayloadRequestAmsterdamWire) NewPayloadReq
 const StatelessInputWire = struct {
     new_payload_request: NewPayloadRequestAmsterdamWire,
     witness: ExecutionWitness,
-    chain_config: ChainConfig,
+    chain_id: u64,
     public_keys: []const [public_key_bytes]u8,
 
     pub const Ssz = ssz.Container(@This(), .{
@@ -894,11 +854,11 @@ const StatelessInputWire = struct {
     });
 };
 
-const BorrowedExecutionPayloadV4Ssz = ssz.Container(ExecutionPayloadV4Wire, .{
+const BorrowedExecutionPayloadV4Ssz = ssz.ProgressiveContainer(ExecutionPayloadV4Wire, [_]bool{true} ** 19, .{
     .extra_data = ssz.Borrowed(ssz.ByteList(max_extra_data_bytes)),
     .transactions = BorrowedTransactionsSsz,
     .withdrawals = WithdrawalsSsz,
-    .block_access_list = ssz.Borrowed(ssz.ByteList(max_block_access_list_bytes)),
+    .block_access_list = ssz.Borrowed(ssz.ProgressiveByteList),
 });
 const BorrowedNewPayloadRequestAmsterdamSsz = ssz.Container(NewPayloadRequestAmsterdamWire, .{
     .execution_payload = BorrowedExecutionPayloadV4Ssz,
@@ -913,7 +873,8 @@ const BorrowedStatelessInputSsz = ssz.Container(StatelessInputWire, .{
 const StatelessValidationResultWire = struct {
     new_payload_request_root: [32]u8,
     successful_validation: bool,
-    chain_config: ChainConfig,
+    chain_id: u64,
+    schema_id: u16,
 
     pub const Ssz = ssz.Container(@This(), .{});
 };
@@ -1091,20 +1052,12 @@ fn payloadV4FromWire(value: ExecutionPayloadV4Wire) ExecutionPayloadV4 {
     };
 }
 
-fn defaultChainConfig() ChainConfig {
-    return .{
-        .chain_id = 0,
-        .active_fork = .{
-            .activation = .{},
-        },
-    };
-}
-
-fn failureResult(chain_config: ChainConfig, request_root: [32]u8) StatelessValidationResult {
+fn failureResult(chain_id: u64, result_schema_id: u16, request_root: [32]u8) StatelessValidationResult {
     return .{
         .new_payload_request_root = request_root,
         .successful_validation = false,
-        .chain_config = chain_config,
+        .chain_id = chain_id,
+        .schema_id = result_schema_id,
     };
 }
 
@@ -1129,7 +1082,7 @@ pub fn validateStatelessBytesReusable(allocator: std.mem.Allocator, bytes: []con
 fn validateStatelessResultUsing(scratch: std.mem.Allocator, bytes: []const u8) Error!StatelessValidationResult {
     const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(defaultChainConfig(), [_]u8{0} ** 32),
+        else => return failureResult(0, 0, [_]u8{0} ** 32),
     };
     return validateStatelessUsing(AmsterdamValidator, scratch, input);
 }
@@ -1180,11 +1133,11 @@ fn validateStatelessUsing(
 ) Error!StatelessValidationResult {
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(input.chain_config, [_]u8{0} ** 32),
+        else => return failureResult(input.chain_id, schema_id, [_]u8{0} ** 32),
     };
     const normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(input.chain_config, request_root),
+        else => return failureResult(input.chain_id, schema_id, request_root),
     };
     const native_result = Validator.validate(allocator, normalized) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1193,7 +1146,8 @@ fn validateStatelessUsing(
     return .{
         .new_payload_request_root = request_root,
         .successful_validation = native_result.status == .valid,
-        .chain_config = input.chain_config,
+        .chain_id = input.chain_id,
+        .schema_id = schema_id,
     };
 }
 
@@ -1207,7 +1161,6 @@ fn validateStatelessUsing(
 /// Returned slices borrow decoded input or storage owned by `allocator`; guest
 /// callers should give it their invocation-lifetime allocator.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
-    try validateChainConfig(input.chain_config, input.new_payload_request);
     const payload = input.new_payload_request.payloadView();
     const transactions = try normalizeTransactions(
         allocator,
@@ -1220,7 +1173,7 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!inpu
     else
         &.{};
     return .{
-        .chain_id = input.chain_config.chain_id,
+        .chain_id = input.chain_id,
         .blob_params = null,
         .block = .{
             .parent_hash = payload.parent_hash,
@@ -1276,27 +1229,6 @@ fn normalizeTransactions(
         );
     }
     return normalized;
-}
-
-fn validateChainConfig(chain_config: ChainConfig, request: NewPayloadRequest) Error!void {
-    const activation = chain_config.active_fork.activation;
-    if (activation.block_number == null and activation.timestamp == null) {
-        return error.InvalidForkActivation;
-    }
-    const payload = request.payloadView();
-    if (!activationApplies(activation, payload.block_number, payload.timestamp)) {
-        return error.InactiveForkConfig;
-    }
-}
-
-fn activationApplies(activation: ForkActivation, block_number: u64, timestamp: u64) bool {
-    if (activation.block_number) |at| {
-        if (block_number < at) return false;
-    }
-    if (activation.timestamp) |at| {
-        if (timestamp < at) return false;
-    }
-    return true;
 }
 
 fn normalizeWithdrawals(allocator: std.mem.Allocator, withdrawals: []const Withdrawal) Error![]const EthWithdrawal {

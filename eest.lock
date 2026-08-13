@@ -22,11 +22,11 @@ benchmark_dest=.eest/benchmarks/tests-benchmark-v0.0.9
 # the tests-zkevm release track and carry statelessInputBytes/statelessOutputBytes
 # for the native stateless/ERE runners.
 zkevm_repo=ethereum/execution-specs
-zkevm_version=tests-zkevm@v0.6.2
+zkevm_version=tests-zkevm@v0.8.0
 zkevm_artifact=fixtures_zkevm.tar.gz
-zkevm_url=https://github.com/ethereum/execution-specs/releases/download/tests-zkevm%40v0.6.2/fixtures_zkevm.tar.gz
-zkevm_sha256=cf9395b2cb1a87c195fd827ea03dce65a37c6036bb182441da28e7b0f6d45f40
-zkevm_dest=.eest/fixtures/tests-zkevm-v0.6.2
+zkevm_url=https://github.com/ethereum/execution-specs/releases/download/tests-zkevm%40v0.8.0/fixtures_zkevm.tar.gz
+zkevm_sha256=f19f782fb5cefb7466e852e101d28883452221f03cfa1867eec5d520a3112c5c
+zkevm_dest=.eest/fixtures/tests-zkevm-v0.8.0
 
 # Consensus-spec SSZ conformance fixtures. The fetch script extracts generic
 # fixtures plus preset-specific static objects from the three release archives.

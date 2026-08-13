@@ -102,13 +102,13 @@ canonical result with `statelessOutputBytes`:
 
 ```sh
 scripts/fetch-eest-zkevm-fixtures.sh
-zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests
+zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests
 zig build zkevm -- \
-  --report ../.eest/zkevm-v0.6.2.json \
-  ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests
+  --report ../.eest/zkevm-v0.8.0.json \
+  ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests
 zig build zkevm -- \
   --oracle-differential \
-  ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests
+  ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests
 zig build zkevm-mutations
 ```
 
@@ -166,7 +166,7 @@ several independent faults and do not define an internal rejection priority;
 the typed mutation matrix owns failure-status parity.
 
 `zkevm-mutations` is the separate adversarial gate. It starts from a bounded
-manifest of canonical v0.6.2 inputs that validate successfully, applies
+manifest of canonical v0.8.0 inputs that validate successfully, applies
 structured mutations, re-encodes and decodes valid schema-v1 SSZ, then requires
 the intended typed `BlockSTF.Status`. It covers missing and altered trie nodes,
 code, authenticated headers and pre-state roots, public keys, explicit payload
@@ -192,7 +192,7 @@ For a mutation-only checkout, the same bounded manifest can drive extraction:
 
 ```sh
 scripts/fetch-eest-zkevm-fixtures.sh \
-  --manifest fixtures/stateless-mutations-tests-zkevm-v0.6.2.txt
+  --manifest fixtures/stateless-mutations-tests-zkevm-v0.8.0.txt
 zig build zkevm-mutations
 ```
 
@@ -262,8 +262,8 @@ zig build eest-block-stf -- ../.eest/fixtures/tests-glamsterdam-devnet-v8.1.0/fi
 zig build eest-block-stf -- --bal-differential ../.eest/fixtures/tests-glamsterdam-devnet-v8.1.0/fixtures/blockchain_tests_sync
 
 scripts/fetch-eest-zkevm-fixtures.sh
-scripts/fetch-eest-zkevm-fixtures.sh --manifest fixtures/zisk-steps-tests-zkevm-v0.6.2.txt
-zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists/bal_empty_block_no_coinbase.json
+scripts/fetch-eest-zkevm-fixtures.sh --manifest fixtures/zisk-steps-tests-zkevm-v0.8.0.txt
+zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists/bal_empty_block_no_coinbase.json
 ```
 
 The manifest form verifies the same locked archive checksum but extracts only

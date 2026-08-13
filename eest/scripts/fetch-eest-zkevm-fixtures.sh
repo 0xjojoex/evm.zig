@@ -21,7 +21,7 @@ Environment overrides:
 
 Example:
   scripts/fetch-eest-zkevm-fixtures.sh
-  zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.6.2/fixtures/blockchain_tests/path/to/test.json
+  zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests/path/to/test.json
 USAGE
 }
 
@@ -91,7 +91,7 @@ lock_path_value() {
 }
 
 repo="${EEST_ZKEVM_REPO:-$(lock_value zkevm_repo || printf 'ethereum/execution-specs')}"
-version="${EEST_ZKEVM_VERSION:-$(lock_value zkevm_version || printf 'tests-zkevm@v0.6.2')}"
+version="${EEST_ZKEVM_VERSION:-$(lock_value zkevm_version || printf 'tests-zkevm@v0.8.0')}"
 artifact="${EEST_ZKEVM_ARTIFACT:-$(lock_value zkevm_artifact || printf 'fixtures_zkevm.tar.gz')}"
 version_slug="${version//@/-}"
 url_version="${version//@/%40}"

@@ -521,8 +521,10 @@ fn reportOutputMismatch(
         .successful_validation
     else if (!std.mem.eql(u8, &actual_result.new_payload_request_root, &expected_result.new_payload_request_root))
         .new_payload_request_root
-    else if (!std.meta.eql(actual_result.chain_config, expected_result.chain_config))
-        .chain_config
+    else if (actual_result.chain_id != expected_result.chain_id)
+        .chain_id
+    else if (actual_result.schema_id != expected_result.schema_id)
+        .schema_id
     else
         .result_encoding;
     try reporter.add(.{
