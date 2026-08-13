@@ -130,7 +130,7 @@ pub const PreparedCallTransaction = struct {
 
 pub const Call = execution_values.Call;
 pub const Create = execution_values.Create;
-pub const Message = execution_values.Message;
+const Message = execution_values.Message;
 pub const default_max_live_frames: usize = @as(usize, Host.max_call_depth) + 1;
 
 pub const CaptureContext = capture_context.Context;

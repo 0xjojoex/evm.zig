@@ -9,9 +9,9 @@ const Interpreter = evmz.interpreter;
 const eip7702 = @import("./eip7702.zig");
 const FrameStore = @import("./frame_store.zig");
 const execution_values = @import("../execution.zig");
-const ExecutionGas = execution_values.ExecutionGas;
-const ExecutionContext = execution_values.ExecutionContext;
-const ExecutionResult = execution_values.ExecutionResult;
+const ExecutionGas = evmz.execution.ExecutionGas;
+const ExecutionContext = evmz.execution.ExecutionContext;
+const ExecutionResult = evmz.execution.ExecutionResult;
 const FrameResult = Interpreter.FrameResult;
 const call_scratch_storage = @import("./call_scratch.zig");
 const CaptureContext = executor_module.CaptureContext;
@@ -590,7 +590,7 @@ pub fn bind(comptime Executor: type) type {
 
         pub fn beginRootCapture(
             self: *Executor,
-            message: executor_module.Message,
+            message: evmz.Message,
             gas: ExecutionGas,
         ) !?evmz.trace.CallToken {
             const context = self.currentCaptureContext() orelse return null;
@@ -1281,7 +1281,7 @@ pub fn bind(comptime Executor: type) type {
             } else {
                 return error.InvalidNativeContractOutput;
             };
-            const status: execution_values.Status = switch (result.status) {
+            const status: evmz.TxStatus = switch (result.status) {
                 .success => .success,
                 .failure => .invalid,
                 .out_of_gas => .out_of_gas,
