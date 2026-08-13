@@ -5,16 +5,16 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .ckzg = .{
-            .url = "git+https://github.com/ethereum/c-kzg-4844.git#e1c5705613ff0f4f2bababd67b721b9e989a5905",
-            .hash = "ckzg_4844-0.0.0-I7LPWFMvEQBkUTBYYmPmfogEUEIyQWrruA5E7aHe8hMY",
+            .url = "git+https://github.com/ethereum/c-kzg-4844.git#e125905e5e01186e6ccb7a0ced4845bf7eddbcfe",
+            .hash = "ckzg_4844-0.0.0-I7LPWMw0EQBnqYagHE3VRwTrTAYpH0u6ZBPtfAeJsuDa",
         },
         .blst = .{
             .url = "https://github.com/supranational/blst/archive/e7f90de551e8df682f3cc99067d204d8b90d27ad.tar.gz",
             .hash = "N-V-__8AAN0aOwD_n2xFB-Q0eBNtvIKtGPfGZSVt0DdbmfH2",
         },
         .mcl = .{
-            .url = "https://github.com/herumi/mcl/archive/refs/tags/v3.06.tar.gz",
-            .hash = "N-V-__8AAIbQPgBN3AkA58o43UT3Y6jkn55OesBXTWc63zEF",
+            .url = "https://github.com/herumi/mcl/archive/refs/tags/v3.08.tar.gz",
+            .hash = "N-V-__8AAA3HPgD6Du1UslCL4qG97Y3blIoJACv5GuPFZpEu",
         },
         .xkcp = .{
             .url = "git+https://github.com/XKCP/XKCP.git#78477d2e0b980737deaa07b928b29302257055ca",
@@ -22,8 +22,8 @@
             .lazy = true,
         },
         .libsecp256k1 = .{
-            .url = "https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.7.1.tar.gz",
-            .hash = "N-V-__8AAO1SWwCbwhTAU7t6L3XQtTy6TzE8CiOGHjENn_rl",
+            .url = "https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.8.0.tar.gz",
+            .hash = "N-V-__8AAFwQbQAc-L8ZUw4rqyk_OWdYX4-V8crqiWlJ1dhl",
             .lazy = true,
         },
     },
