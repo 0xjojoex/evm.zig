@@ -241,6 +241,7 @@ pub fn bind(comptime Executor: type) type {
                     .{
                         .host = &self.host_iface,
                         .msg = msg,
+                        .execution_context = &self.executor.execution_context.?,
                         .bytecode = bytecode,
                     },
                     control_value,
@@ -986,6 +987,7 @@ pub fn bind(comptime Executor: type) type {
             slot.init(self.allocator, .{
                 .host = &host_iface,
                 .msg = &message,
+                .execution_context = &self.execution_context.?,
                 .bytecode = bytecode,
             });
             defer slot.deinit();

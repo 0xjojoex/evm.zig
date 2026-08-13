@@ -478,7 +478,6 @@ pub const MockHost = struct {
             .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
-            .executionContext = executionContext,
             .selfDestruct = selfDestruct,
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
@@ -488,10 +487,6 @@ pub const MockHost = struct {
         } };
     }
 
-    fn executionContext(ptr: *anyopaque) ?*const ExecutionContext {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        return &self.execution_context;
-    }
 };
 
 pub fn defaultMessage() Host.Message {
@@ -615,12 +610,13 @@ pub const BytecodeResult = struct {
     stack_top: ?u256,
 };
 
-pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const u8, comptime revision: evmz.eth.Revision) !BytecodeResult {
+pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, execution_context: *const ExecutionContext, code: []const u8, comptime revision: evmz.eth.Revision) !BytecodeResult {
     if (comptime !forkEnabled(revision)) return error.SkipZigTest;
     const Exact = evmz.Vm(evmz.eth.specAt(revision));
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = host,
         .msg = msg,
+        .execution_context = execution_context,
         .source = .{ .code = code },
     });
     defer frame.deinit();
@@ -642,7 +638,7 @@ pub fn expectBytecodeStatusByRevision(comptime items: anytype, comptime revision
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, revision);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &bytecode_bytes, revision);
     try std.testing.expectEqual(expected, result.status);
 }
 
@@ -657,7 +653,7 @@ pub fn expectBytecodeStackTopByRevision(comptime items: anytype, comptime revisi
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, revision);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &bytecode_bytes, revision);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(expected, result.stack_top.?);
 }
@@ -673,6 +669,7 @@ pub fn expectStackByRevision(code: []const u8, comptime revision: evmz.eth.Revis
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
+        .execution_context = &mock_host.execution_context,
         .source = .{ .code = code },
     });
     defer frame.deinit();
@@ -696,11 +693,11 @@ test "ORIGIN and GASPRICE read the borrowed transaction context" {
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
-    try std.testing.expect((try host.executionContext()) == &mock_host.execution_context);
 
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
+        .execution_context = &mock_host.execution_context,
         .source = .{ .code = &bytecode(.{ .ORIGIN, .GASPRICE }) },
     });
     defer frame.deinit();
@@ -709,27 +706,6 @@ test "ORIGIN and GASPRICE read the borrowed transaction context" {
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u256, &.{ 0, 0 }, interpreter.call_frame.stack.asSlice());
-}
-
-test "missing execution context fails environment opcodes" {
-    var mock_host = MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const Missing = struct {
-        fn missing(_: *anyopaque) ?*const ExecutionContext {
-            return null;
-        }
-    };
-    var missing_vtable = host.vtable.*;
-    missing_vtable.executionContext = Missing.missing;
-    host.vtable = &missing_vtable;
-    const msg = defaultMessage();
-    const code = bytecode(.{.ORIGIN});
-
-    try std.testing.expectError(
-        error.MissingExecutionContext,
-        runBytecodeWithHost(&host, &msg, &code, .latest),
-    );
 }
 
 test "host action errors propagate out of CALL execution" {
@@ -746,7 +722,7 @@ test "host action errors propagate out of CALL execution" {
 
     try std.testing.expectError(
         error.DatabaseUnavailable,
-        runBytecodeWithHost(&host, &msg, &code, .latest),
+        runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .latest),
     );
 }
 
@@ -764,7 +740,7 @@ test "SLOTNUM pushes the transaction context slot number" {
     const msg = defaultMessage();
     const code = bytecode(.{.SLOTNUM});
 
-    const result = try runBytecodeWithHost(&host, &msg, &code, .amsterdam);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .amsterdam);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u256, 0x123456789abcdef0), result.stack_top.?);
 }
@@ -785,7 +761,7 @@ fn expectBlockhash(number: u16, expected: u256, expected_reads: u64) !void {
         evmz.Opcode.BLOCKHASH.toByte(),
     };
 
-    const result = try runBytecodeWithHost(&host, &msg, &code, .latest);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .latest);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(expected, result.stack_top.?);
     try std.testing.expectEqual(expected_reads, mock_host.block_hash_reads);

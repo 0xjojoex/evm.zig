@@ -7,7 +7,6 @@
 const std = @import("std");
 const evmz = @import("./evm.zig");
 const Opcode = @import("./opcode.zig").Opcode;
-pub const ExecutionContext = @import("./execution/context.zig").ExecutionContext;
 const addr = evmz.addr;
 const Address = evmz.Address;
 const AddressWord = evmz.AddressWord;
@@ -175,9 +174,6 @@ pub const VTable = struct {
     copyCode: *const fn (ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) anyerror!usize,
     emitLog: *const fn (ptr: *anyopaque, event_log: Log) anyerror!void,
     getBlockHash: *const fn (ptr: *anyopaque, number: u256) anyerror!u256,
-    /// Project the immutable opcode context without copying it. The pointer is
-    /// valid while the host owner's current execution scope remains active.
-    executionContext: *const fn (ptr: *anyopaque) ?*const ExecutionContext,
     accessAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!AccessStatus,
     accessStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!AccessStatus,
     accessDelegatedAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!?AccessStatus,
@@ -205,9 +201,6 @@ comptime {
 
 pub fn accountExists(self: *Self, address: AddressWord) !bool {
     return self.vtable.accountExists(self.ptr, address);
-}
-pub fn executionContext(self: *const Self) !*const ExecutionContext {
-    return self.vtable.executionContext(self.ptr) orelse error.MissingExecutionContext;
 }
 pub fn getBlockHash(self: *Self, number: u256) !u256 {
     return self.vtable.getBlockHash(self.ptr, number);

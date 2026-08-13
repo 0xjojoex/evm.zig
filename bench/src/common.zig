@@ -9,6 +9,13 @@ pub const Host = evmz.Host;
 pub const caller_address = evmz.addr(0x1000000000000000000000000000000000000001);
 pub const contract_address = evmz.addr(0x2000000000000000000000000000000000000002);
 pub const max_gas = std.math.maxInt(i64);
+/// Shared context for frames driven outside an executor. Matches the
+/// per-host context CountingHost carries.
+pub const static_execution_context = evmz.execution.ExecutionContext{
+    .chain = .{ .chain_id = 1 },
+    .block = .{ .gas_limit = @intCast(max_gas) },
+    .transaction = .{ .origin = caller_address },
+};
 pub const allocator_env_var = "EVMZ_BENCH_ALLOCATOR";
 
 pub const HostProfile = enum {
@@ -46,7 +53,6 @@ pub const HostCounters = struct {
     storage_store: u64 = 0,
     log: u64 = 0,
     block_hash: u64 = 0,
-    execution_context: u64 = 0,
     access_account: u64 = 0,
     access_storage: u64 = 0,
     access_delegated_account: u64 = 0,
@@ -123,7 +129,6 @@ pub const CountingHost = struct {
             .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
-            .executionContext = executionContext,
             .selfDestruct = selfDestruct,
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
@@ -132,12 +137,6 @@ pub const CountingHost = struct {
             .getTransientStorage = getTransientStorage,
             .setTransientStorage = setTransientStorage,
         } };
-    }
-
-    noinline fn executionContext(ptr: *anyopaque) ?*const evmz.execution.ExecutionContext {
-        const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        self.counters.execution_context += 1;
-        return &self.execution_context;
     }
 
     noinline fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {

@@ -37,6 +37,7 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
         var msg = evmz.t.defaultMessage();
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -94,6 +95,7 @@ test "prepared tail dispatch executes promoted mcopy and exp" {
         var msg = evmz.t.defaultMessage();
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -136,6 +138,7 @@ fn expectPreparedStatus(
     const Exact = evmz.Vm(evmz.eth.specAt(revision));
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -159,6 +162,7 @@ test "prepared tail dispatch rejects SAR before Constantinople" {
     const Byzantium = evmz.t.Vm(.byzantium) orelse return error.SkipZigTest;
     var frame = try Byzantium.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -204,6 +208,7 @@ test "prepared tail dispatch reads frame-local values" {
         msg.input_data = &input;
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -264,6 +269,7 @@ test "prepared tail dispatch reads execution-context values" {
         var msg = evmz.t.defaultMessage();
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -305,6 +311,7 @@ test "prepared tail dispatch reads host account values" {
         msg.recipient = target;
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -345,6 +352,7 @@ test "prepared tail dispatch copies frame-local byte slices" {
         msg.input_data = &input;
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -373,6 +381,7 @@ test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
     var msg = evmz.t.defaultMessage();
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -429,6 +438,7 @@ test "prepared tail dispatch halts once on unrepresentable memory operands" {
         msg.gas = 100_000;
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -464,6 +474,7 @@ test "prepared tail dispatch returns and reverts frame-local output" {
         var msg = evmz.t.defaultMessage();
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -495,6 +506,7 @@ test "prepared tail dispatch rejects Byzantium opcodes before activation" {
         const Homestead = evmz.t.Vm(.homestead) orelse return error.SkipZigTest;
         var frame = try Homestead.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -526,6 +538,7 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
 
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -548,6 +561,7 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
 
     var static_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &static_host,
+        .execution_context = &static_host_state.execution_context,
         .msg = &static_msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -576,6 +590,7 @@ test "prepared tail dispatch uses resolved dispatch target for hot opcodes" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -606,6 +621,7 @@ test "untraced interpreter tail dispatch respects resolved dispatch target" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -629,6 +645,7 @@ test "untraced interpreter tail dispatch rejects invalid and undefined bytes" {
 
         var frame = try Interpreter.Interpreter(evmz.eth.amsterdam).OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .bytecode = bytecode.view() },
         });
@@ -659,6 +676,7 @@ test "builtin enforces the final derived stack minimum" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -730,6 +748,7 @@ test "custom target receives and charges the final derived spec" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -748,6 +767,7 @@ test "custom target receives and charges the final derived spec" {
     msg.gas = custom_gas - 1;
     var out_of_gas_frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -791,6 +811,7 @@ test "custom target enforces the final derived stack minimum" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -822,6 +843,7 @@ test "captured custom MSTORE handler retains inherited trace effects" {
     msg.gas = 100;
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -893,6 +915,7 @@ fn expectSpecializedAdmission(
     const code = [_]u8{@intFromEnum(opcode)};
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -921,6 +944,7 @@ fn expectOpcodeHalt(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: Inte
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -951,6 +975,7 @@ test "instruction boundary resolves EVM faults without throwing" {
 
         var frame = try Interpreter.Interpreter(evmz.eth.cancun).OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &mock_host.execution_context,
             .msg = &msg,
             .source = .{ .code = &code },
         });
@@ -967,6 +992,7 @@ test "instruction boundary resolves EVM faults without throwing" {
     const code = [_]u8{@intFromEnum(Opcode.PUSH0)};
     var frame = try Interpreter.Interpreter(evmz.eth.cancun).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });

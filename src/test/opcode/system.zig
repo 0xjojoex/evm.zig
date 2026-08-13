@@ -16,6 +16,7 @@ test "CREATE initcode limit is independent from transaction validation" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
     });
     defer frame.deinit();

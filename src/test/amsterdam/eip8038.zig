@@ -142,7 +142,7 @@ fn expectAmsterdamColdAccountAccessGas(comptime opcode: evmz.Opcode) !void {
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    const result = try evmz.t.runBytecodeWithHost(&host, &msg, &bytecode, .amsterdam);
+    const result = try evmz.t.runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &bytecode, .amsterdam);
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 6_997), result.gas_left);
 }
@@ -178,7 +178,7 @@ fn expectAmsterdamAccessGas(code: []const u8, status: evmz.execution.AccessStatu
     var msg = evmz.t.defaultMessage();
     msg.gas = 10_000;
 
-    const result = try evmz.t.runBytecodeWithHost(&host, &msg, code, .amsterdam);
+    const result = try evmz.t.runBytecodeWithHost(&host, &msg, &mock_host.execution_context, code, .amsterdam);
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(expected_gas_left, result.gas_left);
 }

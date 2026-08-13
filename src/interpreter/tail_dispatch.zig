@@ -722,10 +722,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
                     if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
-                    const execution_context = ctx.frame.host.executionContext() catch |err| {
-                        recordError(ctx, ip, sp, gas, err);
-                        return .thrown;
-                    };
+                    const execution_context = ctx.frame.execution_context;
                     sp[0] = switch (value) {
                         .origin => execution_context.transaction.origin.toU256(),
                         .gas_price => execution_context.transaction.gas_price,
@@ -812,10 +809,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
 
         fn tailBlockhash(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const slot = sp - 1;
-            const execution_context = ctx.frame.host.executionContext() catch |err| {
-                recordError(ctx, ip, sp, gas, err);
-                return .thrown;
-            };
+            const execution_context = ctx.frame.execution_context;
             const current_number: u256 = execution_context.block.number;
             const oldest_hashable = if (current_number > 256) current_number - 256 else 0;
             slot[0] = if (slot[0] < current_number and slot[0] >= oldest_hashable)
@@ -830,10 +824,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
 
         fn tailBlobhash(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) TailStatus {
             const slot = sp - 1;
-            const execution_context = ctx.frame.host.executionContext() catch |err| {
-                recordError(ctx, ip, sp, gas, err);
-                return .thrown;
-            };
+            const execution_context = ctx.frame.execution_context;
             const index = std.math.cast(usize, slot[0]);
             slot[0] = if (index) |i|
                 if (i < execution_context.transaction.blob_hashes.len) execution_context.transaction.blob_hashes[i] else 0

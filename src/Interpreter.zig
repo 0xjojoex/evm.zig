@@ -12,6 +12,7 @@ const trace = @import("./trace.zig");
 const tail_dispatch = @import("./interpreter/tail_dispatch.zig");
 const Opcode = @import("./opcode.zig").Opcode;
 const TerminalCause = @import("./execution.zig").TerminalCause;
+const ExecutionContext = @import("./execution/context.zig").ExecutionContext;
 
 const Error = anyerror;
 
@@ -77,6 +78,9 @@ pub const RunResult = union(enum) {
 pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
+    /// Environment is an input to execution, not a host capability: the
+    /// owner supplies the transaction-scoped context at frame creation.
+    execution_context: *const ExecutionContext,
     bytecode: Bytecode.View,
 };
 
@@ -215,6 +219,7 @@ pub const CallFrame = struct {
     state: FrameState,
     host: *Host,
     msg: *Host.Message,
+    execution_context: *const ExecutionContext,
     stack: Stack,
     memory: Memory,
     pc: usize = 0,
@@ -230,14 +235,15 @@ pub const CallFrame = struct {
     jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
 
     comptime {
-        std.debug.assert(@sizeOf(CallFrame) == 184);
+        std.debug.assert(@sizeOf(CallFrame) == 192);
         std.debug.assert(@alignOf(CallFrame) == 8);
         std.debug.assert(@offsetOf(CallFrame, "state") == 0);
         std.debug.assert(@offsetOf(CallFrame, "host") == 16);
         std.debug.assert(@offsetOf(CallFrame, "msg") == 24);
-        std.debug.assert(@offsetOf(CallFrame, "stack") == 32);
-        std.debug.assert(@offsetOf(CallFrame, "memory") == 48);
-        std.debug.assert(@offsetOf(CallFrame, "gas_left") == 96);
+        std.debug.assert(@offsetOf(CallFrame, "execution_context") == 32);
+        std.debug.assert(@offsetOf(CallFrame, "stack") == 40);
+        std.debug.assert(@offsetOf(CallFrame, "memory") == 56);
+        std.debug.assert(@offsetOf(CallFrame, "gas_left") == 104);
     }
 
     pub fn init(
@@ -289,6 +295,7 @@ pub const CallFrame = struct {
         self.host = options.host;
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
+        self.execution_context = options.execution_context;
         self.stack = stack;
         self.memory = memory;
         self.pc = 0;
@@ -631,7 +638,7 @@ pub const CallFrameSlot = struct {
     msg: Host.Message = undefined,
 
     comptime {
-        std.debug.assert(@sizeOf(CallFrameSlot) == 33360);
+        std.debug.assert(@sizeOf(CallFrameSlot) == 33376);
         std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == 0);
         std.debug.assert(@offsetOf(CallFrameSlot, "io_storage") == @sizeOf(Stack.Storage));
         std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @offsetOf(CallFrameSlot, "io_storage") + @sizeOf(frame_io.Slot));
@@ -662,6 +669,11 @@ pub const CallFrameSlot = struct {
     }
 };
 
+const test_execution_context = ExecutionContext{
+    .chain = .{ .chain_id = 1 },
+    .transaction = .{ .origin = evmz.addr(0) },
+};
+
 test "call frame can execute with externally supplied stack storage" {
     const code = [_]u8{
         @intFromEnum(Opcode.PUSH1),
@@ -687,6 +699,7 @@ test "call frame can execute with externally supplied stack storage" {
         std.testing.allocator,
         .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .bytecode = bytecode.view(),
         },
@@ -732,6 +745,7 @@ test "call frame can execute with externally supplied memory storage" {
         std.testing.allocator,
         .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .bytecode = bytecode.view(),
         },
@@ -769,6 +783,7 @@ test "interpreter trace cursor records step start and end" {
 
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -837,6 +852,7 @@ test "interpreter captured tail table records a replay span" {
     });
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -898,6 +914,7 @@ test "captured tail memory exhaustion remains a resource error" {
         no_growth_allocator,
         .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .bytecode = bytecode.view(),
         },
@@ -934,6 +951,7 @@ test "interpreter captured tail table records optional memory writes" {
     msg.gas = 100;
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -993,6 +1011,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         msg.gas = case.gas;
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .source = .{ .code = case.code },
         });
@@ -1022,6 +1041,7 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
     msg.gas = 100;
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -1049,6 +1069,7 @@ test "yielded action stays in frame-owned sidecar until resume" {
     msg.gas = 100;
     var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
     });
     defer owned.deinit();
@@ -1098,6 +1119,7 @@ test "call and create resumes reject mismatched suspended actions" {
     msg.gas = 100;
     var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
     });
     defer owned.deinit();
@@ -1258,6 +1280,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
 
             host: *Host,
             msg: *const Host.Message,
+            execution_context: *const ExecutionContext,
             source: Source = .{ .code = &.{} },
         };
 
@@ -1284,6 +1307,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
             slot.init(allocator, .{
                 .host = options.host,
                 .msg = options.msg,
+                .execution_context = options.execution_context,
                 .bytecode = bytecode,
             });
             return .{

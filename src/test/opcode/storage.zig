@@ -27,6 +27,7 @@ test "SLOAD cold storage access gas comes from the exact spec" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -76,6 +77,7 @@ test "SSTORE gas and state gas come from the exact spec" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -107,6 +109,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -133,6 +136,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -162,6 +166,7 @@ test "prepared cold Amsterdam SSTORE out of access gas stops before storage writ
     const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -188,6 +193,7 @@ test "prepared SSTORE rejects static context before host access" {
     const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     var frame = try Osaka.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
@@ -214,6 +220,7 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     var frame = try Berlin.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .bytecode = bytecode.view() },
     });
