@@ -57,10 +57,6 @@ pub fn Instruction(comptime spec: ExactSpec) type {
         inline fn dispatchEntryForOpcode(comptime opcode: Opcode) instruction_table.Entry {
             return dispatch_table[@intFromEnum(opcode)];
         }
-
-        pub inline fn chargeStaticGas(frame: *CallFrame, comptime opcode: Opcode) bool {
-            return frame.trackGas(Self.staticGasForFrame(frame, opcode));
-        }
     };
 }
 

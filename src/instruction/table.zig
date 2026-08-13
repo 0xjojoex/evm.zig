@@ -10,6 +10,8 @@ const OpInfo = opcode_info.OpInfo;
 pub const Target = union(enum) {
     invalid,
     builtin: Opcode,
+    /// The interpreter charges `Entry.info.static_gas` before calling
+    /// `Handler.execute(spec, frame)`; the handler owns dynamic gas and behavior.
     custom: type,
 
     pub fn assertValid(comptime self: Target) void {
@@ -84,13 +86,19 @@ pub const Spec = struct {
         inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].info.static_gas = gas;
     }
 
-    /// Repoint dispatch for one byte, keeping its activation and gas.
+    /// Repoint dispatch for one byte, keeping its activation and metadata.
+    /// Builtin targets must share the target entry's stack requirement.
     pub fn setTarget(self: *Spec, opcode_byte: u8, comptime target: Target) void {
         self.table[opcode_byte].target = target;
     }
 
     /// Install a complete fork-new instruction on any byte — typically an
-    /// unassigned one.
+    /// unassigned one. Installation cannot change bytecode framing: jumpdest
+    /// analysis and disassembly skip only PUSH immediates, regardless of the
+    /// table. A custom instruction needing an operand must read it from the
+    /// code stream in its handler and keep the operand encoding outside
+    /// 0x5b..0x7f (EIP-8024-style) so the byte never aliases JUMPDEST or a
+    /// PUSH.
     pub fn install(
         self: *Spec,
         comptime name: @EnumLiteral(),
@@ -158,5 +166,13 @@ pub fn validate(comptime table: Table) void {
     for (table) |entry| {
         std.debug.assert(!entry.active or entry.defined());
         entry.target.assertValid();
+        switch (entry.target) {
+            .builtin => |opcode| {
+                const target_stack_in = table[@intFromEnum(opcode)].info.stack_in;
+                std.debug.assert(target_stack_in >= opcode_info.info(@intFromEnum(opcode)).stack_in);
+                std.debug.assert(entry.info.stack_in == target_stack_in);
+            },
+            .invalid, .custom => {},
+        }
     }
 }

@@ -29,8 +29,8 @@ pub const Status = enum(u8) {
 /// being accessed. Applies to accounts, storage slots, and delegation targets
 /// alike; it says nothing about which kind of thing was accessed.
 pub const AccessStatus = enum(u1) {
-    cold = 0,
-    warm = 1,
+    cold,
+    warm,
 };
 
 /// How one SSTORE moves a slot through its original/current/next triple.

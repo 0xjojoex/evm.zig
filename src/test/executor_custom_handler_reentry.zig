@@ -11,9 +11,7 @@ const ReentrantInstruction = struct {
     var capture_context: ?*evmz.executor.CaptureContext = null;
 
     const Handler = struct {
-        pub inline fn execute(comptime Instructions: type, frame: *evmz.interpreter.CallFrame) anyerror!void {
-            if (!Instructions.chargeStaticGas(frame, .ADD)) return;
-
+        pub inline fn execute(comptime _: evmz.spec.Spec, frame: *evmz.interpreter.CallFrame) anyerror!void {
             const stack_before = @intFromPtr(frame.stack.base);
             const root_capture_before: ?usize = if (frame.msg.depth == 0) blk: {
                 const capture = capture_context orelse return error.MissingTestCaptureContext;
@@ -50,7 +48,9 @@ const ReentrantInstruction = struct {
 
 const reentrant_cancun = blk: {
     var instruction = evmz.eth.cancun.instruction;
-    instruction.table[@intFromEnum(evmz.Opcode.ADD)].target = .{ .custom = ReentrantInstruction.Handler };
+    const entry = &instruction.table[@intFromEnum(evmz.Opcode.ADD)];
+    entry.info.stack_in = 1;
+    entry.target = .{ .custom = ReentrantInstruction.Handler };
     break :blk evmz.eth.cancun.extend(.{ .instruction = instruction });
 };
 const ReentrantVm = evmz.VmWithOptions(reentrant_cancun, .{ .step_capture = true });

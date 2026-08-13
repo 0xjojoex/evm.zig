@@ -53,6 +53,10 @@ const usage =
     \\it from outside instead, which forfeits canonical authority for the rest of
     \\the run.
     \\
+    \\Non-interactive: pass a command as argv and add -x/--exit to print its
+    \\output and skip the REPL, e.g. `evmz-debug disasm 60aae680 -x` or
+    \\`evmz-debug 6001600101 --run -x`.
+    \\
 ;
 
 pub fn main(init: std.process.Init) !void {
@@ -71,10 +75,12 @@ pub fn main(init: std.process.Init) !void {
     };
     defer repl.unload();
 
-    if (try initialCommand(init, allocator)) |command| {
+    const startup = try initialCommand(init, allocator);
+    if (startup.command) |command| {
         defer allocator.free(command);
         if (!try repl.dispatch(command)) return;
     }
+    if (startup.once) return;
 
     var in_buffer: [64 * 1024]u8 = undefined;
     var in = std.Io.File.stdin().readerStreaming(init.io, &in_buffer);
@@ -88,24 +94,37 @@ pub fn main(init: std.process.Init) !void {
     try repl.out.flush();
 }
 
+const Startup = struct {
+    command: ?[]u8 = null,
+    /// Print the argv command's output and exit instead of entering the REPL.
+    once: bool = false,
+};
+
 /// Rejoin argv into one command line, so `evmz-debug 6001600101 --run` behaves
-/// exactly like typing it. A leading non-command word is assumed to be bytecode.
-fn initialCommand(init: std.process.Init, allocator: std.mem.Allocator) !?[]u8 {
+/// exactly like typing it. A leading non-command word is assumed to be
+/// bytecode. `-x`/`--exit` may appear anywhere and never reaches the command.
+fn initialCommand(init: std.process.Init, allocator: std.mem.Allocator) !Startup {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();
     _ = args.next();
 
+    var startup: Startup = .{};
     var command: std.Io.Writer.Allocating = .init(allocator);
     defer command.deinit();
     var count: usize = 0;
-    while (args.next()) |arg_z| : (count += 1) {
+    while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
+        if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--exit")) {
+            startup.once = true;
+            continue;
+        }
         if (count == 0 and Command.parse(arg) == null) try command.writer.writeAll("load ");
         if (count != 0) try command.writer.writeByte(' ');
         try command.writer.writeAll(arg);
+        count += 1;
     }
-    if (count == 0) return null;
-    return try command.toOwnedSlice();
+    if (count != 0) startup.command = try command.toOwnedSlice();
+    return startup;
 }
 
 const Command = enum {
@@ -508,6 +527,12 @@ const Repl = struct {
                 instruction_spec.fmt(decoded.opcode),
             });
             if (decoded.immediate.len != 0) try self.out.print(" 0x{f}", .{Hex{ .data = decoded.immediate }});
+            switch (decoded.peek) {
+                .none => {},
+                .malformed => try self.out.writeAll("  ; malformed operand"),
+                .depth => |depth| try self.out.print("  ; depth {d}", .{depth}),
+                .exchange => |positions| try self.out.print("  ; positions {d}, {d}", .{ positions[0], positions[1] }),
+            }
             if (!decoded.active) try self.out.writeAll("  ; inactive in this fork");
             try self.out.writeAll("\n");
         }

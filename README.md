@@ -89,13 +89,13 @@ and provisional storage-change inspection.
 
 evmz exposes the execution stack as separate reusable surfaces:
 
-| Surface | Responsibility |
-| --- | --- |
-| Interpreter | EVM bytecode and call-frame execution |
+| Surface             | Responsibility                                              |
+| ------------------- | ----------------------------------------------------------- |
+| Interpreter         | EVM bytecode and call-frame execution                       |
 | Transaction program | Envelope validation, fees, nonce, execution, and settlement |
-| Block program | Ordered transaction execution and block-level rules |
-| Stateless validator | Witness validation and post-state and receipts roots |
-| Guest | The stateless validator compiled for SP1 or ZisK |
+| Block program       | Ordered transaction execution and block-level rules         |
+| Stateless validator | Witness validation and post-state and receipts roots        |
+| Guest               | The stateless validator compiled for SP1 or ZisK            |
 
 ## Exact specifications
 
@@ -169,14 +169,14 @@ sizing, schema pinning, and proof-readiness checks.
 ## Performance
 
 Representative Apple M1 Max VM-loop results from the fixed-Osaka `ReleaseFast`
-snapshot; lower is better:
+napshot measured on 2026-08-13; lower is better:
 
-| Fixture | evmz | evmone-base | revm-int |
-| --- | ---: | ---: | ---: |
-| Arithmetic loop | 0.119 ms | **0.099 ms** | 0.489 ms |
-| Storage SSTORE loop | **0.196 ms** | 0.866 ms | 0.858 ms |
-| ERC20 transfer | **3.859 ms** | 6.183 ms | 6.088 ms |
-| Snailtracer | **20.495 ms** | 59.606 ms | 37.704 ms |
+| Fixture             |          evmz | evmone-base |  revm-int |
+| ------------------- | ------------: | ----------: | --------: |
+| Arithmetic loop     |  **0.104 ms** |    0.109 ms |  0.501 ms |
+| Storage SSTORE loop |  **0.162 ms** |    0.854 ms |  0.875 ms |
+| ERC20 transfer      |  **3.761 ms** |    6.247 ms |  6.084 ms |
+| Snailtracer         | **19.965 ms** |   59.804 ms | 37.990 ms |
 
 Both full snapshots, fixtures, methodology, and reproduction commands are in
 [`bench/README.md`](bench/README.md#published-snapshots).
@@ -184,23 +184,37 @@ Both full snapshots, fixtures, methodology, and reproduction commands are in
 <details>
 <summary>The evmz approach</summary>
 
-evmz bets on compile-time protocol specialization. One complete specification
-(gas schedules, opcode availability, dispatch targets, transaction rules, and
-block hooks) is a comptime value. The 256-entry dispatch table, static gas
-constants, and fork gates are resolved at build time and baked into the binary.
-There is no runtime revision state inside the generated VM.
+evmz doesn't ship one general interpreter with runtime switches. Everything
+you'd normally toggle at runtime — fork rules, tracing, single-stepping,
+custom opcodes — is a compile-time decision, and each combination compiles
+into its own exact machine from one semantic foundation.
 
-Execution is two-tier. Prepared tail dispatch carries machine state
-(instruction pointer, stack pointer, gas) in registers and has dedicated
-handlers for selected common operations, including storage. Fork-gated ops,
-custom dispatch overrides, CALL/CREATE, and tracing spill to the generic
-handler set that operates on the full CallFrame. Generic protocol hot/cold tier
-metadata is a separate dispatch decision from prepared-tail handler selection.
+The interpreter is where the principle pays off most visibly. One set of
+handler semantics compiles into different execution models for different
+purposes:
+
+- **Default** — pure tail dispatch: each handler charges gas, executes, and
+  tail-calls its successor. No central dispatch loop, no per-op capability
+  checks.
+- **Trace** — a separate build whose dispatch table interleaves trace hooks
+  with the same handlers. Observability is a different binary path, not a flag
+  the default build tests per instruction.
+- **Step** — the continuation flips from chaining to yielding after each
+  instruction, producing a genuine single-step interpreter for the debugger
+  with behavior identical to the default build.
 
 Around the interpreter sits a zero-alloc, pooled executor: frames, stacks,
 messages, and IO buffers live in preallocated slots (optionally hard-bounded for
 embedded/zkVM targets), and the state journal is cheap enough that the full
 executor benches within noise of the raw interpreter.
+
+Hard-bounding the pools yields yet another purpose-built machine
+— the zkVM guest, where every dead branch and allocator call would be a
+proven, costed cycle.
+
+Each purpose is its own compilation, and binaries
+carry exactly the machines they were built for. For an execution engine —
+where you know at ship time what you need
 
 </details>
 

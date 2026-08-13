@@ -741,8 +741,7 @@ test "debug session resolves and executes a custom instruction" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const square_byte: u8 = 0xb0;
     const Square = struct {
-        pub inline fn execute(comptime Instructions: type, frame: *Interpreter.CallFrame) anyerror!void {
-            if (!frame.trackGas(comptime Instructions.table[square_byte].info.static_gas)) return;
+        pub inline fn execute(comptime _: evmz.spec.Spec, frame: *Interpreter.CallFrame) anyerror!void {
             const value = frame.pop() orelse return;
             _ = frame.push(value *% value);
         }
@@ -752,7 +751,6 @@ test "debug session resolves and executes a custom instruction" {
         instructions.install(.SQUARE, square_byte, .{
             .static_gas = 5,
             .stack_in = 1,
-            .stack_out = 1,
         }, .{ .custom = Square });
         break :instructions instructions;
     };
@@ -835,7 +833,6 @@ test "debug session resolves and executes a custom instruction" {
     try std.testing.expect(entry.defined());
     try std.testing.expectEqual(@as(i64, 5), entry.info.static_gas);
     try std.testing.expectEqual(@as(u8, 1), entry.info.stack_in);
-    try std.testing.expectEqual(@as(u8, 1), entry.info.stack_out);
     pause = try controlled.step();
 
     const result = run: while (true) {

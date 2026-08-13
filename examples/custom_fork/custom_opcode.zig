@@ -15,11 +15,10 @@ comptime {
     std.debug.assert(!evmz.opcode.info(square_byte).defined);
 }
 
-/// SQUARE: pop x, push x*x (wrapping). `Instructions` is the compiled exact
-/// table, so the handler charges its own spec-assigned static gas from it.
+/// SQUARE: pop x, push x*x (wrapping). The generated custom adapter charges
+/// the exact table entry's static gas before calling this handler.
 const Square = struct {
-    pub inline fn execute(comptime Instructions: type, frame: *evmz.interpreter.CallFrame) anyerror!void {
-        if (!frame.trackGas(comptime Instructions.table[square_byte].info.static_gas)) return;
+    pub inline fn execute(comptime _: evmz.spec.Spec, frame: *evmz.interpreter.CallFrame) anyerror!void {
         const x = frame.pop() orelse return;
         _ = frame.push(x *% x);
     }
@@ -33,7 +32,6 @@ const custom_instruction = blk: {
     instruction.install(.SQUARE, square_byte, .{
         .static_gas = square_gas,
         .stack_in = 1,
-        .stack_out = 1,
     }, .{ .custom = Square });
     // Retire an opcode this fork does not want.
     instruction.deactivate(&.{.SELFDESTRUCT});

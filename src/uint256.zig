@@ -59,7 +59,7 @@ pub inline fn writeBytes32From(bytes: *[32]u8, source: *const u256) void {
     }
 }
 
-pub inline fn sdiv(a: u256, b: u256) u256 {
+pub fn sdiv(a: u256, b: u256) u256 {
     if (b == 0) return 0;
 
     const ia: i256 = @bitCast(a);
@@ -68,7 +68,7 @@ pub inline fn sdiv(a: u256, b: u256) u256 {
     return if ((ia < 0) != (ib < 0)) 0 -% quotient else quotient;
 }
 
-pub inline fn smod(a: u256, b: u256) u256 {
+pub fn smod(a: u256, b: u256) u256 {
     if (b == 0) return 0;
 
     const ia: i256 = @bitCast(a);
@@ -77,7 +77,7 @@ pub inline fn smod(a: u256, b: u256) u256 {
     return if (ia < 0) 0 -% remainder else remainder;
 }
 
-pub inline fn div(a: u256, b: u256) u256 {
+pub fn div(a: u256, b: u256) u256 {
     if (b == 0) return 0;
     if ((a | b) <= std.math.maxInt(u64)) {
         return @as(u64, @truncate(a)) / @as(u64, @truncate(b));
@@ -147,7 +147,7 @@ pub inline fn ceilDiv(value: u256, denominator: u256) u256 {
 /// Wrapping exponentiation. Early-exits the cases where the result is fully
 /// determined (or known to overflow to zero) before the square-and-multiply
 /// loop, which is what EXP relies on for large exponents.
-pub inline fn wrapExp(a: u256, expo: u256) u256 {
+pub fn wrapExp(a: u256, expo: u256) u256 {
     if (expo == 0) return 1;
     if (a == 0) return 0;
     if (a == 1) return 1;

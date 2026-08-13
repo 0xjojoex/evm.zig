@@ -2,7 +2,6 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
-const opcode_info = @import("../opcode.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const Stack = @import("../Stack.zig");
 const instruction = @import("../instruction.zig");
@@ -668,14 +667,58 @@ test "untraced interpreter tail dispatch executes a repointed builtin" {
     try std.testing.expectEqual(@as(u256, 2) -% 7, frame.frame.stack.pop());
 }
 
-test "untraced interpreter tail dispatch calls a custom target directly" {
+test "builtin target enforces the final derived stack minimum" {
+    const spec = comptime spec: {
+        var exact = evmz.eth.amsterdam.instruction;
+        exact.table[@intFromEnum(Opcode.ADD)].info.stack_in = 3;
+        break :spec evmz.eth.amsterdam.extend(.{ .instruction = exact });
+    };
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = evmz.t.bytecode(.{ .PUSH1, 7, .PUSH1, 2, .ADD, .STOP });
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .source = .{ .bytecode = bytecode.view() },
+    });
+    defer frame.deinit();
+    var intpr = frame.interpreter();
+
+    _ = try intpr.execute();
+
+    try std.testing.expectEqual(Interpreter.FrameHalt.stack_underflow, frame.frame.haltReason().?);
+}
+
+test "custom target receives and charges the final derived spec" {
+    const custom_gas = 7;
     const CustomHandler = struct {
-        pub inline fn execute(comptime Instructions: type, frame: *Interpreter.CallFrame) anyerror!void {
-            if (!Instructions.chargeStaticGas(frame, .ADD)) return;
+        var called = false;
+        var saw_derived_spec = false;
+
+        pub inline fn execute(comptime exact: ExactSpec, frame: *Interpreter.CallFrame) anyerror!void {
+            called = true;
+            saw_derived_spec = exact.instruction.entry(@intFromEnum(Opcode.ADD)).info.static_gas == custom_gas;
             _ = frame.push(42);
         }
     };
-    const spec = instructionOverrideSpec(.ADD, .{ .custom = CustomHandler });
+    const base_spec = comptime spec: {
+        var exact = evmz.eth.amsterdam.instruction;
+        const entry = &exact.table[@intFromEnum(Opcode.ADD)];
+        entry.info.stack_in = 0;
+        entry.target = .{ .custom = CustomHandler };
+        break :spec evmz.eth.amsterdam.extend(.{ .instruction = exact });
+    };
+    const spec = comptime spec: {
+        var exact = base_spec.instruction;
+        exact.table[@intFromEnum(Opcode.ADD)].info.static_gas = custom_gas;
+        break :spec base_spec.extend(.{ .instruction = exact });
+    };
 
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -696,14 +739,73 @@ test "untraced interpreter tail dispatch calls a custom target directly" {
     const result = try intpr.execute();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try std.testing.expect(CustomHandler.called);
+    try std.testing.expect(CustomHandler.saw_derived_spec);
     try std.testing.expectEqual(@as(u256, 42), frame.frame.stack.pop());
-    try std.testing.expectEqual(msg.gas - staticGas(.ADD), frame.frame.gas_left);
+    try std.testing.expectEqual(msg.gas - custom_gas, frame.frame.gas_left);
+
+    CustomHandler.called = false;
+    msg.gas = custom_gas - 1;
+    var out_of_gas_frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .source = .{ .bytecode = bytecode.view() },
+    });
+    defer out_of_gas_frame.deinit();
+    var out_of_gas_interpreter = out_of_gas_frame.interpreter();
+
+    const out_of_gas = try out_of_gas_interpreter.execute();
+
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, out_of_gas.status());
+    try std.testing.expect(!CustomHandler.called);
+}
+
+test "custom target enforces the final derived stack minimum" {
+    const CustomHandler = struct {
+        var called = false;
+
+        pub inline fn execute(comptime _: ExactSpec, _: *Interpreter.CallFrame) anyerror!void {
+            called = true;
+        }
+    };
+    const base_spec = comptime spec: {
+        var exact = evmz.eth.amsterdam.instruction;
+        const entry = &exact.table[@intFromEnum(Opcode.ADD)];
+        entry.info.stack_in = 0;
+        entry.target = .{ .custom = CustomHandler };
+        break :spec evmz.eth.amsterdam.extend(.{ .instruction = exact });
+    };
+    const spec = comptime spec: {
+        var exact = base_spec.instruction;
+        exact.table[@intFromEnum(Opcode.ADD)].info.stack_in = 1;
+        break :spec base_spec.extend(.{ .instruction = exact });
+    };
+
+    var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    var msg = evmz.t.defaultMessage();
+    const code = evmz.t.bytecode(.{ .ADD, .STOP });
+    var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
+    defer bytecode.deinit(std.testing.allocator);
+
+    var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .msg = &msg,
+        .source = .{ .bytecode = bytecode.view() },
+    });
+    defer frame.deinit();
+    var intpr = frame.interpreter();
+
+    _ = try intpr.execute();
+
+    try std.testing.expectEqual(Interpreter.FrameHalt.stack_underflow, frame.frame.haltReason().?);
+    try std.testing.expect(!CustomHandler.called);
 }
 
 test "captured custom MSTORE handler retains inherited trace effects" {
     const CustomMstore = struct {
-        pub inline fn execute(comptime Instructions: type, frame: *Interpreter.CallFrame) anyerror!void {
-            if (!Instructions.chargeStaticGas(frame, .MSTORE)) return;
+        pub inline fn execute(comptime _: ExactSpec, frame: *Interpreter.CallFrame) anyerror!void {
             const offset, const value = frame.popN(2) orelse return;
             const offset_usize = frame.memoryOffsetToUsizeOrOog(offset, 32) orelse return;
             if (!try frame.expandMemory(offset_usize, 32)) return;
@@ -818,10 +920,6 @@ test "instruction boundary resolves EVM faults without throwing" {
 
     try executeFrame(evmz.eth.cancun, frame.frame);
     try std.testing.expectEqual(Interpreter.FrameHalt.stack_overflow, frame.frame.haltReason().?);
-}
-
-fn staticGas(opcode: Opcode) i64 {
-    return opcode_info.table[@intFromEnum(opcode)].static_gas;
 }
 
 fn executeFrame(comptime spec: ExactSpec, frame: *Interpreter.CallFrame) !void {
