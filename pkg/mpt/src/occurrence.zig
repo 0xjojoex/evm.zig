@@ -64,7 +64,7 @@ const Occurrence = struct {
     };
 
     const Branch = struct {
-        source: ?catalog.NodeId,
+        source: ?*const catalog.Node,
         children: [16]Child,
         value: ?[]const u8,
 
@@ -197,11 +197,10 @@ fn Context(comptime KeccakContext: type) type {
                     } };
                 },
                 .branch => {
-                    const links = self.catalog.branchChildren(source_id) orelse
-                        return error.InvalidNodeReference;
+                    const source = try self.catalog.branchFromNode(entry);
                     var branch = Occurrence.Branch.empty;
-                    branch.source = source_id;
-                    for (links, 0..) |link, child_index| {
+                    branch.source = entry;
+                    for (source.links, 0..) |link, child_index| {
                         if (link == .empty) continue;
                         branch.children[child_index] = .catalog;
                     }
@@ -250,13 +249,13 @@ fn Context(comptime KeccakContext: type) type {
                 .empty => null,
                 .occurrence => |id| id,
                 .catalog => occurrence: {
-                    const source = branch.source orelse return error.InvalidNodeReference;
-                    const links = self.catalog.branchChildren(source) orelse
-                        return error.InvalidNodeReference;
-                    const reference = try self.catalog.branchReference(source, child_index);
+                    const child = try self.catalog.resolvedBranchChild(
+                        branch.source orelse return error.InvalidNodeReference,
+                        child_index,
+                    );
                     const id = try self.appendDeferred(
-                        links[child_index],
-                        reference,
+                        child.link,
+                        child.reference,
                         .{ .branch = .{ .node = parent, .child_index = @intCast(child_index) } },
                     );
                     self.occurrence(parent).kind.branch.children[child_index] = .{ .occurrence = id };
@@ -726,14 +725,15 @@ fn Context(comptime KeccakContext: type) type {
         }
 
         fn branchBufferLengths(self: *Self, branch: *const Occurrence.Branch) UpdateError!BranchBufferLengths {
+            const catalog_lengths = if (branch.source) |source|
+                try self.catalog.resolvedBranchReferenceEncodedLengths(source)
+            else
+                null;
             var payload = try encode.bytesEncodedLen(branch.value orelse "");
             for (&branch.children, 0..) |*child, index| {
                 const child_len = switch (child.*) {
                     .empty => 1,
-                    .catalog => try self.catalog.branchReferenceEncodedLen(
-                        branch.source orelse return error.InvalidNodeReference,
-                        index,
-                    ),
+                    .catalog => (catalog_lengths orelse return error.InvalidNodeReference)[index],
                     .occurrence => |id| try encode.referenceEncodedLen(&self.occurrence(id).reference),
                 };
                 payload = std.math.add(usize, payload, child_len) catch
@@ -753,7 +753,7 @@ fn Context(comptime KeccakContext: type) type {
                 .empty => try encode.writeBytes(&writer, ""),
                 .catalog => try encode.writeCodecReference(
                     &writer,
-                    try self.catalog.branchReference(
+                    try self.catalog.resolvedBranchReference(
                         branch.source orelse return error.InvalidNodeReference,
                         index,
                     ),

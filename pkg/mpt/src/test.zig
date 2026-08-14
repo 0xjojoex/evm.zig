@@ -455,6 +455,24 @@ test "catalog links shared hashed nodes once" {
     if (root.kind != .branch) return error.ExpectedBranch;
     const children = catalog.branchChildren(root_ref.node.id) orelse return error.ExpectedBranch;
     try std.testing.expectEqual(children[0].node(), children[1].node());
+    const resolved = try catalog.resolveBranchChild(root_ref.node.id, 1);
+    try std.testing.expectEqual(children[1], resolved.link);
+    switch (resolved.reference) {
+        .hashed => |actual| try std.testing.expectEqualSlices(u8, &leaf_hash, actual),
+        else => return error.ExpectedHashedReference,
+    }
+    const carried = try catalog.resolvedBranchChild(root, 1);
+    try std.testing.expectEqual(resolved.link, carried.link);
+    switch (carried.reference) {
+        .hashed => |actual| try std.testing.expectEqualSlices(u8, &leaf_hash, actual),
+        else => return error.ExpectedHashedReference,
+    }
+    const leaf_id = children[1].node() orelse return error.ExpectedLinkedNode;
+    const leaf_entry = catalog.node(leaf_id) orelse return error.MissingCatalogLeaf;
+    try std.testing.expectError(
+        error.InvalidNodeReference,
+        catalog.resolvedBranchChild(leaf_entry, 1),
+    );
     try expectSameLookup(
         try trie.lookup(root_hash, indexed.index(), &[_]u8{0x00}),
         try catalog.lookup(root_ref, &[_]u8{0x00}),
@@ -554,11 +572,11 @@ test "catalog rejects a resolved content-addressed cycle" {
     try std.testing.expectError(error.InvalidNodeReference, builder.finish());
 }
 
-test "catalog link representation remains four bytes" {
+test "catalog link and branch representations remain compact" {
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(mpt.catalog.Link));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(mpt.catalog.Node));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf([16]mpt.catalog.Link));
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(mpt.catalog.Branch));
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(mpt.catalog.Branch));
 }
 
 test "catalog admission bounds indexed, linked, and branch counts" {

@@ -815,7 +815,8 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
                     .blob_gas_used_after = next_blob_gas_used,
                 });
             }
-            eth_receipt.mergeLogsBloom(&accumulated.logs_bloom, eth_receipt.logsBloom(receipt.logs));
+            const receipt_logs_bloom = eth_receipt.logsBloom(receipt.logs);
+            eth_receipt.mergeLogsBloom(&accumulated.logs_bloom, receipt_logs_bloom);
             if (revision.isImpl(.prague)) {
                 eip6110.appendRequestDataFromLogs(allocator, &accumulated.deposit_request_data, receipt.logs) catch |err| switch (err) {
                     error.InvalidRequest => return foldedResult(.invalid_requests, tx_index, self.block.progress(), requests_hash),
@@ -823,7 +824,12 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
                 };
             }
             accumulated.blob_gas_used = next_blob_gas_used;
-            const encoded_receipt = try eth_receipt.encodeView(allocator, entry.tx.kind, receipt);
+            const encoded_receipt = try eth_receipt.encodeView(
+                allocator,
+                entry.tx.kind,
+                receipt,
+                &receipt_logs_bloom,
+            );
             accumulated.encoded_receipts.append(allocator, encoded_receipt) catch |err| {
                 allocator.free(encoded_receipt);
                 return err;

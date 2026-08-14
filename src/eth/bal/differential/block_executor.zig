@@ -68,8 +68,9 @@ pub fn Operations(
             allocator: std.mem.Allocator,
             kind: transaction.TxKind,
             receipt_view: vm.TxReceiptView,
+            logs_bloom: *const [256]u8,
         ) ![]u8 {
-            return receipt.encode(allocator, kind, receipt_view);
+            return receipt.encodeView(allocator, kind, receipt_view, logs_bloom);
         }
 
         pub fn candidateLogsBloom(logs: state.LogBuffer.View) [256]u8 {

@@ -119,16 +119,18 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
                 &self.deposit_request_data,
                 included.logs,
             );
+            const logs_bloom = Operations.candidateLogsBloom(included.logs);
             const encoded_receipt = try Operations.encodeCandidateReceipt(
                 self.allocator,
                 included.transaction.kind,
                 receipt,
+                &logs_bloom,
             );
             errdefer self.allocator.free(encoded_receipt);
             try self.encoded_receipts.append(self.allocator, encoded_receipt);
             Operations.mergeCandidateLogsBloom(
                 &self.block_logs_bloom,
-                Operations.candidateLogsBloom(included.logs),
+                logs_bloom,
             );
             self.progress = next_progress;
             self.blob_gas_used = blob_admission.next;

@@ -72,7 +72,7 @@ pub fn authenticate(
         account_keys[index] = plan.accountTrieKey(id);
     }
     var workspace = mpt.fixed_key.Workspace.init();
-    try mpt.fixed_key.bindSorted(
+    try mpt.fixed_key.bindAssumeSorted(
         catalog.topology,
         catalog.stateCatalogRoot(),
         account_keys,
@@ -113,7 +113,7 @@ pub fn authenticate(
         for (order, 0..) |storage_id, offset| {
             storage_keys[begin + offset] = plan.storageTrieKey(storage_id);
         }
-        try mpt.fixed_key.bindSorted(
+        try mpt.fixed_key.bindAssumeSorted(
             catalog.topology,
             try catalog.storageCatalogRoot(parent.storage_root),
             storage_keys[begin..end],

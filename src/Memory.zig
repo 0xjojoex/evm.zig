@@ -76,16 +76,20 @@ pub inline fn readInto(self: *const Memory, offset: usize, destination: *u256) v
         assert(offset + word_size <= self.bytes.items.len);
         const bytes = self.bytes.items[offset..][0..word_size];
         assert(std.mem.isAligned(@intFromPtr(self.bytes.items.ptr), limb_alignment));
-        // if offset is 8-byte aligned, read aligned bytes for better lowering
-        // unusual contract remain valid for non-aligned reads
+        // Aligned offsets lower to limb loads; unusual offsets remain valid
+        // through the isolated bytewise path.
         if (std.mem.isAligned(offset, limb_alignment)) {
             uint256.readAlignedBytes32Into(@alignCast(bytes), destination);
-        } else {
-            uint256.readBytes32Into(bytes, destination);
+            return;
         }
+        readUnalignedInto(bytes, destination);
     } else {
         destination.* = self.read(offset);
     }
+}
+
+noinline fn readUnalignedInto(bytes: *const [word_size]u8, destination: *u256) void {
+    uint256.readBytes32Into(bytes, destination);
 }
 
 pub fn readBytes(self: *const Memory, offset: usize, size: usize) []u8 {
@@ -115,10 +119,8 @@ pub fn len(self: *const Memory) usize {
     return self.bytes.items.len;
 }
 
-fn resize(self: *Memory, size: usize) !void {
-    if (size <= self.len()) {
-        return;
-    }
+noinline fn resize(self: *Memory, size: usize) !void {
+    assert(size > self.len());
     const additional = size - self.len();
     if (self.bytes.capacity >= size) {
         self.bytes.appendNTimesAssumeCapacity(0, additional);
@@ -196,10 +198,9 @@ pub fn expandToFit(self: *Memory, offset: usize, byte_size: usize) !void {
     try self.applyExpansion(expansion);
 }
 
-pub fn applyExpansion(self: *Memory, expansion: Expansion) Allocator.Error!void {
-    if (self.len() < expansion.next_size) {
-        try self.resize(expansion.next_size);
-    }
+pub inline fn applyExpansion(self: *Memory, expansion: Expansion) Allocator.Error!void {
+    if (self.len() >= expansion.next_size) return;
+    return self.resize(expansion.next_size);
 }
 
 inline fn nextSize(offset: usize, byte_size: usize) ?usize {

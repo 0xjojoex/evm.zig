@@ -6,6 +6,7 @@ const precomputed_zero_roots = @import("zero_roots.zig");
 
 pub const Root = [32]u8;
 pub const zero = [_]u8{0} ** 32;
+const root_word_alignment = @alignOf(u64);
 const DefaultContext = hash_context.StdSha256Context;
 pub const precomputed_zero_root_count = precomputed_zero_roots.count;
 pub const zero_roots = precomputed_zero_roots.roots;
@@ -325,10 +326,20 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
         }
 
         fn branchChildren(self: *Self, path: *const TreePath, children: *const [2]Root) WalkError!Root {
-            // Nested arrays have the exact contiguous 64-byte layout required by hash64.
-            const root = self.context.hash64(@ptrCast(children));
-            try self.visitor.visit(path, .{ .root = root, .kind = .branch });
+            var root: Root align(root_word_alignment) = undefined;
+            try self.branchChildrenInto(path, children, &root);
             return root;
+        }
+
+        fn branchChildrenInto(
+            self: *Self,
+            path: *const TreePath,
+            children: *const [2]Root,
+            root: *align(root_word_alignment) Root,
+        ) WalkError!void {
+            // Nested arrays have the exact contiguous 64-byte layout required by hash64.
+            root.* = self.context.hash64(@ptrCast(children));
+            try self.visitor.visit(path, .{ .root = root.*, .kind = .branch });
         }
 
         pub fn merkleizeSource(
@@ -356,26 +367,32 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             path: *const TreePath,
         ) WalkError!Root {
             var zero_hashes = ZeroHashes(Context).init(self.context);
-            return self.merkleizeSourceDepth(
+            var root: Root align(root_word_alignment) = undefined;
+            try self.merkleizeSourceDepthInto(
                 source,
                 count,
                 0,
                 depth,
                 &zero_hashes,
                 path,
+                &root,
             );
+            return root;
         }
 
         pub fn merkleizeProgressiveSource(self: *Self, source: anytype, path: *const TreePath) WalkError!Root {
             var zero_hashes = ZeroHashes(Context).init(self.context);
-            return self.merkleizeProgressiveSourceRange(
+            var root: Root align(root_word_alignment) = undefined;
+            try self.merkleizeProgressiveSourceRangeInto(
                 source,
                 try source.count(),
                 0,
                 1,
                 &zero_hashes,
                 path,
+                &root,
             );
+            return root;
         }
 
         pub fn mixInLength(self: *Self, path: *const TreePath, left: Root, length: usize) WalkError!Root {
@@ -406,7 +423,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             return self.branchChildren(path, &children);
         }
 
-        fn merkleizeSourceDepth(
+        fn merkleizeSourceDepthInto(
             self: *Self,
             source: anytype,
             count: usize,
@@ -414,42 +431,52 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             depth: usize,
             zero_hashes: *ZeroHashes(Context),
             path: *const TreePath,
-        ) WalkError!Root {
-            if (start >= count) return self.zeroSubtree(path, depth, zero_hashes.at(depth));
-            if (depth == 0) return source.leaf(start, path);
+            root: *align(root_word_alignment) Root,
+        ) WalkError!void {
+            if (start >= count) {
+                root.* = try self.zeroSubtree(path, depth, zero_hashes.at(depth));
+                return;
+            }
+            if (depth == 0) {
+                root.* = try source.leaf(start, path);
+                return;
+            }
 
             var left_path = path.child(.left);
             var right_path = path.child(.right);
             const child_depth = depth - 1;
-            var children: [2]Root = undefined;
-            children[0] = try self.merkleizeSourceDepth(
+            var children: [2]Root align(root_word_alignment) = undefined;
+            try self.merkleizeSourceDepthInto(
                 source,
                 count,
                 start,
                 child_depth,
                 zero_hashes,
                 &left_path,
+                &children[0],
             );
-            children[1] = if (child_depth >= @bitSizeOf(usize))
-                try self.zeroSubtree(&right_path, child_depth, zero_hashes.at(child_depth))
-            else blk: {
+            if (child_depth >= @bitSizeOf(usize)) {
+                children[1] = try self.zeroSubtree(&right_path, child_depth, zero_hashes.at(child_depth));
+            } else {
                 const half = @as(usize, 1) << @intCast(child_depth);
                 const right_start = std.math.add(usize, start, half) catch {
-                    break :blk try self.zeroSubtree(&right_path, child_depth, zero_hashes.at(child_depth));
+                    children[1] = try self.zeroSubtree(&right_path, child_depth, zero_hashes.at(child_depth));
+                    return self.branchChildrenInto(path, &children, root);
                 };
-                break :blk try self.merkleizeSourceDepth(
+                try self.merkleizeSourceDepthInto(
                     source,
                     count,
                     right_start,
                     child_depth,
                     zero_hashes,
                     &right_path,
+                    &children[1],
                 );
-            };
-            return self.branchChildren(path, &children);
+            }
+            return self.branchChildrenInto(path, &children, root);
         }
 
-        fn merkleizeProgressiveSourceRange(
+        fn merkleizeProgressiveSourceRangeInto(
             self: *Self,
             source: anytype,
             count: usize,
@@ -457,37 +484,43 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
             num_leaves: usize,
             zero_hashes: *ZeroHashes(Context),
             path: *const TreePath,
-        ) WalkError!Root {
-            if (start >= count) return self.zeroSubtree(path, 0, zero);
+            root: *align(root_word_alignment) Root,
+        ) WalkError!void {
+            if (start >= count) {
+                root.* = try self.zeroSubtree(path, 0, zero);
+                return;
+            }
 
             var left_path = path.child(.left);
-            var children: [2]Root = undefined;
-            children[0] = try self.merkleizeSourceDepth(
+            var children: [2]Root align(root_word_alignment) = undefined;
+            try self.merkleizeSourceDepthInto(
                 source,
                 count,
                 start,
                 treeDepth(num_leaves),
                 zero_hashes,
                 &left_path,
+                &children[0],
             );
             const next_start = std.math.add(usize, start, num_leaves) catch
                 return error.EncodedLengthOverflow;
             var right_path = path.child(.right);
-            children[1] = if (next_start >= count)
-                try self.zeroSubtree(&right_path, 0, zero)
-            else blk: {
+            if (next_start >= count) {
+                children[1] = try self.zeroSubtree(&right_path, 0, zero);
+            } else {
                 const next_leaves = std.math.mul(usize, num_leaves, 4) catch
                     return error.EncodedLengthOverflow;
-                break :blk try self.merkleizeProgressiveSourceRange(
+                try self.merkleizeProgressiveSourceRangeInto(
                     source,
                     count,
                     next_start,
                     next_leaves,
                     zero_hashes,
                     &right_path,
+                    &children[1],
                 );
-            };
-            return self.branchChildren(path, &children);
+            }
+            return self.branchChildrenInto(path, &children, root);
         }
     };
 }

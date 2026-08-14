@@ -52,3 +52,30 @@ test "witness index resolves every node by digest and misses absent digests" {
         try std.testing.expectError(error.MissingNode, trie.lookup(absent, index, ""));
     }
 }
+
+test "catalog index resolves full digests across word-zero probe collisions" {
+    const CollisionHash = struct {
+        pub fn keccak256(_: @This(), input: []const u8) mpt.Root {
+            return @bitCast([4]u64{ 1, input[input.len - 1], 0, 0 });
+        }
+    };
+
+    const first = leafNode(1);
+    const second = leafNode(2);
+    const trie = mpt.Trie(CollisionHash).init(std.testing.allocator, .{});
+    const encoded_nodes = [_][]const u8{ &first, &second };
+    var indexed = try trie.indexNodes(&encoded_nodes);
+    defer indexed.deinit();
+
+    const second_root = CollisionHash.keccak256(.{}, &second);
+    var builder = try trie.catalogBuilder(indexed.index());
+    defer builder.deinit();
+    const root = try builder.authenticateRoot(second_root);
+    var catalog = try builder.finishAssumeCollisionResistant();
+    defer catalog.deinit();
+
+    switch (try catalog.lookup(root, "")) {
+        .present => |value| try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, value[0..8], .big)),
+        .absent => return error.ExpectedPresent,
+    }
+}

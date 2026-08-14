@@ -122,7 +122,7 @@ pub const Writer = union(enum) {
     }
 
     /// Internal sink contract used by the package's canonical encoder.
-    pub fn appendByte(self: *Writer, byte: u8) Writer.Error!void {
+    pub inline fn appendByte(self: *Writer, byte: u8) Writer.Error!void {
         switch (self.*) {
             .allocating => |*allocating| try allocating.out.append(allocating.allocator, byte),
             .borrowed => |*fixed_buffer| {
@@ -408,7 +408,10 @@ fn readLongLength(input: []const u8, offset: usize, len_of_len: usize) ParseErro
 }
 
 fn checkedEnd(offset: usize, len: usize, limit: usize) ParseError!usize {
-    const end = std.math.add(usize, offset, len) catch return error.LengthOverflow;
-    if (end > limit) return error.InputTooShort;
-    return end;
+    std.debug.assert(offset <= limit);
+    if (len > limit - offset) {
+        if (len > std.math.maxInt(usize) - offset) return error.LengthOverflow;
+        return error.InputTooShort;
+    }
+    return offset + len;
 }

@@ -48,8 +48,21 @@ pub fn bindSorted(
 ) BatchError!void {
     std.debug.assert(results.len == keys.len);
     std.debug.assert(workspace.len == 0);
-    defer workspace.len = 0;
     try validateSortedKeys(keys);
+    return bindAssumeSorted(topology, root, keys, results, workspace);
+}
+
+/// Bind keys whose strict sorted order was already established by the caller.
+pub fn bindAssumeSorted(
+    topology: catalog.Catalog,
+    root: catalog.RootRef,
+    keys: []const [key_bytes]u8,
+    results: []Lookup,
+    workspace: *Workspace,
+) Error!void {
+    std.debug.assert(results.len == keys.len);
+    std.debug.assert(workspace.len == 0);
+    defer workspace.len = 0;
     if (keys.len == 0) return;
     if (root == .empty) {
         @memset(results, .{ .absent = .empty_trie });
