@@ -24,11 +24,17 @@ pub const trie = @import("eth/trie.zig");
 pub const block_stf = @import("eth/block_stf.zig");
 pub const block_rules = @import("eth/block_rules.zig");
 pub const receipt = @import("eth/receipt.zig");
+pub const gas = @import("eth/gas.zig");
+pub const eip2929 = @import("eth/eip/2929.zig");
 pub const eip6110 = @import("eth/eip/6110.zig");
 pub const eip7002 = @import("eth/eip/7002.zig");
 pub const eip7702 = @import("eth/eip/7702.zig");
 pub const eip7251 = @import("eth/eip/7251.zig");
+pub const eip7623 = @import("eth/eip/7623.zig");
 pub const eip7685 = @import("eth/eip/7685.zig");
+pub const eip7825 = @import("eth/eip/7825.zig");
+pub const eip7976 = @import("eth/eip/7976.zig");
+pub const eip8038 = @import("eth/eip/8038.zig");
 pub const eip8282 = @import("eth/eip/8282.zig");
 pub const eip8037 = @import("eth/eip/8037.zig");
 

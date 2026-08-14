@@ -276,8 +276,8 @@ test "transaction prepayment uses comptime blob gas" {
             .target = 3,
             .max = 6,
             .max_per_transaction = 6,
-            .gas_per_blob = eth_transaction.blob_gas_per_blob * 2,
-            .min_base_fee = eth_transaction.min_blob_base_fee,
+            .gas_per_blob = eth_transaction.gas_per_blob * 2,
+            .min_base_fee = eth_transaction.min_base_fee_per_blob_gas,
             .execution_base_cost = eth_transaction.blob_base_cost,
             .base_fee_update_fraction = eth_transaction.cancun_blob_base_fee_update_fraction,
             .reserve_price_active = false,
@@ -302,7 +302,7 @@ test "transaction prepayment uses comptime blob gas" {
         .max_fee_per_blob_gas = input.max_fee_per_blob_gas,
         .blob_hashes = input.blob_hashes,
     }).?;
-    try std.testing.expectEqual(default + @as(u256, eth_transaction.blob_gas_per_blob * hashes.len * 5), custom);
+    try std.testing.expectEqual(default + @as(u256, eth_transaction.gas_per_blob * hashes.len * 5), custom);
 }
 
 test "transaction validation uses runtime blob params" {
@@ -370,7 +370,7 @@ test "transaction validation rejects invalid single-condition inputs" {
                 .base_fee = 7,
                 .blob_base_fee = 1,
                 .blob_hashes = &.{@as(u256, 0x01) << 248},
-                .sender_balance = 21_000 * 10 + eth_transaction.blob_gas_per_blob * 2 - 1,
+                .sender_balance = 21_000 * 10 + eth_transaction.gas_per_blob * 2 - 1,
             },
             .expected = ValidationError.insufficient_account_funds,
         },
@@ -538,21 +538,21 @@ test "transaction validation interprets revision-specific block progress" {
 }
 
 test "transaction validation applies Osaka transaction gas cap" {
-    const eth_transaction = @import("../eth/transaction.zig");
+    const eth_eip7825 = @import("../eth/eip/7825.zig");
     try std.testing.expectEqual(@as(?ValidationError, null), testRuntime(@import("../eth/spec.zig").osaka).validate(.{
-        .gas_limit = eth_transaction.max_transaction_gas_limit,
+        .gas_limit = eth_eip7825.max_transaction_gas_limit,
         .gas_price = 1,
-        .sender_balance = eth_transaction.max_transaction_gas_limit,
+        .sender_balance = eth_eip7825.max_transaction_gas_limit,
     }));
     try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, testRuntime(@import("../eth/spec.zig").osaka).validate(.{
-        .gas_limit = eth_transaction.max_transaction_gas_limit + 1,
+        .gas_limit = eth_eip7825.max_transaction_gas_limit + 1,
         .gas_price = 1,
-        .sender_balance = eth_transaction.max_transaction_gas_limit + 1,
+        .sender_balance = eth_eip7825.max_transaction_gas_limit + 1,
     }).?);
     try std.testing.expectEqual(@as(?ValidationError, null), testRuntime(@import("../eth/spec.zig").prague).validate(.{
-        .gas_limit = eth_transaction.max_transaction_gas_limit + 1,
+        .gas_limit = eth_eip7825.max_transaction_gas_limit + 1,
         .gas_price = 1,
-        .sender_balance = eth_transaction.max_transaction_gas_limit + 1,
+        .sender_balance = eth_eip7825.max_transaction_gas_limit + 1,
     }));
 }
 
@@ -576,8 +576,8 @@ test "transaction validation uses comptime policy" {
                 .target = 1,
                 .max = 1,
                 .max_per_transaction = 1,
-                .gas_per_blob = eth_transaction.blob_gas_per_blob,
-                .min_base_fee = eth_transaction.min_blob_base_fee,
+                .gas_per_blob = eth_transaction.gas_per_blob,
+                .min_base_fee = eth_transaction.min_base_fee_per_blob_gas,
                 .execution_base_cost = eth_transaction.blob_base_cost,
                 .base_fee_update_fraction = eth_transaction.cancun_blob_base_fee_update_fraction,
                 .reserve_price_active = false,
@@ -612,7 +612,9 @@ test "transaction validation does not apply Osaka total gas cap after Amsterdam"
 
 test "transaction validation caps Amsterdam intrinsic regular gas" {
     const eth_transaction = @import("../eth/transaction.zig");
-    const too_many_addresses = (eth_transaction.max_transaction_gas_limit - 15_000) / (eth_transaction.amsterdam_access_list_address_gas + eth_transaction.access_list_address_data_gas) + 1;
+    const eth_eip7825 = @import("../eth/eip/7825.zig");
+    const eth_eip8038 = @import("../eth/eip/8038.zig");
+    const too_many_addresses = (eth_eip7825.max_transaction_gas_limit - 15_000) / (eth_eip8038.access_list_address_cost + eth_transaction.access_list_address_data_gas) + 1;
     try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, testRuntime(@import("../eth/spec.zig").amsterdam).validate(.{
         .gas_limit = 30_000_000,
         .access_list_counts = .{ .addresses = too_many_addresses },
@@ -620,8 +622,9 @@ test "transaction validation caps Amsterdam intrinsic regular gas" {
 }
 
 test "transaction validation caps Amsterdam calldata floor gas" {
-    const eth_transaction = @import("../eth/transaction.zig");
-    const floor_exceeding_len = (eth_transaction.max_transaction_gas_limit - eth_transaction.amsterdam_tx_base_cost) / 64 + 1;
+    const eth_eip7825 = @import("../eth/eip/7825.zig");
+    const eth_eip8037 = @import("../eth/eip/8037.zig");
+    const floor_exceeding_len = (eth_eip7825.max_transaction_gas_limit - eth_eip8037.tx_base_cost) / 64 + 1;
     const input = try std.testing.allocator.alloc(u8, floor_exceeding_len);
     defer std.testing.allocator.free(input);
     @memset(input, 1);
@@ -696,6 +699,7 @@ test "transaction validation rejects set-code shape errors" {
 
 test "transaction validation rejects oversized initcode" {
     const eth_transaction = @import("../eth/transaction.zig");
+    const eth_eip8037 = @import("../eth/eip/8037.zig");
     var initcode = [_]u8{0} ** (eth_transaction.max_initcode_size + 1);
     try std.testing.expectEqual(ValidationError.initcode_size_exceeded, testRuntime(@import("../eth/spec.zig").shanghai).validate(.{
         .is_create = true,
@@ -718,7 +722,7 @@ test "transaction validation rejects oversized initcode" {
         .sender_balance = 4_000_000,
     }));
 
-    const oversized_amsterdam = try std.testing.allocator.alloc(u8, eth_transaction.amsterdam_max_initcode_size + 1);
+    const oversized_amsterdam = try std.testing.allocator.alloc(u8, eth_eip8037.max_initcode_size + 1);
     defer std.testing.allocator.free(oversized_amsterdam);
     @memset(oversized_amsterdam, 0);
     try std.testing.expectEqual(ValidationError.initcode_size_exceeded, testRuntime(@import("../eth/spec.zig").amsterdam).validate(.{

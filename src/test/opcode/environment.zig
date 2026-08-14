@@ -21,6 +21,7 @@ test "BALANCE cold account access gas comes from the exact spec" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -55,6 +56,7 @@ test "EXTCODESIZE account access gas comes from the exact spec" {
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -96,6 +98,7 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
     const Cancun = evmz.Vm(evmz.eth.cancun);
     var frame = try Cancun.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = bytecode },
     });

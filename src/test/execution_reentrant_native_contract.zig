@@ -54,7 +54,7 @@ const ReentrantRuntime = struct {
             .value = 0,
             .is_static = call.message.is_static,
             .code_address = self.child,
-        })).expectCall();
+        }));
         self.called = true;
         return .{
             .status = if (result.status() == .success) .success else .failure,
@@ -90,7 +90,7 @@ const ReentrantOutputRuntime = struct {
                 .input_data = &.{0x01},
                 .value = 0,
                 .code_address = call.message.code_address,
-            })).expectCall();
+            }));
             try std.testing.expectEqualSlices(u8, &.{0xbb}, nested.output_data);
         }
 
@@ -138,7 +138,7 @@ test "reentrant native contract can use host state and keeps EVM rollback semant
     const success = (try executor.executeStandalone(
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
-    )).expectCall();
+    ));
     try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, success.status());
     try std.testing.expectEqualSlices(u8, &.{0x7e}, success.output_data);
     try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulNativeContract.target, 7));
@@ -149,7 +149,7 @@ test "reentrant native contract can use host state and keeps EVM rollback semant
     const failure = (try executor.executeStandalone(
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
-    )).expectCall();
+    ));
     try std.testing.expectEqual(StatefulVm.Interpreter.Status.invalid, failure.status());
     try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulNativeContract.target, 7));
 
@@ -180,7 +180,7 @@ test "executor construction selects the supplied reentrant native contract runti
     const first = (try first_executor.executeStandalone(
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
-    )).expectCall();
+    ));
     try std.testing.expectEqualSlices(u8, &.{0x11}, first.output_data);
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
@@ -192,7 +192,7 @@ test "executor construction selects the supplied reentrant native contract runti
     const second = (try second_executor.executeStandalone(
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
-    )).expectCall();
+    ));
     try std.testing.expectEqualSlices(u8, &.{0x22}, second.output_data);
 }
 
@@ -208,7 +208,7 @@ test "reentrant native contract output survives synchronous host reentry" {
     const result = (try executor.executeStandalone(
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
-    )).expectCall();
+    ));
 
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
 }
@@ -258,7 +258,7 @@ test "reentrant native contract preserves parent stack across arena growth" {
     try child_account.setCode(&child_code);
     try executor.state.seedAccount(child, child_account);
 
-    const result = (try executor.executeStandalone(request(sender, parent, &.{}), .{})).expectCall();
+    const result = (try executor.executeStandalone(request(sender, parent, &.{}), .{}));
 
     try std.testing.expect(runtime.called);
     try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, result.status());

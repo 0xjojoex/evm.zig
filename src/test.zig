@@ -23,6 +23,7 @@ test {
     _ = @import("./test/opcode/memory.zig");
     _ = @import("./test/opcode/stack.zig");
     _ = @import("./test/opcode/storage.zig");
+    _ = @import("./test/gas_table.zig");
     _ = @import("./test/opcode/system.zig");
     _ = @import("./test/prague/eip7702.zig");
     _ = @import("./test/amsterdam/eip2780.zig");

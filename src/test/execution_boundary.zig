@@ -54,8 +54,7 @@ test "execution checkpoints stay inside one stable transaction scope" {
 
     try executor.warmAccount(other);
     try executor.warmStorage(other, 1);
-    var host = executor.host();
-    try std.testing.expectEqual(sender, (try host.executionContext()).transaction.origin);
+    try std.testing.expectEqual(sender, executor.execution_context.?.transaction.origin);
     try std.testing.expect(executor.state.isAccountWarm(sender));
     try std.testing.expect(executor.state.isAccountWarm(contract));
     try std.testing.expect(executor.state.isAccountWarm(other));
@@ -66,7 +65,7 @@ test "execution checkpoints stay inside one stable transaction scope" {
     try executor.addBalance(reverted, 7);
     checkpoint.restore();
 
-    try std.testing.expectEqual(sender, (try host.executionContext()).transaction.origin);
+    try std.testing.expectEqual(sender, executor.execution_context.?.transaction.origin);
     try std.testing.expect(executor.state.isAccountWarm(other));
     try std.testing.expect(!executor.state.isAccountWarm(reverted));
     try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(reverted));
@@ -119,8 +118,7 @@ test "beginMessageScope derives root identity context and raw warmth" {
         .storage_slots = &warm_slots,
     } });
 
-    var host = executor.host();
-    try std.testing.expectEqualDeep(execution_context, (try host.executionContext()).*);
+    try std.testing.expectEqualDeep(execution_context, executor.execution_context.?);
     try std.testing.expect(executor.state.isAccountWarm(sender));
     try std.testing.expect(executor.state.isAccountWarm(recipient));
     try std.testing.expect(!executor.state.isAccountWarm(coinbase));
@@ -212,8 +210,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     committed.commit();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
-    var host = executor.host();
-    _ = try host.executionContext();
+    try std.testing.expect(executor.execution_context != null);
 
     var reverted = executor.checkpoint();
     defer reverted.deinit();
@@ -229,7 +226,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
     try std.testing.expect(!executor.state.isAccountWarm(additional));
     try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
-    _ = try host.executionContext();
+    try std.testing.expect(executor.execution_context != null);
     try observed.retainStateTransition();
     try std.testing.expect(observations.found);
 }
@@ -337,7 +334,7 @@ test "executeStandalone owns success and revert scope lifecycles" {
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &success_code });
 
-        const result = (try executor.executeStandalone(request(sender, contract), .{})).expectCall();
+        const result = (try executor.executeStandalone(request(sender, contract), .{}));
 
         try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
@@ -349,7 +346,7 @@ test "executeStandalone owns success and revert scope lifecycles" {
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &revert_code });
 
-        const result = (try executor.executeStandalone(request(sender, contract), .{})).expectCall();
+        const result = (try executor.executeStandalone(request(sender, contract), .{}));
 
         try std.testing.expectEqual(evmz.interpreter.Status.revert, result.status());
         try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
@@ -500,7 +497,7 @@ test "nested CREATE revert output survives child frame release" {
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    const result = (try executor.executeStandalone(request(sender, contract), .{})).expectCall();
+    const result = (try executor.executeStandalone(request(sender, contract), .{}));
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);

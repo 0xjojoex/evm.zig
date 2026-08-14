@@ -1,10 +1,10 @@
 const std = @import("std");
 const opcode_info = @import("../opcode.zig");
-const tx = @import("transaction.zig");
+const eip2929 = @import("eip/2929.zig");
+const eip8038 = @import("eip/8038.zig");
 const instruction_table = @import("../instruction/table.zig");
 
 const Opcode = opcode_info.Opcode;
-const warm_storage_read_cost: i64 = 100;
 
 pub const Spec = instruction_table.Spec;
 
@@ -110,9 +110,10 @@ pub const muir_glacier = istanbul;
 
 const berlin_spec: Spec = spec: {
     var result = muir_glacier;
-    result.setStaticGas(&.{ .BALANCE, .EXTCODESIZE, .EXTCODECOPY, .EXTCODEHASH, .SLOAD }, 100);
-    result.account_read_cold_access_gas = 2_500;
-    result.code_account_cold_access_gas = 2_500;
+    result.setStaticGas(&.{ .BALANCE, .EXTCODESIZE, .EXTCODECOPY, .EXTCODEHASH, .SLOAD }, eip2929.warm_storage_read_cost);
+    result.account_read_cold_access_gas = eip2929.cold_account_access_surcharge;
+    // Code accounts pay the warm cost through the static gas set above.
+    result.code_account_cold_access_gas = eip2929.cold_account_access_surcharge;
     result.code_account_warm_access_gas = 0;
     break :spec result;
 };
@@ -155,10 +156,10 @@ pub const osaka = osaka_spec;
 const amsterdam_spec: Spec = spec: {
     var result = osaka;
     result.activate(&.{ .SLOTNUM, .DUPN, .SWAPN, .EXCHANGE });
-    result.setStaticGas(&.{ .CREATE, .CREATE2 }, tx.amsterdam_create_access_cost);
-    result.account_read_cold_access_gas = tx.amsterdam_cold_account_access_cost - warm_storage_read_cost;
-    result.code_account_cold_access_gas = tx.amsterdam_cold_account_access_cost;
-    result.code_account_warm_access_gas = warm_storage_read_cost;
+    result.setStaticGas(&.{ .CREATE, .CREATE2 }, eip8038.create_access_cost);
+    result.account_read_cold_access_gas = eip8038.cold_account_access_cost - eip2929.warm_storage_read_cost;
+    result.code_account_cold_access_gas = eip8038.cold_account_access_cost;
+    result.code_account_warm_access_gas = eip2929.warm_storage_read_cost;
     break :spec result;
 };
 pub const amsterdam = amsterdam_spec;
@@ -175,7 +176,7 @@ test "exact instruction specs extend activation and gas values" {
     try std.testing.expectEqual(@as(i64, 400), tangerine_whistle.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
     try std.testing.expectEqual(@as(i64, 700), istanbul.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
     try std.testing.expectEqual(@as(i64, 100), berlin.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
-    try std.testing.expectEqual(@as(i64, tx.amsterdam_create_access_cost), amsterdam.table[@intFromEnum(Opcode.CREATE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, eip8038.create_access_cost), amsterdam.table[@intFromEnum(Opcode.CREATE)].info.static_gas);
 }
 
 test "instruction spec mutation helpers derive one table value from another" {
@@ -225,7 +226,7 @@ test "exact instruction spec carries execution constants as values" {
     try std.testing.expectEqual(@as(?i64, null), istanbul.account_read_cold_access_gas);
     try std.testing.expectEqual(@as(?i64, 2_500), berlin.account_read_cold_access_gas);
     try std.testing.expectEqual(
-        @as(?i64, tx.amsterdam_cold_account_access_cost - warm_storage_read_cost),
+        @as(?i64, eip8038.cold_account_access_cost - eip2929.warm_storage_read_cost),
         amsterdam.account_read_cold_access_gas,
     );
 }

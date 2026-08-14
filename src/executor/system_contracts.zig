@@ -397,7 +397,7 @@ test "Amsterdam block hook executes state growth from the system-call reservoir"
                 .sender = ethereum.system_address,
                 .recipient = recipient,
                 .gas = 20_000,
-                .state_gas = ethereum.transaction.amsterdam_storage_set_state_gas,
+                .state_gas = ethereum.eip8037.storage_set_state_gas,
                 .require_code = true,
             });
             return calls;

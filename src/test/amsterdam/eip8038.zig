@@ -34,7 +34,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     });
 
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
-    const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas }, 0);
+    const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.eip8037.new_account_state_gas }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expect(!executor.state.isAccountWarm(create_address));
@@ -142,7 +142,7 @@ fn expectAmsterdamColdAccountAccessGas(comptime opcode: evmz.Opcode) !void {
     msg.gas = 10_000;
     const bytecode = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, opcode, .STOP });
 
-    const result = try evmz.t.runBytecodeWithHost(&host, &msg, &bytecode, .amsterdam);
+    const result = try evmz.t.runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &bytecode, .amsterdam);
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(i64, 6_997), result.gas_left);
 }
@@ -178,7 +178,7 @@ fn expectAmsterdamAccessGas(code: []const u8, status: evmz.execution.AccessStatu
     var msg = evmz.t.defaultMessage();
     msg.gas = 10_000;
 
-    const result = try evmz.t.runBytecodeWithHost(&host, &msg, code, .amsterdam);
+    const result = try evmz.t.runBytecodeWithHost(&host, &msg, &mock_host.execution_context, code, .amsterdam);
     try std.testing.expectEqual(Interpreter.Status.success, result.status);
     try std.testing.expectEqual(expected_gas_left, result.gas_left);
 }

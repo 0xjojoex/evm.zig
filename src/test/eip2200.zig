@@ -14,6 +14,11 @@ const Eip2200Vector = struct {
     final: u256,
 };
 
+const test_execution_context = evmz.execution.ExecutionContext{
+    .chain = .{ .chain_id = 1 },
+    .transaction = .{ .origin = evmz.addr(0) },
+};
+
 test "EIP-2200 official SSTORE gas/refund vectors" {
     const vectors = [_]Eip2200Vector{
         .{ .code = "60006000556000600055", .gas_used = 1612, .refund = 0, .original = 0, .final = 0 },
@@ -73,7 +78,6 @@ test "EIP-2200 child frame refunds merge only from committed frames" {
         .output_data = &.{},
         .gas_left = 4,
         .gas_refund = 7,
-        .address = evmz.addr(0xbeef),
     });
     try std.testing.expectEqual(@as(i64, 74), frame.frame.gas_left);
     try std.testing.expectEqual(@as(i64, 4_807), frame.frame.gas_refund);
@@ -128,7 +132,7 @@ fn runSstoreVector(hex_code: []const u8, original: u256, comptime revision: evmz
     var msg = t.defaultMessage();
     msg.gas = test_gas;
 
-    const result = try t.runBytecodeWithHost(&host, &msg, code, revision);
+    const result = try t.runBytecodeWithHost(&host, &msg, &mock_host.execution_context, code, revision);
     return .{
         .status = result.status,
         .gas_left = result.gas_left,
@@ -152,6 +156,7 @@ fn testingFrame() !evmz.Evm.Interpreter.OwnedCallFrame {
 
     return evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });

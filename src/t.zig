@@ -154,13 +154,18 @@ fn bytecodeByte(comptime item: anytype) u8 {
 pub const MockHost = struct {
     const Self = @This();
 
+    pub const Account = struct {
+        nonce: u64 = 0,
+        balance: u256,
+    };
+
     alloc: std.mem.Allocator,
     store: std.AutoHashMap(u256, u256),
     logs: std.ArrayList(Host.Log),
     execution_context: ExecutionContext,
     original_store: std.AutoHashMap(u256, u256),
     code: Address.HashMap([]u8),
-    local_account: Address.HashMap(Host.Account),
+    local_account: Address.HashMap(Account),
     removed_account: Address.HashMap(bool),
     storage_reads: u64,
     access_storage_reads: u64,
@@ -176,7 +181,7 @@ pub const MockHost = struct {
             .store = std.AutoHashMap(u256, u256).init(alloc),
             .logs = .empty,
             .original_store = std.AutoHashMap(u256, u256).init(alloc),
-            .local_account = Address.HashMap(Host.Account).init(alloc),
+            .local_account = Address.HashMap(Account).init(alloc),
             .removed_account = Address.HashMap(bool).init(alloc),
             .code = Address.HashMap([]u8).init(alloc),
             .storage_reads = 0,
@@ -219,14 +224,14 @@ pub const MockHost = struct {
         return self.store.get(key) orelse 0;
     }
 
-    fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
+    fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const topics_copy = try self.alloc.dupe(u256, topics);
+        const topics_copy = try self.alloc.dupe(u256, event_log.topics);
         errdefer self.alloc.free(topics_copy);
-        const data_copy = try self.alloc.dupe(u8, data);
+        const data_copy = try self.alloc.dupe(u8, event_log.data);
         errdefer self.alloc.free(data_copy);
         try self.logs.append(self.alloc, .{
-            .address = address,
+            .address = event_log.address,
             .topics = topics_copy,
             .data = data_copy,
         });
@@ -282,42 +287,11 @@ pub const MockHost = struct {
         return 1;
     }
 
-    fn getCodeBuf(self: Self, address: Address, out: []u8) ![]u8 {
-        const removed = self.removed_account.get(address);
-
-        if (removed) |_| {
-            return &.{};
-        }
-
-        const local = self.code.get(address);
-
-        if (local) |code| {
-            @memcpy(out, code);
-            return code;
-        }
-
-        return &.{};
-    }
-
-    pub fn copyCode(ptr: *anyopaque, address_word: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
+    fn getCode(ptr: *anyopaque, address_word: AddressWord) ![]const u8 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const address = address_word.address();
-
-        if (self.removed_account.get(address)) |_| {
-            return 0;
-        }
-
-        const local = self.code.get(address);
-
-        if (local) |code| {
-            if (code_offset >= code.len) return 0;
-            const copied = @min(buffer_data.len, code.len - code_offset);
-            @memcpy(buffer_data[0..copied], code[code_offset..][0..copied]);
-
-            return copied;
-        }
-
-        return 0;
+        if (self.removed_account.get(address)) |_| return &.{};
+        return self.code.get(address) orelse &.{};
     }
 
     fn getBalance(ptr: *anyopaque, address_word: AddressWord) !u256 {
@@ -339,34 +313,12 @@ pub const MockHost = struct {
         return if (self.local_account.get(address)) |account| account.nonce else 0;
     }
 
-    fn getCodeSize(ptr: *anyopaque, address_word: AddressWord) !u256 {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        var buf: [1024]u8 = undefined;
-        const code = try self.getCodeBuf(address_word.address(), &buf);
-        return code.len;
-    }
-
     fn getCodeHash(ptr: *anyopaque, address_word: AddressWord) !u256 {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        const address = address_word.address();
-        var buf: [1024]u8 = undefined;
-        const a = @This();
-
-        const exist = try a.accountExists(self, address_word);
-
-        if (!exist) {
-            return 0;
-        }
-
-        const code = try self.getCodeBuf(address, &buf);
-
-        if (code.len == 0) {
-            return evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
-        }
-        const result = evmz.crypto.keccak256(code);
-        const final_result = evmz.uint256.fromBytes32(&result);
-
-        return final_result;
+        if (!(try accountExists(ptr, address_word))) return 0;
+        const code = try getCode(ptr, address_word);
+        if (code.len == 0) return evmz.uint256.fromBytes32(&evmz.crypto.keccak256_empty);
+        const digest = evmz.crypto.keccak256(code);
+        return evmz.uint256.fromBytes32(&digest);
     }
 
     fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
@@ -434,12 +386,12 @@ pub const MockHost = struct {
         if (Host.precheckResult(msg)) |result| return result;
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.call_error) |err| return err;
-        return Host.Result.fromCall(.{
+        return .{
             .gas_left = 0,
             .gas_refund = 0,
             .output_data = &.{},
             .outcome = .{ .status = .success, .cause = .none },
-        });
+        };
     }
 
     fn getTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256) !u256 {
@@ -464,8 +416,7 @@ pub const MockHost = struct {
             .accountExists = accountExists,
             .getBalance = getBalance,
             .getNonce = getNonce,
-            .copyCode = copyCode,
-            .getCodeSize = getCodeSize,
+            .getCode = getCode,
             .getCodeHash = getCodeHash,
             .getStorage = getStorage,
             .setStorage = setStorage,
@@ -473,7 +424,6 @@ pub const MockHost = struct {
             .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
-            .executionContext = executionContext,
             .selfDestruct = selfDestruct,
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
@@ -481,11 +431,6 @@ pub const MockHost = struct {
             .getTransientStorage = getTransientStorage,
             .setTransientStorage = setTransientStorage,
         } };
-    }
-
-    fn executionContext(ptr: *anyopaque) ?*const ExecutionContext {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        return &self.execution_context;
     }
 };
 
@@ -610,12 +555,13 @@ pub const BytecodeResult = struct {
     stack_top: ?u256,
 };
 
-pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, code: []const u8, comptime revision: evmz.eth.Revision) !BytecodeResult {
+pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, execution_context: *const ExecutionContext, code: []const u8, comptime revision: evmz.eth.Revision) !BytecodeResult {
     if (comptime !forkEnabled(revision)) return error.SkipZigTest;
     const Exact = evmz.Vm(evmz.eth.specAt(revision));
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = host,
         .msg = msg,
+        .execution_context = execution_context,
         .source = .{ .code = code },
     });
     defer frame.deinit();
@@ -637,7 +583,7 @@ pub fn expectBytecodeStatusByRevision(comptime items: anytype, comptime revision
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, revision);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &bytecode_bytes, revision);
     try std.testing.expectEqual(expected, result.status);
 }
 
@@ -652,7 +598,7 @@ pub fn expectBytecodeStackTopByRevision(comptime items: anytype, comptime revisi
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    const result = try runBytecodeWithHost(&host, &msg, &bytecode_bytes, revision);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &bytecode_bytes, revision);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(expected, result.stack_top.?);
 }
@@ -668,6 +614,7 @@ pub fn expectStackByRevision(code: []const u8, comptime revision: evmz.eth.Revis
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
+        .execution_context = &mock_host.execution_context,
         .source = .{ .code = code },
     });
     defer frame.deinit();
@@ -691,11 +638,11 @@ test "ORIGIN and GASPRICE read the borrowed transaction context" {
     defer mock_host.deinit();
     var host = mock_host.host();
     const msg = defaultMessage();
-    try std.testing.expect((try host.executionContext()) == &mock_host.execution_context);
 
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
+        .execution_context = &mock_host.execution_context,
         .source = .{ .code = &bytecode(.{ .ORIGIN, .GASPRICE }) },
     });
     defer frame.deinit();
@@ -704,27 +651,6 @@ test "ORIGIN and GASPRICE read the borrowed transaction context" {
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u256, &.{ 0, 0 }, interpreter.call_frame.stack.asSlice());
-}
-
-test "missing execution context fails environment opcodes" {
-    var mock_host = MockHost.init(std.testing.allocator, null);
-    defer mock_host.deinit();
-    var host = mock_host.host();
-    const Missing = struct {
-        fn missing(_: *anyopaque) ?*const ExecutionContext {
-            return null;
-        }
-    };
-    var missing_vtable = host.vtable.*;
-    missing_vtable.executionContext = Missing.missing;
-    host.vtable = &missing_vtable;
-    const msg = defaultMessage();
-    const code = bytecode(.{.ORIGIN});
-
-    try std.testing.expectError(
-        error.MissingExecutionContext,
-        runBytecodeWithHost(&host, &msg, &code, .latest),
-    );
 }
 
 test "host action errors propagate out of CALL execution" {
@@ -741,7 +667,7 @@ test "host action errors propagate out of CALL execution" {
 
     try std.testing.expectError(
         error.DatabaseUnavailable,
-        runBytecodeWithHost(&host, &msg, &code, .latest),
+        runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .latest),
     );
 }
 
@@ -759,7 +685,7 @@ test "SLOTNUM pushes the transaction context slot number" {
     const msg = defaultMessage();
     const code = bytecode(.{.SLOTNUM});
 
-    const result = try runBytecodeWithHost(&host, &msg, &code, .amsterdam);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .amsterdam);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(@as(u256, 0x123456789abcdef0), result.stack_top.?);
 }
@@ -780,7 +706,7 @@ fn expectBlockhash(number: u16, expected: u256, expected_reads: u64) !void {
         evmz.Opcode.BLOCKHASH.toByte(),
     };
 
-    const result = try runBytecodeWithHost(&host, &msg, &code, .latest);
+    const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .latest);
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
     try std.testing.expectEqual(expected, result.stack_top.?);
     try std.testing.expectEqual(expected_reads, mock_host.block_hash_reads);

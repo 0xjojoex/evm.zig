@@ -5,15 +5,6 @@ const ExactSpec = @import("./spec.zig").Spec;
 const instruction_table = @import("./instruction/table.zig");
 const evmz = @import("./evm.zig");
 
-// [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929)
-pub const cold_sload_cost = 2100;
-pub const cold_account_access_cost = 2600;
-pub const warm_storage_read_cost = 100;
-
-// warm_storage_read_cost is count before instruction execution
-pub const cold_account_access_gas = cold_account_access_cost - warm_storage_read_cost;
-pub const cold_sload_gas = cold_sload_cost - warm_storage_read_cost;
-
 pub const Target = instruction_table.Target;
 pub const Entry = instruction_table.Entry;
 pub const Table = instruction_table.Table;
