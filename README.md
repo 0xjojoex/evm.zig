@@ -259,7 +259,7 @@ Licensed under either of:
 
 at your option.
 
-Bundled third-party components retain their own licenses: c-kzg-4844 and blst
-(Apache-2.0), and mcl (BSD-3-Clause).
+Bundled third-party components retain their own licenses: blst (Apache-2.0) and
+mcl (BSD-3-Clause).
 Distributions including them should reproduce the applicable license and NOTICE
 files.

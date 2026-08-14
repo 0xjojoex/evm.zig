@@ -1293,9 +1293,8 @@ fn pathExists(b: *std.Build, sub_path: []const u8) bool {
 }
 
 const NativePrecompileDeps = struct {
-    ckzg_dep: *std.Build.Dependency,
-    trusted_setup_mod: *std.Build.Module,
     object: *std.Build.Step.Compile,
+    blst_lib: *std.Build.Step.Compile,
 };
 
 fn nativePrecompileDeps(
@@ -1304,13 +1303,11 @@ fn nativePrecompileDeps(
     optimize: std.builtin.OptimizeMode,
     pic: ?bool,
 ) NativePrecompileDeps {
-    const ckzg_dep = b.dependency("ckzg", .{ .target = target, .optimize = optimize });
     const blst_dep = b.dependency("blst", .{ .target = target, .optimize = optimize });
     const mcl_dep = b.dependency("mcl", .{});
     return .{
-        .ckzg_dep = ckzg_dep,
-        .trusted_setup_mod = buildTrustedSetupModule(b, ckzg_dep.path("src/trusted_setup.txt")),
         .object = buildNativePrecompileObject(b, target, optimize, blst_dep, mcl_dep, pic),
+        .blst_lib = buildBlstLibrary(b, target, optimize, blst_dep, pic),
     };
 }
 
@@ -1679,10 +1676,9 @@ fn addPrecompileNative(
 ) void {
     module.link_libc = true;
     module.link_libcpp = true;
-    module.addImport("ckzg", deps.ckzg_dep.module("ckzg"));
-    module.addImport("kzg_trusted_setup", deps.trusted_setup_mod);
     module.addIncludePath(b.path("src/precompile"));
     module.addObject(deps.object);
+    module.linkLibrary(deps.blst_lib);
 }
 
 fn buildNativePrecompileObject(
@@ -1727,52 +1723,44 @@ fn buildNativePrecompileObject(
     module.addCSourceFile(.{ .file = mcl_dep.path("src/base64.ll"), .flags = mcl_flags });
     module.addCSourceFile(.{ .file = mcl_dep.path("src/bint64.ll"), .flags = mcl_flags });
     module.addCSourceFile(.{ .file = b.path("src/precompile/bls12.c"), .flags = c_flags });
+    module.addCSourceFile(.{ .file = b.path("src/precompile/kzg.c"), .flags = c_flags });
     return b.addObject(.{
         .name = if (pic == true) "native-precompiles-pic" else "native-precompiles",
         .root_module = module,
     });
 }
 
-fn buildTrustedSetupModule(b: *std.Build, txt: std.Build.LazyPath) *std.Build.Module {
-    const path = txt.getPath(b);
-    const text = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .unlimited) catch |err| {
-        std.debug.panic("cannot read trusted setup '{s}': {s}", .{ path, @errorName(err) });
-    };
-    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
-    const n_g1 = parseUsize(&it) orelse std.debug.panic("trusted setup missing g1 count", .{});
-    const n_g2 = parseUsize(&it) orelse std.debug.panic("trusted setup missing g2 count", .{});
-
-    const wf = b.addWriteFiles();
-    _ = wf.add("g1_lagrange.bin", decodeHexPoints(b.allocator, &it, n_g1, 48));
-    _ = wf.add("g2_monomial.bin", decodeHexPoints(b.allocator, &it, n_g2, 96));
-    _ = wf.add("g1_monomial.bin", decodeHexPoints(b.allocator, &it, n_g1, 48));
-    const src = wf.add("kzg_trusted_setup.zig", b.fmt(
-        \\pub const num_g1_points: usize = {d};
-        \\pub const num_g2_points: usize = {d};
-        \\pub const g1_lagrange_bytes = @embedFile("g1_lagrange.bin")[0 .. num_g1_points * 48];
-        \\pub const g2_monomial_bytes = @embedFile("g2_monomial.bin")[0 .. num_g2_points * 96];
-        \\pub const g1_monomial_bytes = @embedFile("g1_monomial.bin")[0 .. num_g1_points * 48];
-        \\
-    , .{ n_g1, n_g2 }));
-
-    return b.addModule("kzg_trusted_setup", .{ .root_source_file = src });
-}
-
-fn parseUsize(it: anytype) ?usize {
-    const token = it.next() orelse return null;
-    return std.fmt.parseUnsigned(usize, token, 10) catch null;
-}
-
-fn decodeHexPoints(allocator: std.mem.Allocator, it: anytype, count: usize, comptime point_size: usize) []const u8 {
-    const out = allocator.alloc(u8, count * point_size) catch @panic("OOM");
-    for (0..count) |i| {
-        const hex = it.next() orelse std.debug.panic("trusted setup truncated at point {d}", .{i});
-        if (hex.len != point_size * 2) {
-            std.debug.panic("point {d} has wrong hex length: {d}", .{ i, hex.len });
-        }
-        _ = std.fmt.hexToBytes(out[i * point_size ..][0..point_size], hex) catch {
-            std.debug.panic("invalid hex at point {d}", .{i});
-        };
+// BLST must stay a static library: folding assembly.S into the relocatable
+// native-precompiles object breaks the optimized Mach-O final link (internal
+// assembly labels are discarded/rebased, so add_mod_384 falls through into
+// add_mod_384x and corrupts the stack).
+fn buildBlstLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    blst_dep: *std.Build.Dependency,
+    pic: ?bool,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .pic = pic,
+    });
+    switch (target.result.cpu.arch) {
+        .aarch64, .x86_64 => {
+            const blst_flags = &[_][]const u8{ "-O2", "-ffreestanding", "-D__BLST_PORTABLE__" };
+            module.addCSourceFile(.{ .file = blst_dep.path("src/server.c"), .flags = blst_flags });
+            module.addAssemblyFile(blst_dep.path("build/assembly.S"));
+        },
+        else => {
+            const blst_flags = &[_][]const u8{ "-O2", "-ffreestanding", "-D__BLST_PORTABLE__", "-D__BLST_NO_ASM__" };
+            module.addCSourceFile(.{ .file = blst_dep.path("src/server.c"), .flags = blst_flags });
+        },
     }
-    return out;
+    return b.addLibrary(.{
+        .name = if (pic == true) "blst-pic" else "blst",
+        .linkage = .static,
+        .root_module = module,
+    });
 }
