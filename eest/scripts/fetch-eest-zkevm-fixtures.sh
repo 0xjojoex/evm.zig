@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/eest-lock.sh"
+
 usage() {
   cat <<'USAGE'
-usage: scripts/fetch-eest-zkevm-fixtures.sh [--manifest PATH] [--resolved-manifest PATH]
+usage: scripts/fetch-eest-zkevm-fixtures.sh [--mutations | --steps | --manifest PATH] [--resolved-manifest PATH]
 
 Downloads EEST zkEVM blockchain fixtures into ../.eest/.
 With --manifest, extracts only the archive-relative paths listed in PATH.
@@ -11,17 +14,18 @@ With --resolved-manifest, records the verified corpus identity, counts, and
 fixture roots.
 
 Environment overrides:
-  EEST_ZKEVM_REPO      default: zkevm_repo from ../eest.lock
-  EEST_ZKEVM_VERSION   default: zkevm_version from ../eest.lock
-  EEST_ZKEVM_ARTIFACT  default: zkevm_artifact from ../eest.lock
-  EEST_ZKEVM_URL       default: zkevm_url from ../eest.lock, or GitHub release URL
-  EEST_ZKEVM_SHA256    default: zkevm_sha256 from ../eest.lock for the locked release
-  EEST_ZKEVM_DEST      default: zkevm_dest from ../eest.lock
-  EEST_CACHE           default: ../.eest/cache
+  EEST_ZKEVM_REPO      repository override
+  EEST_ZKEVM_RELEASE   release override
+  EEST_ZKEVM_ARTIFACT  artifact override
+  EEST_ZKEVM_URL       download URL override
+  EEST_ZKEVM_SHA256    checksum override
+  EEST_ZKEVM_DEST      extraction destination override
+  EEST_CACHE           shared archive cache override
 
 Example:
   scripts/fetch-eest-zkevm-fixtures.sh
-  zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests/path/to/test.json
+  scripts/fetch-eest-zkevm-fixtures.sh --mutations
+  zig build zkevm
 USAGE
 }
 
@@ -43,6 +47,14 @@ while [[ $# -gt 0 ]]; do
       resolved_manifest="$2"
       shift 2
       ;;
+    --mutations)
+      manifest="$(eest_lock_path zkevm_mutations_manifest)"
+      shift
+      ;;
+    --steps)
+      manifest="$(eest_lock_path zkevm_steps_manifest)"
+      shift
+      ;;
     *)
       printf 'error: unknown argument: %s\n' "$1" >&2
       usage >&2
@@ -51,68 +63,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-lock_path=""
-lock_prefix=""
-if [[ -f "../eest.lock" ]]; then
-  lock_path="../eest.lock"
-  lock_prefix=".."
-elif [[ -f "eest.lock" ]]; then
-  lock_path="eest.lock"
-fi
-
-lock_value() {
-  local key="$1"
-  [[ -n "${lock_path}" ]] || return 1
-  awk -F= -v key="${key}" '
-    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-    {
-      lhs=$1
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
-      if (lhs == key) {
-        sub(/^[^=]*=/, "")
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-        print
-        exit
-      }
-    }
-  ' "${lock_path}"
-}
-
-lock_path_value() {
-  local key="$1"
-  local value
-  value="$(lock_value "${key}")"
-  [[ -n "${value}" ]] || return 1
-  if [[ "${value}" = /* || -z "${lock_prefix}" ]]; then
-    printf '%s\n' "${value}"
-  else
-    printf '%s/%s\n' "${lock_prefix}" "${value}"
-  fi
-}
-
-repo="${EEST_ZKEVM_REPO:-$(lock_value zkevm_repo || printf 'ethereum/execution-specs')}"
-version="${EEST_ZKEVM_VERSION:-$(lock_value zkevm_version || printf 'tests-zkevm@v0.8.0')}"
-artifact="${EEST_ZKEVM_ARTIFACT:-$(lock_value zkevm_artifact || printf 'fixtures_zkevm.tar.gz')}"
-version_slug="${version//@/-}"
-url_version="${version//@/%40}"
-dest="${EEST_ZKEVM_DEST:-$(lock_path_value zkevm_dest || printf '../.eest/fixtures/%s' "${version_slug}")}"
-cache="${EEST_CACHE:-../.eest/cache}"
-archive="${cache}/${version_slug}-${artifact}"
+repo="${EEST_ZKEVM_REPO:-$(eest_lock_value zkevm_repo)}"
+release="${EEST_ZKEVM_RELEASE:-$(eest_lock_value zkevm_release)}"
+artifact="${EEST_ZKEVM_ARTIFACT:-$(eest_lock_value zkevm_artifact)}"
+release_slug="$(eest_release_slug "${release}")"
+dest="${EEST_ZKEVM_DEST:-$(eest_release_path zkevm "${release}")}"
+cache="${EEST_CACHE:-${EEST_LOCK_REPO_ROOT}/.eest/cache}"
+archive="${cache}/${release_slug}-${artifact}"
 
 if [[ -n "${EEST_ZKEVM_SHA256:-}" ]]; then
   sha256="${EEST_ZKEVM_SHA256}"
-elif [[ -z "${EEST_ZKEVM_REPO:-}" && -z "${EEST_ZKEVM_VERSION:-}" && -z "${EEST_ZKEVM_ARTIFACT:-}" && -z "${EEST_ZKEVM_URL:-}" ]]; then
-  sha256="$(lock_value zkevm_sha256 || true)"
+elif [[ -z "${EEST_ZKEVM_REPO:-}" && -z "${EEST_ZKEVM_RELEASE:-}" && -z "${EEST_ZKEVM_ARTIFACT:-}" && -z "${EEST_ZKEVM_URL:-}" ]]; then
+  sha256="$(eest_lock_value zkevm_sha256)"
 else
   sha256=""
 fi
 
 if [[ -n "${EEST_ZKEVM_URL:-}" ]]; then
   url="${EEST_ZKEVM_URL}"
-elif [[ -z "${EEST_ZKEVM_REPO:-}" && -z "${EEST_ZKEVM_VERSION:-}" && -z "${EEST_ZKEVM_ARTIFACT:-}" ]] && lock_value zkevm_url >/dev/null; then
-  url="$(lock_value zkevm_url)"
 else
-  url="https://github.com/${repo}/releases/download/${url_version}/${artifact}"
+  url="$(eest_release_url "${repo}" "${release}" "${artifact}")"
 fi
 
 mkdir -p "${cache}" "${dest}"
@@ -179,7 +149,7 @@ if [[ -n "${resolved_manifest}" ]]; then
   command -v jq >/dev/null || { printf 'error: jq is required for --resolved-manifest\n' >&2; exit 1; }
   [[ -n "${sha256}" ]] || { printf 'error: resolved corpus requires a pinned SHA-256\n' >&2; exit 1; }
 
-  spec_version="$(lock_value version)"
+  spec_version="$(eest_lock_value state_release)"
   [[ "${spec_version}" =~ ^tests-[a-z0-9]+(-[a-z0-9]+)*@v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     printf 'error: invalid specification fixture release: %s\n' "${spec_version}" >&2
     exit 1
@@ -210,11 +180,11 @@ if [[ -n "${resolved_manifest}" ]]; then
   mkdir -p "$(dirname "${resolved_manifest}")"
   fixture_root="$(cd "${blockchain_root}" && pwd)"
   jq -n \
-    --arg id "${version}" \
+    --arg id "${release}" \
     --arg digest "${sha256}" \
     --arg fixture_release "${spec_version}" \
     --arg network "${network}" \
-    --arg validation_ref "${version}" \
+    --arg validation_ref "${release}" \
     --arg fixture_root "${fixture_root}" \
     --argjson fixture_files "${fixture_files}" \
     --argjson indexed_tests "${indexed_tests}" \

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/eest-lock.sh"
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'USAGE'
 usage: scripts/fetch-consensus-ssz-fixtures.sh
@@ -9,38 +12,12 @@ Downloads the pinned consensus-spec General, Mainnet, and Minimal archives and
 extracts only generic and static SSZ fixtures into the shared .eest cache.
 
 Environment overrides:
-  EVMZ_EEST_ROOT, CONSENSUS_VERSION, CONSENSUS_CACHE, CONSENSUS_DEST
+  EVMZ_EEST_ROOT, CONSENSUS_REPO, CONSENSUS_RELEASE, CONSENSUS_CACHE,
+  CONSENSUS_DEST
   CONSENSUS_{GENERAL,MAINNET,MINIMAL}_{ARTIFACT,URL,SHA256}
 USAGE
   exit 0
 fi
-
-lock_path=""
-if [[ -f "../eest.lock" ]]; then
-  lock_path="../eest.lock"
-elif [[ -f "eest.lock" ]]; then
-  lock_path="eest.lock"
-else
-  printf 'error: eest.lock not found\n' >&2
-  exit 1
-fi
-
-lock_value() {
-  local key="$1"
-  awk -F= -v key="${key}" '
-    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-    {
-      lhs=$1
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
-      if (lhs == key) {
-        sub(/^[^=]*=/, "")
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-        print
-        exit
-      }
-    }
-  ' "${lock_path}"
-}
 
 main_worktree() {
   git worktree list --porcelain | awk '
@@ -49,8 +26,9 @@ main_worktree() {
   '
 }
 
-version="${CONSENSUS_VERSION:-$(lock_value consensus_version)}"
-relative_dest="$(lock_value consensus_dest)"
+repo="${CONSENSUS_REPO:-$(eest_lock_value consensus_repo)}"
+release="${CONSENSUS_RELEASE:-$(eest_lock_value consensus_release)}"
+relative_dest="$(eest_release_relative_dest consensus "${release}")"
 default_worktree="$(main_worktree)"
 if [[ -z "${default_worktree}" ]]; then
   default_worktree="$(git rev-parse --show-toplevel)"
@@ -68,7 +46,7 @@ fetch_archive() {
   local artifact="$1"
   local url="$2"
   local expected_sha256="$3"
-  local archive="${cache}/consensus-specs-${version}-${artifact}"
+  local archive="${cache}/consensus-specs-${release}-${artifact}"
   if [[ ! -f "${archive}" ]]; then
     printf 'Downloading %s\n' "${url}" >&2
     curl --fail --location --show-error --progress-bar --output "${archive}.tmp" "${url}"
@@ -100,9 +78,9 @@ verify_archive() {
   fi
 }
 
-general_artifact="${CONSENSUS_GENERAL_ARTIFACT:-$(lock_value consensus_general_artifact)}"
-general_url="${CONSENSUS_GENERAL_URL:-$(lock_value consensus_general_url)}"
-general_sha256="${CONSENSUS_GENERAL_SHA256:-$(lock_value consensus_general_sha256)}"
+general_artifact="${CONSENSUS_GENERAL_ARTIFACT:-$(eest_lock_value consensus_general_artifact)}"
+general_url="${CONSENSUS_GENERAL_URL:-$(eest_release_url "${repo}" "${release}" "${general_artifact}")}"
+general_sha256="${CONSENSUS_GENERAL_SHA256:-$(eest_lock_value consensus_general_sha256)}"
 general_archive="$(fetch_archive "${general_artifact}" "${general_url}" "${general_sha256}")"
 printf 'Extracting General SSZ fixtures to %s\n' "${dest}/ssz_generic"
 tar -xzf "${general_archive}" \
@@ -115,9 +93,9 @@ for preset in mainnet minimal; do
   artifact_variable="CONSENSUS_${uppercase_preset}_ARTIFACT"
   url_variable="CONSENSUS_${uppercase_preset}_URL"
   sha256_variable="CONSENSUS_${uppercase_preset}_SHA256"
-  artifact="${!artifact_variable:-$(lock_value "consensus_${preset}_artifact")}"
-  url="${!url_variable:-$(lock_value "consensus_${preset}_url")}"
-  sha256="${!sha256_variable:-$(lock_value "consensus_${preset}_sha256")}"
+  artifact="${!artifact_variable:-$(eest_lock_value "consensus_${preset}_artifact")}"
+  url="${!url_variable:-$(eest_release_url "${repo}" "${release}" "${artifact}")}"
+  sha256="${!sha256_variable:-$(eest_lock_value "consensus_${preset}_sha256")}"
   archive="$(fetch_archive "${artifact}" "${url}" "${sha256}")"
   printf 'Extracting %s static SSZ fixtures to %s\n' "${preset}" "${dest}/${preset}"
   if [[ "${tar_supports_wildcards}" == true ]]; then

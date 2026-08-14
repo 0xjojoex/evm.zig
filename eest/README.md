@@ -7,7 +7,6 @@ scripts/fetch-eest-fixtures.sh
 EEST_TRACKS="state_tests blockchain_tests_sync" scripts/fetch-eest-fixtures.sh
 zig build eest-scope
 zig build eest
-zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v8.1.0/fixtures/state_tests/path/to/test.json
 zig build eest-classify
 zig build eest-tx
 ```
@@ -18,10 +17,14 @@ one of them — `zig build eest` runs `evmz-eest state`. Run `evmz-eest --help`
 for the command list. One runner stays a separate executable: `ssz-conformance`
 builds without evmz.
 
-The default state-test corpus comes from `eest.lock`, currently
-`tests-glamsterdam-devnet@v8.1.0` from `ethereum/execution-specs` for Amsterdam
-work. Bare `zig build eest` resolves `eest.lock` `dest` and runs
-`fixtures/state_tests`.
+The default state-test corpus comes from the authoritative state track in
+`eest.lock`. Bare `zig build eest` derives its versioned cache destination and
+runs `fixtures/state_tests`.
+
+Every fixture consumer derives its release URL and cache path from that lock.
+`zig build fixture-lock-check` rejects copied release tags and destinations.
+Corpus manifests, known-failure policy, and generated SSZ provenance stay
+explicit because each must be reviewed when its owning corpus changes.
 
 `EEST_TRACKS` limits extraction to named fixture directories. CI restores the
 pinned compressed archive from cache, verifies its lockfile SHA-256, and only
@@ -31,9 +34,9 @@ not cached because the state tree alone is roughly 1.5 GB.
 The `Execution spec tests` workflow has independent execution-fixture and
 consensus-SSZ jobs. The execution job runs the full sidecar tests, state corpus,
 and regular BlockSTF corpus with four workers. The SSZ job uses its separately
-pinned consensus-spec archives. A third job runs the complete pinned
-`tests-zkevm@v0.8.0` native corpus, tracked-state differential, and mutation
-matrix. The guest workflow runs the same 27,184 fixtures on ZisK: 27,162 match,
+pinned consensus-spec archives. A third job runs the complete pinned zkEVM
+native corpus, tracked-state differential, and mutation matrix. The guest
+workflow runs the same 27,184 fixtures on ZisK: 27,162 match,
 while 22 pinned ZisK alpha BLS12-381 provider crashes remain explicitly tracked;
 the strict release gate does not waive them.
 
@@ -60,8 +63,8 @@ lanes and fails if no cases run or any case is skipped:
   canonical static fixture must decode, re-encode byte-for-byte, and match
   `roots.yaml`.
 
-The pinned `v1.7.0-alpha.13` corpus contains 5,145 General cases, 2,275 Mainnet
-cases, and 55,965 Minimal cases. Preset/fork schemas are checked-in Zig
+The pinned corpus contains 5,145 General cases, 2,275 Mainnet cases, and 55,965
+Minimal cases. Preset/fork schemas are checked-in Zig
 declarations under `src/ssz_static/`; fixture YAML is not interpreted as a
 runtime schema.
 The generator fingerprints named schemas recursively, including collection
@@ -72,18 +75,21 @@ resolved consensus-spec pyspec when the pin changes. Canonical `value.yaml`
 mapping remains separate from binary and hash-tree-root conformance.
 
 Regeneration uses the Python environment from the exact pinned consensus-specs
-checkout. With `EVMZ` set to this repository and `FIXTURES` set to the extracted
-`consensus_dest` directory from `eest.lock`:
+checkout. With `EVMZ` set to this repository:
 
 ```sh
-git clone --depth 1 --branch v1.7.0-alpha.13 \
-  https://github.com/ethereum/consensus-specs.git /tmp/evmz-consensus-specs
+source scripts/eest-lock.sh
+CONSENSUS_REPO="$(eest_lock_value consensus_repo)"
+CONSENSUS_RELEASE="$(eest_lock_value consensus_release)"
+FIXTURES="$(eest_release_path consensus "$CONSENSUS_RELEASE")"
+git clone --depth 1 --branch "$CONSENSUS_RELEASE" \
+  "https://github.com/${CONSENSUS_REPO}.git" /tmp/evmz-consensus-specs
 (cd /tmp/evmz-consensus-specs && make _pyspec)
 (cd /tmp/evmz-consensus-specs && uv run python \
   "$EVMZ/eest/scripts/generate-consensus-ssz-schemas.py" \
   --pyspec-root tests/core/pyspec \
   --fixtures-root "$FIXTURES" \
-  --version v1.7.0-alpha.13 \
+  --version "$CONSENSUS_RELEASE" \
   --output "$EVMZ/eest/src/ssz_static")
 ```
 
@@ -106,13 +112,9 @@ canonical result with `statelessOutputBytes`:
 
 ```sh
 scripts/fetch-eest-zkevm-fixtures.sh
-zig build zkevm -- ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests
-zig build zkevm -- \
-  --report ../.eest/zkevm-v0.8.0.json \
-  ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests
-zig build zkevm -- \
-  --oracle-differential \
-  ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests
+zig build zkevm
+zig build zkevm -- --report ../.eest/zkevm-report.json
+zig build zkevm -- --oracle-differential
 zig build zkevm-mutations
 ```
 
@@ -170,13 +172,13 @@ several independent faults and do not define an internal rejection priority;
 the typed mutation matrix owns failure-status parity.
 
 `zkevm-mutations` is the separate adversarial gate. It starts from a bounded
-manifest of canonical v0.8.0 inputs that validate successfully, applies
-structured mutations, re-encodes and decodes valid schema-v1 SSZ, then requires
-the intended typed `BlockSTF.Status`. It covers missing and altered trie nodes,
-code, authenticated headers and pre-state roots, public keys, explicit payload
-claims, BAL coverage, withdrawals, transaction bodies, and all five Amsterdam
-request families. BAL coverage includes omitted accounts and storage slots as
-well as spurious accounts and storage reads.
+manifest of canonical inputs from the pinned zkEVM corpus that validate
+successfully, applies structured mutations, re-encodes and decodes valid
+schema-v1 SSZ, then requires the intended typed `BlockSTF.Status`. It covers
+missing and altered trie nodes, code, authenticated headers and pre-state roots,
+public keys, explicit payload claims, BAL coverage, withdrawals, transaction
+bodies, and all five Amsterdam request families. BAL coverage includes omitted
+accounts and storage slots as well as spurious accounts and storage reads.
 
 The gate is an existence proof, not a coverage proof: a mutation resolves on
 the first variant that reaches its expected status, so it shows each rejection
@@ -196,7 +198,7 @@ For a mutation-only checkout, the same bounded manifest can drive extraction:
 
 ```sh
 scripts/fetch-eest-zkevm-fixtures.sh \
-  --manifest fixtures/stateless-mutations-tests-zkevm-v0.8.0.txt
+  --mutations
 zig build zkevm-mutations
 ```
 
@@ -262,12 +264,12 @@ normalized decoding is correct.
 
 ```sh
 EEST_TRACKS=blockchain_tests_sync scripts/fetch-eest-fixtures.sh
-zig build eest-block-stf -- ../.eest/fixtures/tests-glamsterdam-devnet-v8.1.0/fixtures/blockchain_tests_sync
-zig build eest-block-stf -- --bal-differential ../.eest/fixtures/tests-glamsterdam-devnet-v8.1.0/fixtures/blockchain_tests_sync
+zig build eest-block-stf
+zig build eest-block-stf -- --bal-differential
 
 scripts/fetch-eest-zkevm-fixtures.sh
-scripts/fetch-eest-zkevm-fixtures.sh --manifest fixtures/zisk-steps-tests-zkevm-v0.8.0.txt
-zig build eest-stateless-block-stf -- ../.eest/fixtures/tests-zkevm-v0.8.0/fixtures/blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists/bal_empty_block_no_coinbase.json
+scripts/fetch-eest-zkevm-fixtures.sh --steps
+zig build eest-stateless-block-stf
 ```
 
 The manifest form verifies the same locked archive checksum but extracts only

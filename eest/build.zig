@@ -55,6 +55,11 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const check = b.addSystemCommand(&.{ "bash", "scripts/check-fixture-lock.sh" });
+        b.step("fixture-lock-check", "Verify fixture pins have one source of truth").dependOn(&check.step);
+    }
+
+    {
         const eest_exe = b.addExecutable(.{
             .name = "evmz-eest",
             .root_module = eestModule(b, "src/main.zig", target, optimize, evmz_mod),

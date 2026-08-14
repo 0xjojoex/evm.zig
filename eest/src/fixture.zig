@@ -44,7 +44,7 @@ pub fn lockedFixturePath(
     allocator: std.mem.Allocator,
     track: []const u8,
 ) ![]u8 {
-    const dest = try lockedPathValue(io, allocator, "dest");
+    const dest = try lock.releasePath(io, allocator, .state);
     defer allocator.free(dest);
     return if (track.len == 0)
         try std.fs.path.join(allocator, &.{ dest, "fixtures" })
@@ -58,18 +58,18 @@ pub fn lockedZkevmFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     return try std.fs.path.join(allocator, &.{ dest, "fixtures" });
 }
 
-pub fn lockedZkevmReleasePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
-    const dest = try lockedPathValue(io, allocator, "zkevm_dest");
-    return dest;
+pub fn lockedBenchmarkFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    const dest = try lock.releasePath(io, allocator, .benchmark);
+    defer allocator.free(dest);
+    return std.fs.path.join(allocator, &.{ dest, "fixtures" });
 }
 
-fn lockedPathValue(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]u8 {
-    var value = try lock.readValue(io, allocator, key);
-    defer value.deinit(allocator);
-    if (std.fs.path.isAbsolute(value.bytes) or value.relative_prefix.len == 0) {
-        return allocator.dupe(u8, value.bytes);
-    }
-    return std.fs.path.join(allocator, &.{ value.relative_prefix, value.bytes });
+pub fn lockedZkevmReleasePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    return lock.releasePath(io, allocator, .zkevm);
+}
+
+pub fn lockedPath(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]u8 {
+    return lock.readPath(io, allocator, key);
 }
 
 pub fn asObject(value: JsonValue) ?std.json.ObjectMap {

@@ -572,7 +572,8 @@ fn printScopeReport(io: std.Io, allocator: std.mem.Allocator, roots: []const []c
         }
     }
 
-    const benchmark_root = "../.eest/benchmarks/tests-benchmark-v0.0.9/fixtures";
+    const benchmark_root = try fixture_common.lockedBenchmarkFixturePath(io, allocator);
+    defer allocator.free(benchmark_root);
     const benchmark_count = try countJsonFilesIfPresent(io, benchmark_root);
     if (benchmark_count > 0) {
         std.debug.print("\nEEST benchmark scope: {s}\n", .{benchmark_root});

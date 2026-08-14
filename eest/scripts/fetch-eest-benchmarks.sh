@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/eest-lock.sh"
+
 usage() {
   cat <<'USAGE'
 usage: scripts/fetch-eest-benchmarks.sh
@@ -8,11 +11,13 @@ usage: scripts/fetch-eest-benchmarks.sh
 Downloads generated EEST benchmark JSON fixtures into ../.eest/, which is gitignored.
 
 Environment overrides:
-  EEST_REPO               default: ethereum/execution-specs
-  EEST_BENCHMARK_VERSION  default: tests-benchmark@v0.0.9
-  EEST_BENCHMARK_ARTIFACT default: fixtures_benchmark.tar.gz
-  EEST_BENCHMARK_DEST     default: ../.eest/benchmarks/tests-benchmark-v0.0.9
-  EEST_CACHE              default: ../.eest/cache
+  EEST_BENCHMARK_REPO      repository override
+  EEST_BENCHMARK_RELEASE   release override
+  EEST_BENCHMARK_ARTIFACT  artifact override
+  EEST_BENCHMARK_URL       download URL override
+  EEST_BENCHMARK_SHA256    checksum override
+  EEST_BENCHMARK_DEST      extraction destination override
+  EEST_CACHE               shared archive cache override
 
 Example:
   scripts/fetch-eest-benchmarks.sh
@@ -26,15 +31,21 @@ case "${1:-}" in
     ;;
 esac
 
-repo="${EEST_REPO:-ethereum/execution-specs}"
-version="${EEST_BENCHMARK_VERSION:-tests-benchmark@v0.0.9}"
-artifact="${EEST_BENCHMARK_ARTIFACT:-fixtures_benchmark.tar.gz}"
-version_slug="${version//@/-}"
-url_version="${version//@/%40}"
-dest="${EEST_BENCHMARK_DEST:-../.eest/benchmarks/${version_slug}}"
-cache="${EEST_CACHE:-../.eest/cache}"
-url="https://github.com/${repo}/releases/download/${url_version}/${artifact}"
-archive="${cache}/${version_slug}-${artifact}"
+repo="${EEST_BENCHMARK_REPO:-$(eest_lock_value benchmark_repo)}"
+release="${EEST_BENCHMARK_RELEASE:-$(eest_lock_value benchmark_release)}"
+artifact="${EEST_BENCHMARK_ARTIFACT:-$(eest_lock_value benchmark_artifact)}"
+release_slug="$(eest_release_slug "${release}")"
+dest="${EEST_BENCHMARK_DEST:-$(eest_release_path benchmark "${release}")}"
+cache="${EEST_CACHE:-${EEST_LOCK_REPO_ROOT}/.eest/cache}"
+url="${EEST_BENCHMARK_URL:-$(eest_release_url "${repo}" "${release}" "${artifact}")}"
+archive="${cache}/${release_slug}-${artifact}"
+if [[ -n "${EEST_BENCHMARK_SHA256:-}" ]]; then
+  sha256="${EEST_BENCHMARK_SHA256}"
+elif [[ -z "${EEST_BENCHMARK_REPO:-}" && -z "${EEST_BENCHMARK_RELEASE:-}" && -z "${EEST_BENCHMARK_ARTIFACT:-}" && -z "${EEST_BENCHMARK_URL:-}" ]]; then
+  sha256="$(eest_lock_value benchmark_sha256)"
+else
+  sha256=""
+fi
 
 cleanup_tmp() {
   if [[ -n "${tmp:-}" && -f "${tmp}" ]]; then
@@ -49,14 +60,38 @@ trap cleanup_tmp EXIT
 
 mkdir -p "${cache}" "${dest}"
 
+verify_archive() {
+  local path="$1"
+  local actual_sha256
+  if [[ -z "${sha256}" ]]; then
+    printf 'No SHA-256 configured; skipping archive verification\n'
+    return
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual_sha256="$(sha256sum "${path}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual_sha256="$(shasum -a 256 "${path}" | awk '{print $1}')"
+  else
+    printf 'error: sha256sum or shasum is required\n' >&2
+    return 1
+  fi
+  if [[ "${actual_sha256}" != "${sha256}" ]]; then
+    printf 'fixture archive checksum mismatch\n  expected: %s\n  actual:   %s\n' "${sha256}" "${actual_sha256}" >&2
+    return 1
+  fi
+  printf 'Verified SHA-256 %s\n' "${sha256}"
+}
+
 if [[ ! -f "${archive}" ]]; then
   tmp="${archive}.tmp"
   printf 'Downloading %s\n' "${url}"
   curl --fail --location --show-error --progress-bar --output "${tmp}" "${url}"
+  verify_archive "${tmp}"
   mv "${tmp}" "${archive}"
   tmp=""
 else
   printf 'Using cached %s\n' "${archive}"
+  verify_archive "${archive}"
 fi
 
 printf 'Extracting to %s\n' "${dest}"

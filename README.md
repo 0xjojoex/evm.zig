@@ -10,10 +10,9 @@ RV64 guest on SP1 and ZisK.
 
 evmz is pre-release. The version is `0.0.0`, the public API may change between
 commits, and the project has not been audited. `main` tracks the latest
-supported execution-spec prereleases; it currently targets
-`tests-glamsterdam-devnet@v8.1.0` and `tests-zkevm@v0.8.0`. Dedicated fixture-pin
-branches preserve older devnet lines such as Glamsterdam devnet-7. The
-`eest.lock` on each branch is authoritative for its exact fixture releases.
+supported execution-spec prereleases. Dedicated fixture-pin branches preserve
+older devnet lines such as Glamsterdam devnet-7; the branch-local `eest.lock`
+is authoritative for every exact fixture release.
 
 Implemented:
 

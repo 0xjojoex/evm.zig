@@ -1,4 +1,4 @@
-//! Generated from consensus-specs v1.7.0-alpha.13 resolved pyspec.
+//! Generated from the consensus-specs resolved pyspec pinned by eest.lock.
 //! Unique named schema shapes first required at altair.
 //! Regenerate with scripts/generate-consensus-ssz-schemas.py.
 

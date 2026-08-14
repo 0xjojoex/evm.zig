@@ -4,13 +4,11 @@ const mutation = @import("../stateless_mutation.zig");
 
 pub const about = "Run typed stateless mutation rejection fixtures";
 
-const default_manifest = "fixtures/stateless-mutations-tests-zkevm-v0.8.0.txt";
-
 pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
 
-    var manifest_path: []const u8 = default_manifest;
+    var manifest_path: ?[]const u8 = null;
     var fixture_root: ?[]const u8 = null;
     while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
@@ -29,7 +27,8 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     }
 
     const root = fixture_root orelse try fixture.lockedZkevmReleasePath(init.io, arena);
-    const summary = try mutation.runManifest(init.io, allocator, root, manifest_path);
+    const resolved_manifest = manifest_path orelse try fixture.lockedPath(init.io, arena, "zkevm_mutations_manifest");
+    const summary = try mutation.runManifest(init.io, allocator, root, resolved_manifest);
     std.debug.print("canonical_inputs={} mutations={}/{}\n", .{
         summary.canonical_inputs,
         summary.resolvedCount(),
