@@ -62,6 +62,15 @@ const GuestPayloadSteps = struct {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const core = b.option(
+        bool,
+        "core",
+        "Configure the evmz core; false exports only the SSZ, RLP, and MPT modules",
+    ) orelse true;
+    if (!core) {
+        _ = createPackageModules(b, target, optimize, null, true);
+        return;
+    }
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
     const is_native_profile = profile == .native;
     const requested_native_keccak = b.option(
@@ -82,31 +91,6 @@ pub fn build(b: *std.Build) void {
         .native_keccak = native_keccak,
         .native_secp256k1 = native_secp256k1,
     };
-    const use_xkcp = native_keccak == .xkcp;
-    const xkcp_dep = if (use_xkcp) b.lazyDependency("xkcp", .{}) else null;
-    if (use_xkcp and xkcp_dep == null) return;
-    const xkcp_object = if (xkcp_dep) |dep|
-        buildXkcpObject(b, target, optimize, dep, if (pic) "xkcp-pic" else "xkcp", if (pic) true else null)
-    else
-        null;
-    if (xkcp_dep) |dep| {
-        const install_license = b.addInstallFile(dep.path("LICENSE"), "share/licenses/evmz/XKCP.txt");
-        b.getInstallStep().dependOn(&install_license.step);
-    }
-    const use_libsecp256k1 = native_secp256k1 == .libsecp256k1;
-    const libsecp256k1_dep = if (use_libsecp256k1)
-        b.lazyDependency("libsecp256k1", .{})
-    else
-        null;
-    if (use_libsecp256k1 and libsecp256k1_dep == null) return;
-    const libsecp256k1_object = if (libsecp256k1_dep) |dep|
-        buildLibsecp256k1Object(b, target, optimize, dep, if (pic) "libsecp256k1-pic" else "libsecp256k1", if (pic) true else null)
-    else
-        null;
-    if (libsecp256k1_dep) |dep| {
-        const install_license = b.addInstallFile(dep.path("COPYING"), "share/licenses/evmz/libsecp256k1.txt");
-        b.getInstallStep().dependOn(&install_license.step);
-    }
     const stateless_schemas = b.option(
         []const []const u8,
         "stateless-schema",
@@ -163,13 +147,6 @@ pub fn build(b: *std.Build) void {
         "micro-filter",
         "Only run benchmark micro tests whose names contain this filter",
     );
-    const native_precompile_deps = nativePrecompileDeps(
-        b,
-        target,
-        optimize,
-        if (pic) true else null,
-    );
-
     // Frame pointers cost ~3 instructions per tail-dispatch handler; bench
     // builds already omit them, so keep shipped release artifacts identical.
     const omit_frame_pointer = optimize != .Debug;
@@ -181,9 +158,6 @@ pub fn build(b: *std.Build) void {
         .build_options = native_build_options,
         .stateless_profile = stateless_profile_none_mod,
         .packages = packages,
-        .native_precompiles = native_precompile_deps,
-        .xkcp = xkcp_object,
-        .libsecp256k1 = libsecp256k1_object,
         .omit_frame_pointer = omit_frame_pointer,
         .pic = if (pic) true else null,
         .exported = is_native_profile,
@@ -199,6 +173,51 @@ pub fn build(b: *std.Build) void {
         .exported = !is_native_profile,
     });
     const evmz_mod = if (is_native_profile) native_evmz_mod else zkvm_evmz_mod;
+
+    // A parent requesting the zkVM module supplies its guest accelerator
+    // provider at link time. Repository test and guest steps still configure
+    // native providers when this package is the top-level build.
+    if (!is_native_profile and b.pkg_hash.len != 0) return;
+
+    // Register the public module graph before requesting lazy packages. A
+    // parent build may ask for `module("evmz")` during the configure pass that
+    // discovers a missing lazy dependency; Zig then fetches and configures the
+    // graph again before making any steps.
+    const use_xkcp = native_keccak == .xkcp;
+    const xkcp_dep = if (use_xkcp) b.lazyDependency("xkcp", .{}) else null;
+    if (use_xkcp and xkcp_dep == null) return;
+    const xkcp_object = if (xkcp_dep) |dep|
+        buildXkcpObject(b, target, optimize, dep, if (pic) "xkcp-pic" else "xkcp", if (pic) true else null)
+    else
+        null;
+    if (xkcp_dep) |dep| {
+        const install_license = b.addInstallFile(dep.path("LICENSE"), "share/licenses/evmz/XKCP.txt");
+        b.getInstallStep().dependOn(&install_license.step);
+    }
+    const use_libsecp256k1 = native_secp256k1 == .libsecp256k1;
+    const libsecp256k1_dep = if (use_libsecp256k1)
+        b.lazyDependency("libsecp256k1", .{})
+    else
+        null;
+    if (use_libsecp256k1 and libsecp256k1_dep == null) return;
+    const libsecp256k1_object = if (libsecp256k1_dep) |dep|
+        buildLibsecp256k1Object(b, target, optimize, dep, if (pic) "libsecp256k1-pic" else "libsecp256k1", if (pic) true else null)
+    else
+        null;
+    if (libsecp256k1_dep) |dep| {
+        const install_license = b.addInstallFile(dep.path("COPYING"), "share/licenses/evmz/libsecp256k1.txt");
+        b.getInstallStep().dependOn(&install_license.step);
+    }
+    const native_precompile_deps = nativePrecompileDeps(
+        b,
+        target,
+        optimize,
+        if (pic) true else null,
+    ) orelse return;
+    addPrecompileNative(b, native_evmz_mod, native_precompile_deps);
+    addNativeKeccak(native_evmz_mod, xkcp_object);
+    addNativeSecp256k1(native_evmz_mod, libsecp256k1_object);
+
     const ssz_mod = packages.ssz;
     const rlp_mod = packages.rlp;
     const mpt_mod = packages.mpt;
@@ -407,7 +426,7 @@ pub fn build(b: *std.Build) void {
         addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name, evmz_build, null);
         addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter, evmz_build);
     }
-    if (pathExists(b, "pkg/ssz/build.zig")) {
+    if (pathExists(b, "pkg/ssz/bench/build.zig")) {
         addSszBenchDelegate(b, bench_optimize_name);
     }
     // Capacity is free in guest execution steps: the linker reserves the heap
@@ -481,7 +500,7 @@ pub fn build(b: *std.Build) void {
     );
 
     // examples
-    {
+    if (pathExists(b, "examples/build.zig")) {
         const example_name = b.option(
             []const u8,
             "example-name",
@@ -1302,9 +1321,9 @@ fn nativePrecompileDeps(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     pic: ?bool,
-) NativePrecompileDeps {
-    const blst_dep = b.dependency("blst", .{ .target = target, .optimize = optimize });
-    const mcl_dep = b.dependency("mcl", .{});
+) ?NativePrecompileDeps {
+    const blst_dep = b.lazyDependency("blst", .{ .target = target, .optimize = optimize }) orelse return null;
+    const mcl_dep = b.lazyDependency("mcl", .{}) orelse return null;
     return .{
         .object = buildNativePrecompileObject(b, target, optimize, blst_dep, mcl_dep, pic),
         .blst_lib = buildBlstLibrary(b, target, optimize, blst_dep, pic),
@@ -1433,7 +1452,7 @@ fn addSszBenchDelegate(b: *std.Build, optimize_name: []const u8) void {
         run.addArg("--");
         run.addArgs(args);
     }
-    run.setCwd(b.path("pkg/ssz"));
+    run.setCwd(b.path("pkg/ssz/bench"));
 
     const step = b.step("ssz-bench", "Run standalone SSZ codec benchmarks");
     step.dependOn(&run.step);

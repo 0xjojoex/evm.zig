@@ -177,12 +177,25 @@ jobs:
       - name: Record corpus identity
         run: |
           if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
+            spec_version="$(awk -F= '$1 == "version" { print $2; exit }' eest.lock)"
             version="$(awk -F= '$1 == "zkevm_version" { print $2; exit }' eest.lock)"
             archive_sha="$(awk -F= '$1 == "zkevm_sha256" { print $2; exit }' eest.lock)"
             fixture_root="$(awk -F= '$1 == "zkevm_dest" { print $2; exit }' eest.lock)"
+            test -n "${spec_version}"
             test -n "${version}"
             test -n "${archive_sha}"
             test -d "${fixture_root}"
+
+            [[ "${spec_version}" =~ ^tests-[a-z0-9]+(-[a-z0-9]+)*@v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            spec_track="${spec_version#tests-}"
+            spec_track="${spec_track%@v*}"
+            spec_release="${spec_version##*@v}"
+            spec_major="${spec_release%%.*}"
+            if [[ "${spec_track}" == *-devnet ]]; then
+              network="${spec_track}-${spec_major}"
+            else
+              network="${spec_track}"
+            fi
 
             blockchain_root="${fixture_root}/fixtures/blockchain_tests"
             index="${fixture_root}/fixtures/.meta/index.json"
@@ -206,7 +219,10 @@ jobs:
             jq -n \
               --arg id "${version}" \
               --arg digest "${archive_sha}" \
+              --arg fixture_release "${spec_version}" \
+              --arg network "${network}" \
               --arg source_commit "${SOURCE_COMMIT}" \
+              --arg validation_ref "${version}" \
               --argjson fixture_files "${fixture_files}" \
               --argjson indexed_tests "${indexed_tests}" \
               --argjson fixture_count "${fixture_count}" \
@@ -215,7 +231,12 @@ jobs:
                 mode: "tests-zkevm",
                 id: $id,
                 corpus_digest: $digest,
+                fixture_release: $fixture_release,
+                network: $network,
                 source_commit: $source_commit,
+                workload: {
+                  eest_validation_ref: $validation_ref
+                },
                 fixture_files: $fixture_files,
                 indexed_tests: $indexed_tests,
                 fixture_count: $fixture_count

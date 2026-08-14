@@ -4,17 +4,26 @@ Standalone strict RLP Recursive Length Prefix encoding and decoding library for 
 
 ## Install
 
-The package is developed under `pkg/rlp` in
-[`0xjojoex/evm.zig`](https://github.com/0xjojoex/evm.zig) and published from
-the generated `release/rlp` branch. Add a tagged package root with:
+`rlp` is one of the modules exported by
+[`evmz`](https://github.com/0xjojoex/evm.zig), which is fetched as a single
+package:
 
 ```sh
-zig fetch --save=rlp git+https://github.com/0xjojoex/evm.zig#rlp-v0.1.0
+zig fetch --save git+https://github.com/0xjojoex/evm.zig
 ```
 
-Then import the dependency's `rlp` module from your `build.zig`. Development
-and pull requests belong on evmz `main`; the release branch is generated and
-must not be edited directly.
+```zig
+// build.zig
+const evmz = b.dependency("evmz", .{
+    .target = target,
+    .optimize = optimize,
+    .core = false, // skip the EVM core and its C dependencies
+});
+exe.root_module.addImport("rlp", evmz.module("rlp"));
+```
+
+The historical `rlp-v0.1.0` tag and the `release/rlp` branch remain reachable
+for existing consumers, but no new package-prefixed releases are cut.
 
 ```zig
 const written = try rlp.encode(Account, out, &account);
@@ -137,7 +146,17 @@ truncation, trailing-input, and length-boundary behavior is covered locally.
 EEST transaction and block fixtures remain application integration gates rather
 than codec conformance substitutes.
 
+Run from the repository root:
+
 ```sh
+zig build test-packages
+zig build fuzz-rlp
+```
+
+The unpublished package harness keeps an isolated development lane:
+
+```sh
+cd pkg/rlp
 zig build test
 zig build fuzz
 ```

@@ -4,7 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to create (guest-vX.Y.Z or guest-vX.Y.Z-rc.N)"
+        description: >-
+          Release tag to create, guest-<track>@vX.Y.Z[-rc.N]. On a devnet
+          track the version mirrors the exact fixture release, e.g.
+          guest-glamsterdam-devnet@v8.1.0-rc.0.
         required: true
         type: string
       ref:
@@ -28,6 +31,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  ZIG_VERSION: 0.16.0
+  STATELESS_SCHEMA: "0x1501"
   ZISK_VERSION: 1.0.0-alpha
   ZISK_COMMIT: 4b9f758fabc4955cac20af837019ccc31b803a46
   ZISK_RUST_TOOLCHAIN: zisk-1.0.0
@@ -52,7 +57,14 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
         run: |
-          [[ "${TAG}" =~ ^guest-v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
+          set -euo pipefail
+          [[ "${TAG}" =~ ^guest-[a-z0-9]+(-[a-z0-9]+)*@v([0-9]+)\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
+          scope="${TAG#guest-}"
+          track="${scope%%@*}"
+          fixture_version="${scope#*@v}"
+          fixture_version="${fixture_version%-rc.*}"
+          echo "TRACK=${track}" >> "${GITHUB_ENV}"
+          echo "FIXTURE_VERSION=${fixture_version}" >> "${GITHUB_ENV}"
 
       - name: Checkout release source
         uses: actions/checkout@v7
@@ -82,7 +94,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: ${{ env.ZIG_VERSION }}
 
       # Deliberately unconditional: releases never restore zisk-artifacts-v1.
       - name: Build fresh pinned ZisK artifacts
@@ -106,7 +118,7 @@ jobs:
           mkdir -p "${ARTIFACTS}"
           zig build guest-zisk \
             -Dguest-payload=stateless-ere \
-            -Dstateless-schema=0x1501 \
+            "-Dstateless-schema=${STATELESS_SCHEMA}" \
             -Doptimize=ReleaseFast \
             "-Dziskos-staticlib=${PROVIDER}" \
             --prefix "${RUNNER_TEMP}/guest" \
@@ -170,6 +182,36 @@ jobs:
             echo "- Reproducibility: fresh cache-free build matches the tested artifact byte-for-byte"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      # The evidence records the specification compiled into the tested guest.
+      # A devnet tag mirrors the complete authoritative fixture release.
+      - name: Require the tag to match the corpus spec
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          network="$(jq -er '.network | select(type == "string" and length > 0)' \
+            "${ARTIFACTS}/corpus-manifest.json")"
+          fixture_release="$(jq -er \
+            '.fixture_release | select(type == "string" and length > 0)' \
+            "${ARTIFACTS}/corpus-manifest.json")"
+          expected_network="${TRACK}"
+          if [[ "${TRACK}" == *-devnet ]]; then
+            expected_network="${TRACK}-${FIXTURE_VERSION%%.*}"
+            expected_release="tests-${TRACK}@v${FIXTURE_VERSION}"
+            if [[ "${fixture_release}" != "${expected_release}" ]]; then
+              echo "error: ${TAG} claims ${expected_release}; corpus evidence is ${fixture_release}" >&2
+              exit 1
+            fi
+          fi
+          if [[ "${network}" != "${expected_network}" ]]; then
+            echo "error: ${TAG} claims ${expected_network}; corpus evidence is ${network}" >&2
+            exit 1
+          fi
+          {
+            echo "- Spec: \`${network}\`"
+            echo "- Fixture release: \`${fixture_release}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Upload release bundle
         if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@v7
@@ -205,6 +247,7 @@ jobs:
           echo "ELF_NAME=${ELF_NAME}" >> "${GITHUB_ENV}"
           test -s "${GITHUB_WORKSPACE}/release-artifacts/${ELF_NAME}"
           test -s "${GITHUB_WORKSPACE}/release-artifacts/corpus-summary.json"
+          test -s "${GITHUB_WORKSPACE}/release-artifacts/corpus-manifest.json"
 
       - name: Free disk space for VK generation
         run: |
@@ -271,10 +314,19 @@ jobs:
           notes="${RUNNER_TEMP}/release-notes.md"
           elf_sha="$(sha256sum "${ARTIFACTS}/${ELF_NAME}" | cut -d ' ' -f 1)"
           vk_sha="$(sha256sum "${ARTIFACTS}/${VK_NAME}" | cut -d ' ' -f 1)"
+          manifest="${ARTIFACTS}/corpus-manifest.json"
+          network="$(jq -r '.network // "unspecified"' "${manifest}")"
+          fixture_release="$(jq -r '.fixture_release // "unspecified"' "${manifest}")"
+          corpus_ref="$(jq -r '.workload.eest_validation_ref // "unspecified"' "${manifest}")"
           cat > "${notes}" <<EOF
           ZisK guest pre-release for integration testing.
 
+          - Spec: ${network}
+          - Fixture release: ${fixture_release}
+          - Corpus: ${corpus_ref}
+          - Stateless schema: ${STATELESS_SCHEMA}
           - Source commit: ${SOURCE_COMMIT}
+          - Zig: ${ZIG_VERSION}
           - ZisK: v${ZISK_VERSION} (${ZISK_COMMIT})
           - ERE keygen image: ${ERE_IMAGE}
           - ELF SHA-256: ${elf_sha}

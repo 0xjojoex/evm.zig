@@ -11,16 +11,26 @@ const ssz = @import("ssz");
 
 ## Install
 
-The package is developed under `pkg/ssz` in
-[`0xjojoex/evm.zig`](https://github.com/0xjojoex/evm.zig) and published from
-the generated `release/ssz` branch. Add a tagged package root with:
+`ssz` is one of the modules exported by
+[`evmz`](https://github.com/0xjojoex/evm.zig), which is fetched as a single
+package:
 
 ```sh
-zig fetch --save=ssz git+https://github.com/0xjojoex/evm.zig#ssz-v0.1.0
+zig fetch --save git+https://github.com/0xjojoex/evm.zig
 ```
 
-Then import the dependency's `ssz` module from your `build.zig`. Contribute on
-evmz `main` — `release/ssz` is generated and must not be edited directly.
+```zig
+// build.zig
+const evmz = b.dependency("evmz", .{
+    .target = target,
+    .optimize = optimize,
+    .core = false, // skip the EVM core and its C dependencies
+});
+exe.root_module.addImport("ssz", evmz.module("ssz"));
+```
+
+The historical `ssz-v0.1.0` tag and the `release/ssz` branch remain reachable
+for existing consumers, but no new package-prefixed releases are cut.
 
 ## Why this one
 
@@ -315,11 +325,20 @@ Zero-subtree roots through depth 255 ship as embedded constants and never call
 
 ## Testing & benchmarks
 
+Run from the repository root:
+
+```sh
+zig build test-packages
+zig build ssz-bench
+zig build ssz-bench -- --filter list_u64
+```
+
+The unpublished package harness keeps an isolated development lane:
+
 ```sh
 cd pkg/ssz
 zig build test
-zig build -Doptimize=ReleaseFast bench
-zig build -Doptimize=ReleaseFast bench -- --filter list_u64
+zig build bench -- --filter list_u64
 ```
 
 The canonical zero-root table is a checked-in binary artifact. Regenerate it
@@ -329,8 +348,9 @@ explicitly after changing its size or generation rules:
 zig run tools/generate-zero-roots.zig -- src/merkle/zero_roots.bin
 ```
 
-From the evmz repo root, `zig build ssz-bench` runs the same matrix. Benchmarks
-cover primitives, vectors, containers, large `u64` and nested byte lists,
+`ssz-bench` delegates to the sidecar build in `bench/`, which consumes the
+repository root with `-Dcore=false` exactly as an external consumer does.
+Benchmarks cover primitives, vectors, containers, large `u64` and nested byte lists,
 expanded and packed bitfields, and a Phase 0 `BeaconState` at 16K/100K
 validators, reporting median time and throughput.
 
