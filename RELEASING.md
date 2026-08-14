@@ -105,16 +105,15 @@ Three identities serve different purposes:
 Devnet tags make the tested specification visible to operators:
 
 ~~~
-guest-glamsterdam-devnet@v8.1.0-rc.0
-      └── track ────┘     └ fixture release ┘
+guest-<track>@vX.Y.Z-rc.0
+      └ track ┘ └ fixture release ┘
 ~~~
 
 The version is not evmz software SemVer. It mirrors the complete authoritative
-fixture release: `@v8.1.0` means
-`tests-glamsterdam-devnet@v8.1.0`. An `-rc.N` suffix records artifact
-qualification without changing that compatibility coordinate. The separately
-numbered `tests-zkevm` wire/corpus release remains explicit in `evidence.json`
-and the release notes.
+fixture release: `@vX.Y.Z` means `tests-<track>@vX.Y.Z`. An `-rc.N` suffix
+records artifact qualification without changing that compatibility coordinate.
+The separately numbered `tests-zkevm` wire/corpus release remains explicit in
+`evidence.json` and the release notes.
 
 The release qualification's `evidence.json` records both the network and exact
 fixture release compiled into the tested guest. The naming policy pairs a

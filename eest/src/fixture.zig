@@ -46,22 +46,19 @@ pub fn lockedFixturePath(
 ) ![]u8 {
     const dest = try lock.releasePath(io, allocator, .state);
     defer allocator.free(dest);
-    return if (track.len == 0)
-        try std.fs.path.join(allocator, &.{ dest, "fixtures" })
-    else
-        try std.fs.path.join(allocator, &.{ dest, "fixtures", track });
+    return fixtureRoot(allocator, dest, track);
 }
 
 pub fn lockedZkevmFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     const dest = try lockedZkevmReleasePath(io, allocator);
     defer allocator.free(dest);
-    return try std.fs.path.join(allocator, &.{ dest, "fixtures" });
+    return fixtureRoot(allocator, dest, "blockchain_tests");
 }
 
 pub fn lockedBenchmarkFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     const dest = try lock.releasePath(io, allocator, .benchmark);
     defer allocator.free(dest);
-    return std.fs.path.join(allocator, &.{ dest, "fixtures" });
+    return fixtureRoot(allocator, dest, "");
 }
 
 pub fn lockedZkevmReleasePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
@@ -70,6 +67,13 @@ pub fn lockedZkevmReleasePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
 
 pub fn lockedPath(io: std.Io, allocator: std.mem.Allocator, key: []const u8) ![]u8 {
     return lock.readPath(io, allocator, key);
+}
+
+fn fixtureRoot(allocator: std.mem.Allocator, release_path: []const u8, track: []const u8) ![]u8 {
+    return if (track.len == 0)
+        std.fs.path.join(allocator, &.{ release_path, "fixtures" })
+    else
+        std.fs.path.join(allocator, &.{ release_path, "fixtures", track });
 }
 
 pub fn asObject(value: JsonValue) ?std.json.ObjectMap {
@@ -459,4 +463,11 @@ test "EEST state fork parser maps ConstantinopleFix to Petersburg" {
     try std.testing.expectEqual(evmz.eth.Revision.petersburg, parseStateFork("ConstantinopleFix"));
     try std.testing.expectEqual(evmz.eth.Revision.osaka, parseStateFork("Osaka"));
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseStateFork("Amsterdam"));
+}
+
+test "zkEVM default fixture root selects blockchain tests" {
+    const path = try fixtureRoot(std.testing.allocator, "/cache/release", "blockchain_tests");
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectEqualStrings("/cache/release/fixtures/blockchain_tests", path);
 }
