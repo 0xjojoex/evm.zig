@@ -105,13 +105,19 @@ cycles stay separate metrics, and emulator execution duration is never treated
 as proving time.
 
 Reports are absolute: the workflow measures the candidate ELF and does not
-compare against a release. There is no stored release baseline, because no
-guest release exists to be a baseline yet. `report-guest-cycles.py --baseline
-<dir>` still renders per-block deltas between two local result sets.
+compare against a release. The existing `zkevm` command writes the ERE rows,
+aggregated report, and one `evidence.json`; there is no separate reporting
+script or stored release baseline.
+
+A strict `tests-zkevm` dispatch produces the only artifact eligible for guest
+release. `Guest release` accepts that run id, verifies the evidence, tag, source
+commit, and ELF hash, then promotes the tested bytes without rebuilding them.
 
 `zig build zkevm -- --executor zisk|sp1` runs the same ERE-shaped
 measurements locally; pass `--zisk-host`/`--zisk-elf` or
-`--sp1-host`/`--sp1-elf` and fixture paths.
+`--sp1-host`/`--sp1-elf` and fixture paths. `--evidence-dir` enables the
+checkout-owned evidence path used by CI; ZisK is the only evidence backend
+until the SP1 provider is operational.
 
 ## Real proof gate
 

@@ -102,9 +102,9 @@ qualification without changing that compatibility coordinate. The separately
 numbered `tests-zkevm` wire/corpus release remains explicit in the manifest and
 release notes.
 
-The claim is enforced, not conventional. `corpus-manifest.json` records both
-the network and exact fixture release compiled into the tested guest. For a
-devnet tag the release workflow requires
+The claim is enforced, not conventional. The strict benchmark's
+`evidence.json` records both the network and exact fixture release compiled
+into the tested guest. For a devnet tag the release workflow requires
 
 ~~~
 network == "<track>-<major>"
@@ -140,6 +140,14 @@ The preferred next tag is `guest-glamsterdam-devnet@v8.1.0-rc.0`, paired with
 its exact coordinate would be `guest-glamsterdam-devnet@v7.2.0`, not
 `@v7.0.0`. The already-published `guest-v0.1.0-rc.0` remains untouched as
 historical evidence.
+
+Dispatch `Guest benchmark` with `corpus=tests-zkevm` and
+`release_gate=true`. A successful run emits one long-lived strict artifact
+containing the tested ELF, `evidence.json`, and its report. Dispatch `Guest
+release` with that run id and the intended tag. The release workflow verifies
+the successful run, source ancestry, strict result counts, tag/spec mapping,
+and ELF hash before generating the VK and signatures; it never rebuilds or
+searches other runs.
 
 ## Changelog
 

@@ -25,6 +25,9 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
 - Retained unpublished `0.0.0` package harnesses for focused tests, fuzzers,
   benchmarks, and dependency-boundary checks. Root consumers and releases use
   only the root package identity and version.
+- Consolidated guest evidence into the existing `zkevm` command and one
+  `evidence.json`, removed the dormant SP1 workflow branches and Python report
+  stage, and made guest releases promote one explicit strict-run artifact.
 
 ### RLP
 

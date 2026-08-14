@@ -1,5 +1,6 @@
 const std = @import("std");
 const stateless = @import("../stateless.zig");
+const guest_evidence = @import("../guest_evidence.zig");
 const fixture_common = @import("../fixture.zig");
 const runner = @import("../runner.zig");
 
@@ -22,6 +23,16 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     defer report.deinit();
     var report_path: ?[]const u8 = null;
     var report_only = false;
+    var evidence_dir: ?[]const u8 = null;
+    var corpus_manifest: ?[]const u8 = null;
+    var known_failures: ?[]const u8 = null;
+    var source_ref: ?[]const u8 = null;
+    var stateless_schema: ?[]const u8 = null;
+    var zig_version: ?[]const u8 = null;
+    var backend_version: ?[]const u8 = null;
+    var backend_commit: ?[]const u8 = null;
+    var backend_toolchain: ?[]const u8 = null;
+    var strict_evidence = false;
 
     while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
@@ -58,6 +69,35 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         } else if (std.mem.eql(u8, arg, "--output-folder")) {
             const value = args.next() orelse return error.MissingOutputFolder;
             options.output_folder = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--evidence-dir")) {
+            const value = args.next() orelse return error.MissingEvidenceDir;
+            evidence_dir = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--corpus-manifest")) {
+            const value = args.next() orelse return error.MissingCorpusManifest;
+            corpus_manifest = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--known-failures")) {
+            const value = args.next() orelse return error.MissingKnownFailures;
+            known_failures = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--source-ref")) {
+            const value = args.next() orelse return error.MissingSourceRef;
+            source_ref = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--stateless-schema")) {
+            const value = args.next() orelse return error.MissingStatelessSchema;
+            stateless_schema = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--zig-version")) {
+            const value = args.next() orelse return error.MissingZigVersion;
+            zig_version = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--backend-version")) {
+            const value = args.next() orelse return error.MissingBackendVersion;
+            backend_version = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--backend-commit")) {
+            const value = args.next() orelse return error.MissingBackendCommit;
+            backend_commit = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--backend-toolchain")) {
+            const value = args.next() orelse return error.MissingBackendToolchain;
+            backend_toolchain = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--strict-evidence")) {
+            strict_evidence = true;
         } else if (std.mem.eql(u8, arg, "--zisk-host")) {
             const value = args.next() orelse return error.MissingZiskHostPath;
             options.executor.zisk_host_path = try arena.dupe(u8, value);
@@ -89,12 +129,57 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         try paths.append(allocator, try fixture_common.lockedZkevmFixturePath(init.io, arena));
     }
 
+    const evidence_options: ?guest_evidence.Options = if (evidence_dir) |dir| evidence: {
+        if (options.output_folder != null) return error.EvidenceOwnsOutputFolder;
+        const rows_dir = try std.fs.path.join(arena, &.{ dir, "rows" });
+        options.output_folder = rows_dir;
+        report_only = true;
+        const elf_path = switch (options.executor.target) {
+            .zisk => options.executor.zisk_elf_path,
+            .sp1 => options.executor.sp1_elf_path,
+            .native => null,
+        } orelse return error.MissingEvidenceElf;
+        break :evidence .{
+            .output_dir = dir,
+            .rows_dir = rows_dir,
+            .corpus_manifest = corpus_manifest orelse return error.MissingCorpusManifest,
+            .known_failures = known_failures,
+            .source_ref = source_ref orelse return error.MissingSourceRef,
+            .strict = strict_evidence,
+            .backend = options.executor.target,
+            .elf_path = elf_path,
+            .stateless_schema = stateless_schema orelse return error.MissingStatelessSchema,
+            .zig_version = zig_version orelse return error.MissingZigVersion,
+            .backend_version = backend_version orelse return error.MissingBackendVersion,
+            .backend_commit = backend_commit orelse return error.MissingBackendCommit,
+            .backend_toolchain = backend_toolchain orelse return error.MissingBackendToolchain,
+        };
+    } else if (corpus_manifest != null or
+        known_failures != null or
+        source_ref != null or
+        stateless_schema != null or
+        zig_version != null or
+        backend_version != null or
+        backend_commit != null or
+        backend_toolchain != null or
+        strict_evidence)
+        return error.EvidenceOptionsRequireEvidenceDir
+    else
+        null;
+
+    if (evidence_options) |evidence| {
+        try guest_evidence.prepare(init.io, arena, evidence.output_dir, evidence.rows_dir);
+    }
+
     // One session over every root: a guest context owns a host child, and
     // rebuilding it per root would repeat the ELF-to-ROM conversion per batch.
     options.source_roots = paths.items;
     const total = try Fixtures.run(init.io, allocator, paths.items, options, jobs);
     printSummary(if (paths.items.len == 1) paths.items[0] else "total", total);
     if (report_path) |path| try report.write(init.io, path);
+    if (evidence_options) |evidence| {
+        if (!try guest_evidence.write(init.io, arena, evidence)) std.process.exit(1);
+    }
     // `--report-only` withholds the exit code for accumulated fixture failures
     // so a downstream comparison still gets its rows. Configuration, I/O and
     // host-startup problems surface as errors above and still fail hard, and an
@@ -124,7 +209,7 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm -- [--executor native|zisk|sp1] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
+        \\usage: zig build zkevm -- [--executor native|zisk|sp1] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--evidence-dir PATH --corpus-manifest PATH --source-ref REF --stateless-schema ID --zig-version VERSION --backend-version VERSION --backend-commit SHA --backend-toolchain VERSION [--known-failures PATH] [--strict-evidence]] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
         \\
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
         \\against the raw statelessOutputBytes public values.
@@ -142,6 +227,9 @@ fn printUsage() void {
         \\against the same statelessOutputBytes. Each worker owns one guest host
         \\child, which converts the ELF to a ZisK ROM once at startup.
         \\Use --output-folder to also write one ERE BenchmarkRun row per block.
+        \\Use --evidence-dir to aggregate those rows into evidence.json and
+        \\report.md. Evidence mode owns its rows subdirectory and applies the
+        \\corpus-scoped known-failure gate; --strict-evidence permits none.
         \\
     , .{ default_jobs, max_jobs });
 }

@@ -4,21 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: >-
-          Release tag to create, guest-<track>@vX.Y.Z[-rc.N]. On a devnet
-          track the version mirrors the exact fixture release, e.g.
-          guest-glamsterdam-devnet@v8.1.0-rc.0.
+        description: guest-<track>@vX.Y.Z[-rc.N]
         required: true
         type: string
-      ref:
-        description: Commit on main to release
+      evidence_run_id:
+        description: Successful strict Guest benchmark run
         required: true
-        default: main
-        type: string
+        type: number
       dry_run:
-        description: >-
-          Stop after building, validating, and matching corpus evidence; skip
-          the verification key, signing, and the draft release
+        description: Validate evidence but skip VK generation, signing, and release creation
         required: true
         default: false
         type: boolean
@@ -33,181 +27,164 @@ concurrency:
 env:
   ZIG_VERSION: 0.16.0
   STATELESS_SCHEMA: "0x1501"
-  ZISK_VERSION: 1.0.0-alpha
-  ZISK_COMMIT: 4b9f758fabc4955cac20af837019ccc31b803a46
-  ZISK_RUST_TOOLCHAIN: zisk-1.0.0
   # ere-server-zisk:58ca85b, pinned by digest so the VK provenance is immutable.
   ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:a21622ab8a9b2502f40307208b593f500a22373201e9ae37c2558a7eadb52e17
 
 jobs:
-  build:
-    name: Build and verify ${{ inputs.tag }}
+  verify:
+    name: Verify ${{ inputs.tag }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
     outputs:
-      elf-name: ${{ steps.elf.outputs.elf-name }}
-      source-commit: ${{ steps.source.outputs.commit }}
-      evidence-url: ${{ steps.evidence.outputs.run-url }}
+      elf-name: ${{ steps.bundle.outputs.elf-name }}
+      source-commit: ${{ steps.run.outputs.source-commit }}
+      evidence-url: ${{ steps.run.outputs.run-url }}
 
     steps:
-      - name: Require a guest release tag
+      - name: Select exact strict benchmark artifact
+        id: run
         env:
-          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.evidence_run_id }}
         run: |
           set -euo pipefail
-          [[ "${TAG}" =~ ^guest-[a-z0-9]+(-[a-z0-9]+)*@v([0-9]+)\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
-          scope="${TAG#guest-}"
-          track="${scope%%@*}"
-          fixture_version="${scope#*@v}"
-          fixture_version="${fixture_version%-rc.*}"
-          echo "TRACK=${track}" >> "${GITHUB_ENV}"
-          echo "FIXTURE_VERSION=${fixture_version}" >> "${GITHUB_ENV}"
+          run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          test "$(jq -r .conclusion <<<"${run}")" = success
+          test "$(jq -r .event <<<"${run}")" = workflow_dispatch
+          test "$(jq -r .path <<<"${run}")" = .github/workflows/guest-benchmark.yml
+          source_commit="$(jq -er .head_sha <<<"${run}")"
+          run_attempt="$(jq -er .run_attempt <<<"${run}")"
+          artifact_name="guest-zisk-strict-${RUN_ID}-${run_attempt}"
+          artifacts="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts")"
+          jq -e --arg name "${artifact_name}" \
+            '[.artifacts[] | select(.expired | not) | select(.name == $name)] | length == 1' \
+            <<<"${artifacts}"
+          {
+            echo "source-commit=${source_commit}"
+            echo "run-url=$(jq -er .html_url <<<"${run}")"
+            echo "artifact-name=${artifact_name}"
+          } >> "${GITHUB_OUTPUT}"
 
-      - name: Checkout release source
+      - name: Checkout tested source
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ steps.run.outputs.source-commit }}
           fetch-depth: 0
 
-      - name: Require a source commit on main
-        id: source
+      - name: Require tested source on main
+        env:
+          SOURCE_COMMIT: ${{ steps.run.outputs.source-commit }}
         run: |
-          set -euo pipefail
-          source_commit="$(git rev-parse HEAD)"
           git show-ref --verify --quiet refs/remotes/origin/main
-          git merge-base --is-ancestor "${source_commit}" refs/remotes/origin/main
-          echo "SOURCE_COMMIT=${source_commit}" >> "${GITHUB_ENV}"
-          echo "commit=${source_commit}" >> "${GITHUB_OUTPUT}"
-
-      - name: Resolve build paths
-        run: |
-          {
-            echo "ZISK_HOME=${RUNNER_TEMP}/zisk-sdk"
-            echo "ZISK_SOURCE=${RUNNER_TEMP}/zisk-source"
-            echo "ZISK_ARTIFACTS=${RUNNER_TEMP}/zisk-artifacts"
-            echo "ARTIFACTS=${GITHUB_WORKSPACE}/release-artifacts"
-          } >> "${GITHUB_ENV}"
+          git merge-base --is-ancestor "${SOURCE_COMMIT}" refs/remotes/origin/main
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      # Deliberately unconditional: releases never restore zisk-artifacts-v1.
-      - name: Build fresh pinned ZisK artifacts
-        id: zisk
-        uses: ./.github/actions/build-zisk-artifacts
-        with:
-          version: ${{ env.ZISK_VERSION }}
-          commit: ${{ env.ZISK_COMMIT }}
-          rust-toolchain: ${{ env.ZISK_RUST_TOOLCHAIN }}
-          zisk-home: ${{ env.ZISK_HOME }}
-          source-dir: ${{ env.ZISK_SOURCE }}
-          artifacts-dir: ${{ env.ZISK_ARTIFACTS }}
-
-      - name: Build and validate guest ELF
-        id: elf
-        env:
-          PROVIDER: ${{ steps.zisk.outputs.provider }}
-        run: |
-          set -euo pipefail
-          test -s "${PROVIDER}"
-          mkdir -p "${ARTIFACTS}"
-          zig build guest-zisk \
-            -Dguest-payload=stateless-ere \
-            "-Dstateless-schema=${STATELESS_SCHEMA}" \
-            -Doptimize=ReleaseFast \
-            "-Dziskos-staticlib=${PROVIDER}" \
-            --prefix "${RUNNER_TEMP}/guest" \
-            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
-            --summary all
-          elf_name="stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
-          install -m 0644 \
-            "${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf" \
-            "${ARTIFACTS}/${elf_name}"
-          zig build check-guest-elf -- "${ARTIFACTS}/${elf_name}"
-          echo "ELF_NAME=${elf_name}" >> "${GITHUB_ENV}"
-          echo "elf-name=${elf_name}" >> "${GITHUB_OUTPUT}"
-
-      - name: Require corpus evidence for these exact bytes
-        id: evidence
+      - name: Download exact evidence
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.evidence_run_id }}
+          ARTIFACT_NAME: ${{ steps.run.outputs.artifact-name }}
         run: |
-          set -euo pipefail
-          elf_sha="$(sha256sum "${ARTIFACTS}/${ELF_NAME}" | cut -d ' ' -f 1)"
-          runs="$(gh run list --workflow guest-benchmark.yml --branch main \
-            --status success --limit 20 --json databaseId,headSha,url)"
-          ordered="$(jq -r --arg sha "${SOURCE_COMMIT}" \
-            '([.[] | select(.headSha == $sha)] + [.[] | select(.headSha != $sha)])
-             | .[] | "\(.databaseId)\t\(.url)"' <<<"${runs}")"
-          evidence_url=""
-          while IFS=$'\t' read -r run_id run_url; do
-            [[ -n "${run_id}" ]] || continue
-            artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
-              --jq '[.artifacts[]
-                     | select(.expired | not)
-                     | select(.name | startswith("guest-zisk-tests-zkevm-"))
-                     | .name] | sort | last // empty')"
-            [[ -n "${artifact}" ]] || continue
-            evidence_dir="${RUNNER_TEMP}/evidence"
-            rm -rf "${evidence_dir}"
-            gh run download "${run_id}" --name "${artifact}" --dir "${evidence_dir}" || continue
-            tested="$(find "${evidence_dir}" -name 'stateless-validator-evmz-zisk-*.elf' -print -quit)"
-            [[ -n "${tested}" ]] || continue
-            tested_sha="$(sha256sum "${tested}" | cut -d ' ' -f 1)"
-            if [[ "${tested_sha}" == "${elf_sha}" ]]; then
-              evidence_url="${run_url}"
-              install -m 0644 "${evidence_dir}/guest-cycle-summary.json" "${ARTIFACTS}/corpus-summary.json"
-              install -m 0644 "${evidence_dir}/guest-cycle-report.md" "${ARTIFACTS}/corpus-report.md"
-              install -m 0644 "${evidence_dir}/resolved-manifest.json" "${ARTIFACTS}/corpus-manifest.json"
-              break
-            fi
-            echo "note: ${run_url} tested sha256 ${tested_sha}; this build is ${elf_sha}"
-          done <<<"${ordered}"
-          if [[ -z "${evidence_url}" ]]; then
-            echo "error: no successful tests-zkevm benchmark artifact matches this ELF (sha256 ${elf_sha})" >&2
-            echo "Dispatch 'Guest benchmark' with corpus=tests-zkevm on ${SOURCE_COMMIT}, wait for green, then rerun this release." >&2
-            exit 1
-          fi
-          echo "run-url=${evidence_url}" >> "${GITHUB_OUTPUT}"
-          {
-            echo "## Corpus evidence"
-            echo ""
-            echo "- ELF SHA-256: \`${elf_sha}\`"
-            echo "- Matched benchmark run: ${evidence_url}"
-            echo "- Reproducibility: fresh cache-free build matches the tested artifact byte-for-byte"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          mkdir -p "${RUNNER_TEMP}/evidence"
+          gh run download "${RUN_ID}" \
+            --name "${ARTIFACT_NAME}" \
+            --dir "${RUNNER_TEMP}/evidence"
 
-      # The evidence records the specification compiled into the tested guest.
-      # A devnet tag mirrors the complete authoritative fixture release.
-      - name: Require the tag to match the corpus spec
+      - name: Validate and stage release bundle
+        id: bundle
         env:
           TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ steps.run.outputs.source-commit }}
+          EVIDENCE_URL: ${{ steps.run.outputs.run-url }}
         run: |
           set -euo pipefail
-          network="$(jq -er '.network | select(type == "string" and length > 0)' \
-            "${ARTIFACTS}/corpus-manifest.json")"
-          fixture_release="$(jq -er \
-            '.fixture_release | select(type == "string" and length > 0)' \
-            "${ARTIFACTS}/corpus-manifest.json")"
-          expected_network="${TRACK}"
-          if [[ "${TRACK}" == *-devnet ]]; then
-            expected_network="${TRACK}-${FIXTURE_VERSION%%.*}"
-            expected_release="tests-${TRACK}@v${FIXTURE_VERSION}"
-            if [[ "${fixture_release}" != "${expected_release}" ]]; then
-              echo "error: ${TAG} claims ${expected_release}; corpus evidence is ${fixture_release}" >&2
+          source_dir="${RUNNER_TEMP}/evidence"
+          evidence="${source_dir}/guest-evidence/evidence.json"
+          report="${source_dir}/guest-evidence/report.md"
+          test -s "${evidence}"
+          test -s "${report}"
+          jq -e \
+            --arg source "${SOURCE_COMMIT}" \
+            --arg schema "${STATELESS_SCHEMA}" \
+            '.schema_version == 1
+             and .source_ref == $source
+             and .backend == "zisk"
+             and .metric == "steps"
+             and .stateless_schema == $schema
+             and .corpus.mode == "tests-zkevm"
+             and ((.corpus.digest // "") | test("^[0-9a-f]{64}$"))
+             and ((.corpus.fixture_release // "") | length > 0)
+             and ((.guest.elf_sha256 // "") | test("^[0-9a-f]{64}$"))
+             and ((.guest.zig_version // "") | length > 0)
+             and ((.guest.backend_version // "") | length > 0)
+             and ((.guest.backend_commit // "") | test("^[0-9a-f]{40}$"))
+             and ((.guest.backend_toolchain // "") | length > 0)
+             and .gate.strict == true
+             and .gate.passed == true
+             and .results.fixture_count == .corpus.expected_fixtures
+             and .results.total_steps > 0
+             and .results.crashes == 0
+             and .results.known_failures == 0
+             and .results.unexpected_failures == 0
+             and (.results.unexpected_passes | length) == 0
+             and (.results.stale_known | length) == 0' \
+            "${evidence}"
+
+          elf_name="$(jq -er '.guest.elf_name | select(type == "string" and length > 0)' "${evidence}")"
+          test "$(basename "${elf_name}")" = "${elf_name}"
+          [[ "${elf_name}" == stateless-validator-evmz-zisk-*.elf ]]
+          elf="${source_dir}/${elf_name}"
+          test -s "${elf}"
+          expected_sha="$(jq -er .guest.elf_sha256 "${evidence}")"
+          actual_sha="$(sha256sum "${elf}" | cut -d ' ' -f 1)"
+          test "${actual_sha}" = "${expected_sha}"
+          zig build check-guest-elf -- --require-rv64im-zicclsm "${elf}"
+
+          [[ "${TAG}" =~ ^guest-[a-z0-9]+(-[a-z0-9]+)*@v([0-9]+)\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
+          remote_tag="$(git ls-remote --tags origin \
+            "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
+          if [[ -n "${remote_tag}" ]]; then
+            tag_commit="$(awk '
+              /\^\{\}$/ { peeled=$1 }
+              !/\^\{\}$/ { direct=$1 }
+              END { if (peeled != "") print peeled; else print direct }
+            ' <<<"${remote_tag}")"
+            if [[ "${tag_commit}" != "${SOURCE_COMMIT}" ]]; then
+              echo "error: ${TAG} already points to ${tag_commit}, not tested source ${SOURCE_COMMIT}" >&2
               exit 1
             fi
           fi
-          if [[ "${network}" != "${expected_network}" ]]; then
-            echo "error: ${TAG} claims ${expected_network}; corpus evidence is ${network}" >&2
-            exit 1
+          scope="${TAG#guest-}"
+          track="${scope%%@*}"
+          fixture_version="${scope#*@v}"
+          fixture_version="${fixture_version%-rc.*}"
+          network="$(jq -er .corpus.network "${evidence}")"
+          fixture_release="$(jq -er .corpus.fixture_release "${evidence}")"
+          expected_network="${track}"
+          if [[ "${track}" == *-devnet ]]; then
+            expected_network="${track}-${fixture_version%%.*}"
+            test "${fixture_release}" = "tests-${track}@v${fixture_version}"
           fi
+          test "${network}" = "${expected_network}"
+
+          artifacts="${GITHUB_WORKSPACE}/release-artifacts"
+          mkdir -p "${artifacts}"
+          install -m 0644 "${elf}" "${artifacts}/${elf_name}"
+          install -m 0644 "${evidence}" "${artifacts}/evidence.json"
+          install -m 0644 "${report}" "${artifacts}/report.md"
+          echo "elf-name=${elf_name}" >> "${GITHUB_OUTPUT}"
           {
+            echo "## Release evidence"
+            echo ""
+            echo "- ELF SHA-256: \`${actual_sha}\`"
+            echo "- Strict benchmark run: ${EVIDENCE_URL}"
             echo "- Spec: \`${network}\`"
             echo "- Fixture release: \`${fixture_release}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -223,7 +200,7 @@ jobs:
 
   release:
     name: Draft ${{ inputs.tag }}
-    needs: build
+    needs: verify
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -240,14 +217,14 @@ jobs:
 
       - name: Resolve bundle paths
         env:
-          ELF_NAME: ${{ needs.build.outputs.elf-name }}
+          ELF_NAME: ${{ needs.verify.outputs.elf-name }}
         run: |
           set -euo pipefail
           echo "ARTIFACTS=${GITHUB_WORKSPACE}/release-artifacts" >> "${GITHUB_ENV}"
           echo "ELF_NAME=${ELF_NAME}" >> "${GITHUB_ENV}"
           test -s "${GITHUB_WORKSPACE}/release-artifacts/${ELF_NAME}"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/corpus-summary.json"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/corpus-manifest.json"
+          test -s "${GITHUB_WORKSPACE}/release-artifacts/evidence.json"
+          test -s "${GITHUB_WORKSPACE}/release-artifacts/report.md"
 
       - name: Free disk space for VK generation
         run: |
@@ -287,19 +264,17 @@ jobs:
           test -n "${MINISIGN_PASSWORD}"
           (
             cd "${ARTIFACTS}"
-            sha256sum "${ELF_NAME}" "${VK_NAME}" corpus-summary.json corpus-report.md corpus-manifest.json > SHA256SUMS
+            sha256sum "${ELF_NAME}" "${VK_NAME}" evidence.json report.md > SHA256SUMS
           )
           secret_key="${RUNNER_TEMP}/minisign.key"
-          public_key="${ARTIFACTS}/minisign.pub"
           printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${secret_key}"
-          printf '%s\n' "${MINISIGN_PUBLIC_KEY}" > "${public_key}"
+          printf '%s\n' "${MINISIGN_PUBLIC_KEY}" > "${ARTIFACTS}/minisign.pub"
           for file in "${ARTIFACTS}/${ELF_NAME}" "${ARTIFACTS}/${VK_NAME}" "${ARTIFACTS}/SHA256SUMS"; do
-            filename="$(basename "${file}")"
             printf '%s\n' "${MINISIGN_PASSWORD}" | minisign \
               -Sm "${file}" \
               -s "${secret_key}" \
               -x "${file}.minisig" \
-              -t "${filename}"
+              -t "$(basename "${file}")"
           done
           rm -f "${secret_key}"
 
@@ -307,36 +282,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
-          SOURCE_COMMIT: ${{ needs.build.outputs.source-commit }}
-          EVIDENCE_URL: ${{ needs.build.outputs.evidence-url }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source-commit }}
+          EVIDENCE_URL: ${{ needs.verify.outputs.evidence-url }}
         run: |
           set -euo pipefail
+          evidence="${ARTIFACTS}/evidence.json"
           notes="${RUNNER_TEMP}/release-notes.md"
-          elf_sha="$(sha256sum "${ARTIFACTS}/${ELF_NAME}" | cut -d ' ' -f 1)"
           vk_sha="$(sha256sum "${ARTIFACTS}/${VK_NAME}" | cut -d ' ' -f 1)"
-          manifest="${ARTIFACTS}/corpus-manifest.json"
-          network="$(jq -r '.network // "unspecified"' "${manifest}")"
-          fixture_release="$(jq -r '.fixture_release // "unspecified"' "${manifest}")"
-          corpus_ref="$(jq -r '.workload.eest_validation_ref // "unspecified"' "${manifest}")"
-          cat > "${notes}" <<EOF
-          ZisK guest pre-release for integration testing.
-
-          - Spec: ${network}
-          - Fixture release: ${fixture_release}
-          - Corpus: ${corpus_ref}
-          - Stateless schema: ${STATELESS_SCHEMA}
-          - Source commit: ${SOURCE_COMMIT}
-          - Zig: ${ZIG_VERSION}
-          - ZisK: v${ZISK_VERSION} (${ZISK_COMMIT})
-          - ERE keygen image: ${ERE_IMAGE}
-          - ELF SHA-256: ${elf_sha}
-          - VK SHA-256: ${vk_sha}
-
-          The ELF hash-matches the artifact executed by the linked benchmark
-          run, so the attached corpus results apply to these exact bytes.
-          Publishing this draft marks it as a pre-release; final conformance
-          claims remain separate maintainer decisions.
-          EOF
+          jq -r \
+            --arg tag "${TAG}" \
+            --arg source "${SOURCE_COMMIT}" \
+            --arg run "${EVIDENCE_URL}" \
+            --arg image "${ERE_IMAGE}" \
+            --arg vk_sha "${vk_sha}" \
+            '"ZisK guest pre-release for integration testing.\n\n" +
+             "- Spec: " + .corpus.network + "\n" +
+             "- Fixture release: " + .corpus.fixture_release + "\n" +
+             "- Corpus: " + .corpus.id + "\n" +
+             "- Stateless schema: " + .stateless_schema + "\n" +
+             "- Source commit: " + $source + "\n" +
+             "- Zig: " + .guest.zig_version + "\n" +
+             "- ZisK: v" + .guest.backend_version + " (" + .guest.backend_commit + ")\n" +
+             "- ZisK Rust toolchain: " + .guest.backend_toolchain + "\n" +
+             "- ERE keygen image: " + $image + "\n" +
+             "- Benchmark evidence: " + $run + "\n" +
+             "- ELF SHA-256: " + .guest.elf_sha256 + "\n" +
+             "- VK SHA-256: " + $vk_sha + "\n\n" +
+             "The attached ELF is the exact artifact executed by the strict benchmark run."' \
+            "${evidence}" > "${notes}"
           gh release create "${TAG}" \
             -R "${GITHUB_REPOSITORY}" \
             --target "${SOURCE_COMMIT}" \
