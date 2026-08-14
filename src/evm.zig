@@ -92,11 +92,6 @@ pub const BlockResult = vm.BlockResult;
 pub const AfterTransactionContext = vm.AfterTransactionContext;
 pub const FinalizeBlockContext = vm.FinalizeBlockContext;
 
-/// Number of 32-byte EVM words spanning `size` bytes (rounded up).
-pub fn calcWordSize(comptime T: type, size: T) T {
-    return @divFloor(size + 31, 32);
-}
-
 test {
     std.testing.refAllDecls(@This());
     _ = @import("./test.zig");

@@ -8,7 +8,6 @@ const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const eip7702 = @import("./eip7702.zig");
 const FrameStore = @import("./frame_store.zig");
-const execution_values = @import("../execution.zig");
 const ExecutionGas = evmz.execution.ExecutionGas;
 const ExecutionContext = evmz.execution.ExecutionContext;
 const ExecutionResult = evmz.execution.ExecutionResult;
@@ -1533,8 +1532,8 @@ pub fn bind(comptime Executor: type) type {
             self: *Executor,
             gas_left: i64,
             gas_reservoir: i64,
-            status: execution_values.Status,
-            cause: execution_values.TerminalCause,
+            status: evmz.execution.Status,
+            cause: evmz.execution.TerminalCause,
         ) Host.Result {
             self.clearLastOutput();
             return .{
@@ -1549,14 +1548,14 @@ pub fn bind(comptime Executor: type) type {
         fn createFailureFromResult(
             self: *Executor,
             result: ExecutionResult,
-            status: execution_values.Status,
-            cause: execution_values.TerminalCause,
+            status: evmz.execution.Status,
+            cause: evmz.execution.TerminalCause,
         ) Host.Result {
             var failed = result;
             failed.outcome = .{ .status = status, .cause = cause };
             failed.gas_left = 0;
             failed.gas_refund = 0;
-            execution_values.finalizeStateGas(&failed);
+            evmz.execution.finalizeStateGas(&failed);
             self.clearLastOutput();
             failed.output_data = &.{};
             return Host.Result.fromExecution(failed, true);
