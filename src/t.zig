@@ -432,7 +432,6 @@ pub const MockHost = struct {
             .setTransientStorage = setTransientStorage,
         } };
     }
-
 };
 
 pub fn defaultMessage() Host.Message {

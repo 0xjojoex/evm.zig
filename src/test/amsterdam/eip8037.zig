@@ -8,6 +8,7 @@ const Interpreter = evmz.interpreter;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
 const eip8037 = evmz.eth.eip8037;
+const eip8038 = evmz.eth.eip8038;
 
 test "Amsterdam authorization policy charges the first authority write" {
     const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
@@ -19,7 +20,7 @@ test "Amsterdam authorization policy charges the first authority write" {
     });
 
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_state_charge);
-    try std.testing.expectEqual(@as(u64, eip8037.account_write_cost), adjustment.account_write_charge);
+    try std.testing.expectEqual(@as(u64, eip8038.account_write_cost), adjustment.account_write_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.delegation_state_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.regular_refund);
 }
@@ -34,7 +35,7 @@ test "Amsterdam authorization policy charges a newly-created authority leaf" {
     });
 
     try std.testing.expectEqual(@as(u64, eip8037.new_account_state_gas), adjustment.account_state_charge);
-    try std.testing.expectEqual(@as(u64, eip8037.account_write_cost), adjustment.account_write_charge);
+    try std.testing.expectEqual(@as(u64, eip8038.account_write_cost), adjustment.account_write_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.delegation_state_charge);
 }
 
@@ -55,7 +56,7 @@ test "Amsterdam authorization policy charges create then clear only once" {
     }));
 
     try std.testing.expectEqual(@as(u64, eip8037.new_account_state_gas), adjustment.account_state_charge);
-    try std.testing.expectEqual(@as(u64, eip8037.account_write_cost), adjustment.account_write_charge);
+    try std.testing.expectEqual(@as(u64, eip8038.account_write_cost), adjustment.account_write_charge);
     try std.testing.expectEqual(@as(u64, eip8037.auth_base_state_gas), adjustment.delegation_state_charge);
 }
 

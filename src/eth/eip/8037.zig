@@ -5,7 +5,6 @@
 //! gating stays in exact spec assembly.
 
 const delegation = @import("../../code/eip7702.zig");
-const gas = @import("../gas.zig");
 
 // New parameters: state byte pricing and sizing.
 /// CPSB in the EIP: gas charged for each net-new state byte.
@@ -19,26 +18,6 @@ pub const state_bytes_per_storage_set: u64 = 64;
 
 /// Maximum SSTORE count assumed for an EIP-8037 Amsterdam system call.
 pub const system_max_sstores_per_call: u64 = 16;
-
-// Regular-gas companion costs for operations that also create state. The EIP
-// notes ACCOUNT_WRITE, CREATE_ACCESS, and COLD_ACCOUNT_ACCESS come from EIP-8038.
-/// Regular gas for writing an account leaf while handling delegation or account updates.
-pub const account_write_cost: u64 = 8_000;
-
-/// Regular gas for writing a storage slot; state growth is charged separately as state-gas.
-pub const storage_write_cost: u64 = 10_000;
-
-/// Regular-gas refund when a storage write clears a slot under the Amsterdam gas table.
-pub const storage_clear_refund: u64 = 12_480;
-
-/// Cold storage access cost used by Amsterdam SLOAD/SSTORE accounting.
-pub const cold_storage_access_cost: u64 = 3_000;
-
-/// Cold account access cost used by EIP-8037 through the Amsterdam/EIP-8038 gas table.
-pub const cold_account_access_cost: u64 = 3_000;
-
-/// Regular CREATE/CREATE2 access cost; new-account bytes are charged as state-gas.
-pub const create_access_cost: u64 = 11_000;
 
 /// Amsterdam transaction base cost before calldata, access list, authorization, or create costs.
 pub const tx_base_cost: u64 = 12_000;
@@ -67,15 +46,6 @@ pub const storage_set_state_gas: u64 = state_bytes_per_storage_set * cost_per_st
 
 /// Worst-case state-gas for one EIP-7702 authorization.
 pub const authorization_state_gas: u64 = new_account_state_gas + auth_base_state_gas;
-
-/// Amsterdam access-list address cost; access-list byte data is accounted separately.
-pub const access_list_address_gas: u64 = 3_000;
-
-/// Amsterdam access-list storage-key cost; access-list byte data is accounted separately.
-pub const access_list_storage_key_gas: u64 = 3_000;
-
-/// Amsterdam CALL value cost: regular account-write cost plus the legacy stipend.
-pub const call_value_cost: u64 = account_write_cost + gas.call_stipend;
 
 // [EIP-7825](7825.zig)'s transaction gas cap bounds regular gas from here on;
 // EIP-8037 lets state-gas use the reservoir above that cap, still bounded by
