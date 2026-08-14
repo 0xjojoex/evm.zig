@@ -517,6 +517,25 @@ pub const Builder = struct {
         if (self.nodes.items.len >= self.limits.linked_nodes) return error.ResourceLimitExceeded;
         if (self.nodes.items.len >= @intFromEnum(Link.@"opaque")) return error.ResourceLimitExceeded;
         const id: NodeId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
+        if (self.nodes.items.len == self.nodes.capacity or self.work.items.len == self.work.capacity) {
+            return self.appendNodeGrowing(id, encoded);
+        }
+        self.nodes.appendAssumeCapacity(.{
+            .encoded = encoded,
+            .payload = undefined,
+            .path_offset = undefined,
+            .path_byte_len = undefined,
+            .path_nibble_len = undefined,
+            .value_offset = undefined,
+            .value_len = undefined,
+            .path_nibble_offset = undefined,
+            .kind = undefined,
+        });
+        self.work.appendAssumeCapacity(id);
+        return id;
+    }
+
+    noinline fn appendNodeGrowing(self: *Builder, id: NodeId, encoded: []const u8) BuildError!NodeId {
         try self.nodes.append(self.allocator, .{
             .encoded = encoded,
             .payload = undefined,

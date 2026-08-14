@@ -1570,20 +1570,29 @@ pub fn observeAccount(
 ) Allocator.Error!void {
     self.assertTransaction();
     const row = &self.accounts[@intFromEnum(id)];
-    if (row.observation_generation != self.transaction_generation) {
-        try self.observed_accounts.ensureUnusedCapacity(self.allocator, 1);
-        row.observation_generation = self.transaction_generation;
-        row.observation_index = index32(self.observed_accounts.items.len);
-        self.observed_accounts.appendAssumeCapacity(.{
-            .account = id,
-            .original = row.current,
-            .original_storage_generation = row.storage_generation,
-            .effect_current = row.current,
-            .observation = observation,
-        });
+    if (row.observation_generation == self.transaction_generation) {
+        self.observed_accounts.items[row.observation_index].observation.merge(observation);
         return;
     }
-    self.observed_accounts.items[row.observation_index].observation.merge(observation);
+    return self.observeAccountFirst(id, row, observation);
+}
+
+noinline fn observeAccountFirst(
+    self: *StatelessBlockState,
+    id: AccountId,
+    row: *AccountRow,
+    observation: AccountObservation,
+) Allocator.Error!void {
+    try self.observed_accounts.ensureUnusedCapacity(self.allocator, 1);
+    row.observation_generation = self.transaction_generation;
+    row.observation_index = index32(self.observed_accounts.items.len);
+    self.observed_accounts.appendAssumeCapacity(.{
+        .account = id,
+        .original = row.current,
+        .original_storage_generation = row.storage_generation,
+        .effect_current = row.current,
+        .observation = observation,
+    });
 }
 
 pub fn observeStorage(
@@ -1593,24 +1602,33 @@ pub fn observeStorage(
 ) Allocator.Error!void {
     self.assertTransaction();
     const row = &self.storage[@intFromEnum(id)];
-    if (row.observation_generation != self.transaction_generation) {
-        try self.observed_storage.ensureUnusedCapacity(self.allocator, 1);
-        const original = if (row.original_generation == self.transaction_generation)
-            row.transaction_original
-        else
-            self.effectiveStorage(id);
-        row.observation_generation = self.transaction_generation;
-        row.observation_index = index32(self.observed_storage.items.len);
-        row.transaction_undo_index = std.math.maxInt(u32);
-        self.observed_storage.appendAssumeCapacity(.{
-            .storage = id,
-            .original = original,
-            .effect_current = self.effectiveStorage(id),
-            .observation = observation,
-        });
+    if (row.observation_generation == self.transaction_generation) {
+        self.observed_storage.items[row.observation_index].observation.merge(observation);
         return;
     }
-    self.observed_storage.items[row.observation_index].observation.merge(observation);
+    return self.observeStorageFirst(id, row, observation);
+}
+
+noinline fn observeStorageFirst(
+    self: *StatelessBlockState,
+    id: StorageId,
+    row: *StorageRow,
+    observation: StorageObservation,
+) Allocator.Error!void {
+    try self.observed_storage.ensureUnusedCapacity(self.allocator, 1);
+    const original = if (row.original_generation == self.transaction_generation)
+        row.transaction_original
+    else
+        self.effectiveStorage(id);
+    row.observation_generation = self.transaction_generation;
+    row.observation_index = index32(self.observed_storage.items.len);
+    row.transaction_undo_index = std.math.maxInt(u32);
+    self.observed_storage.appendAssumeCapacity(.{
+        .storage = id,
+        .original = original,
+        .effect_current = self.effectiveStorage(id),
+        .observation = observation,
+    });
 }
 
 pub fn allocationBytes(self: *const StatelessBlockState) usize {

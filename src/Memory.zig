@@ -122,10 +122,11 @@ pub fn len(self: *const Memory) usize {
 noinline fn resize(self: *Memory, size: usize) !void {
     assert(size > self.len());
     const additional = size - self.len();
-    if (self.bytes.capacity >= size) {
-        self.bytes.appendNTimesAssumeCapacity(0, additional);
-        return;
-    }
+    if (self.bytes.capacity < size) return self.grow(additional);
+    self.bytes.appendNTimesAssumeCapacity(0, additional);
+}
+
+noinline fn grow(self: *Memory, additional: usize) !void {
     try self.bytes.appendNTimes(self.allocator, 0, additional);
 }
 
