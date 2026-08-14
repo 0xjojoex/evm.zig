@@ -87,8 +87,6 @@ const ScopeRoot = struct {
     }
 };
 
-pub const code_deposit_gas: i64 = 200;
-
 /// Construct the public initializer for one state domain. Only domains with a
 /// semantic empty baseline may omit `state`; authenticated dense domains keep
 /// the field structurally required.

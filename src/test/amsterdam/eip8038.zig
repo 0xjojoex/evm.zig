@@ -34,7 +34,7 @@ test "Amsterdam nonce-overflow CREATE does not warm aborted address" {
     });
 
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
-    const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas }, 0);
+    const result = try executor.executeCallTransaction(sender, contract, &.{}, .{ .regular_left = 100_000, .reservoir = evmz.eth.eip8037.new_account_state_gas }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expect(!executor.state.isAccountWarm(create_address));

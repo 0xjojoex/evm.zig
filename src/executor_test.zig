@@ -2038,7 +2038,7 @@ test "Amsterdam value transaction emits transfer log" {
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
         .regular_left = 50_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas,
     }, 7);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -2084,7 +2084,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
         .recipient = contract,
     } }, .{
         .regular_left = 90_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas,
     }));
 
     try std.testing.expectEqual(Interpreter.Status.revert, result.status());
@@ -2111,7 +2111,7 @@ test "Amsterdam CREATE endowment emits transfer log" {
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 90_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas,
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -2136,7 +2136,7 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 90_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas,
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -2193,7 +2193,7 @@ test "Amsterdam raises create runtime code size limit" {
         .init_code = &oversized_osaka,
     } }, .{
         .regular_left = 20_000_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas + (default_max_code_size + 1) * evmz.eth.transaction.amsterdam_cost_per_state_byte,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas + (default_max_code_size + 1) * evmz.eth.eip8037.cost_per_state_byte,
     }));
     try std.testing.expectEqual(Interpreter.Status.success, amsterdam_result.status());
     try std.testing.expectEqual(@as(usize, default_max_code_size + 1), (try amsterdam.getCode(evmz.address.create(sender, 0))).len);
@@ -2607,7 +2607,7 @@ fn createObservesTarget(creator_balance: u256) !bool {
         .{ .call = .{ .sender = sender, .recipient = contract } },
         .{
             .regular_left = 1_000_000,
-            .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+            .reservoir = evmz.eth.eip8037.new_account_state_gas,
         },
         &observer,
     ));
@@ -2717,7 +2717,7 @@ test "Amsterdam value call at max depth refills new-account state gas" {
         .depth = Host.max_call_depth,
         .kind = .call,
         .gas = 100_000,
-        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .gas_reservoir = evmz.eth.eip8037.new_account_state_gas,
         .recipient = contract,
         .sender = caller,
         .input_data = &.{},
@@ -2726,7 +2726,7 @@ test "Amsterdam value call at max depth refills new-account state gas" {
     }));
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, evmz.eth.eip8037.new_account_state_gas), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expect(!try executor.state.accountExists(recipient));
 }
@@ -2749,7 +2749,7 @@ test "Amsterdam create at max depth refills new-account state gas" {
         .depth = Host.max_call_depth,
         .kind = .call,
         .gas = 100_000,
-        .gas_reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .gas_reservoir = evmz.eth.eip8037.new_account_state_gas,
         .recipient = contract,
         .sender = caller,
         .input_data = &.{},
@@ -2758,7 +2758,7 @@ test "Amsterdam create at max depth refills new-account state gas" {
     }));
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, evmz.eth.eip8037.new_account_state_gas), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
     try std.testing.expectEqual(@as(u64, 0), executor.getAccount(contract).?.nonce);
 }

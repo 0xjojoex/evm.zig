@@ -356,8 +356,8 @@ test "Amsterdam gas plan executes only capped regular gas" {
     const Amsterdam = runtime(eth.amsterdam);
     const plan = Amsterdam.gasPlan(&.{}, 120_000_000, .{});
     try std.testing.expectEqual(@as(u64, 15_000), plan.intrinsic_gas);
-    try std.testing.expectEqual(@as(u64, eth.transaction.max_transaction_gas_limit - 15_000), plan.execution.?.regular_left);
-    try std.testing.expectEqual(@as(u64, 120_000_000 - eth.transaction.max_transaction_gas_limit), plan.execution.?.reservoir);
+    try std.testing.expectEqual(@as(u64, eth.eip7825.max_transaction_gas_limit - 15_000), plan.execution.?.regular_left);
+    try std.testing.expectEqual(@as(u64, 120_000_000 - eth.eip7825.max_transaction_gas_limit), plan.execution.?.reservoir);
 }
 
 test "Amsterdam calldata floor includes only decomposed regular transaction primitives" {

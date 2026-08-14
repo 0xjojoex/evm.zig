@@ -5,6 +5,7 @@
 //! gating stays in exact spec assembly.
 
 const delegation = @import("../../code/eip7702.zig");
+const gas = @import("../gas.zig");
 
 // New parameters: state byte pricing and sizing.
 /// CPSB in the EIP: gas charged for each net-new state byte.
@@ -73,15 +74,11 @@ pub const access_list_address_gas: u64 = 3_000;
 /// Amsterdam access-list storage-key cost; access-list byte data is accounted separately.
 pub const access_list_storage_key_gas: u64 = 3_000;
 
-pub const call_stipend: u64 = 2_300;
-
 /// Amsterdam CALL value cost: regular account-write cost plus the legacy stipend.
-pub const call_value_cost: u64 = account_write_cost + call_stipend;
+pub const call_value_cost: u64 = account_write_cost + gas.call_stipend;
 
-// EIP-7825's transaction gas cap bounds regular gas; EIP-8037 lets state-gas
-// use the reservoir above this cap while still bounded by tx.gas.
+// [EIP-7825](7825.zig)'s transaction gas cap bounds regular gas from here on;
+// EIP-8037 lets state-gas use the reservoir above that cap, still bounded by
+// tx.gas. The cap's value is unchanged, so it stays owned by 7825.
 /// Amsterdam raises the initcode size bound so larger deployments can use the state-gas reservoir.
 pub const max_initcode_size: usize = 131_072;
-
-/// TX_MAX_GAS_LIMIT: cap for regular-gas contribution, not total tx.gas after EIP-8037.
-pub const max_transaction_gas_limit: u64 = 16_777_216;

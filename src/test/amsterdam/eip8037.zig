@@ -7,7 +7,7 @@ const Executor = evmz.Evm.Executor;
 const Interpreter = evmz.interpreter;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
-const eth_tx = evmz.eth.transaction;
+const eip8037 = evmz.eth.eip8037;
 
 test "Amsterdam authorization policy charges the first authority write" {
     const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
@@ -19,7 +19,7 @@ test "Amsterdam authorization policy charges the first authority write" {
     });
 
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_state_charge);
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), adjustment.account_write_charge);
+    try std.testing.expectEqual(@as(u64, eip8037.account_write_cost), adjustment.account_write_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.delegation_state_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.regular_refund);
 }
@@ -33,8 +33,8 @@ test "Amsterdam authorization policy charges a newly-created authority leaf" {
         .delegation_set_before = false,
     });
 
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_new_account_state_gas), adjustment.account_state_charge);
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), adjustment.account_write_charge);
+    try std.testing.expectEqual(@as(u64, eip8037.new_account_state_gas), adjustment.account_state_charge);
+    try std.testing.expectEqual(@as(u64, eip8037.account_write_cost), adjustment.account_write_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.delegation_state_charge);
 }
 
@@ -54,9 +54,9 @@ test "Amsterdam authorization policy charges create then clear only once" {
         .delegation_set_before = true,
     }));
 
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_new_account_state_gas), adjustment.account_state_charge);
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_account_write_cost), adjustment.account_write_charge);
-    try std.testing.expectEqual(@as(u64, eth_tx.amsterdam_auth_base_state_gas), adjustment.delegation_state_charge);
+    try std.testing.expectEqual(@as(u64, eip8037.new_account_state_gas), adjustment.account_state_charge);
+    try std.testing.expectEqual(@as(u64, eip8037.account_write_cost), adjustment.account_write_charge);
+    try std.testing.expectEqual(@as(u64, eip8037.auth_base_state_gas), adjustment.delegation_state_charge);
 }
 
 test "Amsterdam invalid authorization policy has no runtime charge" {
@@ -135,7 +135,7 @@ test "Amsterdam repeated authorizations share authority history" {
     const result = executed.result();
     try std.testing.expectEqual(evmz.TxStatus.success, result.status);
     try std.testing.expectEqual(
-        @as(u64, eth_tx.amsterdam_new_account_state_gas + eth_tx.amsterdam_auth_base_state_gas),
+        @as(u64, eip8037.new_account_state_gas + eip8037.auth_base_state_gas),
         result.gas.block.state,
     );
     try std.testing.expectEqual(@as(u64, 2), executor.getAccount(authority).?.nonce);
@@ -260,7 +260,7 @@ test "Amsterdam CREATE to pre-existing account leaves state reservoir available"
     try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 50_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas,
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -285,7 +285,7 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     try observed.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
-        .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
+        .regular_left = eip8037.new_account_state_gas - 1,
     }, 0);
     try observed.retainStateTransition();
 
@@ -313,7 +313,7 @@ test "Amsterdam root CREATE records and charges a storage-only target before col
     } };
     const context = (evmz.Env{ .gas_limit = 1_000_000 }).executionContext(.{ .origin = sender });
     const request = transaction.executionRequest(context, message, .{
-        .regular_left = eth_tx.amsterdam_new_account_state_gas - 1,
+        .regular_left = eip8037.new_account_state_gas - 1,
     });
     const observed = executor.observe(&observations);
     try observed.beginMessageScope(request, .{});
@@ -343,12 +343,12 @@ test "Amsterdam value CALL to new account keeps debited state reservoir" {
     try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 100_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas,
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
-    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, evmz.eth.eip8037.new_account_state_gas), result.state_gas_spent);
     try std.testing.expectEqual(@as(u256, 1), executor.getAccount(recipient).?.balance);
 }
 
@@ -361,7 +361,7 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
         .CALLDATASIZE, .PUSH0, .PUSH0, .CREATE,
         .STOP,
     });
-    const input = try std.testing.allocator.alloc(u8, eth_tx.amsterdam_max_initcode_size);
+    const input = try std.testing.allocator.alloc(u8, eip8037.max_initcode_size);
     defer std.testing.allocator.free(input);
     @memset(input, 0);
 
@@ -374,7 +374,7 @@ test "Amsterdam CREATE opcode accepts max initcode size" {
     try executor.beginTransaction(testExecutionContext(sender, 5_000_000), sender, contract);
     const result = try executor.executeCallTransaction(sender, contract, input, .{
         .regular_left = 5_000_000,
-        .reservoir = eth_tx.amsterdam_new_account_state_gas,
+        .reservoir = eip8037.new_account_state_gas,
     }, 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());

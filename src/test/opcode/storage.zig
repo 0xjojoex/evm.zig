@@ -1,9 +1,10 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
 const Interpreter = @import("../../Interpreter.zig");
-const instruction = @import("../../instruction.zig");
 const AccessStatus = evmz.execution.AccessStatus;
 const StorageStatus = evmz.execution.StorageStatus;
+
+const cold_sload_cost = evmz.eth.eip2929.cold_sload_cost;
 
 test "transient storage opcodes are only enabled from Cancun" {
     try evmz.t.expectBytecodeStatusByRevision(.{ .PUSH1, 0x00, .TLOAD }, .shanghai, .invalid);
@@ -118,7 +119,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
 
     const result = try interpreter.execute();
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - instruction.cold_sload_cost - 20_000), result.gas_left);
+    try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - cold_sload_cost - 20_000), result.gas_left);
     try std.testing.expectEqual(@as(u64, 1), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
 }
@@ -128,7 +129,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    msg.gas_reservoir = @intCast(evmz.eth.transaction.amsterdam_storage_set_state_gas);
+    msg.gas_reservoir = @intCast(evmz.eth.eip8037.storage_set_state_gas);
     const code = &.{ 0x60, 0x2a, 0x60, 0x00, 0x55 };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
@@ -147,7 +148,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - 3_000 - 10_000), result.gas_left);
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
-    try std.testing.expectEqual(@as(i64, @intCast(evmz.eth.transaction.amsterdam_storage_set_state_gas)), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, @intCast(evmz.eth.eip8037.storage_set_state_gas)), result.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
     try std.testing.expectEqual(@as(u64, 1), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
@@ -212,7 +213,7 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    msg.gas = 3 + instruction.cold_sload_cost - 1;
+    msg.gas = 3 + cold_sload_cost - 1;
     const code = &.{ 0x60, 0x00, 0x54 };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);

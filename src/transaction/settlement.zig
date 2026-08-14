@@ -296,7 +296,8 @@ test "effective priority fee follows legacy and dynamic fee policy" {
 
 test "settlement cost vectors follow fork and exact-spec policies" {
     const eth = @import("../eth.zig");
-    const eth_tx = @import("../eth/transaction.zig");
+    const eth_tx_eip7825 = @import("../eth/eip/7825.zig");
+    const eth_tx_eip8037 = @import("../eth/eip/8037.zig");
     const refund_plan = DefaultPlan{
         .gas_limit = 100,
         .intrinsic_gas = 20,
@@ -426,20 +427,20 @@ test "settlement cost vectors follow fork and exact-spec policies" {
             .result = ExecutionGasResult{
                 .gas_left = 0,
                 .gas_refund = 0,
-                .gas_reservoir = 120_000_000 - eth_tx.max_transaction_gas_limit,
+                .gas_reservoir = 120_000_000 - eth_tx_eip7825.max_transaction_gas_limit,
                 .state_gas_spent = 0,
             },
             .expected = DefaultCosts{
                 .gas = .{
-                    .used = eth_tx.max_transaction_gas_limit,
-                    .refunded = 120_000_000 - eth_tx.max_transaction_gas_limit,
+                    .used = eth_tx_eip7825.max_transaction_gas_limit,
+                    .refunded = 120_000_000 - eth_tx_eip7825.max_transaction_gas_limit,
                     .block = .{
-                        .total = eth_tx.max_transaction_gas_limit,
-                        .regular = eth_tx.max_transaction_gas_limit,
+                        .total = eth_tx_eip7825.max_transaction_gas_limit,
+                        .regular = eth_tx_eip7825.max_transaction_gas_limit,
                     },
                 },
-                .payer_refund = (120_000_000 - eth_tx.max_transaction_gas_limit) * 10,
-                .fee_payment = eth_tx.max_transaction_gas_limit * 3,
+                .payer_refund = (120_000_000 - eth_tx_eip7825.max_transaction_gas_limit) * 10,
+                .fee_payment = eth_tx_eip7825.max_transaction_gas_limit * 3,
             },
         },
         .{
@@ -455,7 +456,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
             .result = ExecutionGasResult{
                 .gas_left = 0,
                 .gas_refund = 0,
-                .gas_reservoir = eth_tx.amsterdam_new_account_state_gas,
+                .gas_reservoir = eth_tx_eip8037.new_account_state_gas,
                 .state_gas_spent = 0,
             },
             .expected = DefaultCosts{
