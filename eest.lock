@@ -30,14 +30,14 @@ zkevm_dest=.eest/fixtures/tests-zkevm-v0.8.0
 
 # Consensus-spec SSZ conformance fixtures. The fetch script extracts generic
 # fixtures plus preset-specific static objects from the three release archives.
-consensus_version=v1.7.0-alpha.12
+consensus_version=v1.7.0-alpha.13
 consensus_general_artifact=general.tar.gz
-consensus_general_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.12/general.tar.gz
-consensus_general_sha256=329f3cf58927df2614ecafbce78eb3c5258a13e8731d2f410bb31d8e4a5b9eaf
+consensus_general_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/general.tar.gz
+consensus_general_sha256=b98e5328037a84993254085700b8d9eae304beca81d0944fe05274ca3523ed8b
 consensus_mainnet_artifact=mainnet.tar.gz
-consensus_mainnet_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.12/mainnet.tar.gz
-consensus_mainnet_sha256=f0057d2acdea2730ec68cac2c796aad89174e10e9b38ac68ad7d8aa1c0cbd85c
+consensus_mainnet_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/mainnet.tar.gz
+consensus_mainnet_sha256=bf69706c9cc2c423e3bbaeb5ae7eb53a9e5adfdef84e3731296bb646fe2e8149
 consensus_minimal_artifact=minimal.tar.gz
-consensus_minimal_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.12/minimal.tar.gz
-consensus_minimal_sha256=7d79e0e96fdd666aa70cb741372935c5d30d4ad607ae399885212e9714a58b07
-consensus_dest=.eest/consensus/v1.7.0-alpha.12
+consensus_minimal_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/minimal.tar.gz
+consensus_minimal_sha256=94bafd73514385645404007e6ec8b47aed13ca443b8e75621f40fce5ce1f47a2
+consensus_dest=.eest/consensus/v1.7.0-alpha.13

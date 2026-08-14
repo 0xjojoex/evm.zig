@@ -1,4 +1,4 @@
-//! Generated from consensus-specs v1.7.0-alpha.12 resolved pyspec.
+//! Generated from consensus-specs v1.7.0-alpha.13 resolved pyspec.
 //! Unique named schema shapes first required at bellatrix.
 //! Regenerate with scripts/generate-consensus-ssz-schemas.py.
 

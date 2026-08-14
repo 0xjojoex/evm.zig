@@ -1,4 +1,4 @@
-//! Generated from consensus-specs v1.7.0-alpha.12 resolved pyspec.
+//! Generated from consensus-specs v1.7.0-alpha.13 resolved pyspec.
 //! Maps preset/fork fixture names to deduplicated schema codecs.
 //! Regenerate with scripts/generate-consensus-ssz-schemas.py.
 

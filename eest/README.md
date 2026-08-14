@@ -60,9 +60,10 @@ lanes and fails if no cases run or any case is skipped:
   canonical static fixture must decode, re-encode byte-for-byte, and match
   `roots.yaml`.
 
-The pinned corpus currently contains 5,145 General cases, 2,275 Mainnet cases,
-and 55,965 Minimal cases. Preset/fork schemas are checked-in Zig declarations
-under `src/ssz_static/`; fixture YAML is not interpreted as a runtime schema.
+The pinned `v1.7.0-alpha.13` corpus contains 5,145 General cases, 2,275 Mainnet
+cases, and 55,965 Minimal cases. Preset/fork schemas are checked-in Zig
+declarations under `src/ssz_static/`; fixture YAML is not interpreted as a
+runtime schema.
 The generator fingerprints named schemas recursively, including collection
 limits and progressive active fields, and emits each historical shape once in
 the first fork that requires it. Later preset/fork handlers only reference that
@@ -75,14 +76,14 @@ checkout. With `EVMZ` set to this repository and `FIXTURES` set to the extracted
 `consensus_dest` directory from `eest.lock`:
 
 ```sh
-git clone --depth 1 --branch v1.7.0-alpha.12 \
+git clone --depth 1 --branch v1.7.0-alpha.13 \
   https://github.com/ethereum/consensus-specs.git /tmp/evmz-consensus-specs
 (cd /tmp/evmz-consensus-specs && make _pyspec)
 (cd /tmp/evmz-consensus-specs && uv run python \
   "$EVMZ/eest/scripts/generate-consensus-ssz-schemas.py" \
   --pyspec-root tests/core/pyspec \
   --fixtures-root "$FIXTURES" \
-  --version v1.7.0-alpha.12 \
+  --version v1.7.0-alpha.13 \
   --output "$EVMZ/eest/src/ssz_static")
 ```
 

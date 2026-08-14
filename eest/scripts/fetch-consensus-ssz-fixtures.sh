@@ -59,9 +59,9 @@ shared_root="${EVMZ_EEST_ROOT:-${default_worktree}/.eest}"
 cache="${CONSENSUS_CACHE:-${shared_root}/cache}"
 dest="${CONSENSUS_DEST:-${shared_root}/${relative_dest#.eest/}}"
 mkdir -p "${cache}" "${dest}" "${dest}/ssz_generic"
-tar_wildcard_args=()
+tar_supports_wildcards=false
 if tar --help 2>&1 | grep -q -- '--wildcards'; then
-  tar_wildcard_args+=(--wildcards)
+  tar_supports_wildcards=true
 fi
 
 fetch_archive() {
@@ -120,11 +120,18 @@ for preset in mainnet minimal; do
   sha256="${!sha256_variable:-$(lock_value "consensus_${preset}_sha256")}"
   archive="$(fetch_archive "${artifact}" "${url}" "${sha256}")"
   printf 'Extracting %s static SSZ fixtures to %s\n' "${preset}" "${dest}/${preset}"
-  tar -xzf "${archive}" \
-    -C "${dest}" \
-    --strip-components=1 \
-    "${tar_wildcard_args[@]}" \
-    "tests/${preset}/*/ssz_static/*"
+  if [[ "${tar_supports_wildcards}" == true ]]; then
+    tar -xzf "${archive}" \
+      -C "${dest}" \
+      --strip-components=1 \
+      --wildcards \
+      "tests/${preset}/*/ssz_static/*"
+  else
+    tar -xzf "${archive}" \
+      -C "${dest}" \
+      --strip-components=1 \
+      "tests/${preset}/*/ssz_static/*"
+  fi
 done
 
 printf 'Done. Run:\n'
