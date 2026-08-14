@@ -226,8 +226,10 @@ pub fn ImplType(
                         executable.scope.authorizationCount() != 0;
                     result = if (has_authorization_phase)
                         try executeAuthorizedPayload(context, executable, gas)
-                    else
-                        try executePayload(context, executable, gas);
+                    else blk: {
+                        try warmDelegatedTransactionTarget(context, executable.message);
+                        break :blk try executePayload(context, executable, gas);
+                    };
                 }
             }
 
