@@ -97,6 +97,14 @@ comptime {
     std.debug.assert(@alignOf(Occurrence) == 8);
 }
 
+const key_nibbles = @sizeOf(hash.Root) * 2;
+const max_path_nodes = key_nibbles + 1;
+
+comptime {
+    // Fixed 32-byte keys admit at most 64 ancestors plus one leaf.
+    std.debug.assert(max_path_nodes <= std.math.maxInt(u7));
+}
+
 const DeleteFrame = union(enum) {
     extension: OccurrenceId,
     branch: struct {
@@ -459,8 +467,8 @@ fn Context(comptime KeccakContext: type) type {
         fn delete(self: *Self, root: OccurrenceId, key: nibble.Path) AllocUpdateError!void {
             var current = root;
             var remaining = key;
-            var frames: std.ArrayList(DeleteFrame) = .empty;
-            defer frames.deinit(self.allocator);
+            var frames: [max_path_nodes]DeleteFrame = undefined;
+            var frame_count: u7 = 0;
 
             while (true) {
                 try self.materialize(current);
@@ -479,7 +487,9 @@ fn Context(comptime KeccakContext: type) type {
                     .extension => |extension| {
                         if (extension.path.len >= remaining.len) return error.InvalidNode;
                         if (!remaining.startsWith(extension.path)) return;
-                        try frames.append(self.allocator, .{ .extension = current });
+                        std.debug.assert(frame_count < frames.len);
+                        frames[frame_count] = .{ .extension = current };
+                        frame_count += 1;
                         current = extension.child;
                         remaining = remaining.slice(extension.path.len, remaining.len);
                     },
@@ -487,29 +497,34 @@ fn Context(comptime KeccakContext: type) type {
                         if (remaining.len == 0) return error.InvalidNode;
                         const child_index = remaining.nibbleAt(0);
                         const child = (try self.childOccurrence(current, child_index)) orelse return;
-                        try frames.append(self.allocator, .{ .branch = .{
+                        std.debug.assert(frame_count < frames.len);
+                        frames[frame_count] = .{ .branch = .{
                             .node = current,
                             .child_index = child_index,
-                        } });
+                        } };
+                        frame_count += 1;
                         current = child;
                         remaining = remaining.slice(1, remaining.len);
                     },
                 }
             }
 
-            while (frames.pop()) |frame| switch (frame) {
-                .extension => |parent| try self.compressExtension(parent),
-                .branch => |parent| {
-                    const child = switch (self.occurrence(parent.node).kind.branch.children[parent.child_index]) {
-                        .occurrence => |id| id,
-                        else => unreachable,
-                    };
-                    if (self.occurrence(child).kind == .empty) {
-                        self.occurrence(parent.node).kind.branch.children[parent.child_index] = .empty;
-                    }
-                    try self.compressBranch(parent.node);
-                },
-            };
+            while (frame_count != 0) {
+                frame_count -= 1;
+                switch (frames[frame_count]) {
+                    .extension => |parent| try self.compressExtension(parent),
+                    .branch => |parent| {
+                        const child = switch (self.occurrence(parent.node).kind.branch.children[parent.child_index]) {
+                            .occurrence => |id| id,
+                            else => unreachable,
+                        };
+                        if (self.occurrence(child).kind == .empty) {
+                            self.occurrence(parent.node).kind.branch.children[parent.child_index] = .empty;
+                        }
+                        try self.compressBranch(parent.node);
+                    },
+                }
+            }
         }
 
         fn compressExtension(self: *Self, node: OccurrenceId) AllocUpdateError!void {
