@@ -66,12 +66,13 @@ const Occurrence = struct {
     const Branch = struct {
         source: ?*const catalog.Node,
         children: [16]Child,
-        value: ?[]const u8,
 
+        // Invariant: every update key is exactly 64 nibbles, so no valid key
+        // can terminate at a branch. A variable-width update key would
+        // invalidate this representation.
         pub const empty = Branch{
             .source = null,
             .children = [_]Child{.empty} ** 16,
-            .value = null,
         };
     };
 
@@ -90,9 +91,9 @@ const Occurrence = struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Occurrence.Kind) == 160);
+    std.debug.assert(@sizeOf(Occurrence.Kind) == 144);
     std.debug.assert(@alignOf(Occurrence.Kind) == 8);
-    std.debug.assert(@sizeOf(Occurrence) == 208);
+    std.debug.assert(@sizeOf(Occurrence) == 192);
     std.debug.assert(@alignOf(Occurrence) == 8);
 }
 
@@ -197,6 +198,7 @@ fn Context(comptime KeccakContext: type) type {
                     } };
                 },
                 .branch => {
+                    if (entry.value() != null) return error.NonCanonicalNode;
                     const source = try self.catalog.branchFromNode(entry);
                     var branch = Occurrence.Branch.empty;
                     branch.source = entry;
@@ -204,7 +206,6 @@ fn Context(comptime KeccakContext: type) type {
                         if (link == .empty) continue;
                         branch.children[child_index] = .catalog;
                     }
-                    branch.value = entry.value();
                     self.occurrence(id).kind = .{ .branch = branch };
                 },
             }
@@ -301,10 +302,12 @@ fn Context(comptime KeccakContext: type) type {
                     },
                     .sealed, .source => unreachable,
                     .leaf => |leaf| {
+                        if (leaf.path.len != remaining.len) return error.InvalidNode;
                         try self.insertIntoLeaf(current, leaf, remaining, value);
                         return;
                     },
                     .extension => |extension| {
+                        if (extension.path.len >= remaining.len) return error.InvalidNode;
                         const common = extension.path.commonPrefix(remaining);
                         if (common != extension.path.len) {
                             try self.splitExtension(current, extension, remaining, value, common);
@@ -313,12 +316,8 @@ fn Context(comptime KeccakContext: type) type {
                         current = extension.child;
                         remaining = remaining.slice(common, remaining.len);
                     },
-                    .branch => |branch| {
-                        if (remaining.len == 0) {
-                            self.occurrence(current).kind.branch.value = value;
-                            self.markDirty(current);
-                            return;
-                        }
+                    .branch => {
+                        if (remaining.len == 0) return error.InvalidNode;
                         const child_index = remaining.nibbleAt(0);
                         const child = (try self.childOccurrence(current, child_index)) orelse child: {
                             const created = try self.newOccurrence(
@@ -330,7 +329,6 @@ fn Context(comptime KeccakContext: type) type {
                             self.occurrence(current).kind.branch.children[child_index] = .{ .occurrence = created };
                             break :child created;
                         };
-                        _ = branch;
                         current = child;
                         remaining = remaining.slice(1, remaining.len);
                     },
@@ -385,26 +383,19 @@ fn Context(comptime KeccakContext: type) type {
             new_path: nibble.Path,
             new_value: []const u8,
         ) AllocUpdateError!void {
-            if (old_path.len == 0) {
-                self.occurrence(branch_id).kind.branch.value = old_value;
-            } else {
-                const leaf = try self.newLeaf(
-                    old_path.slice(1, old_path.len),
-                    old_value,
-                    .{ .branch = .{ .node = branch_id, .child_index = old_path.nibbleAt(0) } },
-                );
-                self.occurrence(branch_id).kind.branch.children[old_path.nibbleAt(0)] = .{ .occurrence = leaf };
-            }
-            if (new_path.len == 0) {
-                self.occurrence(branch_id).kind.branch.value = new_value;
-            } else {
-                const leaf = try self.newLeaf(
-                    new_path.slice(1, new_path.len),
-                    new_value,
-                    .{ .branch = .{ .node = branch_id, .child_index = new_path.nibbleAt(0) } },
-                );
-                self.occurrence(branch_id).kind.branch.children[new_path.nibbleAt(0)] = .{ .occurrence = leaf };
-            }
+            if (old_path.len == 0 or new_path.len == 0) return error.InvalidNode;
+            const old_leaf = try self.newLeaf(
+                old_path.slice(1, old_path.len),
+                old_value,
+                .{ .branch = .{ .node = branch_id, .child_index = old_path.nibbleAt(0) } },
+            );
+            self.occurrence(branch_id).kind.branch.children[old_path.nibbleAt(0)] = .{ .occurrence = old_leaf };
+            const new_leaf = try self.newLeaf(
+                new_path.slice(1, new_path.len),
+                new_value,
+                .{ .branch = .{ .node = branch_id, .child_index = new_path.nibbleAt(0) } },
+            );
+            self.occurrence(branch_id).kind.branch.children[new_path.nibbleAt(0)] = .{ .occurrence = new_leaf };
             self.markDirty(branch_id);
         }
 
@@ -448,16 +439,13 @@ fn Context(comptime KeccakContext: type) type {
             self.occurrence(branch_id).kind.branch.children[old_remaining.nibbleAt(0)] = .{ .occurrence = old_child };
 
             const new_remaining = key.slice(common, key.len);
-            if (new_remaining.len == 0) {
-                self.occurrence(branch_id).kind.branch.value = value;
-            } else {
-                const leaf = try self.newLeaf(
-                    new_remaining.slice(1, new_remaining.len),
-                    value,
-                    .{ .branch = .{ .node = branch_id, .child_index = new_remaining.nibbleAt(0) } },
-                );
-                self.occurrence(branch_id).kind.branch.children[new_remaining.nibbleAt(0)] = .{ .occurrence = leaf };
-            }
+            if (new_remaining.len == 0) return error.InvalidNode;
+            const leaf = try self.newLeaf(
+                new_remaining.slice(1, new_remaining.len),
+                value,
+                .{ .branch = .{ .node = branch_id, .child_index = new_remaining.nibbleAt(0) } },
+            );
+            self.occurrence(branch_id).kind.branch.children[new_remaining.nibbleAt(0)] = .{ .occurrence = leaf };
 
             if (common != 0) {
                 self.occurrence(node).kind = .{ .extension = .{
@@ -481,6 +469,7 @@ fn Context(comptime KeccakContext: type) type {
                     .empty => return,
                     .sealed, .source => unreachable,
                     .leaf => |leaf| {
+                        if (leaf.path.len != remaining.len) return error.InvalidNode;
                         if (!leaf.path.eql(remaining)) return;
                         self.occurrence(current).kind = .empty;
                         self.occurrence(current).reference = .empty;
@@ -488,19 +477,14 @@ fn Context(comptime KeccakContext: type) type {
                         break;
                     },
                     .extension => |extension| {
+                        if (extension.path.len >= remaining.len) return error.InvalidNode;
                         if (!remaining.startsWith(extension.path)) return;
                         try frames.append(self.allocator, .{ .extension = current });
                         current = extension.child;
                         remaining = remaining.slice(extension.path.len, remaining.len);
                     },
-                    .branch => |branch| {
-                        if (remaining.len == 0) {
-                            if (branch.value == null) return;
-                            self.occurrence(current).kind.branch.value = null;
-                            self.markDirty(current);
-                            try self.compressBranch(current);
-                            break;
-                        }
+                    .branch => {
+                        if (remaining.len == 0) return error.InvalidNode;
                         const child_index = remaining.nibbleAt(0);
                         const child = (try self.childOccurrence(current, child_index)) orelse return;
                         try frames.append(self.allocator, .{ .branch = .{
@@ -570,13 +554,6 @@ fn Context(comptime KeccakContext: type) type {
                 only_child_index = index;
             }
 
-            if (branch.value) |value| {
-                if (child_count == 0) {
-                    self.occurrence(node).kind = .{ .leaf = .{ .path = .empty, .value = value } };
-                }
-                self.markDirty(node);
-                return;
-            }
             if (child_count == 0) {
                 self.occurrence(node).kind = .empty;
                 self.occurrence(node).reference = .empty;
@@ -729,7 +706,7 @@ fn Context(comptime KeccakContext: type) type {
                 try self.catalog.resolvedBranchReferenceEncodedLengths(source)
             else
                 null;
-            var payload = try encode.bytesEncodedLen(branch.value orelse "");
+            var payload: usize = 1;
             for (&branch.children, 0..) |*child, index| {
                 const child_len = switch (child.*) {
                     .empty => 1,
@@ -760,7 +737,7 @@ fn Context(comptime KeccakContext: type) type {
                 ),
                 .occurrence => |id| try encode.writeReference(&writer, &self.occurrence(id).reference),
             };
-            try encode.writeBytes(&writer, branch.value orelse "");
+            try encode.writeBytes(&writer, "");
             return node_buffer[0 .. encode.listPrefixLen(payload_len) + writer.written().len];
         }
 

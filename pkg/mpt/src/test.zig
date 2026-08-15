@@ -832,6 +832,53 @@ test "occurrence catalog update rejects a root the catalog does not authenticate
     );
 }
 
+test "occurrence catalog update rejects branch values" {
+    const key = [_]u8{0} ** 32;
+    const child = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x02};
+    const child_hash = mpt.StdKeccak256Context.keccak256(.{}, &child);
+    const branch = [_]u8{0xf1} ++ [_]u8{0xa0} ++ child_hash ++
+        [_]u8{0x80} ** 15 ++ [_]u8{0x01};
+    const nodes = [_][]const u8{ &branch, &child };
+    const trie = mpt.init(std.testing.allocator);
+    var indexed = try trie.indexNodes(&nodes);
+    defer indexed.deinit();
+    var builder = try trie.catalogBuilder(indexed.index());
+    defer builder.deinit();
+    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &branch);
+    const root_ref = try builder.authenticateRoot(root_hash);
+    var catalog = try builder.finishAssumeCollisionResistant();
+    defer catalog.deinit();
+    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
+    defer workspace.deinit();
+    const update = [_]mpt.CatalogUpdate{.{ .key = key, .value = &[_]u8{0x03} }};
+    try std.testing.expectError(
+        error.NonCanonicalNode,
+        trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &update),
+    );
+}
+
+test "occurrence catalog update rejects variable-width leaves" {
+    const leaf = [_]u8{ 0xc2, 0x20, 0x01 };
+    const nodes = [_][]const u8{&leaf};
+    const trie = mpt.init(std.testing.allocator);
+    var indexed = try trie.indexNodes(&nodes);
+    defer indexed.deinit();
+    var builder = try trie.catalogBuilder(indexed.index());
+    defer builder.deinit();
+    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
+    const root_ref = try builder.authenticateRoot(root_hash);
+    var catalog = try builder.finishAssumeCollisionResistant();
+    defer catalog.deinit();
+    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
+    defer workspace.deinit();
+    const key = [_]u8{0} ** 32;
+    const update = [_]mpt.CatalogUpdate{.{ .key = key, .value = &[_]u8{0x02} }};
+    try std.testing.expectError(
+        error.InvalidNode,
+        trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &update),
+    );
+}
+
 test "occurrence catalog update cleans every allocation failure position" {
     const Harness = struct {
         fn run(allocator: std.mem.Allocator) !void {
