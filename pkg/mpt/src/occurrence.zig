@@ -54,12 +54,12 @@ const Occurrence = struct {
     };
 
     const Leaf = struct {
-        path: []const u8,
+        path: nibble.Path,
         value: []const u8,
     };
 
     const Extension = struct {
-        path: []const u8,
+        path: nibble.Path,
         child: OccurrenceId,
     };
 
@@ -178,7 +178,7 @@ fn Context(comptime KeccakContext: type) type {
                 .leaf => {
                     const path = entry.path() orelse return error.InvalidNode;
                     self.occurrence(id).kind = .{ .leaf = .{
-                        .path = try self.copyCompactPath(path),
+                        .path = compactPath(path),
                         .value = entry.value() orelse return error.InvalidNode,
                     } };
                 },
@@ -192,7 +192,7 @@ fn Context(comptime KeccakContext: type) type {
                         .{ .extension = id },
                     );
                     self.occurrence(id).kind = .{ .extension = .{
-                        .path = try self.copyCompactPath(path),
+                        .path = compactPath(path),
                         .child = child,
                     } };
                 },
@@ -282,16 +282,10 @@ fn Context(comptime KeccakContext: type) type {
             self.occurrence(child).parent = parent;
         }
 
-        fn copyCompactPath(self: *Self, path: nibble.CompactPath) AllocUpdateError![]u8 {
-            const owned = try self.alloc(u8, path.len);
-            for (owned, 0..) |*path_nibble, index| path_nibble.* = path.nibbleAt(index);
-            return owned;
-        }
-
         fn insert(
             self: *Self,
             root: OccurrenceId,
-            key: []const u8,
+            key: nibble.Path,
             value: []const u8,
         ) AllocUpdateError!void {
             var current = root;
@@ -311,13 +305,13 @@ fn Context(comptime KeccakContext: type) type {
                         return;
                     },
                     .extension => |extension| {
-                        const common = nibble.commonPrefix(extension.path, remaining);
+                        const common = extension.path.commonPrefix(remaining);
                         if (common != extension.path.len) {
                             try self.splitExtension(current, extension, remaining, value, common);
                             return;
                         }
                         current = extension.child;
-                        remaining = remaining[common..];
+                        remaining = remaining.slice(common, remaining.len);
                     },
                     .branch => |branch| {
                         if (remaining.len == 0) {
@@ -325,7 +319,7 @@ fn Context(comptime KeccakContext: type) type {
                             self.markDirty(current);
                             return;
                         }
-                        const child_index = remaining[0];
+                        const child_index = remaining.nibbleAt(0);
                         const child = (try self.childOccurrence(current, child_index)) orelse child: {
                             const created = try self.newOccurrence(
                                 .empty,
@@ -338,7 +332,7 @@ fn Context(comptime KeccakContext: type) type {
                         };
                         _ = branch;
                         current = child;
-                        remaining = remaining[1..];
+                        remaining = remaining.slice(1, remaining.len);
                     },
                 }
             }
@@ -348,10 +342,10 @@ fn Context(comptime KeccakContext: type) type {
             self: *Self,
             node: OccurrenceId,
             leaf: Occurrence.Leaf,
-            key: []const u8,
+            key: nibble.Path,
             value: []const u8,
         ) AllocUpdateError!void {
-            const common = nibble.commonPrefix(leaf.path, key);
+            const common = leaf.path.commonPrefix(key);
             if (common == leaf.path.len and common == key.len) {
                 self.occurrence(node).kind = .{ .leaf = .{ .path = leaf.path, .value = value } };
                 self.markDirty(node);
@@ -369,10 +363,16 @@ fn Context(comptime KeccakContext: type) type {
                     true,
                 );
                 self.occurrence(node).kind = .{ .extension = .{
-                    .path = key[0..common],
+                    .path = key.slice(0, common),
                     .child = branch,
                 } };
-                try self.populateSplitBranch(branch, leaf.path[common..], leaf.value, key[common..], value);
+                try self.populateSplitBranch(
+                    branch,
+                    leaf.path.slice(common, leaf.path.len),
+                    leaf.value,
+                    key.slice(common, key.len),
+                    value,
+                );
             }
             self.markDirty(node);
         }
@@ -380,37 +380,37 @@ fn Context(comptime KeccakContext: type) type {
         fn populateSplitBranch(
             self: *Self,
             branch_id: OccurrenceId,
-            old_path: []const u8,
+            old_path: nibble.Path,
             old_value: []const u8,
-            new_path: []const u8,
+            new_path: nibble.Path,
             new_value: []const u8,
         ) AllocUpdateError!void {
             if (old_path.len == 0) {
                 self.occurrence(branch_id).kind.branch.value = old_value;
             } else {
                 const leaf = try self.newLeaf(
-                    old_path[1..],
+                    old_path.slice(1, old_path.len),
                     old_value,
-                    .{ .branch = .{ .node = branch_id, .child_index = old_path[0] } },
+                    .{ .branch = .{ .node = branch_id, .child_index = old_path.nibbleAt(0) } },
                 );
-                self.occurrence(branch_id).kind.branch.children[old_path[0]] = .{ .occurrence = leaf };
+                self.occurrence(branch_id).kind.branch.children[old_path.nibbleAt(0)] = .{ .occurrence = leaf };
             }
             if (new_path.len == 0) {
                 self.occurrence(branch_id).kind.branch.value = new_value;
             } else {
                 const leaf = try self.newLeaf(
-                    new_path[1..],
+                    new_path.slice(1, new_path.len),
                     new_value,
-                    .{ .branch = .{ .node = branch_id, .child_index = new_path[0] } },
+                    .{ .branch = .{ .node = branch_id, .child_index = new_path.nibbleAt(0) } },
                 );
-                self.occurrence(branch_id).kind.branch.children[new_path[0]] = .{ .occurrence = leaf };
+                self.occurrence(branch_id).kind.branch.children[new_path.nibbleAt(0)] = .{ .occurrence = leaf };
             }
             self.markDirty(branch_id);
         }
 
         fn newLeaf(
             self: *Self,
-            path: []const u8,
+            path: nibble.Path,
             value: []const u8,
             parent: Parent,
         ) Allocator.Error!OccurrenceId {
@@ -421,7 +421,7 @@ fn Context(comptime KeccakContext: type) type {
             self: *Self,
             node: OccurrenceId,
             extension: Occurrence.Extension,
-            key: []const u8,
+            key: nibble.Path,
             value: []const u8,
             common: usize,
         ) AllocUpdateError!void {
@@ -433,42 +433,42 @@ fn Context(comptime KeccakContext: type) type {
             );
             if (common == 0) self.occurrence(node).kind = .{ .branch = .empty };
 
-            const old_remaining = extension.path[common..];
+            const old_remaining = extension.path.slice(common, extension.path.len);
             const old_child = if (old_remaining.len == 1) extension.child else child: {
                 const child = try self.newOccurrence(
-                    .{ .extension = .{ .path = old_remaining[1..], .child = extension.child } },
-                    .{ .branch = .{ .node = branch_id, .child_index = old_remaining[0] } },
+                    .{ .extension = .{ .path = old_remaining.slice(1, old_remaining.len), .child = extension.child } },
+                    .{ .branch = .{ .node = branch_id, .child_index = old_remaining.nibbleAt(0) } },
                     .unset,
                     true,
                 );
                 self.setParent(extension.child, .{ .extension = child });
                 break :child child;
             };
-            self.setParent(old_child, .{ .branch = .{ .node = branch_id, .child_index = old_remaining[0] } });
-            self.occurrence(branch_id).kind.branch.children[old_remaining[0]] = .{ .occurrence = old_child };
+            self.setParent(old_child, .{ .branch = .{ .node = branch_id, .child_index = old_remaining.nibbleAt(0) } });
+            self.occurrence(branch_id).kind.branch.children[old_remaining.nibbleAt(0)] = .{ .occurrence = old_child };
 
-            const new_remaining = key[common..];
+            const new_remaining = key.slice(common, key.len);
             if (new_remaining.len == 0) {
                 self.occurrence(branch_id).kind.branch.value = value;
             } else {
                 const leaf = try self.newLeaf(
-                    new_remaining[1..],
+                    new_remaining.slice(1, new_remaining.len),
                     value,
-                    .{ .branch = .{ .node = branch_id, .child_index = new_remaining[0] } },
+                    .{ .branch = .{ .node = branch_id, .child_index = new_remaining.nibbleAt(0) } },
                 );
-                self.occurrence(branch_id).kind.branch.children[new_remaining[0]] = .{ .occurrence = leaf };
+                self.occurrence(branch_id).kind.branch.children[new_remaining.nibbleAt(0)] = .{ .occurrence = leaf };
             }
 
             if (common != 0) {
                 self.occurrence(node).kind = .{ .extension = .{
-                    .path = key[0..common],
+                    .path = key.slice(0, common),
                     .child = branch_id,
                 } };
             }
             self.markDirty(node);
         }
 
-        fn delete(self: *Self, root: OccurrenceId, key: []const u8) AllocUpdateError!void {
+        fn delete(self: *Self, root: OccurrenceId, key: nibble.Path) AllocUpdateError!void {
             var current = root;
             var remaining = key;
             var frames: std.ArrayList(DeleteFrame) = .empty;
@@ -481,17 +481,17 @@ fn Context(comptime KeccakContext: type) type {
                     .empty => return,
                     .sealed, .source => unreachable,
                     .leaf => |leaf| {
-                        if (!std.mem.eql(u8, leaf.path, remaining)) return;
+                        if (!leaf.path.eql(remaining)) return;
                         self.occurrence(current).kind = .empty;
                         self.occurrence(current).reference = .empty;
                         self.markDirty(current);
                         break;
                     },
                     .extension => |extension| {
-                        if (!nibble.startsWith(remaining, extension.path)) return;
+                        if (!remaining.startsWith(extension.path)) return;
                         try frames.append(self.allocator, .{ .extension = current });
                         current = extension.child;
-                        remaining = remaining[extension.path.len..];
+                        remaining = remaining.slice(extension.path.len, remaining.len);
                     },
                     .branch => |branch| {
                         if (remaining.len == 0) {
@@ -501,14 +501,14 @@ fn Context(comptime KeccakContext: type) type {
                             try self.compressBranch(current);
                             break;
                         }
-                        const child_index = remaining[0];
+                        const child_index = remaining.nibbleAt(0);
                         const child = (try self.childOccurrence(current, child_index)) orelse return;
                         try frames.append(self.allocator, .{ .branch = .{
                             .node = current,
                             .child_index = child_index,
                         } });
                         current = child;
-                        remaining = remaining[1..];
+                        remaining = remaining.slice(1, remaining.len);
                     },
                 }
             }
@@ -572,7 +572,7 @@ fn Context(comptime KeccakContext: type) type {
 
             if (branch.value) |value| {
                 if (child_count == 0) {
-                    self.occurrence(node).kind = .{ .leaf = .{ .path = &.{}, .value = value } };
+                    self.occurrence(node).kind = .{ .leaf = .{ .path = .empty, .value = value } };
                 }
                 self.markDirty(node);
                 return;
@@ -634,9 +634,9 @@ fn Context(comptime KeccakContext: type) type {
                     },
                     .sealed, .source => return error.InvalidNode,
                     .leaf => |leaf| {
-                        const lengths = try encode.leafBufferLengths(leaf.path, leaf.value);
+                        const lengths = try encode.leafPathBufferLengths(leaf.path.len, leaf.value);
                         const scratch = try self.buffers(lengths.compact, lengths.node);
-                        const encoded = try encode.leaf(scratch.node, scratch.compact, leaf.path, leaf.value);
+                        const encoded = try encode.leafPath(scratch.node, scratch.compact, leaf.path, leaf.value);
                         try self.finishEncoding(frame.node, encoded, frame.is_root, &result);
                         continue;
                     },
@@ -682,9 +682,9 @@ fn Context(comptime KeccakContext: type) type {
                 const encoded = switch (node.kind) {
                     .extension => |extension| encoded: {
                         const reference = &self.occurrence(extension.child).reference;
-                        const lengths = try encode.extensionBufferLengths(extension.path, reference);
+                        const lengths = try encode.extensionPathBufferLengths(extension.path.len, reference);
                         const scratch = try self.buffers(lengths.compact, lengths.node);
-                        break :encoded try encode.extension(
+                        break :encoded try encode.extensionPath(
                             scratch.node,
                             scratch.compact,
                             extension.path,
@@ -764,32 +764,27 @@ fn Context(comptime KeccakContext: type) type {
             return node_buffer[0 .. encode.listPrefixLen(payload_len) + writer.written().len];
         }
 
-        fn keyNibbles(self: *Self, key: hash.Root) AllocUpdateError![]u8 {
-            const out = try self.alloc(u8, 64);
-            for (out, 0..) |*value, index| value.* = nibble.keyNibbleAt(&key, index);
-            return out;
-        }
-
-        fn concat(self: *Self, lhs: []const u8, rhs: []const u8) AllocUpdateError![]u8 {
+        fn concat(self: *Self, lhs: nibble.Path, rhs: nibble.Path) AllocUpdateError!nibble.Path {
             const len = std.math.add(usize, lhs.len, rhs.len) catch return error.ResourceLimitExceeded;
-            const out = try self.alloc(u8, len);
-            @memcpy(out[0..lhs.len], lhs);
-            @memcpy(out[lhs.len..], rhs);
-            return out;
+            const out = try self.alloc(u8, packedByteLen(len));
+            writePacked(out, 0, lhs);
+            writePacked(out, lhs.len, rhs);
+            return .{ .key = out, .start = 0, .len = len };
         }
 
-        fn prepend(self: *Self, first: u8, tail: []const u8) AllocUpdateError![]u8 {
-            const out = try self.alloc(u8, std.math.add(usize, 1, tail.len) catch
-                return error.ResourceLimitExceeded);
-            out[0] = first;
-            @memcpy(out[1..], tail);
-            return out;
+        fn prepend(self: *Self, first: u8, tail: nibble.Path) AllocUpdateError!nibble.Path {
+            const len = std.math.add(usize, 1, tail.len) catch return error.ResourceLimitExceeded;
+            const out = try self.alloc(u8, packedByteLen(len));
+            @memset(out, 0);
+            writePackedNibble(out, 0, first);
+            writePacked(out, 1, tail);
+            return .{ .key = out, .start = 0, .len = len };
         }
 
-        fn oneNibble(self: *Self, value: u8) Allocator.Error![]u8 {
+        fn oneNibble(self: *Self, value: u8) Allocator.Error!nibble.Path {
             const out = try self.alloc(u8, 1);
-            out[0] = value;
-            return out;
+            out[0] = value << 4;
+            return .{ .key = out, .start = 0, .len = 1 };
         }
     };
 }
@@ -825,19 +820,41 @@ pub fn updateSorted(
         ),
     };
 
-    for (updates) |update| {
+    for (updates) |*update| {
         const value = update.value orelse continue;
-        const path = try context.keyNibbles(update.key);
+        const path: nibble.Path = .{ .key = &update.key, .start = 0, .len = 64 };
         try context.insert(root, path, value);
     }
-    for (updates) |update| {
+    for (updates) |*update| {
         if (update.value != null) continue;
-        const path = try context.keyNibbles(update.key);
+        const path: nibble.Path = .{ .key = &update.key, .start = 0, .len = 64 };
         try context.delete(root, path);
     }
 
     if (!context.occurrence(root).dirty) return root_hash;
     return context.encodeRoot(root);
+}
+
+fn compactPath(path: nibble.CompactPath) nibble.Path {
+    return .{ .key = path.encoded, .start = path.nibble_offset, .len = path.len };
+}
+
+fn packedByteLen(nibble_len: usize) usize {
+    return (nibble_len + 1) / 2;
+}
+
+fn writePacked(out: []u8, start: usize, path: nibble.Path) void {
+    for (0..path.len) |index| writePackedNibble(out, start + index, path.nibbleAt(index));
+}
+
+fn writePackedNibble(out: []u8, index: usize, value: u8) void {
+    std.debug.assert(value < 16);
+    const byte = &out[index / 2];
+    if (index % 2 == 0) {
+        byte.* = value << 4;
+    } else {
+        byte.* |= value;
+    }
 }
 
 fn validateRoot(root_hash: hash.Root, root_ref: catalog.RootRef) UpdateError!void {
