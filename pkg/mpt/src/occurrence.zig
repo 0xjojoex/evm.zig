@@ -1,6 +1,6 @@
 //! Fixed-key mutation over authenticated catalog or sealed-index sources.
 //!
-//! Source resolution differs, while mutable occurrences, fixed64 MPT algebra,
+//! Source resolution differs, while mutable occurrences, fixed-64-nibble MPT algebra,
 //! untouched references, and bottom-up dirty encoding remain shared.
 
 const std = @import("std");
@@ -9,6 +9,7 @@ const RewindableRegion = @import("rewindable_region");
 const catalog = @import("catalog.zig");
 const encode = @import("encode.zig");
 const errors = @import("error.zig");
+const fixed_key = @import("fixed_key.zig");
 const hash = @import("hash.zig");
 const nibble = @import("nibble.zig");
 const node_codec = @import("node.zig");
@@ -19,11 +20,11 @@ const UpdateError = errors.UpdateError;
 const AllocUpdateError = Allocator.Error || UpdateError;
 
 pub const Update = struct {
-    key: hash.Root,
+    key: fixed_key.FixedKey,
     value: ?[]const u8,
 };
 
-pub const Workspace = RewindableRegion;
+pub const Region = RewindableRegion;
 
 const OccurrenceId = enum(u32) { _ };
 
@@ -108,7 +109,7 @@ fn MutableNode(comptime mode: SourceMode) type {
     };
 }
 
-const key_nibbles = @sizeOf(hash.Root) * 2;
+const key_nibbles = fixed_key.key_nibbles;
 const max_path_nodes = key_nibbles + 1;
 
 comptime {
@@ -918,24 +919,23 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
     };
 }
 
-pub fn updateSorted(
+pub fn updateCatalogSorted(
     keccak_context: anytype,
-    workspace: *Workspace,
-    root_hash: hash.Root,
+    region: *Region,
     topology: *const catalog.Catalog,
     root_ref: catalog.RootRef,
     updates: []const Update,
 ) AllocUpdateError!hash.Root {
-    try validateRoot(root_hash, root_ref);
+    const root_hash = root_ref.digest();
     if (updates.len == 0) return root_hash;
     try validateUpdates(updates);
 
-    const mark = workspace.mark();
-    defer workspace.rewind(mark);
+    const mark = region.mark();
+    defer region.rewind(mark);
     return updateResolved(
         .catalog,
         keccak_context,
-        workspace.allocator(),
+        region.allocator(),
         topology,
         switch (root_ref) {
             .empty => null,
@@ -1033,17 +1033,6 @@ fn writePackedNibble(out: []u8, index: usize, value: u8) void {
         byte.* = value << 4;
     } else {
         byte.* |= value;
-    }
-}
-
-fn validateRoot(root_hash: hash.Root, root_ref: catalog.RootRef) UpdateError!void {
-    switch (root_ref) {
-        .empty => if (!std.mem.eql(u8, &root_hash, &hash.empty_root)) {
-            return error.InvalidNodeReference;
-        },
-        .node => |root| if (!std.mem.eql(u8, &root_hash, &root.digest)) {
-            return error.InvalidNodeReference;
-        },
     }
 }
 

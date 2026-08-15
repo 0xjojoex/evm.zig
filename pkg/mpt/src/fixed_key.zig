@@ -10,31 +10,27 @@ const catalog = @import("catalog.zig");
 const errors = @import("error.zig");
 const nibble = @import("nibble.zig");
 
-pub const key_bytes = 32;
-pub const key_nibbles = 64;
+pub const FixedKey = [32]u8;
+pub const key_nibbles = @sizeOf(FixedKey) * 2;
 pub const max_path_nodes = key_nibbles + 1;
 
-pub const Absence = enum {
+pub const FixedAbsence = enum {
     empty_trie,
     missing_branch_child,
     divergent_path,
 };
 
-pub const Lookup = union(enum) {
+pub const FixedLookup = union(enum) {
     present: []const u8,
-    absent: Absence,
+    absent: FixedAbsence,
 };
 
 pub const Error = errors.CodecError || error{MissingNode};
-pub const BatchError = Error || error{ DuplicateKey, UnsortedKeys };
+pub const BatchLookupError = Error || error{ DuplicateKey, UnsortedKeys };
 
-pub const Workspace = struct {
+pub const BindWorkspace = struct {
     frames: [max_path_nodes]Frame = undefined,
     len: u7 = 0,
-
-    pub fn init() Workspace {
-        return .{};
-    }
 };
 
 /// Bind sorted unique fixed-width keys against an immutable catalog.
@@ -42,10 +38,10 @@ pub const Workspace = struct {
 pub fn bindSorted(
     topology: catalog.Catalog,
     root: catalog.RootRef,
-    keys: []const [key_bytes]u8,
-    results: []Lookup,
-    workspace: *Workspace,
-) BatchError!void {
+    keys: []const FixedKey,
+    results: []FixedLookup,
+    workspace: *BindWorkspace,
+) BatchLookupError!void {
     std.debug.assert(results.len == keys.len);
     std.debug.assert(workspace.len == 0);
     try validateSortedKeys(keys);
@@ -56,9 +52,9 @@ pub fn bindSorted(
 pub fn bindAssumeSorted(
     topology: catalog.Catalog,
     root: catalog.RootRef,
-    keys: []const [key_bytes]u8,
-    results: []Lookup,
-    workspace: *Workspace,
+    keys: []const FixedKey,
+    results: []FixedLookup,
+    workspace: *BindWorkspace,
 ) Error!void {
     std.debug.assert(results.len == keys.len);
     std.debug.assert(workspace.len == 0);
@@ -169,13 +165,13 @@ const Frame = struct {
     } = .enter,
 };
 
-fn push(workspace: *Workspace, frame: Frame) void {
+fn push(workspace: *BindWorkspace, frame: Frame) void {
     std.debug.assert(workspace.len < max_path_nodes);
     workspace.frames[workspace.len] = frame;
     workspace.len += 1;
 }
 
-fn pop(workspace: *Workspace) void {
+fn pop(workspace: *BindWorkspace) void {
     std.debug.assert(workspace.len != 0);
     workspace.len -= 1;
 }
@@ -192,7 +188,7 @@ fn follow(link: catalog.Link) Error!?catalog.NodeId {
     };
 }
 
-fn validateSortedKeys(keys: []const [key_bytes]u8) BatchError!void {
+fn validateSortedKeys(keys: []const FixedKey) BatchLookupError!void {
     if (keys.len < 2) return;
     for (keys[1..], keys[0 .. keys.len - 1]) |current, previous| {
         switch (std.mem.order(u8, &previous, &current)) {

@@ -32,6 +32,13 @@ pub const AuthenticatedRoot = struct {
 pub const RootRef = union(enum) {
     empty,
     node: AuthenticatedRoot,
+
+    pub fn digest(self: RootRef) hash.Root {
+        return switch (self) {
+            .empty => hash.empty_root,
+            .node => |root| root.digest,
+        };
+    }
 };
 
 pub const BoundValue = struct {
@@ -59,6 +66,10 @@ pub const Link = enum(u32) {
         const raw = @intFromEnum(self);
         if (raw >= @intFromEnum(Link.@"opaque")) return null;
         return @enumFromInt(raw);
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(Link) == 4);
     }
 };
 
@@ -99,6 +110,10 @@ pub const Node = struct {
     pub fn extensionChild(self: Node) ?Link {
         if (self.kind != .extension) return null;
         return @enumFromInt(self.payload);
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(Node) == 32);
     }
 };
 
@@ -410,11 +425,18 @@ pub const Builder = struct {
         return self.nodes.items.len;
     }
 
-    pub fn node(self: *const Builder, id: NodeId) ?Node {
+    /// Return the encoded value of an authenticated leaf. Non-leaf nodes are
+    /// skipped without exposing catalog representation records.
+    pub fn leafValue(
+        self: *const Builder,
+        id: NodeId,
+    ) error{ InvalidNode, InvalidNodeReference }!?[]const u8 {
         std.debug.assert(!self.sealed and self.work.items.len == 0);
         const index = @intFromEnum(id);
-        if (index >= self.nodes.items.len) return null;
-        return self.nodes.items[index];
+        if (index >= self.nodes.items.len) return error.InvalidNodeReference;
+        const node = self.nodes.items[index];
+        if (node.kind != .leaf) return null;
+        return node.value() orelse error.InvalidNode;
     }
 
     pub fn finish(self: *Builder) BuildError!Catalog {

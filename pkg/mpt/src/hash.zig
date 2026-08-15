@@ -27,4 +27,16 @@ pub fn assertKeccakContext(comptime Context: type) void {
     if (!std.meta.hasFn(Context, "keccak256")) {
         @compileError("MPT Keccak context must provide keccak256(self, []const u8) [32]u8");
     }
+    const info = @typeInfo(@TypeOf(Context.keccak256)).@"fn";
+    if (info.is_var_args or
+        info.params.len != 2 or
+        info.params[0].type == null or
+        info.params[0].type.? != Context or
+        info.params[1].type == null or
+        info.params[1].type.? != []const u8 or
+        info.return_type == null or
+        info.return_type.? != Root)
+    {
+        @compileError("MPT Keccak context must provide keccak256(self, []const u8) [32]u8");
+    }
 }

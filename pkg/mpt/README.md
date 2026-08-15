@@ -1,7 +1,7 @@
 # mpt
 
 Structural Ethereum Merkle Patricia Trie primitives for Zig 0.16 — canonical
-topology, proofs, and sparse updates over raw byte keys and values.
+topology, proofs, arbitrary-key updates, and fixed-key mutation.
 
 `mpt` owns the *structure* of Ethereum's Merkle Patricia Trie, not the
 meaning carried by it. It computes canonical roots, verifies proofs against a
@@ -50,10 +50,10 @@ switch (try trie.lookup(trusted_root, index, "dog")) {
     .absent  => |reason| { /* valid non-existence: reason says why */ },
 }
 
-// 3. Recompute a post-root from sorted updates without materializing the trie.
+// 3. Recompute a post-root from sorted updates without materializing the whole trie.
 const updates = [_]mpt.Update{
-    .{ .key = "dog", .value = "hound" }, // insert/replace
     .{ .key = "do",  .value = null },    // delete
+    .{ .key = "dog", .value = "hound" }, // insert/replace
 };
 const post_root = try trie.updateSorted(trusted_root, index, &updates);
 ```
@@ -81,24 +81,30 @@ node hashing, encode values, or add domain meaning to the structural trie.
 in Ethereum's MPT and is never stored, so higher layers map domain defaults
 (e.g. a zero storage slot) to a delete rather than an empty value.
 
-**Keys and ordering.** `rootSorted` and `updateSorted` require strictly
-increasing, unique keys and validate that before doing any work. `root` copies
-the entry descriptors into allocator-backed scratch and sorts them for you — it never
-copies key or value bytes.
+**Keys and ordering.** `rootSorted`, `updateSorted`, `updateFixedSorted`, and
+`updateCatalogSorted` require strictly increasing, unique structural keys and
+validate that before mutation. `root` copies the entry descriptors into
+allocator-backed scratch and sorts them for you — it never copies key or value
+bytes.
 
 `Trie(...).Keyed(Key, KeyContext)` accepts typed keys whose `trieKey` projection
-returns `[32]u8`. Typed lookup projects one key on the stack. Typed root and
-update batches materialize projected keys and sort by those bytes because
-domain-key ordering is not structural-key ordering.
+returns `mpt.FixedKey` (`[32]u8`). Typed lookup projects one key on the stack.
+Typed root and update batches materialize projected keys and sort by those bytes
+because domain-key ordering is not structural-key ordering. The typed
+`updateCatalog` facade therefore sorts before calling the structural
+`updateCatalogSorted` operation.
 
 **Witness node index.** `indexNodes` borrows a slice of encoded nodes, hashes each
-one exactly once into allocator-owned internal record storage, sorts by hash for
-deterministic binary lookup, collapses identical duplicates, and rejects the
-same digest paired with conflicting bytes. `IndexedNodes.deinit()` releases the
-records through its retained allocator; the encoded node bytes remain borrowed.
-`IndexedNodes.index()` returns an opaque borrowed capability; raw records cannot
-be assembled into an index accepted by lookup or update. It serves any number
-of allocation-free lookups and updates. Extra irrelevant nodes do not fail a proof.
+one exactly once, and builds an allocator-owned open-addressed position table at
+no more than 50% load. It retains first-occurrence record order, collapses
+identical duplicates, and rejects the same digest paired with conflicting bytes.
+`IndexedNodes.deinit()` releases the records and table through its retained
+allocator; the encoded node bytes remain borrowed. `IndexedNodes.index()` returns
+an opaque borrowed capability; raw records cannot be assembled into an index
+accepted by lookup or update. It serves any number of allocation-free lookups
+and resolver-backed updates. `IndexedNodes.allocationBytes()` reports the bytes
+retained by its owned records and table for guest budgeting. Extra irrelevant
+nodes do not fail a proof.
 
 **Authenticated catalog.** `catalogBuilder(index)` is an optional ingestion
 layer over the sealed index. `authenticateRoot` decodes the witness-present
@@ -106,22 +112,28 @@ topology reachable from a trusted root into stable `u32` handles; `finish`
 rejects resolved cycles and noncanonical extension topology, then seals an
 immutable catalog whose lookup path performs no hashing, digest search,
 allocation, or RLP decoding. Embedded children are always linked; a hashed child
-absent from the sparse witness stays opaque and produces `MissingNode` only when
-a lookup selects it. Several state or storage roots may share one builder, and
-content-addressed nodes retain one handle. `updateSortedCatalog` materializes
-selected nodes directly by handle while preserving untouched authenticated child
-references; `updateSortedCatalogWithWorkspace` reuses one
-`CatalogUpdateWorkspace` across independent roots, and
-`updateSortedCatalogBatch` partitions sorted updates at shared branch prefixes,
-falling back to the sequential updater on divergent terminal paths.
+absent from the witness stays opaque and produces `MissingNode` only when a
+lookup or update selects it. Several state or storage roots may share one builder,
+and content-addressed nodes retain one handle. `CatalogBuilder.leafValue` lets
+ingestion code inspect authenticated leaf payloads without exposing catalog node
+records. `Catalog.lookupBound` returns `BoundLookup`, adding the stable terminal
+`CatalogNodeId` needed by typed caches to the ordinary lookup result.
 
-**Fixed-key stateless commit.** `stateless.zig` is a separate state/storage
-commit engine for exactly 32-byte hashed keys, independent of `proof.zig` and
-`sparse.zig`. The immutable catalog remains the clean authenticated topology;
-commit creates mutable occurrences only along selected paths, retains untouched
-children as authenticated references, and encodes dirty ancestors bottom-up —
-a commit overlay, not a second execution-time copy. Ethereum state and storage
-calls reuse one resettable `StatelessWorkspace` during block commit.
+**Fixed-key mutation.** `updateFixedSorted` and `updateCatalogSorted` share one
+MPT mutation algebra for exactly 32-byte keys. The former resolves authenticated
+nodes lazily from a sealed witness index and uses the trie's allocator; the
+latter carries stable catalog handles and takes a resettable `Region` from the
+caller. Both create mutable occurrences only along selected paths, retain
+untouched children as authenticated references, and encode dirty ancestors
+bottom-up. Fixed width also makes branch terminal values and prefix keys
+structurally invalid; arbitrary-width keys remain on `updateSorted` in the
+sparse engine.
+
+**Fixed-key binding.** `bindSorted` and `bindAssumeSorted` batch authenticated
+lookups through a catalog without allocation or RLP decoding. Their
+`BindWorkspace` is a fixed 65-frame traversal stack. `FixedLookup` uses the
+smaller fixed-key absence algebra, which deliberately omits the impossible
+`empty_branch_value` result.
 
 **Lookup outcomes.** `lookup` returns a `Lookup` union:
 
@@ -134,6 +146,10 @@ calls reuse one resettable `StatelessWorkspace` during block commit.
 An omitted-but-required hashed node instead returns `error.MissingNode` — an
 incomplete witness, never a proof of absence.
 
+Repeated arbitrary-key reads may pass a `LookupCache` to `lookupCached`. The
+cache owns only lookup memoization; authenticated value bytes remain borrowed
+from the indexed witness just as they are for `lookup`.
+
 **Sparse update.** `updateSorted` materializes only the nodes on changed paths;
 unvisited hashed siblings stay as blind 32-byte references. A non-null value
 inserts or replaces; a null value deletes; deleting an absent key is a no-op.
@@ -143,11 +159,13 @@ immutable, and a failed call leaves no partial state.
 ## Resource model
 
 `init` takes an allocator retained by the trie; `root`, `rootSorted`,
-`indexNodes`, and `updateSorted` use it. A normal heap may grow, while
-`FixedBufferAllocator` or a guest bump allocator imposes a hard memory ceiling.
-The allocator must outlive the trie and every `IndexedNodes` it creates.
-`lookup` remains allocation-free after indexing and is also available as the
-top-level `mpt.lookup`.
+`indexNodes`, `updateSorted`, and `updateFixedSorted` use it.
+`updateCatalogSorted` takes an explicit resettable `Region`; the typed
+`updateCatalog` facade also allocates its projected update descriptors there. A
+normal heap may grow, while `FixedBufferAllocator` or a guest bump allocator
+imposes a hard memory ceiling. The allocator must outlive the trie and every
+`IndexedNodes` it creates. `lookup` remains allocation-free after indexing and
+is also available as the top-level `mpt.lookup`.
 
 The primary API has no caller-supplied limits. Sparse update grows touched
 topology incrementally through the retained allocator instead of reserving a
@@ -160,11 +178,13 @@ Untrusted input admission belongs at the surrounding wire or application
 boundary. The stateless guest, for example, validates SSZ list and byte-list
 maxima before invoking MPT; its fixed allocator independently caps memory.
 
-`Workspace`, `rootWorkspaceSize(entries, include_sort)`, and the root
-`*WithWorkspace` entry points remain advanced APIs for exact full-root scratch
-reuse. Indexing and sparse update deliberately have no caller-storage sizing
-API: bounded callers use a fixed allocator rather than exposing mutable index
-records or relying on an inaccurate sparse preflight size.
+`RootWorkspace`, `rootWorkspaceSize(entries, include_sort)`,
+`rootWorkspaceSizeForLimits`, and the root `*WithWorkspace` entry points remain
+advanced APIs for exact full-root scratch reuse. The limits form computes a
+bound when descriptors are not yet materialized. Indexing and sparse update
+deliberately have no caller-storage sizing API: bounded callers use a fixed
+allocator rather than exposing mutable index records or relying on an
+inaccurate sparse preflight size.
 
 Peak memory is bounded: indexed lookup is `O(witness_nodes)` and then allocates
 nothing per lookup; a full root is `O(entries + key topology + max_node_rlp_bytes)`;
@@ -198,10 +218,13 @@ node hashes for tests and benchmarks.
 
 ## Scope
 
-`mpt` deliberately stops at raw byte keys and non-empty byte values. It does
-**not** own persistent storage, pruning, snapshots, database update sets, proof
-generation, or any Ethereum type — accounts, storage schemas, transactions,
-receipts, withdrawals, secure-key hashing, and fork rules all live above it.
+`mpt` deliberately stops at structural keys and non-empty byte values. The
+generic lane accepts raw byte keys; the fixed lane accepts `FixedKey`; and the
+typed facade only projects caller-owned domain keys into that fixed structural
+form. The package does **not** own persistent storage, pruning, snapshots,
+database update sets, proof generation, or any Ethereum type — accounts,
+storage schemas, transactions, receipts, withdrawals, secure-key hashing, and
+fork rules all live above it.
 
 ## Conformance
 
@@ -218,7 +241,9 @@ The fuzz gate generates shared-prefix, divergent, and prefix-chain tries. It
 requires sorted construction, unsorted construction, exact-size workspace
 construction, and sparse insertion from the empty root to produce the same
 root. It also round-trips generated leaf proofs, checks witness-backed replace
-and delete, and feeds arbitrary encoded nodes and keys through proof lookup.
+and delete, differentially checks fixed-key index and catalog mutation against
+full construction, and feeds arbitrary encoded nodes and keys through proof
+lookup.
 
 ```sh
 zig build test

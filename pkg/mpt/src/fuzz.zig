@@ -73,7 +73,7 @@ const Properties = struct {
         const root_workspace_len = try mpt.rootWorkspaceSize(reversed[0..entry_count], true);
         const root_buffer = try std.testing.allocator.alloc(u8, root_workspace_len);
         defer std.testing.allocator.free(root_buffer);
-        var root_workspace = mpt.Workspace.init(root_buffer);
+        var root_workspace = mpt.RootWorkspace.init(root_buffer);
         const workspace_root = try trie.rootWithWorkspace(&root_workspace, reversed[0..entry_count]);
         try expectRootEqual(sorted_root, workspace_root);
         try std.testing.expect(root_workspace.peak_used_bytes <= root_workspace_len);
@@ -251,8 +251,8 @@ fn checkLeafProof(trie: mpt.DefaultTrie, entry: mpt.Entry) !void {
 const differential_entry_count = 4;
 
 /// Cross-engine differential: the same fixed-key batch applied from the empty
-/// root through the index-backed sparse engine and the catalog-backed
-/// occurrence engine must agree with full construction.
+/// root through the arbitrary-key sparse engine and both fixed-key resolvers
+/// must agree with full construction.
 fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Smith) !void {
     var seeds: [differential_entry_count][8]u8 = undefined;
     smith.bytes(std.mem.asBytes(&seeds));
@@ -272,7 +272,7 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
 
     var unique: usize = 0;
     var sorted_keys: [differential_entry_count]mpt.Root = undefined;
-    var hashed_updates: [differential_entry_count]mpt.CatalogUpdate = undefined;
+    var fixed_updates: [differential_entry_count]mpt.FixedUpdate = undefined;
     var index_updates: [differential_entry_count]mpt.Update = undefined;
     var entries: [differential_entry_count]mpt.Entry = undefined;
     for (order) |key_index| {
@@ -280,7 +280,7 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
         if (unique > 0 and std.mem.eql(u8, &sorted_keys[unique - 1], &key)) continue;
         sorted_keys[unique] = key;
         const value = &values[key_index];
-        hashed_updates[unique] = .{ .key = key, .value = value };
+        fixed_updates[unique] = .{ .key = key, .value = value };
         index_updates[unique] = .{ .key = &sorted_keys[unique], .value = value };
         entries[unique] = .{ .key = &sorted_keys[unique], .value = value };
         unique += 1;
@@ -292,7 +292,7 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     const via_fixed_index = try trie.updateFixedSorted(
         mpt.empty_root,
         mpt.empty_node_index,
-        hashed_updates[0..unique],
+        fixed_updates[0..unique],
     );
     try expectRootEqual(expected, via_fixed_index);
 
@@ -301,14 +301,13 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     const root_ref = try builder.authenticateRoot(mpt.empty_root);
     var catalog = try builder.finish();
     defer catalog.deinit();
-    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
-    defer workspace.deinit();
-    const via_occurrence = try trie.updateCatalog(
-        &workspace,
-        mpt.empty_root,
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const via_occurrence = try trie.updateCatalogSorted(
+        &region,
         &catalog,
         root_ref,
-        hashed_updates[0..unique],
+        fixed_updates[0..unique],
     );
     try expectRootEqual(expected, via_occurrence);
 }
