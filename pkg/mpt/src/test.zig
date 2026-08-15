@@ -855,6 +855,10 @@ test "occurrence catalog update rejects branch values" {
         error.NonCanonicalNode,
         trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &update),
     );
+    try std.testing.expectError(
+        error.NonCanonicalNode,
+        trie.updateFixedSorted(root_hash, indexed.index(), &update),
+    );
 }
 
 test "occurrence catalog update rejects variable-width leaves" {
@@ -876,6 +880,10 @@ test "occurrence catalog update rejects variable-width leaves" {
     try std.testing.expectError(
         error.InvalidNode,
         trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &update),
+    );
+    try std.testing.expectError(
+        error.InvalidNode,
+        trie.updateFixedSorted(root_hash, indexed.index(), &update),
     );
 }
 
@@ -983,6 +991,11 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
         &(try trie.rootSorted(&replaced_entries)),
         &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &replacement)),
     );
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try trie.rootSorted(&replaced_entries)),
+        &(try trie.updateFixedSorted(root_hash, indexed.index(), &replacement)),
+    );
 
     const split = [_]mpt.CatalogUpdate{
         .{ .key = second, .value = &[_]u8{0x02} },
@@ -998,12 +1011,22 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
         &(try trie.rootSorted(&split_entries)),
         &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &split)),
     );
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try trie.rootSorted(&split_entries)),
+        &(try trie.updateFixedSorted(root_hash, indexed.index(), &split)),
+    );
 
     const delete_only = [_]mpt.CatalogUpdate{.{ .key = first, .value = null }};
     try std.testing.expectEqualSlices(
         u8,
         &mpt.empty_root,
         &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &delete_only)),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &mpt.empty_root,
+        &(try trie.updateFixedSorted(root_hash, indexed.index(), &delete_only)),
     );
 
     const replace_with_other = [_]mpt.CatalogUpdate{
@@ -1015,6 +1038,11 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
         u8,
         &(try trie.rootSorted(&compressed_entries)),
         &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &replace_with_other)),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try trie.rootSorted(&compressed_entries)),
+        &(try trie.updateFixedSorted(root_hash, indexed.index(), &replace_with_other)),
     );
 }
 

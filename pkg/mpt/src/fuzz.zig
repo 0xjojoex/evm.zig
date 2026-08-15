@@ -289,6 +289,12 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     const expected = try trie.rootSorted(entries[0..unique]);
     const via_index = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, index_updates[0..unique]);
     try expectRootEqual(expected, via_index);
+    const via_fixed_index = try trie.updateFixedSorted(
+        mpt.empty_root,
+        mpt.empty_node_index,
+        hashed_updates[0..unique],
+    );
+    try expectRootEqual(expected, via_fixed_index);
 
     var builder = try trie.catalogBuilder(mpt.empty_node_index);
     defer builder.deinit();

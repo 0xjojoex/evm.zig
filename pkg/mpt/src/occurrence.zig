@@ -1,8 +1,7 @@
-//! Block-local mutation and commit over an authenticated witness catalog.
+//! Fixed-key mutation over authenticated catalog or sealed-index sources.
 //!
-//! The catalog is the immutable commitment topology. This module creates
-//! mutable occurrences only for selected paths, keeps untouched children as
-//! authenticated references, and recomputes one post-state root bottom-up.
+//! Source resolution differs, while mutable occurrences, fixed64 MPT algebra,
+//! untouched references, and bottom-up dirty encoding remain shared.
 
 const std = @import("std");
 const RewindableRegion = @import("rewindable_region");
@@ -13,6 +12,7 @@ const errors = @import("error.zig");
 const hash = @import("hash.zig");
 const nibble = @import("nibble.zig");
 const node_codec = @import("node.zig");
+const proof = @import("proof.zig");
 
 const Allocator = std.mem.Allocator;
 const UpdateError = errors.UpdateError;
@@ -38,63 +38,74 @@ const Parent = union(enum) {
     },
 };
 
-const Occurrence = struct {
-    kind: Kind,
-    parent: Parent,
-    reference: Reference = .unset,
-    dirty: bool = false,
+const SourceMode = enum { catalog, index };
 
-    const Kind = union(enum) {
-        empty,
-        sealed: hash.Root,
-        source: catalog.NodeId,
-        leaf: Leaf,
-        extension: Extension,
-        branch: Branch,
-    };
-
-    const Leaf = struct {
-        path: nibble.Path,
-        value: []const u8,
-    };
-
-    const Extension = struct {
-        path: nibble.Path,
-        child: OccurrenceId,
-    };
-
-    const Branch = struct {
-        source: ?*const catalog.Node,
-        children: [16]Child,
-
-        // Invariant: every update key is exactly 64 nibbles, so no valid key
-        // can terminate at a branch. A variable-width update key would
-        // invalidate this representation.
-        pub const empty = Branch{
-            .source = null,
-            .children = [_]Child{.empty} ** 16,
-        };
-    };
-
-    const Child = union(enum) {
-        empty,
-        catalog,
-        // The union already occupies eight bytes. Align its only payload so
-        // branch child arrays can use natural RV64 word loads without growing.
-        occurrence: OccurrenceId align(8),
-
-        comptime {
-            std.debug.assert(@sizeOf(Child) == 8);
-            std.debug.assert(@alignOf(Child) == 8);
-        }
-    };
+const IndexSource = struct {
+    reference: node_codec.Reference,
+    require_branch: bool,
+    root: bool = false,
 };
 
-comptime {
-    std.debug.assert(@sizeOf(Occurrence.Kind) == 144);
-    std.debug.assert(@alignOf(Occurrence.Kind) == 8);
-    std.debug.assert(@sizeOf(Occurrence) == 192);
-    std.debug.assert(@alignOf(Occurrence) == 8);
+fn Source(comptime mode: SourceMode) type {
+    return if (mode == .catalog) catalog.NodeId else IndexSource;
+}
+
+fn BranchSource(comptime mode: SourceMode) type {
+    return if (mode == .catalog) *const catalog.Node else *const node_codec.Node.Branch;
+}
+
+fn MutableNode(comptime mode: SourceMode) type {
+    return struct {
+        kind: Kind,
+        parent: Parent,
+        reference: Reference = .unset,
+        dirty: bool = false,
+
+        const Kind = union(enum) {
+            empty,
+            sealed: hash.Root,
+            source: Source(mode),
+            leaf: Leaf,
+            extension: Extension,
+            branch: Branch,
+        };
+
+        const Leaf = struct {
+            path: nibble.Path,
+            value: []const u8,
+        };
+
+        const Extension = struct {
+            path: nibble.Path,
+            child: OccurrenceId,
+        };
+
+        const Branch = struct {
+            source: ?BranchSource(mode),
+            children: [16]Child,
+
+            // Invariant: every update key is exactly 64 nibbles, so no valid key
+            // can terminate at a branch. A variable-width update key would
+            // invalidate this representation.
+            pub const empty = Branch{
+                .source = null,
+                .children = [_]Child{.empty} ** 16,
+            };
+        };
+
+        const Child = union(enum) {
+            empty,
+            source,
+            // The union already occupies eight bytes. Align its only payload so
+            // branch child arrays can use natural RV64 word loads without growing.
+            occurrence: OccurrenceId align(8),
+
+            comptime {
+                std.debug.assert(@sizeOf(Child) == 8);
+                std.debug.assert(@alignOf(Child) == 8);
+            }
+        };
+    };
 }
 
 const key_nibbles = @sizeOf(hash.Root) * 2;
@@ -119,13 +130,31 @@ const EncodeFrame = struct {
     is_root: bool,
 };
 
-fn Context(comptime KeccakContext: type) type {
+fn indexSource(reference: node_codec.Reference, require_branch: bool) ?IndexSource {
+    return switch (reference) {
+        .empty => null,
+        .embedded, .hashed => .{ .reference = reference, .require_branch = require_branch },
+    };
+}
+
+const CatalogNode = MutableNode(.catalog);
+
+comptime {
+    std.debug.assert(@sizeOf(CatalogNode.Kind) == 144);
+    std.debug.assert(@alignOf(CatalogNode.Kind) == 8);
+    std.debug.assert(@sizeOf(CatalogNode) == 192);
+    std.debug.assert(@alignOf(CatalogNode) == 8);
+}
+
+fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
     return struct {
         const Self = @This();
+        const Occurrence = MutableNode(mode);
+        const SourceResolver = if (mode == .catalog) *const catalog.Catalog else *const proof.NodeIndex;
 
         allocator: Allocator,
         keccak_context: KeccakContext,
-        catalog: *const catalog.Catalog,
+        source_resolver: SourceResolver,
         nodes: std.ArrayList(Occurrence) = .empty,
         compact_buffer: std.ArrayList(u8) = .empty,
         node_buffer: std.ArrayList(u8) = .empty,
@@ -177,12 +206,18 @@ fn Context(comptime KeccakContext: type) type {
         }
 
         fn materialize(self: *Self, id: OccurrenceId) AllocUpdateError!void {
-            const source_id = switch (self.occurrence(id).kind) {
+            const source = switch (self.occurrence(id).kind) {
                 .source => |source| source,
                 .sealed => return error.MissingNode,
                 else => return,
             };
-            const entry = self.catalog.node(source_id) orelse return error.InvalidNodeReference;
+            if (comptime mode == .catalog) return self.materializeCatalog(id, source);
+            return self.materializeIndex(id, source);
+        }
+
+        fn materializeCatalog(self: *Self, id: OccurrenceId, source: catalog.NodeId) AllocUpdateError!void {
+            const topology = self.source_resolver;
+            const entry = topology.node(source) orelse return error.InvalidNodeReference;
             switch (entry.kind) {
                 .leaf => {
                     const path = entry.path() orelse return error.InvalidNode;
@@ -194,12 +229,8 @@ fn Context(comptime KeccakContext: type) type {
                 .extension => {
                     const path = entry.path() orelse return error.InvalidNode;
                     const link = entry.extensionChild() orelse return error.InvalidNodeReference;
-                    const reference = try self.catalog.extensionReference(source_id);
-                    const child = try self.appendDeferred(
-                        link,
-                        reference,
-                        .{ .extension = id },
-                    );
+                    const reference = try topology.extensionReference(source);
+                    const child = try self.appendCatalogDeferred(link, reference, .{ .extension = id });
                     self.occurrence(id).kind = .{ .extension = .{
                         .path = compactPath(path),
                         .child = child,
@@ -207,19 +238,78 @@ fn Context(comptime KeccakContext: type) type {
                 },
                 .branch => {
                     if (entry.value() != null) return error.NonCanonicalNode;
-                    const source = try self.catalog.branchFromNode(entry);
+                    const source_branch = try topology.branchFromNode(entry);
                     var branch = Occurrence.Branch.empty;
                     branch.source = entry;
-                    for (source.links, 0..) |link, child_index| {
-                        if (link == .empty) continue;
-                        branch.children[child_index] = .catalog;
+                    for (source_branch.links, 0..) |link, child_index| {
+                        if (link != .empty) branch.children[child_index] = .source;
                     }
                     self.occurrence(id).kind = .{ .branch = branch };
                 },
             }
         }
 
-        fn appendDeferred(
+        fn materializeIndex(self: *Self, id: OccurrenceId, source: IndexSource) AllocUpdateError!void {
+            const encoded = switch (source.reference) {
+                .empty => return error.InvalidNodeReference,
+                .hashed => |digest| encoded: {
+                    const found = proof.find(self.source_resolver, digest.*) orelse return error.MissingNode;
+                    if (!source.root and found.len < 32) return error.InvalidNodeReference;
+                    break :encoded found;
+                },
+                .embedded => |value| value,
+            };
+            switch (try node_codec.decode(encoded, source.require_branch)) {
+                .leaf => |leaf| self.occurrence(id).kind = .{ .leaf = .{
+                    .path = compactPath(leaf.path),
+                    .value = leaf.value,
+                } },
+                .extension => |extension| {
+                    const child = try self.appendIndexSource(
+                        indexSource(extension.child, true) orelse return error.InvalidNodeReference,
+                        .{ .extension = id },
+                    );
+                    self.occurrence(id).kind = .{ .extension = .{
+                        .path = compactPath(extension.path),
+                        .child = child,
+                    } };
+                },
+                .branch => |branch| {
+                    const owned = try self.allocator.create(node_codec.Node.Branch);
+                    owned.* = branch;
+                    try self.installIndexBranch(id, owned);
+                },
+            }
+        }
+
+        fn installIndexBranch(
+            self: *Self,
+            id: OccurrenceId,
+            source: *const node_codec.Node.Branch,
+        ) AllocUpdateError!void {
+            if (source.value != null) return error.NonCanonicalNode;
+            var branch = Occurrence.Branch.empty;
+            branch.source = source;
+            for (&branch.children, 0..) |*child, child_index| {
+                if (source.children[child_index] != .empty) child.* = .source;
+            }
+            self.occurrence(id).kind = .{ .branch = branch };
+        }
+
+        fn appendIndexSource(
+            self: *Self,
+            source: IndexSource,
+            parent: Parent,
+        ) AllocUpdateError!OccurrenceId {
+            return self.newOccurrence(
+                .{ .source = source },
+                parent,
+                try encode.fromCodec(source.reference),
+                false,
+            );
+        }
+
+        fn appendCatalogDeferred(
             self: *Self,
             link: catalog.Link,
             reference: node_codec.Reference,
@@ -236,8 +326,8 @@ fn Context(comptime KeccakContext: type) type {
                     ),
                     else => error.InvalidNodeReference,
                 },
-                else => if (link.node()) |id| self.newOccurrence(
-                    .{ .source = id },
+                else => if (link.node()) |source| self.newOccurrence(
+                    .{ .source = source },
                     parent,
                     try encode.fromCodec(reference),
                     false,
@@ -257,14 +347,24 @@ fn Context(comptime KeccakContext: type) type {
             return switch (branch.children[child_index]) {
                 .empty => null,
                 .occurrence => |id| id,
-                .catalog => occurrence: {
-                    const child = try self.catalog.resolvedBranchChild(
-                        branch.source orelse return error.InvalidNodeReference,
-                        child_index,
-                    );
-                    const id = try self.appendDeferred(
-                        child.link,
-                        child.reference,
+                .source => occurrence: {
+                    if (comptime mode == .catalog) {
+                        const child = try self.source_resolver.resolvedBranchChild(
+                            branch.source orelse return error.InvalidNodeReference,
+                            child_index,
+                        );
+                        const id = try self.appendCatalogDeferred(
+                            child.link,
+                            child.reference,
+                            .{ .branch = .{ .node = parent, .child_index = @intCast(child_index) } },
+                        );
+                        self.occurrence(parent).kind.branch.children[child_index] = .{ .occurrence = id };
+                        break :occurrence id;
+                    }
+                    const source = branch.source orelse return error.InvalidNodeReference;
+                    const child = indexSource(source.children[child_index], false) orelse return error.InvalidNodeReference;
+                    const id = try self.appendIndexSource(
+                        child,
                         .{ .branch = .{ .node = parent, .child_index = @intCast(child_index) } },
                     );
                     self.occurrence(parent).kind.branch.children[child_index] = .{ .occurrence = id };
@@ -664,7 +764,7 @@ fn Context(comptime KeccakContext: type) type {
                                         .is_root = false,
                                     });
                                 },
-                                .empty, .catalog => {},
+                                .empty, .source => {},
                             }
                         }
                         continue;
@@ -716,16 +816,38 @@ fn Context(comptime KeccakContext: type) type {
             }
         }
 
-        fn branchBufferLengths(self: *Self, branch: *const Occurrence.Branch) UpdateError!BranchBufferLengths {
-            const catalog_lengths = if (branch.source) |source|
-                try self.catalog.resolvedBranchReferenceEncodedLengths(source)
-            else
-                null;
+        fn branchBufferLengths(self: *Self, branch: *const Occurrence.Branch) AllocUpdateError!BranchBufferLengths {
+            if (comptime mode == .catalog) {
+                const catalog_lengths = if (branch.source) |source|
+                    try self.source_resolver.resolvedBranchReferenceEncodedLengths(source)
+                else
+                    null;
+                var payload: usize = 1;
+                for (&branch.children, 0..) |*child, index| {
+                    const child_len = switch (child.*) {
+                        .empty => 1,
+                        .source => (catalog_lengths orelse return error.InvalidNodeReference)[index],
+                        .occurrence => |child_id| try encode.referenceEncodedLen(&self.occurrence(child_id).reference),
+                    };
+                    payload = std.math.add(usize, payload, child_len) catch
+                        return error.ResourceLimitExceeded;
+                }
+                return .{ .payload = payload, .node = try encode.listEncodedLen(payload) };
+            }
+            const source_lengths = if (branch.source) |source| lengths: {
+                var lengths: [16]u8 = undefined;
+                for (source.children, &lengths) |reference, *len| len.* = switch (reference) {
+                    .empty => 1,
+                    .embedded => |encoded| @intCast(encoded.len),
+                    .hashed => 33,
+                };
+                break :lengths lengths;
+            } else null;
             var payload: usize = 1;
             for (&branch.children, 0..) |*child, index| {
                 const child_len = switch (child.*) {
                     .empty => 1,
-                    .catalog => (catalog_lengths orelse return error.InvalidNodeReference)[index],
+                    .source => (source_lengths orelse return error.InvalidNodeReference)[index],
                     .occurrence => |id| try encode.referenceEncodedLen(&self.occurrence(id).reference),
                 };
                 payload = std.math.add(usize, payload, child_len) catch
@@ -739,16 +861,31 @@ fn Context(comptime KeccakContext: type) type {
             node_buffer: []u8,
             branch: *const Occurrence.Branch,
             payload_len: usize,
-        ) UpdateError![]const u8 {
+        ) AllocUpdateError![]const u8 {
             var writer = try encode.listWriter(node_buffer, payload_len);
+            if (comptime mode == .catalog) {
+                for (&branch.children, 0..) |*child, index| switch (child.*) {
+                    .empty => try encode.writeBytes(&writer, ""),
+                    .source => try encode.writeCodecReference(
+                        &writer,
+                        try self.source_resolver.resolvedBranchReference(
+                            branch.source orelse return error.InvalidNodeReference,
+                            index,
+                        ),
+                    ),
+                    .occurrence => |child_id| try encode.writeReference(
+                        &writer,
+                        &self.occurrence(child_id).reference,
+                    ),
+                };
+                try encode.writeBytes(&writer, "");
+                return node_buffer[0 .. encode.listPrefixLen(payload_len) + writer.written().len];
+            }
             for (&branch.children, 0..) |*child, index| switch (child.*) {
                 .empty => try encode.writeBytes(&writer, ""),
-                .catalog => try encode.writeCodecReference(
+                .source => try encode.writeCodecReference(
                     &writer,
-                    try self.catalog.resolvedBranchReference(
-                        branch.source orelse return error.InvalidNodeReference,
-                        index,
-                    ),
+                    (branch.source orelse return error.InvalidNodeReference).children[index],
                 ),
                 .occurrence => |id| try encode.writeReference(&writer, &self.occurrence(id).reference),
             };
@@ -795,22 +932,72 @@ pub fn updateSorted(
 
     const mark = workspace.mark();
     defer workspace.rewind(mark);
-    const allocator = workspace.allocator();
-    var context: Context(@TypeOf(keccak_context)) = .{
+    return updateResolved(
+        .catalog,
+        keccak_context,
+        workspace.allocator(),
+        topology,
+        switch (root_ref) {
+            .empty => null,
+            .node => |authenticated| authenticated.id,
+        },
+        root_hash,
+        updates,
+    );
+}
+
+pub fn updateIndexSorted(
+    keccak_context: anytype,
+    backing_allocator: Allocator,
+    root_hash: hash.Root,
+    index: *const proof.NodeIndex,
+    updates: []const Update,
+) AllocUpdateError!hash.Root {
+    if (updates.len == 0) return root_hash;
+    try validateUpdates(updates);
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    return updateResolved(
+        .index,
+        keccak_context,
+        allocator,
+        index,
+        if (std.mem.eql(u8, &root_hash, &hash.empty_root)) null else .{
+            .reference = .{ .hashed = &root_hash },
+            .require_branch = false,
+            .root = true,
+        },
+        root_hash,
+        updates,
+    );
+}
+
+fn updateResolved(
+    comptime mode: SourceMode,
+    keccak_context: anytype,
+    allocator: Allocator,
+    source_resolver: if (mode == .catalog) *const catalog.Catalog else *const proof.NodeIndex,
+    root_source: ?Source(mode),
+    root_hash: hash.Root,
+    updates: []const Update,
+) AllocUpdateError!hash.Root {
+    var context: Context(@TypeOf(keccak_context), mode) = .{
         .allocator = allocator,
         .keccak_context = keccak_context,
-        .catalog = topology,
+        .source_resolver = source_resolver,
     };
     defer context.deinit();
-    const root = switch (root_ref) {
-        .empty => try context.newOccurrence(.empty, .root, .empty, false),
-        .node => |authenticated| try context.newOccurrence(
-            .{ .source = authenticated.id },
+    const root = if (root_source) |source|
+        try context.newOccurrence(
+            .{ .source = source },
             .root,
             .unset,
             false,
-        ),
-    };
+        )
+    else
+        try context.newOccurrence(.empty, .root, .empty, false);
 
     for (updates) |*update| {
         const value = update.value orelse continue;

@@ -14,11 +14,11 @@
 //! |-----------------------|----------------|---------------------------------|
 //! | construct from scratch| `root.zig`     | `rootSorted`/`root`, exact flat workspace |
 //! | authenticated reads   | `proof.zig`    | `lookup`, allocation-free       |
-//! | mutate via hash index | `sparse.zig`   | `updateSorted` — no catalog; serves lanes that discover keys during execution |
-//! | mutate via catalog    | `occurrence.zig` | `updateCatalog` — authenticated topology, fixed 32-byte keys, dirty-only re-encode |
+//! | mutate arbitrary keys | `sparse.zig`   | `updateSorted` — variable-width structural keys |
+//! | mutate fixed keys     | `occurrence.zig` | `updateFixedSorted`/`updateCatalog` — resolver-backed fixed64 algebra |
 //!
-//! The two mutation engines implement the same MPT algebra over different node
-//! representations on purpose; `fuzz.zig` holds the cross-engine differential.
+//! `fuzz.zig` differentially checks arbitrary sparse, fixed index, and catalog
+//! occurrence mutation against full construction.
 
 const std = @import("std");
 const hash = @import("hash.zig");
@@ -241,6 +241,23 @@ pub fn Trie(comptime KeccakContext: type) type {
             );
         }
 
+        /// Apply sorted fixed-32-byte-key updates through the shared mutation
+        /// engine, resolving authenticated nodes lazily from the sealed index.
+        pub fn updateFixedSorted(
+            self: Self,
+            root_hash: Root,
+            index: *const NodeIndex,
+            updates: []const CatalogUpdate,
+        ) AllocUpdateError!Root {
+            return occurrence.updateIndexSorted(
+                self.keccak_context,
+                self.allocator,
+                root_hash,
+                index,
+                updates,
+            );
+        }
+
         /// Apply sorted fixed-key updates through an authenticated catalog.
         pub fn updateCatalog(
             self: Self,
@@ -354,20 +371,17 @@ pub fn Trie(comptime KeccakContext: type) type {
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
                     const allocator = self.structural.allocator;
-                    const projected_keys = try allocator.alloc(Root, updates.len);
-                    defer allocator.free(projected_keys);
-                    const structural_updates = try allocator.alloc(sparse.Update, updates.len);
+                    const structural_updates = try allocator.alloc(occurrence.Update, updates.len);
                     defer allocator.free(structural_updates);
 
-                    for (updates, 0..) |item, projected_index| {
-                        projected_keys[projected_index] = self.key_context.trieKey(item.key);
-                        structural_updates[projected_index] = .{
-                            .key = &projected_keys[projected_index],
+                    for (updates, structural_updates) |item, *projected| {
+                        projected.* = .{
+                            .key = self.key_context.trieKey(item.key),
                             .value = item.value,
                         };
                     }
-                    Sort.byKey(sparse.Update, structural_updates);
-                    return self.structural.updateSorted(root_hash, index, structural_updates);
+                    Sort.byKey(occurrence.Update, structural_updates);
+                    return self.structural.updateFixedSorted(root_hash, index, structural_updates);
                 }
 
                 pub fn updateCatalog(
