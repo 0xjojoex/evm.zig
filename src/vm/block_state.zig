@@ -10,6 +10,8 @@ const Backend = @import("../backend.zig").Backend;
 const bal = @import("../eth/bal/model.zig");
 const bal_witness = @import("../eth/bal/witness.zig");
 const ClaimPlan = @import("../eth/bal/ClaimPlan.zig").ClaimPlan;
+const DenseClaimVerifier = @import("../eth/bal/DenseClaimVerifier.zig");
+const tracked_state_projector = @import("../eth/bal/tracked_state_projector.zig");
 const Reader = @import("../state/Reader.zig");
 const TrackedState = @import("../state/TrackedState.zig");
 const BlockState = @import("../stateless/BlockState.zig");
@@ -45,11 +47,20 @@ pub fn Tracked(comptime spec: anytype) type {
         pub const default_executor_state_init: ExecutorStateInit = .{};
         pub const supports_block_production = true;
         pub const supports_external_observation_capture = true;
+        pub const BalClaimVerifier = tracked_state_projector.ClaimVerifier;
 
         pub fn checkSpec(_: @TypeOf(spec)) void {}
 
         pub fn initExecutorState(allocator: std.mem.Allocator, options: ExecutorStateInit) State {
             return State.initForSpec(allocator, spec, options.reader);
+        }
+
+        pub fn initBalClaimVerifier(
+            allocator: std.mem.Allocator,
+            _: *const State,
+            expected: bal.BlockAccessList,
+        ) !BalClaimVerifier {
+            return BalClaimVerifier.init(allocator, expected);
         }
 
         pub inline fn stateAddress(value: address.Address) StateAddress {
@@ -118,6 +129,7 @@ pub const BalStateless = struct {
     pub const ExecutorStateInit = State;
     pub const supports_block_production = false;
     pub const supports_external_observation_capture = false;
+    pub const BalClaimVerifier = DenseClaimVerifier;
 
     pub fn checkSpec(comptime spec: anytype) void {
         if (!spec.block.block_access_list) {
@@ -127,6 +139,14 @@ pub const BalStateless = struct {
 
     pub fn initExecutorState(_: std.mem.Allocator, state: ExecutorStateInit) State {
         return state;
+    }
+
+    pub fn initBalClaimVerifier(
+        allocator: std.mem.Allocator,
+        state: *const State,
+        expected: bal.BlockAccessList,
+    ) !BalClaimVerifier {
+        return BalClaimVerifier.init(allocator, &state.plan, expected);
     }
 
     pub inline fn stateAddress(value: address.Address) StateAddress {

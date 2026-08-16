@@ -254,7 +254,7 @@ const FoldAccount = struct {
         block_access_index: bal.BlockAccessIndex,
     ) Allocator.Error!void {
         for (account.storage) |slot| {
-            if (account.storage_wiped or slot.original == slot.current) {
+            if (observation.storageIsRead(account.storage_wiped, slot.original, slot.current)) {
                 try self.storage_reads.append(allocator, slot.slot);
             } else {
                 try self.storage_changes.append(allocator, .{

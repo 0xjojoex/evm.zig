@@ -193,6 +193,10 @@ pub fn ViewType(comptime State: type) type {
                     .effect = observed.effect,
                 };
             }
+
+            pub fn idAt(self: AccountObservations, index: u32) State.AccountId {
+                return self.state.observed_accounts.items[index].account;
+            }
         };
 
         pub const StorageObservations = struct {
@@ -213,6 +217,10 @@ pub fn ViewType(comptime State: type) type {
                     .observation = observed.observation,
                     .effect = observed.effect,
                 };
+            }
+
+            pub fn idAt(self: StorageObservations, index: u32) State.StorageId {
+                return self.state.observed_storage.items[index].storage;
             }
 
             pub fn metadataAt(self: StorageObservations, index: u32) StorageObservationMetadata {
