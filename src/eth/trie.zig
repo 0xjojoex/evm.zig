@@ -798,8 +798,16 @@ pub fn hashedAddressKey(target: address.Address) [32]u8 {
     return AddressKeyContext.trieKey(.{}, target);
 }
 
+pub inline fn hashedAddressKeyInto(target: address.Address, digest: *align(8) [32]u8) void {
+    crypto.keccak256Into(target.asBytes(), digest);
+}
+
 pub fn hashedStorageKey(key: u256) [32]u8 {
     return StorageKeyContext.trieKey(.{}, key);
+}
+
+pub inline fn hashedStorageKeyInto(key: u256, digest: *align(8) [32]u8) void {
+    crypto.keccak256Into(&uint256.toBytes32(key), digest);
 }
 
 pub fn storageValue(allocator: Allocator, value: u256) Allocator.Error![]u8 {

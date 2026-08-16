@@ -128,13 +128,13 @@ pub const ClaimPlan = struct {
                 const storage_id: StorageId = @enumFromInt(@as(u32, @intCast(storage_index)));
                 storage_accounts[storage_index] = id;
                 storage_slots[storage_index] = slot;
-                storage_trie_keys[storage_index] = trie.hashedStorageKey(slot);
+                trie.hashedStorageKeyInto(slot, &storage_trie_keys[storage_index]);
                 storage_trie_order[storage_index] = storage_id;
                 storage_index += 1;
             }
 
             account_addresses[account_index] = .fromAddress(account.address);
-            account_trie_keys[account_index] = trie.hashedAddressKey(account.address);
+            trie.hashedAddressKeyInto(account.address, &account_trie_keys[account_index]);
             account_storage_ranges[account_index] = .{
                 .start = @intCast(storage_start),
                 .len = @intCast(storage_index - storage_start),

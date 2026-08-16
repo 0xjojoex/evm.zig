@@ -42,10 +42,17 @@ const NativeSecp256k1Provider = switch (build_options.native_secp256k1) {
     .libsecp256k1 => Libsecp256k1Provider,
 };
 
-pub fn keccak256(input: []const u8) [32]u8 {
-    var digest: [32]u8 = undefined;
-    Provider.keccak256(input, &digest);
+pub inline fn keccak256(input: []const u8) [32]u8 {
+    var digest: [32]u8 align(8) = undefined;
+    keccak256Into(input, &digest);
     return digest;
+}
+
+/// Writes a Keccak-256 digest into caller-owned storage. The alignment matches
+/// the zkVM accelerator ABI and permits word-wise consumers without reloading
+/// the digest byte by byte.
+pub inline fn keccak256Into(input: []const u8, digest: *align(8) [32]u8) void {
+    Provider.keccak256Into(input, digest);
 }
 
 pub fn sha256(input: []const u8) [32]u8 {
@@ -64,7 +71,7 @@ pub fn ecrecoverPublicKey(
 }
 
 const NativeProvider = struct {
-    fn keccak256(input: []const u8, out: *[32]u8) void {
+    fn keccak256Into(input: []const u8, out: *align(8) [32]u8) void {
         NativeKeccakProvider.keccak256(input, out);
     }
 
@@ -152,12 +159,11 @@ const Libsecp256k1Provider = struct {
 };
 
 const ZkvmProvider = struct {
-    fn keccak256(input: []const u8, out: *[32]u8) void {
-        var digest: zkvm.Keccak256Hash = undefined;
-        if (zkvm.zkvm_keccak256(zkvm.inputPtr(input), input.len, &digest) != zkvm.EOK) {
+    fn keccak256Into(input: []const u8, out: *align(8) [32]u8) void {
+        const digest: *zkvm.Keccak256Hash = @ptrCast(out);
+        if (zkvm.zkvm_keccak256(zkvm.inputPtr(input), input.len, digest) != zkvm.EOK) {
             @panic("zkvm_keccak256 failed");
         }
-        out.* = digest.data;
     }
 
     fn sha256(input: []const u8, out: *[32]u8) void {
@@ -182,6 +188,10 @@ const ZkvmProvider = struct {
 
 test keccak256 {
     try std.testing.expectEqualSlices(u8, &keccak256_empty, &keccak256(""));
+
+    var digest: [32]u8 align(8) = undefined;
+    keccak256Into("", &digest);
+    try std.testing.expectEqualSlices(u8, &keccak256_empty, &digest);
 }
 
 test "native Keccak backend matches std across rate boundaries" {
