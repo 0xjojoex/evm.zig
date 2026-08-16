@@ -15,11 +15,6 @@ pub const CodecError = rlp.ParseError || error{
     NonCanonicalNode,
 };
 
-pub const WitnessError = error{
-    ConflictingNode,
-    MissingNode,
-};
-
 pub const ResourceError = error{
     ResourceLimitExceeded,
     WorkspaceTooSmall,

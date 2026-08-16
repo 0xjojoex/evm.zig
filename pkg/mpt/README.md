@@ -19,6 +19,32 @@ accounts, storage, secure-key hashing, fork rules — lives in the caller.
 - **Honest absence.** A valid non-existence proof is a *result*; a missing or
   malformed witness node is an *error*. The two never blur.
 
+## Why another MPT package?
+
+Most trie libraries sit behind a database, cache, or persistent mutable state.
+That is not the boundary a stateless executor receives. It starts with a trusted
+root and a sealed bag of witness nodes, must authenticate exactly the available
+topology, serve repeated reads without rehashing or decoding it, apply the final
+mutations, and return a post-state root under caller-controlled memory.
+
+This package therefore keeps three complementary representations instead of
+turning one general trie into every phase:
+
+- The arbitrary-key proof and sparse-update lane is the structural
+  specification, conformance surface, and differential oracle.
+- The immutable catalog authenticates and links witness-present topology once,
+  while preserving missing hashed children as opaque references.
+- The fixed-key mutation lane uses transient occurrences for 32-byte structural
+  keys. A selected catalog child is materialized once, subsequent updates reuse
+  it, untouched children remain authenticated references, and dirty nodes are
+  encoded once at the end.
+
+The last point is deliberate for Ethereum state and storage keys: Keccak-derived
+keys disperse quickly, so sorted batches usually share only shallow prefixes. A
+direct recursive batch fold adds partitioning machinery but finds little extra
+topology to share; the occurrence overlay provides the useful memoization at a
+smaller execution cost.
+
 ## Requirements
 
 - Zig (matching the package's `build.zig.zon`).
@@ -125,9 +151,10 @@ nodes lazily from a sealed witness index and uses the trie's allocator; the
 latter carries stable catalog handles and takes a resettable `Region` from the
 caller. Both create mutable occurrences only along selected paths, retain
 untouched children as authenticated references, and encode dirty ancestors
-bottom-up. Fixed width also makes branch terminal values and prefix keys
-structurally invalid; arbitrary-width keys remain on `updateSorted` in the
-sparse engine.
+bottom-up. An occurrence is the memoized write overlay, not another authenticated
+source of truth. Fixed width also makes branch terminal values and prefix keys
+structurally invalid; arbitrary-width keys remain on `updateSorted` in the sparse
+engine.
 
 **Fixed-key binding.** `bindSorted` and `bindAssumeSorted` batch authenticated
 lookups through a catalog without allocation or RLP decoding. Their

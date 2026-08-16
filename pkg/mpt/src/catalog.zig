@@ -182,20 +182,6 @@ pub const Catalog = struct {
         return self.reference(entry, link, entry.value_offset);
     }
 
-    pub inline fn branchReference(
-        self: Catalog,
-        id: NodeId,
-        child_index: usize,
-    ) errors.LookupError!node_codec.Reference {
-        if (child_index >= 16) return error.InvalidNodeReference;
-        const entry = self.node(id) orelse return error.InvalidNodeReference;
-        if (entry.kind != .branch or entry.payload >= self.branches.items.len) {
-            return error.InvalidNodeReference;
-        }
-        const branch = &self.branches.items[entry.payload];
-        return self.reference(entry, branch.links[child_index], branch.reference_offsets[child_index]);
-    }
-
     /// Fused form for consumers that need both topology and encoded reference.
     pub inline fn resolveBranchChild(
         self: Catalog,
