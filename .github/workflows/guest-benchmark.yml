@@ -194,7 +194,7 @@ jobs:
               --prefix "${RUNNER_TEMP}/failure-probe" \
               --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
               --summary all
-            zig build check-zisk-failure-status -- \
+            zig build check-zisk-failure-status -- --expect-no-propagation \
               "${{ steps.zisk.outputs.host }}" \
               "${RUNNER_TEMP}/failure-probe/guest/zisk/evmz-guest-zisk.elf"
           fi
