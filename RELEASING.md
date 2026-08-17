@@ -1,7 +1,8 @@
 # Releasing evmz
 
-One repository, one fetched package, one version. `pkg/rlp`, `pkg/mpt`, and
+One repository and one versioned Zig package. `pkg/rlp`, `pkg/mpt`, and
 `pkg/ssz` are directories inside that package, not packages of their own.
+Guest ELFs are separately released artifacts, not additional Zig packages.
 
 Zig versions package roots, not modules: `.version`, `.name`, `.fingerprint`,
 and the `.paths` hash all belong to the fetched root, and a dependency is a
@@ -11,8 +12,9 @@ have them.
 
 ## Public surface
 
-A release freezes all three of these together. Renaming or removing a build
-option is a compatibility break exactly like renaming a function.
+A package release freezes its exported modules, consumer-visible build options,
+and supported configurations together. Renaming or removing a build option is
+a compatibility break exactly like renaming a function.
 
 | Fetch | Options | Modules | Native dependencies fetched |
 | --- | --- | --- | --- |
@@ -43,7 +45,7 @@ resolves RLP through the sibling path; root consumers never execute it.
 `include/evmz/evmz.h` is a reserved slot with no declarations. It enters the
 compatibility surface when it gets one.
 
-## Versioning
+## Package versioning
 
 The root `build.zig.zon` `.version` is authoritative and the tag is `vX.Y.Z`
 for exactly that string. It is evmz's own semver, not a mirror of Zig's.
@@ -73,8 +75,7 @@ compatibility table.
 | Tag | Meaning |
 | --- | --- |
 | `vX.Y.Z` | evmz package release; versions every exported module |
-| `guest-<track>@vX.Y.Z[-rc.N]` | guest ELF artifact; on a devnet track, `vX.Y.Z` mirrors the exact fixture release |
-| `rlp-v0.1.0`, `ssz-v0.1.0` | frozen historical subtree releases |
+| `guest-<track>@vX.Y.Z[-rc.N]` | current devnet guest convention; `vX.Y.Z` mirrors the exact fixture release |
 | `guest-v0.1.0-rc.0` | frozen historical guest release, predating spec tracks |
 
 The historical tags, their GitHub releases, and the `release/rlp` and
@@ -86,68 +87,72 @@ keeps its own gates and its own cadence; neither tag substitutes for the other.
 
 ## Guest releases
 
-A guest ELF validates exactly one Ethereum specification —
-`src/stateless/validate.zig` rejects any other at compile time — so the spec is
-part of the artifact's identity, not a note attached to it. Guest tags carry it:
+A guest build can compile a router for one or more known stateless schemas. A
+released guest pins its accepted schema set explicitly; the current production
+policy pins one schema and specification per artifact. The evidence record, not
+the tag alone, states what the artifact accepts and what corpus it passed.
+
+Three identities serve different purposes:
+
+- the accepted **schema ids** select wire decoders, but do not by themselves
+  prove the complete input/output contract;
+- the **ELF SHA-256** identifies the exact released bytes;
+- the **verification key** identifies the corresponding proving program and
+  must be generated from those verified bytes.
+
+### Current devnet naming convention
+
+Devnet tags make the tested specification visible to operators:
 
 ~~~
 guest-glamsterdam-devnet@v8.1.0-rc.0
       └── track ────┘     └ fixture release ┘
 ~~~
 
-**Devnet tracks.** The version is not evmz software SemVer. It mirrors the
-complete authoritative fixture release: `@v8.1.0` means
+The version is not evmz software SemVer. It mirrors the complete authoritative
+fixture release: `@v8.1.0` means
 `tests-glamsterdam-devnet@v8.1.0`. An `-rc.N` suffix records artifact
 qualification without changing that compatibility coordinate. The separately
-numbered `tests-zkevm` wire/corpus release remains explicit in the manifest and
-release notes.
+numbered `tests-zkevm` wire/corpus release remains explicit in `evidence.json`
+and the release notes.
 
-The claim is enforced, not conventional. The strict benchmark's
-`evidence.json` records both the network and exact fixture release compiled
-into the tested guest. For a devnet tag the release workflow requires
+The strict benchmark's `evidence.json` records both the network and exact
+fixture release compiled into the tested guest. The naming policy pairs a
+devnet tag with that evidence as follows:
 
 ~~~
 network == "<track>-<major>"
 fixture_release == "tests-<track>@vX.Y.Z"
 ~~~
 
-Thus `@v8.1.0` rejects evidence from both devnet-7 and another devnet-8 fixture
-line such as `v8.2.0`.
+Thus `@v8.1.0` names neither devnet-7 nor another devnet-8 fixture line such as
+`v8.2.0`. The release pipeline does not derive this mapping from the tag: it
+promotes the selected successful benchmark artifact, and `evidence.json` is the
+reviewable compatibility record.
 
 A devnet track offers **no compatibility guarantee at any bump**. Upstream
 publishes every `tests-*` release as a pre-release for the same reason: the
 spec itself is unstable. Guest releases on a devnet track are published as
-GitHub pre-releases, and the release manifest — not the version — is the
+GitHub pre-releases, and the evidence record — not the version — is the
 authoritative statement of what a given ELF proves. The fixture publisher owns
 all three version components; evmz does not use minor or patch to number its own
 iterations. RCs may advance while qualifying one fixture line, but each tag is
 immutable and there is only one unsuffixed final tag for that line.
 
-Two identities do the work a version number cannot:
+This convention does not define future stable guest versioning. Adopt an
+evmz-owned artifact version only when a stable compatibility promise requires
+one, and update this policy explicitly rather than changing the meaning of the
+existing tag syntax.
 
-- the **stateless schema id** (`-Dstateless-schema`, e.g. `0x1501`) is the wire
-  compatibility token — a consumer asks it whether their input decodes;
-- the **verification key** is the artifact identity — 32 bytes that change with
-  any byte of the ELF, including a toolchain bump that changes no behavior.
-
-**Fork tracks.** When a fork reaches mainnet its track opens at
-`guest-amsterdam@v1.0.0` with ordinary semver, because that is the first point
-at which a stability promise means anything.
-
-The preferred next tag is `guest-glamsterdam-devnet@v8.1.0-rc.0`, paired with
-`tests-glamsterdam-devnet@v8.1.0` and the separately recorded
-`tests-zkevm@v0.8.0`. If the older pinned fixture line were given a scoped tag,
-its exact coordinate would be `guest-glamsterdam-devnet@v7.2.0`, not
-`@v7.0.0`. The already-published `guest-v0.1.0-rc.0` remains untouched as
-historical evidence.
+### Cutting a guest release
 
 Dispatch `Guest benchmark` with `corpus=tests-zkevm` and
-`release_gate=true`. A successful run emits one long-lived strict artifact
+`release_gate=true`. A successful run emits one release-eligible strict artifact
 containing the tested ELF, `evidence.json`, and its report. Dispatch `Guest
 release` with that run id and the intended tag. The release workflow verifies
-the successful run, source ancestry, strict result counts, tag/spec mapping,
-and ELF hash before generating the VK and signatures; it never rebuilds or
-searches other runs.
+the successful run, source ancestry, and ELF hash before generating the VK and
+signatures; it never rebuilds or searches other runs. Correctness and corpus
+qualification belong to the benchmark that produced the artifact.
 
 ## Changelog
 
@@ -158,7 +163,7 @@ in a package-level subsection rather than being repeated under each module.
 The RLP and SSZ package changelogs are closed historical records of the subtree
 era. Leave their entries and links intact; new entries belong in the root.
 
-## Cutting a release
+## Cutting a package release
 
 From a pull request on the exact commit to publish:
 
@@ -171,7 +176,7 @@ From a pull request on the exact commit to publish:
 Releases are never cut from an unmerged branch. A tag that already exists and
 points elsewhere is a hard failure — never move it.
 
-## Gates
+## Package release gates
 
 ~~~sh
 zig build ci -j2 --summary all    # broad repository gate

@@ -7,7 +7,8 @@ usage: scripts/fetch-eest-zkevm-fixtures.sh [--manifest PATH] [--resolved-manife
 
 Downloads EEST zkEVM blockchain fixtures into ../.eest/.
 With --manifest, extracts only the archive-relative paths listed in PATH.
-With --resolved-manifest, records the verified corpus identity and counts.
+With --resolved-manifest, records the verified corpus identity, counts, and
+fixture roots.
 
 Environment overrides:
   EEST_ZKEVM_REPO      default: zkevm_repo from ../eest.lock
@@ -207,12 +208,14 @@ if [[ -n "${resolved_manifest}" ]]; then
   [[ "${indexed_tests}" -gt 0 && "${fixture_count}" -gt 0 ]]
 
   mkdir -p "$(dirname "${resolved_manifest}")"
+  fixture_root="$(cd "${blockchain_root}" && pwd)"
   jq -n \
     --arg id "${version}" \
     --arg digest "${sha256}" \
     --arg fixture_release "${spec_version}" \
     --arg network "${network}" \
     --arg validation_ref "${version}" \
+    --arg fixture_root "${fixture_root}" \
     --argjson fixture_files "${fixture_files}" \
     --argjson indexed_tests "${indexed_tests}" \
     --argjson fixture_count "${fixture_count}" \
@@ -224,6 +227,7 @@ if [[ -n "${resolved_manifest}" ]]; then
       fixture_release: $fixture_release,
       network: $network,
       workload: { eest_validation_ref: $validation_ref },
+      fixture_roots: [$fixture_root],
       fixture_files: $fixture_files,
       indexed_tests: $indexed_tests,
       fixture_count: $fixture_count

@@ -281,13 +281,8 @@ const Checker = struct {
             var offset: usize = 0;
             while (offset < text_bytes.len) : (offset += 4) {
                 const instruction = std.mem.readInt(u32, text_bytes[offset..][0..4], .little);
-                const opcode = instruction & 0x7f;
-                const address = text.address + offset;
-                if (opcode == 0x2f) return checker.failFmt("atomic instruction at 0x{x}", .{address});
-                if (opcode == 0x07 or opcode == 0x27 or opcode == 0x43 or opcode == 0x47 or
-                    opcode == 0x4b or opcode == 0x4f or opcode == 0x53)
-                {
-                    return checker.failFmt("floating-point instruction at 0x{x}", .{address});
+                if (forbiddenInstruction(instruction)) |kind| {
+                    return checker.failFmt("{s} instruction at 0x{x}", .{ kind, text.address + offset });
                 }
             }
         }
@@ -333,6 +328,21 @@ const Checker = struct {
         return .{ .load_count = loads.len };
     }
 };
+
+/// Instructions the ZisK RV64IM emulator does not execute. `rev8` is the one
+/// Zbb encoding Zig's backend emits toward this target, so it is named
+/// alongside the atomic and floating-point opcode families.
+fn forbiddenInstruction(instruction: u32) ?[]const u8 {
+    const opcode = instruction & 0x7f;
+    if (opcode == 0x2f) return "atomic";
+    if (opcode == 0x07 or opcode == 0x27 or opcode == 0x43 or opcode == 0x47 or
+        opcode == 0x4b or opcode == 0x4f or opcode == 0x53)
+    {
+        return "floating-point";
+    }
+    if (instruction & 0xfff0707f == 0x6b805013) return "rev8";
+    return null;
+}
 
 /// The attribute waiver covers conformance deviation:
 /// the vendor static library declares `A` while contributing no atomic
@@ -418,6 +428,14 @@ test "rejects compressed-instruction ELF flag" {
     var checker: Checker = .{ .allocator = std.testing.allocator, .data = &bytes };
     try std.testing.expectError(error.InvalidElf, checker.check(.{}));
     try std.testing.expectEqualStrings("RISC-V compressed-instruction flag is forbidden", checker.failure);
+}
+
+test "opcode scan forbids atomic, floating-point, and rev8 instructions" {
+    try std.testing.expectEqualStrings("atomic", forbiddenInstruction(0x100522af).?); // amoadd.w
+    try std.testing.expectEqualStrings("floating-point", forbiddenInstruction(0x0005a507).?); // flw
+    try std.testing.expectEqualStrings("rev8", forbiddenInstruction(0x6b855513).?); // rev8 a0, a0
+    try std.testing.expectEqual(null, forbiddenInstruction(0x00000013)); // nop
+    try std.testing.expectEqual(null, forbiddenInstruction(0x40555513)); // srai a0, a0, 0x5
 }
 
 test "accepts required architecture attributes" {

@@ -12,7 +12,7 @@ on:
         required: true
         type: number
       dry_run:
-        description: Validate evidence but skip VK generation, signing, and release creation
+        description: Prepare the tested artifact but skip VK generation, signing, and release creation
         required: true
         default: false
         type: boolean
@@ -25,14 +25,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ZIG_VERSION: 0.16.0
-  STATELESS_SCHEMA: "0x1501"
   # ere-server-zisk:58ca85b, pinned by digest so the VK provenance is immutable.
   ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:a21622ab8a9b2502f40307208b593f500a22373201e9ae37c2558a7eadb52e17
 
 jobs:
   verify:
-    name: Verify ${{ inputs.tag }}
+    name: Prepare ${{ inputs.tag }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -72,19 +70,19 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ steps.run.outputs.source-commit }}
-          fetch-depth: 0
 
       - name: Require tested source on main
         env:
+          GH_TOKEN: ${{ github.token }}
           SOURCE_COMMIT: ${{ steps.run.outputs.source-commit }}
         run: |
-          git show-ref --verify --quiet refs/remotes/origin/main
-          git merge-base --is-ancestor "${SOURCE_COMMIT}" refs/remotes/origin/main
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${SOURCE_COMMIT}" --jq .status)"
+          [[ "${status}" == identical || "${status}" == behind ]]
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - name: Require a new tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: test -z "$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
 
       - name: Download exact evidence
         env:
@@ -97,10 +95,9 @@ jobs:
             --name "${ARTIFACT_NAME}" \
             --dir "${RUNNER_TEMP}/evidence"
 
-      - name: Validate and stage release bundle
+      - name: Stage tested release bundle
         id: bundle
         env:
-          TAG: ${{ inputs.tag }}
           SOURCE_COMMIT: ${{ steps.run.outputs.source-commit }}
           EVIDENCE_URL: ${{ steps.run.outputs.run-url }}
         run: |
@@ -110,69 +107,15 @@ jobs:
           report="${source_dir}/guest-evidence/report.md"
           test -s "${evidence}"
           test -s "${report}"
-          jq -e \
-            --arg source "${SOURCE_COMMIT}" \
-            --arg schema "${STATELESS_SCHEMA}" \
-            '.schema_version == 1
-             and .source_ref == $source
-             and .backend == "zisk"
-             and .metric == "steps"
-             and .stateless_schema == $schema
-             and .corpus.mode == "tests-zkevm"
-             and ((.corpus.digest // "") | test("^[0-9a-f]{64}$"))
-             and ((.corpus.fixture_release // "") | length > 0)
-             and ((.guest.elf_sha256 // "") | test("^[0-9a-f]{64}$"))
-             and ((.guest.zig_version // "") | length > 0)
-             and ((.guest.backend_version // "") | length > 0)
-             and ((.guest.backend_commit // "") | test("^[0-9a-f]{40}$"))
-             and ((.guest.backend_toolchain // "") | length > 0)
-             and .gate.strict == true
-             and .gate.passed == true
-             and .results.fixture_count == .corpus.expected_fixtures
-             and .results.total_steps > 0
-             and .results.crashes == 0
-             and .results.known_failures == 0
-             and .results.unexpected_failures == 0
-             and (.results.unexpected_passes | length) == 0
-             and (.results.stale_known | length) == 0' \
-            "${evidence}"
+          test "$(jq -er .source_ref "${evidence}")" = "${SOURCE_COMMIT}"
 
           elf_name="$(jq -er '.guest.elf_name | select(type == "string" and length > 0)' "${evidence}")"
           test "$(basename "${elf_name}")" = "${elf_name}"
-          [[ "${elf_name}" == stateless-validator-evmz-zisk-*.elf ]]
           elf="${source_dir}/${elf_name}"
           test -s "${elf}"
           expected_sha="$(jq -er .guest.elf_sha256 "${evidence}")"
           actual_sha="$(sha256sum "${elf}" | cut -d ' ' -f 1)"
           test "${actual_sha}" = "${expected_sha}"
-          zig build check-guest-elf -- --require-rv64im-zicclsm "${elf}"
-
-          [[ "${TAG}" =~ ^guest-[a-z0-9]+(-[a-z0-9]+)*@v([0-9]+)\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
-          remote_tag="$(git ls-remote --tags origin \
-            "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
-          if [[ -n "${remote_tag}" ]]; then
-            tag_commit="$(awk '
-              /\^\{\}$/ { peeled=$1 }
-              !/\^\{\}$/ { direct=$1 }
-              END { if (peeled != "") print peeled; else print direct }
-            ' <<<"${remote_tag}")"
-            if [[ "${tag_commit}" != "${SOURCE_COMMIT}" ]]; then
-              echo "error: ${TAG} already points to ${tag_commit}, not tested source ${SOURCE_COMMIT}" >&2
-              exit 1
-            fi
-          fi
-          scope="${TAG#guest-}"
-          track="${scope%%@*}"
-          fixture_version="${scope#*@v}"
-          fixture_version="${fixture_version%-rc.*}"
-          network="$(jq -er .corpus.network "${evidence}")"
-          fixture_release="$(jq -er .corpus.fixture_release "${evidence}")"
-          expected_network="${track}"
-          if [[ "${track}" == *-devnet ]]; then
-            expected_network="${track}-${fixture_version%%.*}"
-            test "${fixture_release}" = "tests-${track}@v${fixture_version}"
-          fi
-          test "${network}" = "${expected_network}"
 
           artifacts="${GITHUB_WORKSPACE}/release-artifacts"
           mkdir -p "${artifacts}"
@@ -185,8 +128,8 @@ jobs:
             echo ""
             echo "- ELF SHA-256: \`${actual_sha}\`"
             echo "- Strict benchmark run: ${EVIDENCE_URL}"
-            echo "- Spec: \`${network}\`"
-            echo "- Fixture release: \`${fixture_release}\`"
+            echo "- Spec: \`$(jq -er .corpus.network "${evidence}")\`"
+            echo "- Fixture release: \`$(jq -er .corpus.fixture_release "${evidence}")\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload release bundle

@@ -126,7 +126,11 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     }
 
     if (paths.items.len == 0) {
-        try paths.append(allocator, try fixture_common.lockedZkevmFixturePath(init.io, arena));
+        if (corpus_manifest) |manifest_path| {
+            try paths.appendSlice(allocator, try manifestFixtureRoots(init.io, arena, manifest_path));
+        } else {
+            try paths.append(allocator, try fixture_common.lockedZkevmFixturePath(init.io, arena));
+        }
     }
 
     const evidence_options: ?guest_evidence.Options = if (evidence_dir) |dir| evidence: {
@@ -191,6 +195,21 @@ fn isOption(arg: []const u8) bool {
     return std.mem.startsWith(u8, arg, "-");
 }
 
+/// A resolved corpus manifest records the fixture roots its fetcher verified,
+/// so a manifest-driven run needs no separately supplied paths.
+fn manifestFixtureRoots(io: std.Io, arena: std.mem.Allocator, manifest_path: []const u8) ![]const []const u8 {
+    const max_manifest_bytes = 16 * 1024 * 1024;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, manifest_path, arena, .limited(max_manifest_bytes));
+    const manifest = try std.json.parseFromSliceLeaky(
+        struct { fixture_roots: []const []const u8 = &.{} },
+        arena,
+        bytes,
+        .{ .ignore_unknown_fields = true },
+    );
+    if (manifest.fixture_roots.len == 0) return error.MissingManifestFixtureRoots;
+    return manifest.fixture_roots;
+}
+
 fn requiresSequential(options: stateless.Options) bool {
     return options.limit > 0 or options.verbose or options.trace_mismatch or
         options.classify_failures or options.report != null;
@@ -243,6 +262,34 @@ test "limited and diagnostic zkEVM runs stay sequential" {
     var report = stateless.Report.init(std.testing.allocator);
     defer report.deinit();
     try std.testing.expect(requiresSequential(.{ .report = &report }));
+}
+
+test "manifest-driven runs take their fixture roots from the resolved manifest" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const manifest_path = try std.fs.path.join(std.testing.allocator, &.{ root, "manifest.json" });
+    defer std.testing.allocator.free(manifest_path);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(std.testing.io, .{
+        .sub_path = manifest_path,
+        .data =
+        \\{"mode": "tests-zkevm", "fixture_roots": ["/corpus/a", "/corpus/b"]}
+        ,
+    });
+    const roots = try manifestFixtureRoots(std.testing.io, arena_state.allocator(), manifest_path);
+    try std.testing.expectEqual(@as(usize, 2), roots.len);
+    try std.testing.expectEqualStrings("/corpus/a", roots[0]);
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = manifest_path, .data = "{\"mode\": \"pinned\"}" });
+    try std.testing.expectError(
+        error.MissingManifestFixtureRoots,
+        manifestFixtureRoots(std.testing.io, arena_state.allocator(), manifest_path),
+    );
 }
 
 test "unknown options are not fixture paths" {

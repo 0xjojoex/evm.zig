@@ -98,7 +98,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            binutils-riscv64-unknown-elf \
             jq \
             libgmp10 \
             libomp5-18 \
@@ -142,16 +141,6 @@ jobs:
           scripts/fetch-eest-zkevm-fixtures.sh \
             --resolved-manifest "${RESOLVED_MANIFEST}"
 
-      - name: Resolve corpus paths
-        run: |
-          test -s "${RESOLVED_MANIFEST}"
-          echo "FIXTURE_COUNT=$(jq -r .fixture_count "${RESOLVED_MANIFEST}")" >> "${GITHUB_ENV}"
-          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
-            fixture_root="$(awk -F= '$1 == "zkevm_dest" { print $2; exit }' eest.lock)"
-            test -n "${fixture_root}"
-            echo "EEST_ZKEVM_ROOT=${GITHUB_WORKSPACE}/${fixture_root}/fixtures/blockchain_tests" >> "${GITHUB_ENV}"
-          fi
-
       - name: Build pinned ZisK artifacts
         if: steps.zisk-cache.outputs.cache-hit != 'true'
         uses: ./.github/actions/build-zisk-artifacts
@@ -193,11 +182,7 @@ jobs:
           elf="${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf"
           candidate="${GITHUB_WORKSPACE}/stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
           install -D -m 0644 "${elf}" "${candidate}"
-          check_args=()
-          if [[ "${RELEASE_GATE}" == true ]]; then
-            check_args+=(--require-rv64im-zicclsm)
-          fi
-          zig build check-guest-elf -- "${check_args[@]}" "${candidate}"
+          zig build check-guest-elf -- --require-rv64im-zicclsm "${candidate}"
           if [[ "${RELEASE_GATE}" == true ]]; then
             zig build guest-zisk \
               -Dguest-payload=exit-failure-probe \
@@ -210,11 +195,6 @@ jobs:
               "${{ steps.zisk.outputs.host }}" \
               "${RUNNER_TEMP}/failure-probe/guest/zisk/evmz-guest-zisk.elf"
           fi
-          if riscv64-unknown-elf-objdump -d "${elf}" \
-            | grep -E '[[:space:]]rev8[[:space:]]' >/dev/null; then
-            echo "error: ZisK guest contains unsupported rev8" >&2
-            exit 1
-          fi
           echo "CANDIDATE_ELF=${candidate}" >> "${GITHUB_ENV}"
 
       - name: Run corpus and produce evidence
@@ -222,23 +202,14 @@ jobs:
           GUEST_HOST: ${{ steps.zisk.outputs.host }}
           RELEASE_GATE: ${{ inputs.release_gate }}
         run: |
-          fixture_roots=()
-          if [[ "${CORPUS_MODE}" == tests-zkevm ]]; then
-            fixture_roots+=("${EEST_ZKEVM_ROOT}")
-          else
-            while IFS= read -r -d '' root; do
-              fixture_roots+=("${root}")
-            done < <(find "${CORPUS_ROOT}" -type d -name blockchain_tests -print0 | sort -z)
-            test "${#fixture_roots[@]}" -eq "$(jq '.batches | length' "${RESOLVED_MANIFEST}")"
-          fi
           args=(
             --executor zisk
             --jobs "$(nproc)"
             --zisk-host "${GUEST_HOST}"
             --zisk-elf "${CANDIDATE_ELF}"
-            --evidence-dir guest-evidence
+            --evidence-dir "${GITHUB_WORKSPACE}/guest-evidence"
             --corpus-manifest "${RESOLVED_MANIFEST}"
-            --known-failures eest/fixtures/guest-known-failures.json
+            --known-failures "${GITHUB_WORKSPACE}/eest/fixtures/guest-known-failures.json"
             --source-ref "${SOURCE_COMMIT}"
             --stateless-schema "${STATELESS_SCHEMA}"
             --zig-version "${ZIG_VERSION}"
@@ -249,7 +220,7 @@ jobs:
           if [[ "${RELEASE_GATE}" == true ]]; then
             args+=(--strict-evidence)
           fi
-          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}" "${fixture_roots[@]}"
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}"
 
       - name: Publish job summary
         if: always() && hashFiles('guest-evidence/report.md') != ''

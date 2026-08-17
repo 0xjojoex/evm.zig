@@ -28,6 +28,8 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
 - Consolidated guest evidence into the existing `zkevm` command and one
   `evidence.json`, removed the dormant SP1 workflow branches and Python report
   stage, and made guest releases promote one explicit strict-run artifact.
+  Fixture roots travel in the resolved corpus manifest, and the `rev8` scan
+  joined `check-guest-elf`.
 
 ### RLP
 
