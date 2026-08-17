@@ -14,8 +14,6 @@ pub const Path = struct {
     start: usize,
     len: usize,
 
-    pub const empty: Path = .{ .key = &.{}, .start = 0, .len = 0 };
-
     /// The nibble at `index` within the window.
     pub fn nibbleAt(self: Path, index: usize) u8 {
         std.debug.assert(index < self.len);

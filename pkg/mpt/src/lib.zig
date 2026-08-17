@@ -260,15 +260,17 @@ pub fn Trie(comptime KeccakContext: type) type {
 
         /// Apply sorted fixed-32-byte-key updates through the shared mutation
         /// engine, resolving authenticated nodes lazily from the sealed index.
+        /// Scratch comes from the caller's region and is rewound before return.
         pub fn updateFixedSorted(
             self: Self,
+            region: *Region,
             root_hash: Root,
             index: *const NodeIndex,
             updates: []const FixedUpdate,
         ) AllocUpdateError!Root {
             return occurrence.updateIndexSorted(
                 self.keccak_context,
-                self.allocator,
+                region,
                 root_hash,
                 index,
                 updates,
@@ -276,6 +278,7 @@ pub fn Trie(comptime KeccakContext: type) type {
         }
 
         /// Apply sorted fixed-key updates through an authenticated catalog.
+        /// Scratch comes from the caller's region and is rewound before return.
         pub fn updateCatalogSorted(
             self: Self,
             region: *Region,
@@ -313,19 +316,18 @@ pub fn Trie(comptime KeccakContext: type) type {
         /// `KeyContext.trieKey(self, key)` must return the fixed 32-byte key
         /// traversed by the MPT. Values remain raw bytes.
         pub fn Keyed(comptime Key: type, comptime KeyContext: type) type {
-            if (!std.meta.hasFn(KeyContext, "trieKey")) {
-                @compileError("MPT key context must provide trieKey(self, Key) [32]u8");
-            }
-            const info = @typeInfo(@TypeOf(KeyContext.trieKey)).@"fn";
-            if (info.is_var_args or
-                info.params.len != 2 or
-                info.params[0].type == null or
-                info.params[0].type.? != KeyContext or
-                info.params[1].type == null or
-                info.params[1].type.? != Key or
-                info.return_type == null or
-                info.return_type.? != FixedKey)
-            {
+            const valid = if (std.meta.hasFn(KeyContext, "trieKey")) blk: {
+                const info = @typeInfo(@TypeOf(KeyContext.trieKey)).@"fn";
+                break :blk !info.is_var_args and
+                    info.params.len == 2 and
+                    info.params[0].type != null and
+                    info.params[0].type.? == KeyContext and
+                    info.params[1].type != null and
+                    info.params[1].type.? == Key and
+                    info.return_type != null and
+                    info.return_type.? == FixedKey;
+            } else false;
+            if (!valid) {
                 @compileError("MPT key context must provide trieKey(self, Key) [32]u8");
             }
 
@@ -385,15 +387,18 @@ pub fn Trie(comptime KeccakContext: type) type {
                 /// Project and sort the batch before fixed-key mutation through
                 /// the sealed witness index.
                 /// Colliding projections are reported as `DuplicateKey`.
+                /// Scratch comes from the caller's region and is rewound before return.
                 pub fn update(
                     self: KeyedSelf,
+                    region: *Region,
                     root_hash: Root,
                     index: *const NodeIndex,
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
-                    const allocator = self.structural.allocator;
+                    const mark = region.mark();
+                    defer region.rewind(mark);
+                    const allocator = region.allocator();
                     const structural_updates = try allocator.alloc(occurrence.Update, updates.len);
-                    defer allocator.free(structural_updates);
 
                     for (updates, structural_updates) |item, *projected| {
                         projected.* = .{
@@ -402,7 +407,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                         };
                     }
                     sortFixedUpdates(structural_updates);
-                    return self.structural.updateFixedSorted(root_hash, index, structural_updates);
+                    return self.structural.updateFixedSorted(region, root_hash, index, structural_updates);
                 }
 
                 pub fn updateCatalog(

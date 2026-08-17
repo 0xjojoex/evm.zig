@@ -429,12 +429,14 @@ test "catalog keeps missing hashed siblings opaque" {
     defer catalog.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), catalog.nodeCount());
-    try std.testing.expectEqual(@as(usize, 33), try catalog.branchReferenceEncodedLen(root_ref.node.id, 0));
-    try std.testing.expectEqual(@as(usize, 3), try catalog.branchReferenceEncodedLen(root_ref.node.id, 1));
-    try std.testing.expectEqual(@as(usize, 1), try catalog.branchReferenceEncodedLen(root_ref.node.id, 2));
+    const root = catalog.node(root_ref.node.id) orelse return error.MissingCatalogRoot;
+    const lengths = try catalog.resolvedBranchReferenceEncodedLengths(root);
+    try std.testing.expectEqual(@as(u8, 33), lengths[0]);
+    try std.testing.expectEqual(@as(u8, 3), lengths[1]);
+    try std.testing.expectEqual(@as(u8, 1), lengths[2]);
     try std.testing.expectError(
         error.InvalidNodeReference,
-        catalog.branchReferenceEncodedLen(root_ref.node.id, 16),
+        catalog.resolvedBranchChild(root, 16),
     );
     try std.testing.expectError(error.MissingNode, catalog.lookup(root_ref, &[_]u8{0x00}));
     const embedded = try catalog.lookup(root_ref, &[_]u8{0x10});
@@ -465,15 +467,9 @@ test "catalog links shared hashed nodes once" {
     if (root.kind != .branch) return error.ExpectedBranch;
     const children = catalog.branchChildren(root_ref.node.id) orelse return error.ExpectedBranch;
     try std.testing.expectEqual(children[0].node(), children[1].node());
-    const resolved = try catalog.resolveBranchChild(root_ref.node.id, 1);
+    const resolved = try catalog.resolvedBranchChild(root, 1);
     try std.testing.expectEqual(children[1], resolved.link);
     switch (resolved.reference) {
-        .hashed => |actual| try std.testing.expectEqualSlices(u8, &leaf_hash, actual),
-        else => return error.ExpectedHashedReference,
-    }
-    const carried = try catalog.resolvedBranchChild(root, 1);
-    try std.testing.expectEqual(resolved.link, carried.link);
-    switch (carried.reference) {
         .hashed => |actual| try std.testing.expectEqualSlices(u8, &leaf_hash, actual),
         else => return error.ExpectedHashedReference,
     }
@@ -831,7 +827,7 @@ test "occurrence catalog update rejects branch values" {
     );
     try std.testing.expectError(
         error.NonCanonicalNode,
-        trie.updateFixedSorted(root_hash, indexed.index(), &update),
+        trie.updateFixedSorted(&region, root_hash, indexed.index(), &update),
     );
 }
 
@@ -857,11 +853,11 @@ test "occurrence catalog update rejects variable-width leaves" {
     );
     try std.testing.expectError(
         error.InvalidNode,
-        trie.updateFixedSorted(root_hash, indexed.index(), &update),
+        trie.updateFixedSorted(&region, root_hash, indexed.index(), &update),
     );
 }
 
-test "occurrence catalog update cleans every allocation failure position" {
+test "occurrence updates clean every allocation failure position" {
     const Harness = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const first = fixedKey(0x10);
@@ -884,6 +880,7 @@ test "occurrence catalog update cleans every allocation failure position" {
                 .{ .key = second, .value = &[_]u8{0x02} },
             };
             _ = try trie.updateCatalogSorted(&region, &catalog, root_ref, &updates);
+            _ = try trie.updateFixedSorted(&region, root_hash, indexed.index(), &updates);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
@@ -966,7 +963,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&replaced_entries)),
-        &(try trie.updateFixedSorted(root_hash, indexed.index(), &replacement)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &replacement)),
     );
 
     const split = [_]mpt.FixedUpdate{
@@ -986,7 +983,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&split_entries)),
-        &(try trie.updateFixedSorted(root_hash, indexed.index(), &split)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &split)),
     );
 
     const delete_only = [_]mpt.FixedUpdate{.{ .key = first, .value = null }};
@@ -998,7 +995,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &mpt.empty_root,
-        &(try trie.updateFixedSorted(root_hash, indexed.index(), &delete_only)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &delete_only)),
     );
 
     const replace_with_other = [_]mpt.FixedUpdate{
@@ -1014,7 +1011,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&compressed_entries)),
-        &(try trie.updateFixedSorted(root_hash, indexed.index(), &replace_with_other)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &replace_with_other)),
     );
 }
 

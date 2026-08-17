@@ -182,25 +182,6 @@ pub const Catalog = struct {
         return self.reference(entry, link, entry.value_offset);
     }
 
-    /// Fused form for consumers that need both topology and encoded reference.
-    pub inline fn resolveBranchChild(
-        self: Catalog,
-        id: NodeId,
-        child_index: usize,
-    ) errors.LookupError!ResolvedBranchChild {
-        if (child_index >= 16) return error.InvalidNodeReference;
-        const entry = self.node(id) orelse return error.InvalidNodeReference;
-        if (entry.kind != .branch or entry.payload >= self.branches.items.len) {
-            return error.InvalidNodeReference;
-        }
-        const branch = &self.branches.items[entry.payload];
-        const link = branch.links[child_index];
-        return .{
-            .link = link,
-            .reference = try self.reference(entry, link, branch.reference_offsets[child_index]),
-        };
-    }
-
     pub inline fn resolvedBranchChild(
         self: Catalog,
         parent: *const Node,
@@ -231,28 +212,6 @@ pub const Catalog = struct {
             branch.links[child_index],
             branch.reference_offsets[child_index],
         );
-    }
-
-    pub fn branchReferenceEncodedLen(
-        self: Catalog,
-        id: NodeId,
-        child_index: usize,
-    ) errors.LookupError!usize {
-        if (child_index >= 16) return error.InvalidNodeReference;
-        const lengths = self.branchReferenceEncodedLengths(id) orelse
-            return error.InvalidNodeReference;
-        return lengths[child_index];
-    }
-
-    pub fn branchReferenceEncodedLengths(
-        self: Catalog,
-        id: NodeId,
-    ) ?*const BranchReferenceLengths {
-        const entry = self.node(id) orelse return null;
-        if (entry.kind != .branch or entry.payload >= self.branches.items.len) {
-            return null;
-        }
-        return &self.branches.items[entry.payload].reference_lengths;
     }
 
     pub fn resolvedBranchReferenceEncodedLengths(
@@ -525,10 +484,7 @@ pub const Builder = struct {
         if (self.nodes.items.len >= self.limits.linked_nodes) return error.ResourceLimitExceeded;
         if (self.nodes.items.len >= @intFromEnum(Link.@"opaque")) return error.ResourceLimitExceeded;
         const id: NodeId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
-        if (self.nodes.items.len == self.nodes.capacity or self.work.items.len == self.work.capacity) {
-            return self.appendNodeGrowing(id, encoded);
-        }
-        self.nodes.appendAssumeCapacity(.{
+        const undecoded: Node = .{
             .encoded = encoded,
             .payload = undefined,
             .path_offset = undefined,
@@ -538,23 +494,17 @@ pub const Builder = struct {
             .value_len = undefined,
             .path_nibble_offset = undefined,
             .kind = undefined,
-        });
+        };
+        if (self.nodes.items.len == self.nodes.capacity or self.work.items.len == self.work.capacity) {
+            return self.appendNodeGrowing(id, undecoded);
+        }
+        self.nodes.appendAssumeCapacity(undecoded);
         self.work.appendAssumeCapacity(id);
         return id;
     }
 
-    noinline fn appendNodeGrowing(self: *Builder, id: NodeId, encoded: []const u8) BuildError!NodeId {
-        try self.nodes.append(self.allocator, .{
-            .encoded = encoded,
-            .payload = undefined,
-            .path_offset = undefined,
-            .path_byte_len = undefined,
-            .path_nibble_len = undefined,
-            .value_offset = undefined,
-            .value_len = undefined,
-            .path_nibble_offset = undefined,
-            .kind = undefined,
-        });
+    noinline fn appendNodeGrowing(self: *Builder, id: NodeId, undecoded: Node) BuildError!NodeId {
+        try self.nodes.append(self.allocator, undecoded);
         errdefer _ = self.nodes.pop();
         try self.work.append(self.allocator, id);
         return id;

@@ -36,7 +36,9 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
     });
     try std.testing.expectEqualSlices(u8, &raw_root, &typed_root);
 
-    const inserted = try map.update(mpt.empty_root, mpt.empty_node_index, &.{
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const inserted = try map.update(&region, mpt.empty_root, mpt.empty_node_index, &.{
         .{ .key = .bob, .value = "bob" },
         .{ .key = .alice, .value = "alice" },
     });
@@ -67,12 +69,15 @@ test "typed key facade detects collisions after projection" {
     const Structural = mpt.Trie(mpt.StdKeccak256Context);
     const Map = Structural.Keyed(u8, KeyContext);
     const map = Map.init(Structural.init(std.testing.allocator, .{}), .{});
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
 
     try std.testing.expectError(error.DuplicateKey, map.root(&.{
         .{ .key = 1, .value = "one" },
         .{ .key = 2, .value = "two" },
     }));
     try std.testing.expectError(error.DuplicateKey, map.update(
+        &region,
         mpt.empty_root,
         mpt.empty_node_index,
         &.{

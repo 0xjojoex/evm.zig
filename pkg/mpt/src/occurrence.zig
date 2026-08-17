@@ -110,7 +110,7 @@ fn MutableNode(comptime mode: SourceMode) type {
 }
 
 const key_nibbles = fixed_key.key_nibbles;
-const max_path_nodes = key_nibbles + 1;
+const max_path_nodes = fixed_key.max_path_nodes;
 
 comptime {
     // Fixed 32-byte keys admit at most 64 ancestors plus one leaf.
@@ -948,7 +948,7 @@ pub fn updateCatalogSorted(
 
 pub fn updateIndexSorted(
     keccak_context: anytype,
-    backing_allocator: Allocator,
+    region: *Region,
     root_hash: hash.Root,
     index: *const proof.NodeIndex,
     updates: []const Update,
@@ -956,13 +956,12 @@ pub fn updateIndexSorted(
     if (updates.len == 0) return root_hash;
     try validateUpdates(updates);
 
-    var arena = std.heap.ArenaAllocator.init(backing_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const mark = region.mark();
+    defer region.rewind(mark);
     return updateResolved(
         .index,
         keccak_context,
-        allocator,
+        region.allocator(),
         index,
         if (std.mem.eql(u8, &root_hash, &hash.empty_root)) null else .{
             .reference = .{ .hashed = &root_hash },
@@ -1001,12 +1000,12 @@ fn updateResolved(
 
     for (updates) |*update| {
         const value = update.value orelse continue;
-        const path: nibble.Path = .{ .key = &update.key, .start = 0, .len = 64 };
+        const path: nibble.Path = .{ .key = &update.key, .start = 0, .len = key_nibbles };
         try context.insert(root, path, value);
     }
     for (updates) |*update| {
         if (update.value != null) continue;
-        const path: nibble.Path = .{ .key = &update.key, .start = 0, .len = 64 };
+        const path: nibble.Path = .{ .key = &update.key, .start = 0, .len = key_nibbles };
         try context.delete(root, path);
     }
 
