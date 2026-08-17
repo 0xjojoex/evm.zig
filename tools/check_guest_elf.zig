@@ -276,15 +276,7 @@ const Checker = struct {
         if (options.require_target) {
             const attributes = try checker.findSection(sections, section_names, ".riscv.attributes") orelse return checker.fail("missing .riscv.attributes");
             try checker.checkArchitecture(try checker.sectionBytes(attributes), options.allow_attribute_a);
-            const text_bytes = try checker.sectionBytes(text);
-            if (text.address % 4 != 0 or text_bytes.len % 4 != 0) return checker.fail(".text is not composed of RV64 32-bit words");
-            var offset: usize = 0;
-            while (offset < text_bytes.len) : (offset += 4) {
-                const instruction = std.mem.readInt(u32, text_bytes[offset..][0..4], .little);
-                if (forbiddenInstruction(instruction)) |kind| {
-                    return checker.failFmt("{s} instruction at 0x{x}", .{ kind, text.address + offset });
-                }
-            }
+            try checker.checkExecutableSections(sections);
         }
 
         var start_symbol: ?Symbol = null;
@@ -327,6 +319,23 @@ const Checker = struct {
 
         return .{ .load_count = loads.len };
     }
+
+    fn checkExecutableSections(checker: *Checker, sections: []const Section) error{InvalidElf}!void {
+        for (sections) |section_value| {
+            if (section_value.flags & 0x4 == 0) continue;
+            const bytes = try checker.sectionBytes(section_value);
+            if (section_value.address % 4 != 0 or bytes.len % 4 != 0) {
+                return checker.fail("executable section is not composed of RV64 32-bit words");
+            }
+            var offset: usize = 0;
+            while (offset < bytes.len) : (offset += 4) {
+                const instruction = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+                if (forbiddenInstruction(instruction)) |kind| {
+                    return checker.failFmt("{s} instruction at 0x{x}", .{ kind, section_value.address + offset });
+                }
+            }
+        }
+    }
 };
 
 /// Instructions the ZisK RV64IM emulator does not execute. `rev8` is the one
@@ -346,8 +355,8 @@ fn forbiddenInstruction(instruction: u32) ?[]const u8 {
 
 /// The attribute waiver covers conformance deviation:
 /// the vendor static library declares `A` while contributing no atomic
-/// instructions. The `.text` opcode scan stays unconditional, so the waiver
-/// never excuses actual atomics.
+/// instructions. The executable-section scan stays unconditional, so the
+/// waiver never excuses actual atomics.
 const CheckOptions = struct {
     require_target: bool = false,
     allow_attribute_a: bool = false,
@@ -436,6 +445,20 @@ test "opcode scan forbids atomic, floating-point, and rev8 instructions" {
     try std.testing.expectEqualStrings("rev8", forbiddenInstruction(0x6b855513).?); // rev8 a0, a0
     try std.testing.expectEqual(null, forbiddenInstruction(0x00000013)); // nop
     try std.testing.expectEqual(null, forbiddenInstruction(0x40555513)); // srai a0, a0, 0x5
+}
+
+test "opcode scan covers every executable section" {
+    var checker: Checker = .{
+        .allocator = std.testing.allocator,
+        .data = "\x13\x00\x00\x00\x13\x55\x85\x6b",
+    };
+    defer if (!std.mem.eql(u8, checker.failure, "invalid ELF")) std.testing.allocator.free(checker.failure);
+    const sections = [_]Section{
+        .{ .name_offset = 0, .kind = 1, .flags = 0, .address = 0, .offset = 0, .size = 4, .link = 0, .entry_size = 0 },
+        .{ .name_offset = 0, .kind = 1, .flags = 0x4, .address = 0x1000, .offset = 4, .size = 4, .link = 0, .entry_size = 0 },
+    };
+    try std.testing.expectError(error.InvalidElf, checker.checkExecutableSections(&sections));
+    try std.testing.expectEqualStrings("rev8 instruction at 0x1000", checker.failure);
 }
 
 test "accepts required architecture attributes" {

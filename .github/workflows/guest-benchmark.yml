@@ -182,7 +182,10 @@ jobs:
           elf="${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf"
           candidate="${GITHUB_WORKSPACE}/stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
           install -D -m 0644 "${elf}" "${candidate}"
-          zig build check-guest-elf -- --require-rv64im-zicclsm "${candidate}"
+          zig build check-guest-elf -- \
+            --require-rv64im-zicclsm \
+            --allow-attribute-a \
+            "${candidate}"
           if [[ "${RELEASE_GATE}" == true ]]; then
             zig build guest-zisk \
               -Dguest-payload=exit-failure-probe \
