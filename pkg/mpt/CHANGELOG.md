@@ -21,21 +21,26 @@ Releases are cut from `pkg/mpt` on evmz `main` and published to the generated
   topology linked once from a sealed witness index, then served without
   hashing, index search, allocation, or RLP decoding. Hashed children absent
   from the witness stay opaque authenticated references.
-- Catalog-backed sparse updates (`updateCatalog`, `updateSortedCatalog`, and
-  their `Batch`/`WithWorkspace` forms) over a reusable
-  `CatalogUpdateWorkspace`.
-- Block-local stateless mutation and commit (`updateStatelessCatalog`,
-  `StatelessWorkspace`, `StatelessUpdate`): mutable occurrences are created
-  only for selected paths, untouched children stay authenticated references,
-  and one post-state root is recomputed bottom-up.
-- Allocation-free fixed-32-byte-key batch binding (`fixed_key.bindSorted`),
+- Fixed-32-byte-key mutation through either a sealed witness index
+  (`updateFixedSorted`) or authenticated catalog (`updateCatalogSorted`) using
+  the shared `FixedUpdate` representation and mutation algebra. Catalog updates
+  use a caller-owned `Region`; both resolvers materialize only selected paths,
+  preserve untouched authenticated references, and recompute dirty ancestors
+  bottom-up.
+- Allocation-free fixed-32-byte-key batch binding (`bindSorted`),
   walking integer links over an authenticated catalog and sharing prefixes
-  between sorted state and storage keys.
+  between sorted state and storage keys with a fixed `BindWorkspace`.
 - `IndexedNodes.allocationBytes` reports bytes retained by an owned index, so
   guests can budget fixed or bump allocation.
 
 ### Changed
 
+- Curated catalog and fixed-key APIs at the package root instead of exposing
+  representation modules. Root construction scratch is named `RootWorkspace`;
+  fixed-key binding uses `BindWorkspace`; catalog mutation uses `Region`.
+- Fixed key projection contexts now have an exact
+  `trieKey(self, Key) FixedKey` contract, matching the exact
+  `keccak256(self, []const u8) Root` execution-context contract.
 - Lazily materialize hashed branch children.
 - Borrow sparse branches during encoding and updates.
 - Decode only the selected proof branches.

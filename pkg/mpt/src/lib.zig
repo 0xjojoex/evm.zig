@@ -14,11 +14,11 @@
 //! |-----------------------|----------------|---------------------------------|
 //! | construct from scratch| `root.zig`     | `rootSorted`/`root`, exact flat workspace |
 //! | authenticated reads   | `proof.zig`    | `lookup`, allocation-free       |
-//! | mutate via hash index | `sparse.zig`   | `updateSorted` — no catalog; serves lanes that discover keys during execution |
-//! | mutate via catalog    | `occurrence.zig` | `updateCatalog` — authenticated topology, fixed 32-byte keys, dirty-only re-encode |
+//! | mutate arbitrary keys | `sparse.zig`   | `updateSorted` — variable-width structural keys |
+//! | mutate fixed keys     | `occurrence.zig` | `updateFixedSorted`/`updateCatalogSorted` — resolver-backed fixed-64-nibble algebra |
 //!
-//! The two mutation engines implement the same MPT algebra over different node
-//! representations on purpose; `fuzz.zig` holds the cross-engine differential.
+//! `fuzz.zig` differentially checks arbitrary sparse, fixed index, and catalog
+//! occurrence mutation against full construction.
 
 const std = @import("std");
 const hash = @import("hash.zig");
@@ -26,9 +26,8 @@ const root_mod = @import("root.zig");
 const proof = @import("proof.zig");
 const sparse = @import("sparse.zig");
 const occurrence = @import("occurrence.zig");
-
-pub const catalog = @import("catalog.zig");
-pub const fixed_key = @import("fixed_key.zig");
+const catalog = @import("catalog.zig");
+const fixed_key = @import("fixed_key.zig");
 
 const errors = @import("error.zig");
 pub const Error = errors.Error;
@@ -37,9 +36,10 @@ pub const IndexError = errors.IndexError;
 pub const LookupError = errors.LookupError;
 pub const UpdateError = errors.UpdateError;
 pub const Root = hash.Root;
+pub const FixedKey = fixed_key.FixedKey;
 pub const empty_root = hash.empty_root;
 pub const StdKeccak256Context = hash.StdKeccak256Context;
-pub const Workspace = @import("workspace.zig").Workspace;
+pub const RootWorkspace = @import("workspace.zig").Workspace;
 pub const Entry = root_mod.Entry;
 pub const rootWorkspaceSize = root_mod.workspaceSize;
 pub const rootWorkspaceSizeForLimits = root_mod.workspaceSizeForLimits;
@@ -48,8 +48,22 @@ pub const Lookup = proof.Lookup;
 pub const LookupCache = proof.LookupCache;
 pub const NodeIndex = proof.NodeIndex;
 pub const Catalog = catalog.Catalog;
-pub const CatalogWorkspace = occurrence.Workspace;
-pub const CatalogUpdate = occurrence.Update;
+pub const CatalogBuilder = catalog.Builder;
+pub const CatalogRoot = catalog.RootRef;
+pub const CatalogNodeId = catalog.NodeId;
+pub const CatalogLimits = catalog.Limits;
+pub const CatalogInitError = catalog.InitError;
+pub const BoundLookup = catalog.BoundLookup;
+pub const BoundValue = catalog.BoundValue;
+pub const Region = occurrence.Region;
+pub const FixedAbsence = fixed_key.FixedAbsence;
+pub const FixedLookup = fixed_key.FixedLookup;
+pub const BindWorkspace = fixed_key.BindWorkspace;
+pub const BatchLookupError = fixed_key.BatchLookupError;
+pub const bindSorted = fixed_key.bindSorted;
+pub const bindAssumeSorted = fixed_key.bindAssumeSorted;
+/// Final value or deletion for one fixed 32-byte structural key.
+pub const FixedUpdate = occurrence.Update;
 pub const Update = sparse.Update;
 
 const empty_index_storage: proof.IndexStorage = .{};
@@ -62,7 +76,7 @@ const IndexedNodesData = struct {
     index_storage: proof.IndexStorage,
 };
 
-const empty_indexed_nodes: IndexedNodesData = .{
+var empty_indexed_nodes: IndexedNodesData = .{
     .allocator = null,
     .storage = &.{},
     .table = &.{},
@@ -82,7 +96,7 @@ pub const IndexedNodes = opaque {
     }
 
     pub fn index(self: *const IndexedNodes) *const NodeIndex {
-        return proof.emptyIndex(&indexedNodesData(self).index_storage);
+        return proof.emptyIndex(&indexedNodesConstData(self).index_storage);
     }
 
     pub fn nodeCount(self: *const IndexedNodes) usize {
@@ -92,7 +106,7 @@ pub const IndexedNodes = opaque {
     /// Requested bytes retained by this owned index, excluding allocator
     /// alignment and bookkeeping. Empty indexes use static storage.
     pub fn allocationBytes(self: *const IndexedNodes) usize {
-        const data = indexedNodesData(self);
+        const data = indexedNodesConstData(self);
         if (data.allocator == null) return 0;
         return @sizeOf(IndexedNodesData) +
             data.storage.len * @sizeOf(proof.NodeRecord) +
@@ -100,15 +114,18 @@ pub const IndexedNodes = opaque {
     }
 };
 
-fn indexedNodesData(indexed: *const IndexedNodes) *IndexedNodesData {
-    return @ptrCast(@alignCast(@constCast(indexed)));
+fn indexedNodesData(indexed: *IndexedNodes) *IndexedNodesData {
+    return @ptrCast(@alignCast(indexed));
+}
+
+fn indexedNodesConstData(indexed: *const IndexedNodes) *const IndexedNodesData {
+    return @ptrCast(@alignCast(indexed));
 }
 
 fn indexedNodesFromData(data: *IndexedNodesData) *IndexedNodes {
     return @ptrCast(data);
 }
 
-pub const AllocError = std.mem.Allocator.Error || Error;
 pub const AllocBuildError = std.mem.Allocator.Error || BuildError;
 pub const AllocIndexError = std.mem.Allocator.Error || IndexError;
 pub const AllocUpdateError = std.mem.Allocator.Error || UpdateError;
@@ -157,7 +174,7 @@ pub fn Trie(comptime KeccakContext: type) type {
             const scratch_len = try root_mod.workspaceSizeFor(entries.len, needed, !already_sorted);
             const scratch = try self.allocator.alloc(u8, scratch_len);
             defer self.allocator.free(scratch);
-            var workspace = Workspace.init(scratch);
+            var workspace = RootWorkspace.init(scratch);
             return if (already_sorted)
                 root_mod.rootSorted(self.keccak_context, &workspace, entries, needed)
             else
@@ -167,7 +184,7 @@ pub fn Trie(comptime KeccakContext: type) type {
         /// Advanced fixed-scratch variant of `rootSorted`.
         pub fn rootSortedWithWorkspace(
             self: Self,
-            workspace: *Workspace,
+            workspace: *RootWorkspace,
             entries: []const Entry,
         ) BuildError!Root {
             return root_mod.rootSorted(self.keccak_context, workspace, entries, try root_mod.requirements(entries));
@@ -176,7 +193,7 @@ pub fn Trie(comptime KeccakContext: type) type {
         /// Advanced fixed-scratch variant of `root`.
         pub fn rootWithWorkspace(
             self: Self,
-            workspace: *Workspace,
+            workspace: *RootWorkspace,
             entries: []const Entry,
         ) BuildError!Root {
             return root_mod.root(self.keccak_context, workspace, entries, try root_mod.requirements(entries));
@@ -189,7 +206,7 @@ pub fn Trie(comptime KeccakContext: type) type {
             encoded_nodes: []const []const u8,
         ) AllocIndexError!*IndexedNodes {
             if (encoded_nodes.len == 0) {
-                return indexedNodesFromData(@constCast(&empty_indexed_nodes));
+                return indexedNodesFromData(&empty_indexed_nodes);
             }
 
             const storage = try self.allocator.alloc(proof.NodeRecord, encoded_nodes.len);
@@ -241,29 +258,47 @@ pub fn Trie(comptime KeccakContext: type) type {
             );
         }
 
-        /// Apply sorted fixed-key updates through an authenticated catalog.
-        pub fn updateCatalog(
+        /// Apply sorted fixed-32-byte-key updates through the shared mutation
+        /// engine, resolving authenticated nodes lazily from the sealed index.
+        /// Scratch comes from the caller's region and is rewound before return.
+        pub fn updateFixedSorted(
             self: Self,
-            workspace: *CatalogWorkspace,
+            region: *Region,
             root_hash: Root,
-            topology: *const Catalog,
-            root_ref: catalog.RootRef,
-            updates: []const CatalogUpdate,
+            index: *const NodeIndex,
+            updates: []const FixedUpdate,
         ) AllocUpdateError!Root {
-            return occurrence.updateSorted(
+            return occurrence.updateIndexSorted(
                 self.keccak_context,
-                workspace,
+                region,
                 root_hash,
+                index,
+                updates,
+            );
+        }
+
+        /// Apply sorted fixed-key updates through an authenticated catalog.
+        /// Scratch comes from the caller's region and is rewound before return.
+        pub fn updateCatalogSorted(
+            self: Self,
+            region: *Region,
+            topology: *const Catalog,
+            catalog_root: CatalogRoot,
+            updates: []const FixedUpdate,
+        ) AllocUpdateError!Root {
+            return occurrence.updateCatalogSorted(
+                self.keccak_context,
+                region,
                 topology,
-                root_ref,
+                catalog_root,
                 updates,
             );
         }
 
         /// Start a root-scoped authenticated catalog over an existing sealed
         /// witness index. Additional state or storage roots may be linked
-        /// before `catalog.Builder.finish` seals the immutable topology.
-        pub fn catalogBuilder(self: Self, index: *const NodeIndex) std.mem.Allocator.Error!catalog.Builder {
+        /// before `CatalogBuilder.finish` seals the immutable topology.
+        pub fn catalogBuilder(self: Self, index: *const NodeIndex) std.mem.Allocator.Error!CatalogBuilder {
             return catalog.Builder.init(self.allocator, index);
         }
 
@@ -272,8 +307,8 @@ pub fn Trie(comptime KeccakContext: type) type {
         pub fn catalogBuilderWithLimits(
             self: Self,
             index: *const NodeIndex,
-            limits: catalog.Limits,
-        ) catalog.InitError!catalog.Builder {
+            limits: CatalogLimits,
+        ) CatalogInitError!CatalogBuilder {
             return catalog.Builder.initWithLimits(self.allocator, index, limits);
         }
 
@@ -281,7 +316,18 @@ pub fn Trie(comptime KeccakContext: type) type {
         /// `KeyContext.trieKey(self, key)` must return the fixed 32-byte key
         /// traversed by the MPT. Values remain raw bytes.
         pub fn Keyed(comptime Key: type, comptime KeyContext: type) type {
-            if (!std.meta.hasFn(KeyContext, "trieKey")) {
+            const valid = if (std.meta.hasFn(KeyContext, "trieKey")) blk: {
+                const info = @typeInfo(@TypeOf(KeyContext.trieKey)).@"fn";
+                break :blk !info.is_var_args and
+                    info.params.len == 2 and
+                    info.params[0].type != null and
+                    info.params[0].type.? == KeyContext and
+                    info.params[1].type != null and
+                    info.params[1].type.? == Key and
+                    info.return_type != null and
+                    info.return_type.? == FixedKey;
+            } else false;
+            if (!valid) {
                 @compileError("MPT key context must provide trieKey(self, Key) [32]u8");
             }
 
@@ -311,7 +357,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                 /// not preserve order.
                 pub fn root(self: KeyedSelf, entries: []const KeyedSelf.Entry) AllocBuildError!Root {
                     const allocator = self.structural.allocator;
-                    const projected_keys = try allocator.alloc(Root, entries.len);
+                    const projected_keys = try allocator.alloc(FixedKey, entries.len);
                     defer allocator.free(projected_keys);
                     const structural_entries = try allocator.alloc(root_mod.Entry, entries.len);
                     defer allocator.free(structural_entries);
@@ -326,13 +372,6 @@ pub fn Trie(comptime KeccakContext: type) type {
                     return self.structural.root(structural_entries);
                 }
 
-                pub fn indexNodes(
-                    self: KeyedSelf,
-                    encoded_nodes: []const []const u8,
-                ) AllocIndexError!*IndexedNodes {
-                    return self.structural.indexNodes(encoded_nodes);
-                }
-
                 /// Fixed-size projection stays on the stack, so lookup remains
                 /// allocation-free after witness indexing.
                 pub fn lookup(
@@ -345,42 +384,21 @@ pub fn Trie(comptime KeccakContext: type) type {
                     return self.structural.lookup(root_hash, index, &projected_key);
                 }
 
-                /// Project and sort the batch before structural sparse update.
+                /// Project and sort the batch before fixed-key mutation through
+                /// the sealed witness index.
                 /// Colliding projections are reported as `DuplicateKey`.
+                /// Scratch comes from the caller's region and is rewound before return.
                 pub fn update(
                     self: KeyedSelf,
+                    region: *Region,
                     root_hash: Root,
                     index: *const NodeIndex,
                     updates: []const KeyedSelf.Update,
                 ) AllocUpdateError!Root {
-                    const allocator = self.structural.allocator;
-                    const projected_keys = try allocator.alloc(Root, updates.len);
-                    defer allocator.free(projected_keys);
-                    const structural_updates = try allocator.alloc(sparse.Update, updates.len);
-                    defer allocator.free(structural_updates);
-
-                    for (updates, 0..) |item, projected_index| {
-                        projected_keys[projected_index] = self.key_context.trieKey(item.key);
-                        structural_updates[projected_index] = .{
-                            .key = &projected_keys[projected_index],
-                            .value = item.value,
-                        };
-                    }
-                    Sort.byKey(sparse.Update, structural_updates);
-                    return self.structural.updateSorted(root_hash, index, structural_updates);
-                }
-
-                pub fn updateCatalog(
-                    self: KeyedSelf,
-                    workspace: *CatalogWorkspace,
-                    root_hash: Root,
-                    topology: *const Catalog,
-                    root_ref: catalog.RootRef,
-                    updates: []const KeyedSelf.Update,
-                ) AllocUpdateError!Root {
-                    const allocator = self.structural.allocator;
+                    const mark = region.mark();
+                    defer region.rewind(mark);
+                    const allocator = region.allocator();
                     const structural_updates = try allocator.alloc(occurrence.Update, updates.len);
-                    defer allocator.free(structural_updates);
 
                     for (updates, structural_updates) |item, *projected| {
                         projected.* = .{
@@ -388,12 +406,33 @@ pub fn Trie(comptime KeccakContext: type) type {
                             .value = item.value,
                         };
                     }
-                    Sort.byKey(occurrence.Update, structural_updates);
-                    return self.structural.updateCatalog(
-                        workspace,
-                        root_hash,
+                    sortFixedUpdates(structural_updates);
+                    return self.structural.updateFixedSorted(region, root_hash, index, structural_updates);
+                }
+
+                pub fn updateCatalog(
+                    self: KeyedSelf,
+                    region: *Region,
+                    topology: *const Catalog,
+                    catalog_root: CatalogRoot,
+                    updates: []const KeyedSelf.Update,
+                ) AllocUpdateError!Root {
+                    const mark = region.mark();
+                    defer region.rewind(mark);
+                    const allocator = region.allocator();
+                    const structural_updates = try allocator.alloc(occurrence.Update, updates.len);
+
+                    for (updates, structural_updates) |item, *projected| {
+                        projected.* = .{
+                            .key = self.key_context.trieKey(item.key),
+                            .value = item.value,
+                        };
+                    }
+                    sortFixedUpdates(structural_updates);
+                    return self.structural.updateCatalogSorted(
+                        region,
                         topology,
-                        root_ref,
+                        catalog_root,
                         structural_updates,
                     );
                 }
@@ -402,22 +441,21 @@ pub fn Trie(comptime KeccakContext: type) type {
     };
 }
 
-pub const Sort = struct {
-    inline fn keyBytes(key: anytype) []const u8 {
-        return switch (@typeInfo(std.meta.Child(@TypeOf(key)))) {
-            .array => key,
-            else => key.*,
-        };
-    }
+pub fn sortUpdates(items: []Update) void {
+    std.mem.sort(Update, items, {}, struct {
+        fn lessThan(_: void, lhs: Update, rhs: Update) bool {
+            return std.mem.lessThan(u8, lhs.key, rhs.key);
+        }
+    }.lessThan);
+}
 
-    pub inline fn byKey(comptime T: type, items: []T) void {
-        std.mem.sort(T, items, {}, struct {
-            fn lessThan(_: void, lhs: T, rhs: T) bool {
-                return std.mem.lessThan(u8, keyBytes(&lhs.key), keyBytes(&rhs.key));
-            }
-        }.lessThan);
-    }
-};
+fn sortFixedUpdates(items: []FixedUpdate) void {
+    std.mem.sort(FixedUpdate, items, {}, struct {
+        fn lessThan(_: void, lhs: FixedUpdate, rhs: FixedUpdate) bool {
+            return std.mem.lessThan(u8, &lhs.key, &rhs.key);
+        }
+    }.lessThan);
+}
 
 pub const DefaultTrie = Trie(StdKeccak256Context);
 
@@ -439,14 +477,4 @@ pub fn lookupCached(
     cache: *LookupCache,
 ) (std.mem.Allocator.Error || LookupError)!Lookup {
     return proof.lookupCached(root_hash, index, key, cache);
-}
-
-/// Advanced fixed-scratch `rootSorted` using the default Keccak context.
-pub fn rootSortedWithWorkspace(workspace: *Workspace, entries: []const Entry) BuildError!Root {
-    return root_mod.rootSorted(StdKeccak256Context{}, workspace, entries, try root_mod.requirements(entries));
-}
-
-/// Advanced fixed-scratch `root` using the default Keccak context.
-pub fn rootWithWorkspace(workspace: *Workspace, entries: []const Entry) BuildError!Root {
-    return root_mod.root(StdKeccak256Context{}, workspace, entries, try root_mod.requirements(entries));
 }

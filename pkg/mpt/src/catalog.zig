@@ -32,6 +32,13 @@ pub const AuthenticatedRoot = struct {
 pub const RootRef = union(enum) {
     empty,
     node: AuthenticatedRoot,
+
+    pub fn digest(self: RootRef) hash.Root {
+        return switch (self) {
+            .empty => hash.empty_root,
+            .node => |root| root.digest,
+        };
+    }
 };
 
 pub const BoundValue = struct {
@@ -59,6 +66,10 @@ pub const Link = enum(u32) {
         const raw = @intFromEnum(self);
         if (raw >= @intFromEnum(Link.@"opaque")) return null;
         return @enumFromInt(raw);
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(Link) == 4);
     }
 };
 
@@ -100,16 +111,30 @@ pub const Node = struct {
         if (self.kind != .extension) return null;
         return @enumFromInt(self.payload);
     }
+
+    comptime {
+        std.debug.assert(@sizeOf(Node) == 32);
+    }
 };
 
 pub const BranchLinks = [16]Link;
+pub const BranchReferenceLengths = [16]u8;
 
-/// Compact branch topology plus offsets of hashed references in the original
-/// encoded parent. Embedded children borrow their encoding from the linked
-/// child descriptor; empty references do not use an offset.
+/// Compact branch topology, encoded reference lengths, and offsets into the
+/// original parent. Reference lengths stay in 1..33 for the catalog lifetime.
 pub const Branch = struct {
     links: BranchLinks,
     reference_offsets: [16]u16,
+    reference_lengths: BranchReferenceLengths,
+
+    comptime {
+        std.debug.assert(@sizeOf(Branch) == 112);
+    }
+};
+
+pub const ResolvedBranchChild = struct {
+    link: Link,
+    reference: node_codec.Reference,
 };
 
 pub const Catalog = struct {
@@ -157,39 +182,50 @@ pub const Catalog = struct {
         return self.reference(entry, link, entry.value_offset);
     }
 
-    pub fn branchReference(
+    pub inline fn resolvedBranchChild(
         self: Catalog,
-        id: NodeId,
+        parent: *const Node,
+        child_index: usize,
+    ) errors.LookupError!ResolvedBranchChild {
+        if (child_index >= 16) return error.InvalidNodeReference;
+        const branch = try self.branchFromNode(parent);
+        const link = branch.links[child_index];
+        return .{
+            .link = link,
+            .reference = try self.reference(
+                parent,
+                link,
+                branch.reference_offsets[child_index],
+            ),
+        };
+    }
+
+    pub inline fn resolvedBranchReference(
+        self: Catalog,
+        parent: *const Node,
         child_index: usize,
     ) errors.LookupError!node_codec.Reference {
         if (child_index >= 16) return error.InvalidNodeReference;
-        const entry = self.node(id) orelse return error.InvalidNodeReference;
-        if (entry.kind != .branch or entry.payload >= self.branches.items.len) {
-            return error.InvalidNodeReference;
-        }
-        const branch = &self.branches.items[entry.payload];
-        return self.reference(entry, branch.links[child_index], branch.reference_offsets[child_index]);
+        const branch = try self.branchFromNode(parent);
+        return self.reference(
+            parent,
+            branch.links[child_index],
+            branch.reference_offsets[child_index],
+        );
     }
 
-    pub fn branchReferenceEncodedLen(
+    pub fn resolvedBranchReferenceEncodedLengths(
         self: Catalog,
-        id: NodeId,
-        child_index: usize,
-    ) errors.LookupError!usize {
-        if (child_index >= 16) return error.InvalidNodeReference;
-        const entry = self.node(id) orelse return error.InvalidNodeReference;
-        if (entry.kind != .branch or entry.payload >= self.branches.items.len) {
+        parent: *const Node,
+    ) errors.LookupError!*const BranchReferenceLengths {
+        return &((try self.branchFromNode(parent)).reference_lengths);
+    }
+
+    pub fn branchFromNode(self: Catalog, parent: *const Node) errors.LookupError!*const Branch {
+        if (parent.kind != .branch or parent.payload >= self.branches.items.len) {
             return error.InvalidNodeReference;
         }
-        const link = self.branches.items[entry.payload].links[child_index];
-        return switch (link) {
-            .empty => 1,
-            .@"opaque" => 33,
-            _ => if (link.node()) |child_id| child: {
-                const child_node = self.node(child_id) orelse return error.InvalidNodeReference;
-                break :child if (child_node.encoded.len < 32) child_node.encoded.len else 33;
-            } else error.InvalidNodeReference,
-        };
+        return &self.branches.items[parent.payload];
     }
 
     fn reference(
@@ -287,15 +323,11 @@ pub const Builder = struct {
     positions: []u32,
     nodes: std.ArrayList(Node) = .empty,
     branches: std.ArrayList(Branch) = .empty,
-    states: std.ArrayList(u32) = .empty,
     work: std.ArrayList(NodeId) = .empty,
     limits: Limits,
     sealed: bool = false,
 
     const no_node = std.math.maxInt(u32);
-    const pending: u32 = 0;
-    const decoded: u32 = 1;
-
     pub fn init(allocator: std.mem.Allocator, index: *const proof.NodeIndex) std.mem.Allocator.Error!Builder {
         return initWithLimits(allocator, index, .{}) catch |err| switch (err) {
             error.ResourceLimitExceeded => unreachable,
@@ -318,7 +350,6 @@ pub const Builder = struct {
         self.allocator.free(self.positions);
         self.nodes.deinit(self.allocator);
         self.branches.deinit(self.allocator);
-        self.states.deinit(self.allocator);
         self.work.deinit(self.allocator);
         self.* = undefined;
     }
@@ -326,7 +357,7 @@ pub const Builder = struct {
     pub fn authenticateRoot(self: *Builder, digest: hash.Root) BuildError!RootRef {
         std.debug.assert(!self.sealed);
         if (std.mem.eql(u8, &digest, &hash.empty_root)) return .empty;
-        const indexed = proof.findIndexed(self.index, digest) orelse return error.MissingNode;
+        const indexed = proof.findIndexed(self.index, &digest) orelse return error.MissingNode;
         const id = try self.linkIndexed(indexed);
         try self.decodePending();
         return .{ .node = .{ .id = id, .digest = digest } };
@@ -339,11 +370,18 @@ pub const Builder = struct {
         return self.nodes.items.len;
     }
 
-    pub fn node(self: *const Builder, id: NodeId) ?Node {
+    /// Return the encoded value of an authenticated leaf. Non-leaf nodes are
+    /// skipped without exposing catalog representation records.
+    pub fn leafValue(
+        self: *const Builder,
+        id: NodeId,
+    ) error{ InvalidNode, InvalidNodeReference }!?[]const u8 {
         std.debug.assert(!self.sealed and self.work.items.len == 0);
         const index = @intFromEnum(id);
-        if (index >= self.nodes.items.len or self.states.items[index] != decoded) return null;
-        return self.nodes.items[index];
+        if (index >= self.nodes.items.len) return error.InvalidNodeReference;
+        const node = self.nodes.items[index];
+        if (node.kind != .leaf) return null;
+        return node.value() orelse error.InvalidNode;
     }
 
     pub fn finish(self: *Builder) BuildError!Catalog {
@@ -373,21 +411,18 @@ pub const Builder = struct {
         self.branches = .empty;
         self.allocator.free(self.positions);
         self.positions = &.{};
-        self.states.deinit(self.allocator);
-        self.states = .empty;
         self.work.deinit(self.allocator);
         self.work = .empty;
         return .{ .allocator = self.allocator, .nodes = nodes, .branches = branches };
     }
 
     fn decodePending(self: *Builder) BuildError!void {
+        // appendNode schedules each new ID once; linkIndexed reuses it without requeueing.
         while (self.work.pop()) |id| {
             const index = @intFromEnum(id);
-            if (self.states.items[index] == decoded) continue;
             var decoded_node = try node_codec.decodeForCatalog(self.nodes.items[index].encoded);
             const compact = try self.compactNode(self.nodes.items[index].encoded, &decoded_node);
             self.nodes.items[index] = compact;
-            self.states.items[index] = decoded;
         }
     }
 
@@ -400,6 +435,11 @@ pub const Builder = struct {
         var branch: Branch = undefined;
         for (references, 0..) |compact_reference, index| {
             const reference = compact_reference.reference(encoded);
+            branch.reference_lengths[index] = switch (reference) {
+                .empty => 1,
+                .embedded => |child| @intCast(child.len),
+                .hashed => 33,
+            };
             switch (reference) {
                 .empty => {
                     branch.links[index] = .empty;
@@ -417,11 +457,11 @@ pub const Builder = struct {
         return index;
     }
 
-    fn linkReference(self: *Builder, reference: node_codec.Reference) BuildError!Link {
+    inline fn linkReference(self: *Builder, reference: node_codec.Reference) BuildError!Link {
         return switch (reference) {
             .empty => .empty,
             .embedded => |encoded| Link.fromNode(try self.appendNode(encoded)),
-            .hashed => |digest| if (proof.findIndexed(self.index, digest.*)) |indexed|
+            .hashed => |digest| if (proof.findIndexed(self.index, digest)) |indexed|
                 if (indexed.encoded.len < 32)
                     error.InvalidNodeReference
                 else
@@ -444,7 +484,7 @@ pub const Builder = struct {
         if (self.nodes.items.len >= self.limits.linked_nodes) return error.ResourceLimitExceeded;
         if (self.nodes.items.len >= @intFromEnum(Link.@"opaque")) return error.ResourceLimitExceeded;
         const id: NodeId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
-        try self.nodes.append(self.allocator, .{
+        const undecoded: Node = .{
             .encoded = encoded,
             .payload = undefined,
             .path_offset = undefined,
@@ -454,10 +494,18 @@ pub const Builder = struct {
             .value_len = undefined,
             .path_nibble_offset = undefined,
             .kind = undefined,
-        });
+        };
+        if (self.nodes.items.len == self.nodes.capacity or self.work.items.len == self.work.capacity) {
+            return self.appendNodeGrowing(id, undecoded);
+        }
+        self.nodes.appendAssumeCapacity(undecoded);
+        self.work.appendAssumeCapacity(id);
+        return id;
+    }
+
+    noinline fn appendNodeGrowing(self: *Builder, id: NodeId, undecoded: Node) BuildError!NodeId {
+        try self.nodes.append(self.allocator, undecoded);
         errdefer _ = self.nodes.pop();
-        try self.states.append(self.allocator, pending);
-        errdefer _ = self.states.pop();
         try self.work.append(self.allocator, id);
         return id;
     }
@@ -559,22 +607,24 @@ pub const Builder = struct {
     }
 
     fn validateAcyclic(self: *Builder) BuildError!void {
-        @memset(self.states.items, 0);
+        const incoming = try self.allocator.alloc(u32, self.nodes.items.len);
+        defer self.allocator.free(incoming);
+        @memset(incoming, 0);
         for (self.nodes.items) |entry| switch (entry.kind) {
             .leaf => {},
             .extension => {
                 if ((entry.extensionChild() orelse return error.InvalidNodeReference).node()) |child| {
-                    try addIncoming(self.states.items, child);
+                    try addIncoming(incoming, child);
                 }
             },
             .branch => for ((try self.branchData(entry)).links) |child| {
-                if (child.node()) |id| try addIncoming(self.states.items, id);
+                if (child.node()) |id| try addIncoming(incoming, id);
             },
         };
 
         self.work.clearRetainingCapacity();
-        for (self.states.items, 0..) |incoming, index| {
-            if (incoming == 0) try self.work.append(self.allocator, @enumFromInt(@as(u32, @intCast(index))));
+        for (incoming, 0..) |count, index| {
+            if (count == 0) try self.work.append(self.allocator, @enumFromInt(@as(u32, @intCast(index))));
         }
 
         var visited: usize = 0;
@@ -585,8 +635,8 @@ pub const Builder = struct {
             const entry = self.nodes.items[@intFromEnum(id)];
             switch (entry.kind) {
                 .leaf => {},
-                .extension => try self.removeIncoming(entry.extensionChild() orelse return error.InvalidNodeReference),
-                .branch => for ((try self.branchData(entry)).links) |child| try self.removeIncoming(child),
+                .extension => try self.removeIncoming(incoming, entry.extensionChild() orelse return error.InvalidNodeReference),
+                .branch => for ((try self.branchData(entry)).links) |child| try self.removeIncoming(incoming, child),
             }
         }
         if (visited != self.nodes.items.len) return error.InvalidNodeReference;
@@ -597,12 +647,12 @@ pub const Builder = struct {
         return &self.branches.items[entry.payload];
     }
 
-    fn removeIncoming(self: *Builder, link: Link) BuildError!void {
+    fn removeIncoming(self: *Builder, incoming: []u32, link: Link) BuildError!void {
         const id = link.node() orelse return;
         const index = @intFromEnum(id);
-        if (self.states.items[index] == 0) return error.InvalidNodeReference;
-        self.states.items[index] -= 1;
-        if (self.states.items[index] == 0) try self.work.append(self.allocator, id);
+        if (incoming[index] == 0) return error.InvalidNodeReference;
+        incoming[index] -= 1;
+        if (incoming[index] == 0) try self.work.append(self.allocator, id);
     }
 
     fn addIncoming(incoming: []u32, id: NodeId) error{ResourceLimitExceeded}!void {

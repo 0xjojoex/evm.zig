@@ -681,10 +681,10 @@ fn foldedResult(status: Status, tx_index: usize, progress: vm.BlockResult, reque
 }
 
 /// Adapter required by BlockExecution's observation capability. Consensus BAL
-/// recording and optional external diagnostics remain separate authorities.
-fn StateObservationSink(comptime BlockState: type) type {
+/// folding and optional external diagnostics remain separate authorities.
+fn StateObservationSink(comptime BlockState: type, comptime BalFold: type) type {
     return struct {
-        consensus_bal: ?*tracked_state_projector.BlockBuilder,
+        bal_fold: ?*BalFold,
         external_target: ?ObservationTarget,
         block_access_index: eth_bal.BlockAccessIndex = 0,
 
@@ -693,8 +693,8 @@ fn StateObservationSink(comptime BlockState: type) type {
             observation: anytype,
         ) !void {
             const observations = observation.observations();
-            if (self.consensus_bal) |builder| {
-                try builder.append(observations, self.block_access_index);
+            if (self.bal_fold) |fold| {
+                try fold.append(observations, self.block_access_index);
             }
             if (self.external_target) |target| {
                 try BlockState.consumeObservationTarget(
@@ -709,13 +709,17 @@ fn StateObservationSink(comptime BlockState: type) type {
 
 /// Loop-invariant borrows for the per-transaction fold. Everything here is
 /// pinned in `executeBlock`'s frame and outlives every transaction.
-fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
+fn PayloadFold(
+    comptime revision: Revision,
+    comptime Engine: type,
+    comptime ObservationSink: type,
+) type {
     return struct {
         allocator: std.mem.Allocator,
         env: Env,
         block: *Engine.BlockExecution,
         executor: *Engine.Executor,
-        collector: *StateObservationSink(Engine.BlockState),
+        collector: *ObservationSink,
         step_capture: *block_capture.StepScope,
         observe_state: bool,
 
@@ -815,7 +819,8 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
                     .blob_gas_used_after = next_blob_gas_used,
                 });
             }
-            eth_receipt.mergeLogsBloom(&accumulated.logs_bloom, eth_receipt.logsBloom(receipt.logs));
+            const receipt_logs_bloom = eth_receipt.logsBloom(receipt.logs);
+            eth_receipt.mergeLogsBloom(&accumulated.logs_bloom, receipt_logs_bloom);
             if (revision.isImpl(.prague)) {
                 eip6110.appendRequestDataFromLogs(allocator, &accumulated.deposit_request_data, receipt.logs) catch |err| switch (err) {
                     error.InvalidRequest => return foldedResult(.invalid_requests, tx_index, self.block.progress(), requests_hash),
@@ -823,7 +828,12 @@ fn PayloadFold(comptime revision: Revision, comptime Engine: type) type {
                 };
             }
             accumulated.blob_gas_used = next_blob_gas_used;
-            const encoded_receipt = try eth_receipt.encodeView(allocator, entry.tx.kind, receipt);
+            const encoded_receipt = try eth_receipt.encodeView(
+                allocator,
+                entry.tx.kind,
+                receipt,
+                &receipt_logs_bloom,
+            );
             accumulated.encoded_receipts.append(allocator, encoded_receipt) catch |err| {
                 allocator.free(encoded_receipt);
                 return err;
@@ -942,7 +952,14 @@ pub fn applyExecution(
         claims,
     )) return .{ .status = .invalid_block_body };
 
-    var result = try executeBlock(revision, Engine, allocator, input, &run, observer);
+    var result = if (comptime Engine.specification.block.block_access_list and
+        @TypeOf(observer) == void)
+    blk: {
+        if (input.block_access_list != null) {
+            break :blk try executeBlock(revision, Engine, true, allocator, input, &run, observer);
+        }
+        break :blk try executeBlock(revision, Engine, false, allocator, input, &run, observer);
+    } else try executeBlock(revision, Engine, false, allocator, input, &run, observer);
     if (result.status != .valid) return result;
 
     var block_hash_mismatch = false;
@@ -989,7 +1006,7 @@ fn produceExecution(
         null,
     )) return .{ .rejected = .{ .status = .invalid_block_body } };
 
-    const result = try executeBlock(revision, Engine, allocator, input, &run, observer);
+    const result = try executeBlock(revision, Engine, false, allocator, input, &run, observer);
     if (result.status != .valid) return .{ .rejected = result };
 
     try run.commit();
@@ -1004,6 +1021,7 @@ fn produceExecution(
 fn executeBlock(
     comptime revision: Revision,
     comptime Engine: type,
+    comptime verifies_bal_claim: bool,
     allocator: std.mem.Allocator,
     input: anytype,
     run: *BlockRun(Engine),
@@ -1017,6 +1035,8 @@ fn executeBlock(
     else
         null;
     const validates_block_access_list = @hasField(@TypeOf(input), "block_access_list");
+    comptime std.debug.assert(!verifies_bal_claim or
+        (block_access_list_enabled and validates_block_access_list and @TypeOf(observer) == void));
     const resource_preparer = if (comptime @hasField(@TypeOf(input), "execution_resource_preparer"))
         input.execution_resource_preparer
     else
@@ -1080,10 +1100,21 @@ fn executeBlock(
         }) catch {};
     }
 
-    var consensus_bal = tracked_state_projector.BlockBuilder.init(allocator);
-    defer consensus_bal.deinit();
-    var observation_sink = StateObservationSink(Engine.BlockState){
-        .consensus_bal = if (block_access_list_enabled) &consensus_bal else null,
+    const BalFold = if (verifies_bal_claim)
+        Engine.BlockState.BalClaimVerifier
+    else
+        tracked_state_projector.BlockBuilder;
+    var bal_fold = if (comptime verifies_bal_claim)
+        try Engine.BlockState.initBalClaimVerifier(
+            allocator,
+            &executor.state,
+            bal_claim.accounts().?,
+        )
+    else
+        tracked_state_projector.BlockBuilder.init(allocator);
+    defer bal_fold.deinit();
+    var observation_sink = StateObservationSink(Engine.BlockState, BalFold){
+        .bal_fold = if (block_access_list_enabled) &bal_fold else null,
         .external_target = if (input.capture) |capture| capture.observations else null,
     };
     const observe_state = block_access_list_enabled or observation_sink.external_target != null;
@@ -1132,7 +1163,7 @@ fn executeBlock(
     };
     defer accumulated.deinit();
 
-    const fold = PayloadFold(revision, Engine){
+    const fold = PayloadFold(revision, Engine, @TypeOf(observation_sink)){
         .allocator = allocator,
         .env = input.env,
         .block = &block,
@@ -1226,55 +1257,47 @@ fn executeBlock(
     };
 
     try step_capture.finishBlock();
-    if (block_access_list_enabled) {
-        const claim_verified_without_artifact = if (comptime validates_block_access_list and
-            @TypeOf(observer) == void)
-        blk: {
-            const expected = bal_claim.accounts() orelse break :blk false;
-            if (!try consensus_bal.matchesClaim(expected)) break :blk false;
+    if (comptime verifies_bal_claim) {
+        if (try bal_fold.matchesClaim()) {
             computed_block_access_list_hash = crypto.keccak256(block_access_list.?);
-            break :blk true;
-        } else false;
-
-        if (claim_verified_without_artifact) {
-            // The admitted canonical claim is the observed BAL; validation
-            // needs its commitment but owns no produced artifact.
         } else {
-            observed_block_access_list = consensus_bal.finish() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return err,
-            };
-            // BlockBuilder emits canonical structure; only its consensus item budget remains.
-            block_admission.validateCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
-                error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
-                else => return err,
-            };
+            block_access_list_mismatch = true;
+        }
+    } else if (block_access_list_enabled) {
+        observed_block_access_list = bal_fold.finish() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return err,
+        };
+        // BlockBuilder emits canonical structure; only its consensus item budget remains.
+        block_admission.validateCounts(eth_bal.count(observed_block_access_list.?.accounts), input.env.gas_limit) catch |err| switch (err) {
+            error.BlockAccessListGasLimitExceeded => return .{ .status = .block_access_list_too_large },
+            else => return err,
+        };
 
-            var needs_encoded_block_access_list = !validates_block_access_list or
-                @TypeOf(observer) != void;
-            if (block_access_list) |encoded_claim| {
-                if (!eth_bal.eql(bal_claim.accounts().?, observed_block_access_list.?.accounts)) {
-                    block_access_list_mismatch = true;
-                    needs_encoded_block_access_list = true;
-                    if (comptime @TypeOf(observer) != void) {
-                        observer.blockAccessListMismatch(
-                            bal_claim.accounts().?,
-                            observed_block_access_list.?.accounts,
-                        );
-                    }
-                } else if (!needs_encoded_block_access_list) {
-                    computed_block_access_list_hash = crypto.keccak256(encoded_claim);
-                }
-            } else {
+        var needs_encoded_block_access_list = !validates_block_access_list or
+            @TypeOf(observer) != void;
+        if (block_access_list) |encoded_claim| {
+            if (!eth_bal.eql(bal_claim.accounts().?, observed_block_access_list.?.accounts)) {
+                block_access_list_mismatch = true;
                 needs_encoded_block_access_list = true;
+                if (comptime @TypeOf(observer) != void) {
+                    observer.blockAccessListMismatch(
+                        bal_claim.accounts().?,
+                        observed_block_access_list.?.accounts,
+                    );
+                }
+            } else if (!needs_encoded_block_access_list) {
+                computed_block_access_list_hash = crypto.keccak256(encoded_claim);
             }
-            if (needs_encoded_block_access_list) {
-                observed_block_access_list_encoded = try eth_bal.encodeAlloc(
-                    allocator,
-                    observed_block_access_list.?.accounts,
-                );
-                computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
-            }
+        } else {
+            needs_encoded_block_access_list = true;
+        }
+        if (needs_encoded_block_access_list) {
+            observed_block_access_list_encoded = try eth_bal.encodeAlloc(
+                allocator,
+                observed_block_access_list.?.accounts,
+            );
+            computed_block_access_list_hash = crypto.keccak256(observed_block_access_list_encoded.?);
         }
     }
     if (comptime @TypeOf(observer) != void) observer.finishCandidate(input.withdrawals);

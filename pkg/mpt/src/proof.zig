@@ -96,6 +96,20 @@ fn keyEquals(lhs: NodeKey, rhs: NodeKey) bool {
     return true;
 }
 
+inline fn borrowedKeyWord(digest: *align(1) const hash.Root, comptime index: usize) u64 {
+    const bytes: [*]align(1) const u8 = @ptrCast(digest);
+    const word: *align(1) const [@sizeOf(u64)]u8 = @ptrCast(bytes + index * @sizeOf(u64));
+    return @bitCast(word.*);
+}
+
+/// Keep align-1 tail assembly behind word-zero equality on RV64 guests.
+noinline fn borrowedKeyTailEquals(key: *const NodeKey, digest: *align(1) const hash.Root) bool {
+    inline for (1..4) |index| {
+        if (key[index] != borrowedKeyWord(digest, index)) return false;
+    }
+    return true;
+}
+
 pub const NodeRecord = struct {
     key: NodeKey,
     encoded: []const u8,
@@ -135,6 +149,24 @@ const IndexData = struct {
             if (entry == 0) return null;
             const record = &self.records[entry - 1];
             if (keyEquals(record.key, key)) {
+                return .{ .encoded = record.encoded, .position = entry - 1 };
+            }
+            slot = @intCast((slot + 1) & mask);
+        }
+    }
+
+    /// Probe a digest borrowed from an encoded node without first assembling
+    /// its full align-1 byte representation into an aligned value.
+    fn findBorrowed(self: IndexData, digest: *align(1) const hash.Root) ?IndexedNode {
+        if (self.table.len == 0) return null;
+        const word_0 = borrowedKeyWord(digest, 0);
+        const mask: u64 = self.table.len - 1;
+        var slot: usize = @intCast(word_0 & mask);
+        while (true) {
+            const entry = self.table[slot];
+            if (entry == 0) return null;
+            const record = &self.records[entry - 1];
+            if (record.key[0] == word_0 and borrowedKeyTailEquals(&record.key, digest)) {
                 return .{ .encoded = record.encoded, .position = entry - 1 };
             }
             slot = @intCast((slot + 1) & mask);
@@ -208,8 +240,8 @@ pub fn find(index: *const NodeIndex, digest: hash.Root) ?[]const u8 {
     return indexed.encoded;
 }
 
-pub fn findIndexed(index: *const NodeIndex, digest: hash.Root) ?IndexedNode {
-    return dataFromIndex(index).find(digest);
+pub fn findIndexed(index: *const NodeIndex, digest: *align(1) const hash.Root) ?IndexedNode {
+    return dataFromIndex(index).findBorrowed(digest);
 }
 
 fn indexFromData(data: *const IndexData) *const NodeIndex {

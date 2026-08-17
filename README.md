@@ -223,7 +223,8 @@ where you know at ship time what you need
 Standalone Zig libraries under `pkg/` can be fetched independently:
 
 - [`pkg/rlp`](pkg/rlp) — strict RLP encoding and decoding
-- [`pkg/mpt`](pkg/mpt) — Merkle Patricia Trie proofs and sparse updates
+- [`pkg/mpt`](pkg/mpt) — stateless MPT proofs, authenticated catalogs, and
+  sparse/fixed-key updates
 - [`pkg/ssz`](pkg/ssz) — comptime-typed SSZ encoding and decoding
 
 ## Scope

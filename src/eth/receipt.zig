@@ -46,17 +46,23 @@ pub const Payload = struct {
 };
 
 pub fn encode(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: TxReceiptView) ![]u8 {
-    return encodeView(allocator, kind, receipt);
+    const logs_bloom = logsBloom(receipt.logs);
+    return encodeView(allocator, kind, receipt, &logs_bloom);
 }
 
-pub fn encodeView(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: anytype) ![]u8 {
+pub fn encodeView(
+    allocator: std.mem.Allocator,
+    kind: transaction.TxKind,
+    receipt: anytype,
+    logs_bloom: *const [256]u8,
+) ![]u8 {
     const logs = try allocator.alloc(Log, receipt.logs.len());
     defer allocator.free(logs);
     for (logs, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
     const payload: Payload = .{
         .status = receiptStatus(receipt.status),
         .cumulative_gas_used = receipt.cumulative_gas_used,
-        .logs_bloom = logsBloom(receipt.logs),
+        .logs_bloom = logs_bloom.*,
         .logs = logs,
     };
     const payload_len = try rlp.encodedLen(Payload, &payload);
@@ -90,7 +96,9 @@ fn transactionType(kind: transaction.TxKind) ?u8 {
     };
 }
 
-pub fn logsBloom(logs: state.LogBuffer.View) [256]u8 {
+/// Keep this outlined: after callers reuse the result there is only one hot
+/// call site, which Zig otherwise inlines back into the block loop.
+pub noinline fn logsBloom(logs: state.LogBuffer.View) [256]u8 {
     var bloom = [_]u8{0} ** 256;
     for (0..logs.len()) |index| {
         const event_log = logs.get(index);

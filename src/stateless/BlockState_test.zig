@@ -504,9 +504,20 @@ test "dense commit reclaims independent storage roots and error scopes" {
         accepted.changes(),
     );
 
+    const wrong_root = [_]u8{0x42} ** 32;
+    try std.testing.expectError(
+        error.InvalidNodeReference,
+        trie.stateRootAfterChangesCatalog(
+            allocator,
+            wrong_root,
+            &catalog,
+            &account_facts,
+            accepted.changes(),
+        ),
+    );
+
     var commit_buffer: [128 * 1024]u8 = undefined;
     var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
-    const wrong_root = [_]u8{0x42} ** 32;
     try std.testing.expectError(
         error.InvalidNodeReference,
         StatelessCommit.stateRootAfterCatalog(

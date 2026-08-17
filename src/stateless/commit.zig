@@ -56,6 +56,7 @@ pub fn stateRootAfterCatalog(
     commit: anytype,
 ) trie.UpdateError![32]u8 {
     comptime assertCommitView(@TypeOf(commit));
+    try catalog.validateStateRoot(root_hash);
     var workspace = DenseCommitWorkspace.init(allocator);
     defer workspace.deinit();
     const commit_allocator = workspace.retainedAllocator();
@@ -64,7 +65,7 @@ pub fn stateRootAfterCatalog(
     for (commit.accountTrieOrder()) |account_id| {
         if (commit.accountDirty(account_id)) dirty_account_count += 1;
     }
-    var account_updates: std.ArrayList(mpt.CatalogUpdate) =
+    var account_updates: std.ArrayList(mpt.FixedUpdate) =
         try .initCapacity(commit_allocator, dirty_account_count);
     var account_values: std.ArrayList(trie.AccountValueBuffer) =
         try .initCapacity(commit_allocator, dirty_account_count);
@@ -112,12 +113,8 @@ pub fn stateRootAfterCatalog(
     }
     std.debug.assert(account_updates.items.len == dirty_account_count);
 
-    var scope = workspace.beginScope();
-    defer scope.deinit();
-    return trie.updateCatalogHashed(
-        &workspace.mpt_workspace,
-        scope.allocator(),
-        root_hash,
+    return trie.updateCatalogHashedSorted(
+        &workspace.mpt_region,
         catalog,
         catalog.stateCatalogRoot(),
         account_updates.items,
@@ -143,7 +140,7 @@ fn storageRootAfterCatalog(
         if (commit.storageDirty(storage_id)) dirty_storage_count += 1;
     }
     if (dirty_storage_count == 0) return base_root;
-    var updates: std.ArrayList(mpt.CatalogUpdate) =
+    var updates: std.ArrayList(mpt.FixedUpdate) =
         try .initCapacity(allocator, dirty_storage_count);
     var values: std.ArrayList(trie.StorageValueBuffer) =
         try .initCapacity(allocator, dirty_storage_count);
@@ -161,15 +158,13 @@ fn storageRootAfterCatalog(
     }
     std.debug.assert(updates.items.len == dirty_storage_count);
 
-    const root_ref: mpt.catalog.RootRef = if (wiped or
+    const root_ref: mpt.CatalogRoot = if (wiped or
         std.mem.eql(u8, &parent_root, &trie.empty_root_hash))
         .empty
     else
         try catalog.storageCatalogRoot(parent_root);
-    return trie.updateCatalogHashed(
-        &workspace.mpt_workspace,
-        allocator,
-        base_root,
+    return trie.updateCatalogHashedSorted(
+        &workspace.mpt_region,
         catalog,
         root_ref,
         updates.items,
@@ -177,38 +172,39 @@ fn storageRootAfterCatalog(
 }
 
 /// Owns the serial dense-commit lifetime tree. Retained account material lives
-/// at the root; each storage calculation and MPT update gets a nested scope.
+/// at the root; each storage calculation gets a nested scope, while catalog
+/// mutation scopes itself inside the same region.
 const DenseCommitWorkspace = struct {
-    mpt_workspace: mpt.CatalogWorkspace,
+    mpt_region: mpt.Region,
 
     const Scope = struct {
         workspace: *DenseCommitWorkspace,
-        mark: mpt.CatalogWorkspace.Mark,
+        mark: mpt.Region.Mark,
 
         fn allocator(self: *Scope) Allocator {
-            return self.workspace.mpt_workspace.allocator();
+            return self.workspace.mpt_region.allocator();
         }
 
         fn deinit(self: *Scope) void {
-            self.workspace.mpt_workspace.rewind(self.mark);
+            self.workspace.mpt_region.rewind(self.mark);
             self.* = undefined;
         }
     };
 
     fn init(parent_allocator: Allocator) DenseCommitWorkspace {
-        return .{ .mpt_workspace = mpt.CatalogWorkspace.init(parent_allocator) };
+        return .{ .mpt_region = mpt.Region.init(parent_allocator) };
     }
 
     fn deinit(self: *DenseCommitWorkspace) void {
-        self.mpt_workspace.deinit();
+        self.mpt_region.deinit();
         self.* = undefined;
     }
 
     fn retainedAllocator(self: *DenseCommitWorkspace) Allocator {
-        return self.mpt_workspace.allocator();
+        return self.mpt_region.allocator();
     }
 
     fn beginScope(self: *DenseCommitWorkspace) Scope {
-        return .{ .workspace = self, .mark = self.mpt_workspace.mark() };
+        return .{ .workspace = self, .mark = self.mpt_region.mark() };
     }
 };

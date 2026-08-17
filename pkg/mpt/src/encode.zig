@@ -10,6 +10,7 @@ const rlp = @import("rlp");
 
 const errors = @import("error.zig");
 const hash = @import("hash.zig");
+const nibble = @import("nibble.zig");
 const node_codec = @import("node.zig");
 
 const UpdateError = errors.UpdateError;
@@ -66,7 +67,11 @@ pub const BufferLengths = struct {
 };
 
 pub fn leafBufferLengths(path: []const u8, value: []const u8) UpdateError!BufferLengths {
-    const compact_len = try compactOutputLen(path);
+    return leafPathBufferLengths(path.len, value);
+}
+
+pub fn leafPathBufferLengths(path_len: usize, value: []const u8) UpdateError!BufferLengths {
+    const compact_len = try compactOutputLen(path_len);
     const payload = try addEncodedLengths(&.{
         try bytesEncodedLenUpperBound(compact_len),
         try bytesEncodedLen(value),
@@ -75,7 +80,11 @@ pub fn leafBufferLengths(path: []const u8, value: []const u8) UpdateError!Buffer
 }
 
 pub fn extensionBufferLengths(path: []const u8, child_reference: *const Reference) UpdateError!BufferLengths {
-    const compact_len = try compactOutputLen(path);
+    return extensionPathBufferLengths(path.len, child_reference);
+}
+
+pub fn extensionPathBufferLengths(path_len: usize, child_reference: *const Reference) UpdateError!BufferLengths {
+    const compact_len = try compactOutputLen(path_len);
     const payload = try addEncodedLengths(&.{
         try bytesEncodedLenUpperBound(compact_len),
         try referenceEncodedLen(child_reference),
@@ -90,6 +99,20 @@ pub fn leaf(
     value: []const u8,
 ) UpdateError![]const u8 {
     const compact_path = try compact(compact_buffer, path, true);
+    return leafCompact(node_buffer, compact_path, value);
+}
+
+pub fn leafPath(
+    node_buffer: []u8,
+    compact_buffer: []u8,
+    path: nibble.Path,
+    value: []const u8,
+) UpdateError![]const u8 {
+    const compact_path = try compactPath(compact_buffer, path, true);
+    return leafCompact(node_buffer, compact_path, value);
+}
+
+fn leafCompact(node_buffer: []u8, compact_path: []const u8, value: []const u8) UpdateError![]const u8 {
     const payload_len = try addEncodedLengths(&.{
         try bytesEncodedLen(compact_path),
         try bytesEncodedLen(value),
@@ -108,6 +131,25 @@ pub fn extension(
 ) UpdateError![]const u8 {
     if (child_reference.* == .unset or child_reference.* == .empty) return error.InvalidNode;
     const compact_path = try compact(compact_buffer, path, false);
+    return extensionCompact(node_buffer, compact_path, child_reference);
+}
+
+pub fn extensionPath(
+    node_buffer: []u8,
+    compact_buffer: []u8,
+    path: nibble.Path,
+    child_reference: *const Reference,
+) UpdateError![]const u8 {
+    if (child_reference.* == .unset or child_reference.* == .empty) return error.InvalidNode;
+    const compact_path = try compactPath(compact_buffer, path, false);
+    return extensionCompact(node_buffer, compact_path, child_reference);
+}
+
+fn extensionCompact(
+    node_buffer: []u8,
+    compact_path: []const u8,
+    child_reference: *const Reference,
+) UpdateError![]const u8 {
     const payload_len = try addEncodedLengths(&.{
         try bytesEncodedLen(compact_path),
         try referenceEncodedLen(child_reference),
@@ -120,8 +162,7 @@ pub fn extension(
 
 /// Hex-prefix-encode a nibble path, flagged `terminal` for a leaf.
 pub fn compact(out: []u8, path: []const u8, terminal: bool) UpdateError![]const u8 {
-    const out_len = std.math.add(usize, 1, path.len / 2) catch
-        return error.ResourceLimitExceeded;
+    const out_len = try compactOutputLen(path.len);
     if (out_len > out.len) return error.ResourceLimitExceeded;
     const odd = path.len % 2 == 1;
     const flags: u8 = (@as(u8, @intFromBool(terminal)) << 1) |
@@ -142,8 +183,12 @@ pub fn compact(out: []u8, path: []const u8, terminal: bool) UpdateError![]const 
     return out[0..out_len];
 }
 
-pub fn compactOutputLen(path: []const u8) UpdateError!usize {
-    return std.math.add(usize, 1, path.len / 2) catch
+pub fn compactPath(out: []u8, path: nibble.Path, terminal: bool) UpdateError![]const u8 {
+    return nibble.encodeCompact(out, path, terminal) catch error.ResourceLimitExceeded;
+}
+
+pub fn compactOutputLen(path_len: usize) UpdateError!usize {
+    return std.math.add(usize, 1, path_len / 2) catch
         error.ResourceLimitExceeded;
 }
 

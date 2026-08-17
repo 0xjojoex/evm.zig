@@ -52,19 +52,16 @@ fn storageTrie(allocator: Allocator) StorageTrie {
 /// Internal hashed-key seam for the dense commit module. Keeping the
 /// structural trie context here avoids instantiating a second Keccak-backed
 /// MPT implementation merely because commit lives in its own source file.
-pub inline fn updateCatalogHashed(
-    workspace: *mpt.CatalogWorkspace,
-    allocator: Allocator,
-    root_hash: [32]u8,
+pub inline fn updateCatalogHashedSorted(
+    region: *mpt.Region,
     catalog: *const WitnessCatalog,
-    root_ref: mpt.catalog.RootRef,
-    updates: []const mpt.CatalogUpdate,
+    catalog_root: mpt.CatalogRoot,
+    updates: []const mpt.FixedUpdate,
 ) UpdateError![32]u8 {
-    return structuralTrie(allocator).updateCatalog(
-        workspace,
-        root_hash,
+    return structuralTrie(region.allocator()).updateCatalogSorted(
+        region,
         &catalog.topology,
-        root_ref,
+        catalog_root,
         updates,
     );
 }
@@ -242,21 +239,21 @@ pub const ProofCache = mpt.LookupCache;
 
 const StorageCatalogRoot = struct {
     hash: [32]u8,
-    root: mpt.catalog.RootRef,
+    root: mpt.CatalogRoot,
 };
 
 const CatalogAccount = struct {
-    node: mpt.catalog.NodeId,
+    node: mpt.CatalogNodeId,
     decoded: Account,
 };
 
-/// Block-lifetime authenticated topology for state reads. The sorted witness
-/// index remains separately owned by the backend until sparse commit is moved
-/// onto catalog paths.
+/// Block-lifetime authenticated topology for state reads and fixed-key commit.
+/// The sealed witness index remains separately owned by the backend for proof
+/// lookup and as the catalog's encoded-node backing.
 pub const WitnessCatalog = struct {
     allocator: Allocator,
     topology: mpt.Catalog,
-    state_root: mpt.catalog.RootRef,
+    state_root: mpt.CatalogRoot,
     storage_roots: std.ArrayList(StorageCatalogRoot),
     accounts: std.ArrayList(CatalogAccount),
 
@@ -277,7 +274,7 @@ pub const WitnessCatalog = struct {
             .absent => return null,
         };
         const S = struct {
-            fn compareAccountNode(target: mpt.catalog.NodeId, item: CatalogAccount) std.math.Order {
+            fn compareAccountNode(target: mpt.CatalogNodeId, item: CatalogAccount) std.math.Order {
                 return std.math.order(@intFromEnum(target), @intFromEnum(item.node));
             }
         };
@@ -308,19 +305,29 @@ pub const WitnessCatalog = struct {
         return self.topology.branchCount();
     }
 
-    pub fn stateCatalogRoot(self: WitnessCatalog) mpt.catalog.RootRef {
+    pub fn stateCatalogRoot(self: WitnessCatalog) mpt.CatalogRoot {
         return self.state_root;
     }
 
+    /// Resolve a storage root by its authenticated digest. Unlike the state
+    /// commit boundary, the digest itself selects the catalog root.
     pub fn storageCatalogRoot(
         self: WitnessCatalog,
         digest: [32]u8,
-    ) mpt.LookupError!mpt.catalog.RootRef {
+    ) mpt.LookupError!mpt.CatalogRoot {
         if (std.mem.eql(u8, &digest, &empty_root_hash)) return .empty;
         return self.findStorageRoot(digest) orelse error.MissingNode;
     }
 
-    fn findStorageRoot(self: WitnessCatalog, digest: [32]u8) ?mpt.catalog.RootRef {
+    /// State commit receives the pre-root independently from this catalog;
+    /// reject a mismatched pair before deriving any changes.
+    pub fn validateStateRoot(self: WitnessCatalog, digest: [32]u8) error{InvalidNodeReference}!void {
+        if (!std.mem.eql(u8, &digest, &self.state_root.digest())) {
+            return error.InvalidNodeReference;
+        }
+    }
+
+    fn findStorageRoot(self: WitnessCatalog, digest: [32]u8) ?mpt.CatalogRoot {
         const S = struct {
             fn compareStorageRootHash(context: [32]u8, item: StorageCatalogRoot) std.math.Order {
                 return std.mem.order(u8, &context, &item.hash);
@@ -359,10 +366,8 @@ pub fn buildWitnessCatalog(
     defer storage_root_accounts.deinit(allocator);
 
     for (0..state_node_count) |raw_id| {
-        const id: mpt.catalog.NodeId = @enumFromInt(@as(u32, @intCast(raw_id)));
-        const node = builder.node(id) orelse return error.InvalidNodeReference;
-        if (node.kind != .leaf) continue;
-        const encoded = node.value() orelse return error.InvalidNode;
+        const id: mpt.CatalogNodeId = @enumFromInt(@as(u32, @intCast(raw_id)));
+        const encoded = (try builder.leafValue(id)) orelse continue;
         const entry = try accounts.addOne(allocator);
         entry.node = id;
         try decodeAccountValueInto(encoded, &entry.decoded);
@@ -473,7 +478,7 @@ pub fn orderedTrieRoot(allocator: Allocator, encoded_values: []const []const u8)
 
     var scratch = try OrderedTrieWorkspace.init(allocator, encoded_values);
     defer scratch.deinit(allocator);
-    var root_workspace = mpt.Workspace.init(scratch.root_buffer);
+    var root_workspace = mpt.RootWorkspace.init(scratch.root_buffer);
     return structuralTrie(allocator).rootWithWorkspace(&root_workspace, scratch.pairs);
 }
 
@@ -504,7 +509,7 @@ fn updateRootIndexed(allocator: Allocator, root_hash: [32]u8, indexed: *const In
 
     const sorted = try allocator.dupe(Update, updates);
     defer allocator.free(sorted);
-    mpt.Sort.byKey(Update, sorted);
+    mpt.sortUpdates(sorted);
 
     const trie = structuralTrie(allocator);
 
@@ -512,6 +517,7 @@ fn updateRootIndexed(allocator: Allocator, root_hash: [32]u8, indexed: *const In
 }
 
 fn storageRootAfterChangesIndexed(
+    region: *mpt.Region,
     allocator: Allocator,
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
@@ -539,11 +545,11 @@ fn storageRootAfterChangesIndexed(
         empty_root_hash
     else
         root_hash;
-    return storageTrie(allocator).update(base_root, indexed.index(), updates.items);
+    return storageTrie(allocator).update(region, base_root, indexed.index(), updates.items);
 }
 
 fn storageRootAfterChangesCatalog(
-    workspace: *mpt.CatalogWorkspace,
+    region: *mpt.Region,
     allocator: Allocator,
     root_hash: [32]u8,
     catalog: *const WitnessCatalog,
@@ -567,13 +573,12 @@ fn storageRootAfterChangesCatalog(
     const wiped = changesWipeStorage(changes, target);
     const base_root = if (wiped) empty_root_hash else root_hash;
     if (updates.items.len == 0) return base_root;
-    const root_ref: mpt.catalog.RootRef = if (wiped)
+    const root_ref: mpt.CatalogRoot = if (wiped)
         .empty
     else
         try catalog.storageCatalogRoot(root_hash);
     return storageTrie(allocator).updateCatalog(
-        workspace,
-        base_root,
+        region,
         &catalog.topology,
         root_ref,
         updates.items,
@@ -631,6 +636,8 @@ pub fn stateRootAfterChangesIndexed(
 ) UpdateError![32]u8 {
     comptime assertChangesView(@TypeOf(changes));
     const scratch = allocator;
+    var region = mpt.Region.init(allocator);
+    defer region.deinit();
 
     var addresses: std.ArrayList(address.Address) = .empty;
     defer addresses.deinit(scratch);
@@ -675,6 +682,7 @@ pub fn stateRootAfterChangesIndexed(
         } else try loadAccountOrEmpty(accounts, root_hash, indexed.index(), target);
         const account_change = changesAccount(changes, target);
         const storage_root = try storageRootAfterChangesIndexed(
+            &region,
             scratch,
             previous.storage_root,
             indexed,
@@ -704,7 +712,7 @@ pub fn stateRootAfterChangesIndexed(
         try updates.append(scratch, .{ .key = change.address, .value = null });
     }
 
-    return accounts.update(root_hash, indexed.index(), updates.items);
+    return accounts.update(&region, root_hash, indexed.index(), updates.items);
 }
 
 pub fn stateRootAfterChangesCatalog(
@@ -715,8 +723,9 @@ pub fn stateRootAfterChangesCatalog(
     changes: anytype,
 ) UpdateError![32]u8 {
     comptime assertChangesView(@TypeOf(changes));
-    var workspace = mpt.CatalogWorkspace.init(allocator);
-    defer workspace.deinit();
+    try catalog.validateStateRoot(root_hash);
+    var region = mpt.Region.init(allocator);
+    defer region.deinit();
 
     var addresses: std.ArrayList(address.Address) = .empty;
     defer addresses.deinit(allocator);
@@ -751,7 +760,7 @@ pub fn stateRootAfterChangesCatalog(
             try loadCatalogAccountOrEmpty(catalog, target);
         const account_change = changesAccount(changes, target);
         const storage_root = try storageRootAfterChangesCatalog(
-            &workspace,
+            &region,
             allocator,
             previous.storage_root,
             catalog,
@@ -782,8 +791,7 @@ pub fn stateRootAfterChangesCatalog(
     }
 
     return accountTrie(allocator).updateCatalog(
-        &workspace,
-        root_hash,
+        &region,
         &catalog.topology,
         catalog.stateCatalogRoot(),
         updates.items,
@@ -794,8 +802,16 @@ pub fn hashedAddressKey(target: address.Address) [32]u8 {
     return AddressKeyContext.trieKey(.{}, target);
 }
 
+pub inline fn hashedAddressKeyInto(target: address.Address, digest: *align(8) [32]u8) void {
+    crypto.keccak256Into(target.asBytes(), digest);
+}
+
 pub fn hashedStorageKey(key: u256) [32]u8 {
     return StorageKeyContext.trieKey(.{}, key);
+}
+
+pub inline fn hashedStorageKeyInto(key: u256, digest: *align(8) [32]u8) void {
+    crypto.keccak256Into(&uint256.toBytes32(key), digest);
 }
 
 pub fn storageValue(allocator: Allocator, value: u256) Allocator.Error![]u8 {
@@ -1782,7 +1798,11 @@ test "authenticated account facts preserve cached absence" {
 
 fn sortedPairsForTest(allocator: Allocator, pairs: []const Pair) ![]Pair {
     const sorted = try allocator.dupe(Pair, pairs);
-    mpt.Sort.byKey(Pair, sorted);
+    std.mem.sort(Pair, sorted, {}, struct {
+        fn lessThan(_: void, lhs: Pair, rhs: Pair) bool {
+            return std.mem.lessThan(u8, lhs.key, rhs.key);
+        }
+    }.lessThan);
     try rejectDuplicateKeys(sorted);
     return sorted;
 }
