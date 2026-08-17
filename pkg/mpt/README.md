@@ -38,10 +38,10 @@ bending one general trie to every phase:
   untouched children stay authenticated references, and dirty nodes encode
   once at the end.
 
-The overlay is deliberate for Ethereum state and storage: Keccak-derived keys
-disperse quickly, so sorted batches share only shallow prefixes. A recursive
-batch fold adds partitioning machinery but finds little topology to share; the
-occurrence overlay provides the useful memoization at a smaller execution cost.
+The overlay fits hashed keys well: Keccak-derived keys disperse quickly, so an
+update batch shares little deep topology. Memoizing each materialized path
+across the batch captures the sharing that does exist, without dedicated batch
+machinery.
 
 ## Requirements
 

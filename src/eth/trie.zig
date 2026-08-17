@@ -517,6 +517,7 @@ fn updateRootIndexed(allocator: Allocator, root_hash: [32]u8, indexed: *const In
 }
 
 fn storageRootAfterChangesIndexed(
+    region: *mpt.Region,
     allocator: Allocator,
     root_hash: [32]u8,
     indexed: *const IndexedNodes,
@@ -544,7 +545,7 @@ fn storageRootAfterChangesIndexed(
         empty_root_hash
     else
         root_hash;
-    return storageTrie(allocator).update(base_root, indexed.index(), updates.items);
+    return storageTrie(allocator).update(region, base_root, indexed.index(), updates.items);
 }
 
 fn storageRootAfterChangesCatalog(
@@ -635,6 +636,8 @@ pub fn stateRootAfterChangesIndexed(
 ) UpdateError![32]u8 {
     comptime assertChangesView(@TypeOf(changes));
     const scratch = allocator;
+    var region = mpt.Region.init(allocator);
+    defer region.deinit();
 
     var addresses: std.ArrayList(address.Address) = .empty;
     defer addresses.deinit(scratch);
@@ -679,6 +682,7 @@ pub fn stateRootAfterChangesIndexed(
         } else try loadAccountOrEmpty(accounts, root_hash, indexed.index(), target);
         const account_change = changesAccount(changes, target);
         const storage_root = try storageRootAfterChangesIndexed(
+            &region,
             scratch,
             previous.storage_root,
             indexed,
@@ -708,7 +712,7 @@ pub fn stateRootAfterChangesIndexed(
         try updates.append(scratch, .{ .key = change.address, .value = null });
     }
 
-    return accounts.update(root_hash, indexed.index(), updates.items);
+    return accounts.update(&region, root_hash, indexed.index(), updates.items);
 }
 
 pub fn stateRootAfterChangesCatalog(
