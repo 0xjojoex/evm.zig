@@ -369,6 +369,7 @@ fn measureEvmzCaptureExact(
     counting_host.resetCounters();
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
+        .execution_context = &counting_host.execution_context,
         .msg = &msg,
         .source = .{ .code = code },
     });
@@ -437,6 +438,7 @@ fn measureEvmzExact(
     const total_start_ns = if (scope == .call_total) try common.monotonicNowNs() else 0;
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = &host,
+        .execution_context = &counting_host.execution_context,
         .msg = &msg,
         .source = .{ .code = code },
     });

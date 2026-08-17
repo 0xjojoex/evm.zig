@@ -368,7 +368,7 @@ const Repl = struct {
             return self.out.writeAll("substitute output is not hex\n");
         defer self.allocator.free(output);
 
-        const result: Host.CallResult = .{
+        const result: Host.Result = .{
             // A substituted child never ran a frame, so it carries no frame halt.
             .outcome = .{ .status = status, .cause = switch (status) {
                 .success => .none,
@@ -384,12 +384,10 @@ const Repl = struct {
             },
             .gas_refund = 0,
         };
-        try self.settle(loaded, loaded.session.substituteResult(switch (action) {
-            .call => Host.Result.fromCall(result),
-            // The CREATE handler derived the address before suspending, so a
-            // substituted create still deploys where the canonical one would.
-            .create => |create| Host.Result.fromCreate(create.msg.recipient, result),
-        }));
+        // A substituted create still lands where the canonical one would:
+        // the CREATE handler derived the address before suspending, and the
+        // resume reads it from the suspended message, not the result.
+        try self.settle(loaded, loaded.session.substituteResult(result));
         try self.printPause(loaded);
     }
 
@@ -480,8 +478,8 @@ const Repl = struct {
                 try self.out.print("finished {s}: {s} gas_left={d} output=0x{f}\n", .{
                     @tagName(completion),
                     @tagName(result.status()),
-                    result.gasLeft(),
-                    Hex{ .data = result.outputData() },
+                    result.gas_left,
+                    Hex{ .data = result.output_data },
                 });
             },
         }

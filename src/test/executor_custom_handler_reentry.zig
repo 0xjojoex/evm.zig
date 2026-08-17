@@ -28,9 +28,8 @@ const ReentrantInstruction = struct {
                     .input_data = &.{},
                     .value = 0,
                     .is_static = frame.msg.is_static,
-                    .real_sender = frame.msg.real_sender,
                     .code_address = child,
-                })).expectCall();
+                }));
                 if (result.status() != .success) return error.ReentrantChildFailed;
                 call_count += 1;
             }
@@ -113,7 +112,7 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
             .recipient = parent,
         } },
         .legacy(100_000),
-    )).expectCall();
+    ));
     const span = (try capture.finish()).?;
     defer tape.resolve(span) catch unreachable;
 

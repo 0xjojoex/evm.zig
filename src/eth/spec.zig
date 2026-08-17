@@ -11,9 +11,17 @@ const delegation_code = @import("../code/eip7702.zig");
 const execution = @import("../execution.zig");
 const engine_spec = @import("../spec.zig");
 const authorization = @import("../transaction/authorization.zig");
+const eip2929 = @import("eip/2929.zig");
 const eip7002 = @import("eip/7002.zig");
 const eip7251 = @import("eip/7251.zig");
+const eip7623 = @import("eip/7623.zig");
+const eip7702 = @import("eip/7702.zig");
+const eip7825 = @import("eip/7825.zig");
+const eip7976 = @import("eip/7976.zig");
+const eip8037 = @import("eip/8037.zig");
+const eip8038 = @import("eip/8038.zig");
 const eip8282 = @import("eip/8282.zig");
+const eth_gas = @import("gas.zig");
 const eth_instruction = @import("instruction.zig");
 const eth_precompile = @import("precompile.zig");
 const eth_system = @import("system.zig");
@@ -36,10 +44,67 @@ pub const StorageSpec = engine_spec.StorageSpec;
 pub const SelfDestructSpec = engine_spec.SelfDestructSpec;
 pub const OptionalPatch = engine_spec.OptionalPatch;
 
-const cold_account_access_cost: i64 = 2_600;
-const warm_storage_read_cost: i64 = 100;
-const cold_sload_cost: i64 = 2_100;
-const account_creation_cost: i64 = 25_000;
+/// The four gas quantities every legacy SSTORE schedule prices, plus whether
+/// net metering is in effect. Forks reprice the values, never the shape — so
+/// each repricing below is its predecessor with the fields that EIP changed.
+///
+/// Amsterdam leaves this shape behind entirely; see `amsterdamSstore`.
+const StorageSchedule = struct {
+    /// Charged when a write leaves the slot's committed value unchanged.
+    warm_access: i64,
+    /// Zero to non-zero.
+    set: i64,
+    /// Non-zero to a different non-zero.
+    reset: i64,
+    /// Refund for clearing a slot to zero.
+    clear: i64,
+    /// Price by net effect over the transaction rather than per write.
+    net: bool,
+};
+
+// Repriced by EIP
+
+/// Original schedule, no net metering. Petersburg reverts to this when
+/// EIP-1283 is pulled.
+const frontier_storage_schedule: StorageSchedule = .{
+    .warm_access = 200,
+    .set = 20_000,
+    .reset = 5_000,
+    .clear = 15_000,
+    .net = false,
+};
+
+/// EIP-1283: net metering over the original values. Constantinople only —
+/// pulled in Petersburg over the reentrancy hazard EIP-1706 raised.
+const eip1283_storage_schedule: StorageSchedule = schedule: {
+    var result = frontier_storage_schedule;
+    result.net = true;
+    break :schedule result;
+};
+
+/// EIP-2200: net metering restored, priced against EIP-1884's repriced SLOAD.
+const eip2200_storage_schedule: StorageSchedule = schedule: {
+    var result = eip1283_storage_schedule;
+    result.warm_access = 800;
+    break :schedule result;
+};
+
+/// EIP-2929: a warm write costs WARM_STORAGE_READ_COST, and SSTORE_RESET_GAS
+/// sheds the cold-read portion now charged separately as the cold surcharge.
+const eip2929_storage_schedule: StorageSchedule = schedule: {
+    var result = eip2200_storage_schedule;
+    result.warm_access = eip2929.warm_storage_read_cost;
+    result.reset -= eip2929.cold_sload_cost;
+    break :schedule result;
+};
+
+/// EIP-3529: SSTORE_CLEARS_SCHEDULE drops to
+/// `SSTORE_RESET_GAS + ACCESS_LIST_STORAGE_KEY_COST`.
+const eip3529_storage_schedule: StorageSchedule = schedule: {
+    var result = eip2929_storage_schedule;
+    result.clear = result.reset + @as(i64, @intCast(eth_tx.access_list_storage_key_cost));
+    break :schedule result;
+};
 
 const semantics = struct {
     fn allowsContractCreation(kind: tx.TxKind) bool {
@@ -67,37 +132,37 @@ const semantics = struct {
     }
 
     fn legacyIntrinsicBase(_: tx_gas.IntrinsicGasOptions) ?u64 {
-        return 21_000;
+        return eth_gas.transaction_cost;
     }
 
     fn amsterdamIntrinsicBase(options: tx_gas.IntrinsicGasOptions) ?u64 {
-        var gas: u64 = eth_tx.amsterdam_tx_base_cost;
+        var gas: u64 = eip8037.tx_base_cost;
         if (options.is_create) {
-            gas = std.math.add(u64, gas, eth_tx.amsterdam_create_access_cost) catch return null;
+            gas = std.math.add(u64, gas, eip8038.create_access_cost) catch return null;
         } else if (!options.is_self_transfer) {
-            gas = std.math.add(u64, gas, eth_tx.amsterdam_cold_account_access_cost) catch return null;
+            gas = std.math.add(u64, gas, eip8038.cold_account_access_cost) catch return null;
         }
         if (options.value != 0 and !options.is_self_transfer) {
-            gas = std.math.add(u64, gas, eth_tx.amsterdam_transfer_log_cost) catch return null;
+            gas = std.math.add(u64, gas, eip8037.transfer_log_cost) catch return null;
             if (!options.is_create) {
-                gas = std.math.add(u64, gas, eth_tx.amsterdam_tx_value_cost) catch return null;
+                gas = std.math.add(u64, gas, eip8037.tx_value_cost) catch return null;
             }
         }
         return gas;
     }
 
     fn calldataBeforeIstanbul(input: []const u8) ?u64 {
-        return calldataCost(input, 68);
+        return calldataCost(input, eth_gas.tx_data_nonzero_cost);
     }
 
     fn calldataSinceIstanbul(input: []const u8) ?u64 {
-        return calldataCost(input, 16);
+        return calldataCost(input, eth_gas.eip2028_tx_data_nonzero_cost);
     }
 
     fn calldataCost(input: []const u8, nonzero_cost: u64) ?u64 {
         var gas: u64 = 0;
         for (input) |byte| {
-            gas = std.math.add(u64, gas, if (byte == 0) 4 else nonzero_cost) catch return null;
+            gas = std.math.add(u64, gas, if (byte == 0) eth_gas.tx_data_zero_cost else nonzero_cost) catch return null;
         }
         return gas;
     }
@@ -116,13 +181,15 @@ const semantics = struct {
 
     fn pragueFloor(input: tx_gas.FloorGasInput) ?u64 {
         const tokens = eth_tx.calldataTokenCount(input.input) orelse return null;
-        const data_cost = std.math.mul(u64, tokens, 10) catch return null;
-        return std.math.add(u64, 21_000, data_cost) catch null;
+        const data_cost = std.math.mul(u64, tokens, eip7623.total_cost_floor_per_token) catch return null;
+        return std.math.add(u64, eth_gas.transaction_cost, data_cost) catch null;
     }
 
     fn amsterdamFloor(input: tx_gas.FloorGasInput) ?u64 {
         const bytes = std.math.cast(u64, input.input.len) orelse return null;
-        const data_cost = std.math.mul(u64, bytes, 64) catch return null;
+        // EIP-7976 charges every byte as four floor tokens, so zero and
+        // non-zero bytes both cost 64 gas on the floor path.
+        const data_cost = std.math.mul(u64, bytes, eip7976.floor_cost_per_nonzero_byte) catch return null;
         var gas = std.math.add(u64, amsterdamIntrinsicBase(input.options) orelse return null, data_cost) catch return null;
         gas = std.math.add(u64, gas, amsterdamAccessListData(input.options.access_list_counts) orelse return null) catch return null;
         return gas;
@@ -130,17 +197,17 @@ const semantics = struct {
 
     fn legacyAuthorizationSuccess(input: authorization.SuccessInput) authorization.GasAdjustment {
         if (!input.account_exists) return .{};
-        return .{ .regular_refund = eth_tx.authorization_existing_account_refund_gas };
+        return .{ .regular_refund = eip7702.existing_account_refund_gas };
     }
 
     fn amsterdamAuthorizationSuccess(input: authorization.SuccessInput) authorization.GasAdjustment {
         return .{
-            .account_state_charge = if (input.account_exists) 0 else eth_tx.amsterdam_new_account_state_gas,
-            .account_write_charge = if (input.account_already_written) 0 else eth_tx.amsterdam_account_write_cost,
+            .account_state_charge = if (input.account_exists) 0 else eip8037.new_account_state_gas,
+            .account_write_charge = if (input.account_already_written) 0 else eip8038.account_write_cost,
             .delegation_state_charge = if (!input.clears_delegation and
                 !input.delegated_before_transaction and
                 !input.delegation_set_before)
-                eth_tx.amsterdam_auth_base_state_gas
+                eip8037.auth_base_state_gas
             else
                 0,
         };
@@ -228,16 +295,16 @@ const semantics = struct {
     }
 
     fn frontierCallNewAccount(input: execution.CallNewAccountInput) execution.CallNewAccountGas {
-        return if (!input.account_exists) .{ .regular = account_creation_cost } else .{};
+        return if (!input.account_exists) .{ .regular = eth_gas.account_creation_cost } else .{};
     }
 
     fn spuriousCallNewAccount(input: execution.CallNewAccountInput) execution.CallNewAccountGas {
-        return if (input.value > 0 and !input.account_exists) .{ .regular = account_creation_cost } else .{};
+        return if (input.value > 0 and !input.account_exists) .{ .regular = eth_gas.account_creation_cost } else .{};
     }
 
     fn amsterdamCallNewAccount(input: execution.CallNewAccountInput) execution.CallNewAccountGas {
         return if (input.value > 0 and !input.account_exists)
-            .{ .state = @intCast(eth_tx.amsterdam_new_account_state_gas) }
+            .{ .state = @intCast(eip8037.new_account_state_gas) }
         else
             .{};
     }
@@ -248,15 +315,15 @@ const semantics = struct {
 
     fn amsterdamTopFrameStateGas(input: execution.TopFrameValueTransferInput) i64 {
         if (input.value == 0 or input.same_address or !input.creates_account) return 0;
-        return @intCast(eth_tx.amsterdam_new_account_state_gas);
+        return @intCast(eip8037.new_account_state_gas);
     }
 
     fn legacyDelegatedAccountAccess(cold: bool) i64 {
-        return if (cold) cold_account_access_cost else warm_storage_read_cost;
+        return if (cold) eip2929.cold_account_access_cost else eip2929.warm_storage_read_cost;
     }
 
     fn amsterdamDelegatedAccountAccess(cold: bool) i64 {
-        return if (cold) @intCast(eth_tx.amsterdam_cold_account_access_cost) else warm_storage_read_cost;
+        return if (cold) @intCast(eip8038.cold_account_access_cost) else eip2929.warm_storage_read_cost;
     }
 
     fn noTopLevelDelegatedAccountAccess(_: execution.TopLevelDelegatedAccountAccessInput) ?execution.DelegatedAccountAccess {
@@ -289,12 +356,12 @@ const semantics = struct {
     }
 
     fn legacyDepositRegularGas(runtime_size: i64) ?i64 {
-        return std.math.mul(i64, runtime_size, 200) catch null;
+        return std.math.mul(i64, runtime_size, eth_gas.code_deposit_byte_cost) catch null;
     }
 
     fn amsterdamDepositRegularGas(runtime_size: i64) ?i64 {
         const words = @divFloor(runtime_size + 31, 32);
-        return std.math.mul(i64, words, eth_tx.amsterdam_code_deposit_word_cost) catch null;
+        return std.math.mul(i64, words, eip8037.code_deposit_word_cost) catch null;
     }
 
     fn noDepositStateGas(_: i64) ?i64 {
@@ -302,7 +369,7 @@ const semantics = struct {
     }
 
     fn amsterdamDepositStateGas(runtime_size: i64) ?i64 {
-        return std.math.mul(i64, runtime_size, eth_tx.amsterdam_cost_per_state_byte) catch null;
+        return std.math.mul(i64, runtime_size, eip8037.cost_per_state_byte) catch null;
     }
 
     fn preShanghaiInitcodeWordGas(is_create2: bool) i64 {
@@ -310,7 +377,7 @@ const semantics = struct {
     }
 
     fn shanghaiInitcodeWordGas(is_create2: bool) i64 {
-        return @as(i64, @intCast(eth_tx.initcode_word_gas)) + @as(i64, if (is_create2) 6 else 0);
+        return @as(i64, @intCast(eth_tx.initcode_word_cost)) + @as(i64, if (is_create2) 6 else 0);
     }
 
     fn noCreateAccountStateGas(_: execution.CreateAccountStateGasInput) i64 {
@@ -318,7 +385,7 @@ const semantics = struct {
     }
 
     fn amsterdamCreateAccountStateGas(input: execution.CreateAccountStateGasInput) i64 {
-        return if (input.target_alive) 0 else @intCast(eth_tx.amsterdam_new_account_state_gas);
+        return if (input.target_alive) 0 else @intCast(eip8037.new_account_state_gas);
     }
 
     fn noStorageAccess(_: execution.AccessStatus) ?i64 {
@@ -326,39 +393,31 @@ const semantics = struct {
     }
 
     fn berlinStorageAccess(status: execution.AccessStatus) ?i64 {
-        return if (status == .cold) cold_sload_cost else 0;
+        return if (status == .cold) eip2929.cold_sload_cost else 0;
     }
 
     fn amsterdamStorageAccess(status: execution.AccessStatus) ?i64 {
-        return if (status == .cold) @intCast(eth_tx.amsterdam_cold_storage_access_cost) else warm_storage_read_cost;
+        return if (status == .cold) @intCast(eip8038.cold_storage_access_cost) else eip2929.warm_storage_read_cost;
     }
 
-    const StorageSchedule = struct {
-        warm_access: i64,
-        set: i64,
-        reset: i64,
-        clear: i64,
-        net: bool,
-    };
-
     fn frontierSstore(status: execution.StorageStatus) execution.StorageGas {
-        return scheduledSstore(.{ .warm_access = 200, .set = 20_000, .reset = 5_000, .clear = 15_000, .net = false }, status);
+        return scheduledSstore(frontier_storage_schedule, status);
     }
 
     fn constantinopleSstore(status: execution.StorageStatus) execution.StorageGas {
-        return scheduledSstore(.{ .warm_access = 200, .set = 20_000, .reset = 5_000, .clear = 15_000, .net = true }, status);
+        return scheduledSstore(eip1283_storage_schedule, status);
     }
 
     fn istanbulSstore(status: execution.StorageStatus) execution.StorageGas {
-        return scheduledSstore(.{ .warm_access = 800, .set = 20_000, .reset = 5_000, .clear = 15_000, .net = true }, status);
+        return scheduledSstore(eip2200_storage_schedule, status);
     }
 
     fn berlinSstore(status: execution.StorageStatus) execution.StorageGas {
-        return scheduledSstore(.{ .warm_access = 100, .set = 20_000, .reset = 2_900, .clear = 15_000, .net = true }, status);
+        return scheduledSstore(eip2929_storage_schedule, status);
     }
 
     fn londonSstore(status: execution.StorageStatus) execution.StorageGas {
-        return scheduledSstore(.{ .warm_access = 100, .set = 20_000, .reset = 2_900, .clear = 4_800, .net = true }, status);
+        return scheduledSstore(eip3529_storage_schedule, status);
     }
 
     fn scheduledSstore(schedule: StorageSchedule, status: execution.StorageStatus) execution.StorageGas {
@@ -383,8 +442,8 @@ const semantics = struct {
     }
 
     fn amsterdamSstore(status: execution.StorageStatus) execution.StorageGas {
-        const write: i64 = @intCast(eth_tx.amsterdam_storage_write_cost);
-        const clear: i64 = @intCast(eth_tx.amsterdam_storage_clear_refund);
+        const write: i64 = @intCast(eip8038.storage_write_cost);
+        const clear: i64 = @intCast(eip8038.storage_clear_refund);
         return switch (status) {
             .assigned => .{},
             .added, .modified => .{ .cost = write },
@@ -401,7 +460,7 @@ const semantics = struct {
     }
 
     fn amsterdamSstoreState(status: execution.StorageStatus) execution.StorageStateGas {
-        const charge: i64 = @intCast(eth_tx.amsterdam_storage_set_state_gas);
+        const charge: i64 = @intCast(eip8037.storage_set_state_gas);
         return switch (status) {
             .added => .{ .charge = charge },
             .added_deleted => .{ .refund = charge },
@@ -446,12 +505,12 @@ const semantics = struct {
     }
 
     fn tangerineSelfDestructNewAccount(input: execution.SelfDestructNewAccountInput) execution.CallNewAccountGas {
-        return if (!input.same_address and !input.account_exists) .{ .regular = account_creation_cost } else .{};
+        return if (!input.same_address and !input.account_exists) .{ .regular = eth_gas.account_creation_cost } else .{};
     }
 
     fn spuriousSelfDestructNewAccount(input: execution.SelfDestructNewAccountInput) execution.CallNewAccountGas {
         return if (!input.same_address and input.transfers_balance and !input.account_exists)
-            .{ .regular = account_creation_cost }
+            .{ .regular = eth_gas.account_creation_cost }
         else
             .{};
     }
@@ -459,8 +518,8 @@ const semantics = struct {
     fn amsterdamSelfDestructNewAccount(input: execution.SelfDestructNewAccountInput) execution.CallNewAccountGas {
         return if (!input.same_address and input.transfers_balance and !input.account_exists)
             .{
-                .regular = @intCast(eth_tx.amsterdam_account_write_cost),
-                .state = @intCast(eth_tx.amsterdam_new_account_state_gas),
+                .regular = @intCast(eip8038.account_write_cost),
+                .state = @intCast(eip8037.new_account_state_gas),
             }
         else
             .{};
@@ -480,8 +539,8 @@ const cancun_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 3,
     .max = 6,
     .max_per_transaction = 6,
-    .gas_per_blob = eth_tx.blob_gas_per_blob,
-    .min_base_fee = eth_tx.min_blob_base_fee,
+    .gas_per_blob = eth_tx.gas_per_blob,
+    .min_base_fee = eth_tx.min_base_fee_per_blob_gas,
     .execution_base_cost = eth_tx.blob_base_cost,
     .base_fee_update_fraction = eth_tx.cancun_blob_base_fee_update_fraction,
     .reserve_price_active = false,
@@ -492,8 +551,8 @@ const prague_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 6,
     .max = 9,
     .max_per_transaction = 9,
-    .gas_per_blob = eth_tx.blob_gas_per_blob,
-    .min_base_fee = eth_tx.min_blob_base_fee,
+    .gas_per_blob = eth_tx.gas_per_blob,
+    .min_base_fee = eth_tx.min_base_fee_per_blob_gas,
     .execution_base_cost = eth_tx.blob_base_cost,
     .base_fee_update_fraction = eth_tx.prague_blob_base_fee_update_fraction,
     .reserve_price_active = false,
@@ -504,8 +563,8 @@ const osaka_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 6,
     .max = 9,
     .max_per_transaction = 6,
-    .gas_per_blob = eth_tx.blob_gas_per_blob,
-    .min_base_fee = eth_tx.min_blob_base_fee,
+    .gas_per_blob = eth_tx.gas_per_blob,
+    .min_base_fee = eth_tx.min_base_fee_per_blob_gas,
     .execution_base_cost = eth_tx.blob_base_cost,
     .base_fee_update_fraction = eth_tx.prague_blob_base_fee_update_fraction,
     .reserve_price_active = true,
@@ -516,8 +575,8 @@ const amsterdam_blob_schedule: tx_blob.BlobSchedule = .{
     .target = 14,
     .max = 21,
     .max_per_transaction = 6,
-    .gas_per_blob = eth_tx.blob_gas_per_blob,
-    .min_base_fee = eth_tx.min_blob_base_fee,
+    .gas_per_blob = eth_tx.gas_per_blob,
+    .min_base_fee = eth_tx.min_base_fee_per_blob_gas,
     .execution_base_cost = eth_tx.blob_base_cost,
     .base_fee_update_fraction = eth_tx.amsterdam_blob_base_fee_update_fraction,
     .reserve_price_active = true,
@@ -536,8 +595,8 @@ pub const frontier: Spec = .{
         .intrinsicBaseGas = semantics.legacyIntrinsicBase,
         .create_intrinsic_gas = 0,
         .calldataGas = semantics.calldataBeforeIstanbul,
-        .access_list_address_gas = eth_tx.access_list_address_gas,
-        .storage_key_gas = eth_tx.access_list_storage_key_gas,
+        .access_list_address_gas = eth_tx.access_list_address_cost,
+        .storage_key_gas = eth_tx.access_list_storage_key_cost,
         .accessListDataGas = semantics.noAccessListData,
         .initcode_word_gas = 0,
         .authorization_intrinsic_gas = 0,
@@ -572,7 +631,7 @@ pub const frontier: Spec = .{
         .base_gas = 40,
         .cold_account_access_gas = null,
         .value_transfer_gas = 9_000,
-        .value_stipend = eth_tx.call_stipend,
+        .value_stipend = eth_gas.call_stipend,
         .newAccountGas = semantics.frontierCallNewAccount,
         .topFrameValueTransferStateGas = semantics.noTopFrameStateGas,
         .delegatedAccountAccessGas = semantics.legacyDelegatedAccountAccess,
@@ -660,7 +719,7 @@ pub const petersburg = constantinople.extend(.{
 pub const istanbul = petersburg.extend(.{
     .transaction = .{ .calldataGas = semantics.calldataSinceIstanbul },
     .storage = .{
-        .sstore_minimum_gas = .{ .replace = eth_tx.call_stipend },
+        .sstore_minimum_gas = .{ .replace = eth_gas.call_stipend },
         .sstoreGas = semantics.istanbulSstore,
     },
     .instruction = eth_instruction.istanbul,
@@ -671,14 +730,14 @@ pub const muir_glacier = istanbul;
 
 pub const berlin = muir_glacier.extend(.{
     .transaction = .{ .active_kinds = std.EnumSet(tx.TxKind).initMany(&.{ .legacy, .access_list }) },
-    .call = .{ .base_gas = 100, .cold_account_access_gas = .{ .replace = cold_account_access_cost - warm_storage_read_cost } },
+    .call = .{ .base_gas = 100, .cold_account_access_gas = .{ .replace = eip2929.cold_account_access_surcharge } },
     .create = .{ .warms_created_address = true },
     .storage = .{
-        .sload_cold_access_gas = .{ .replace = cold_sload_cost - warm_storage_read_cost },
+        .sload_cold_access_gas = .{ .replace = eip2929.cold_sload_surcharge },
         .sstoreAccessGas = semantics.berlinStorageAccess,
         .sstoreGas = semantics.berlinSstore,
     },
-    .self_destruct = .{ .cold_account_access_gas = .{ .replace = cold_account_access_cost } },
+    .self_destruct = .{ .cold_account_access_gas = .{ .replace = eip2929.cold_account_access_cost } },
     .instruction = eth_instruction.berlin,
     .precompile = eth_precompile.Exact(eth_precompile.berlin_config),
 });
@@ -703,7 +762,7 @@ pub const merge_fork = gray_glacier;
 pub const shanghai = merge_fork.extend(.{
     .transaction = .{
         .max_initcode_size = eth_tx.max_initcode_size,
-        .initcode_word_gas = eth_tx.initcode_word_gas,
+        .initcode_word_gas = eth_tx.initcode_word_cost,
         .warms_coinbase = true,
     },
     .create = .{
@@ -732,7 +791,7 @@ pub const prague = cancun.extend(.{
         .active_kinds = std.EnumSet(tx.TxKind).initMany(&.{ .legacy, .access_list, .dynamic_fee, .blob, .set_code }),
         .isDelegationCode = semantics.eip7702DelegationCode,
         .blob_schedule = .{ .replace = prague_blob_schedule },
-        .authorization_intrinsic_gas = eth_tx.authorization_intrinsic_gas,
+        .authorization_intrinsic_gas = eip7702.per_empty_account_cost,
         .floorGas = semantics.pragueFloor,
     },
     .authorization = .{ .active = true, .warms_delegated_target = true },
@@ -743,8 +802,8 @@ pub const prague = cancun.extend(.{
 pub const osaka = prague.extend(.{
     .transaction = .{
         .blob_schedule = .{ .replace = osaka_blob_schedule },
-        .regular_gas_cap = .{ .replace = eth_tx.max_transaction_gas_limit },
-        .total_gas_limit = .{ .replace = eth_tx.max_transaction_gas_limit },
+        .regular_gas_cap = .{ .replace = eip7825.max_transaction_gas_limit },
+        .total_gas_limit = .{ .replace = eip7825.max_transaction_gas_limit },
     },
     .instruction = eth_instruction.osaka,
     .precompile = eth_precompile.Exact(eth_precompile.osaka_config),
@@ -753,15 +812,15 @@ pub const osaka = prague.extend(.{
 pub const amsterdam = osaka.extend(.{
     .transaction = .{
         .blob_schedule = .{ .replace = amsterdam_blob_schedule },
-        .max_initcode_size = eth_tx.amsterdam_max_initcode_size,
+        .max_initcode_size = eip8037.max_initcode_size,
         .intrinsicBaseGas = semantics.amsterdamIntrinsicBase,
         .create_intrinsic_gas = 0,
-        .access_list_address_gas = eth_tx.amsterdam_access_list_address_gas,
-        .storage_key_gas = eth_tx.amsterdam_access_list_storage_key_gas,
+        .access_list_address_gas = eip8038.access_list_address_cost,
+        .storage_key_gas = eip8038.access_list_storage_key_cost,
         .accessListDataGas = semantics.amsterdamAccessListData,
-        .authorization_intrinsic_gas = eth_tx.amsterdam_regular_per_auth_base_cost,
+        .authorization_intrinsic_gas = eip8037.regular_per_auth_base_cost,
         .floorGas = semantics.amsterdamFloor,
-        .intrinsic_regular_gas_limit = .{ .replace = eth_tx.max_transaction_gas_limit },
+        .intrinsic_regular_gas_limit = .{ .replace = eip7825.max_transaction_gas_limit },
         .total_gas_limit = .{ .replace = null },
     },
     .settlement = .{
@@ -778,8 +837,8 @@ pub const amsterdam = osaka.extend(.{
         .block_access_list = true,
     },
     .call = .{
-        .cold_account_access_gas = .{ .replace = @as(i64, @intCast(eth_tx.amsterdam_cold_account_access_cost)) - warm_storage_read_cost },
-        .value_transfer_gas = eth_tx.amsterdam_call_value_cost,
+        .cold_account_access_gas = .{ .replace = @as(i64, @intCast(eip8038.cold_account_access_cost)) - eip2929.warm_storage_read_cost },
+        .value_transfer_gas = eip8038.call_value_cost,
         .newAccountGas = semantics.amsterdamCallNewAccount,
         .topFrameValueTransferStateGas = semantics.amsterdamTopFrameStateGas,
         .delegatedAccountAccessGas = semantics.amsterdamDelegatedAccountAccess,
@@ -787,13 +846,13 @@ pub const amsterdam = osaka.extend(.{
     },
     .create = .{
         .code_size_limit = .{ .replace = eth_system.amsterdam_max_code_size },
-        .initcode_size_limit = .{ .replace = eth_tx.amsterdam_max_initcode_size },
+        .initcode_size_limit = .{ .replace = eip8037.max_initcode_size },
         .depositRegularGas = semantics.amsterdamDepositRegularGas,
         .depositStateGas = semantics.amsterdamDepositStateGas,
         .accountStateGas = semantics.amsterdamCreateAccountStateGas,
     },
     .storage = .{
-        .sload_cold_access_gas = .{ .replace = @as(i64, @intCast(eth_tx.amsterdam_cold_storage_access_cost)) - warm_storage_read_cost },
+        .sload_cold_access_gas = .{ .replace = @as(i64, @intCast(eip8038.cold_storage_access_cost)) - eip2929.warm_storage_read_cost },
         .sstoreAccessGas = semantics.amsterdamStorageAccess,
         .sstoreGas = semantics.amsterdamSstore,
         .sstoreStateGas = semantics.amsterdamSstoreState,
@@ -802,7 +861,7 @@ pub const amsterdam = osaka.extend(.{
         .policy = semantics.amsterdamSelfDestructPolicy,
         .finalization = semantics.amsterdamSelfDestructFinalization,
         .newAccountGas = semantics.amsterdamSelfDestructNewAccount,
-        .cold_account_access_gas = .{ .replace = eth_tx.amsterdam_cold_account_access_cost },
+        .cold_account_access_gas = .{ .replace = eip8038.cold_account_access_cost },
     },
     .valueTransferLog = semantics.amsterdamValueTransferLog,
     .instruction = eth_instruction.amsterdam,
@@ -841,6 +900,19 @@ test "Petersburg disables Constantinople net SSTORE metering until Istanbul" {
     try std.testing.expectEqual(execution.StorageGas{ .cost = 200, .refund = 4800 }, constantinople.storage.sstoreGas(.modified_restored));
     try std.testing.expectEqual(execution.StorageGas{ .cost = 5000, .refund = 0 }, petersburg.storage.sstoreGas(.modified_restored));
     try std.testing.expectEqual(execution.StorageGas{ .cost = 800, .refund = 4200 }, istanbul.storage.sstoreGas(.modified_restored));
+}
+
+test "legacy SSTORE schedules match their EIP repricings" {
+    // Pins the derived fields against the values the EIPs state outright, so
+    // the formulas above cannot drift.
+    const expected = [_]struct { StorageSchedule, StorageSchedule }{
+        .{ frontier_storage_schedule, .{ .warm_access = 200, .set = 20_000, .reset = 5_000, .clear = 15_000, .net = false } },
+        .{ eip1283_storage_schedule, .{ .warm_access = 200, .set = 20_000, .reset = 5_000, .clear = 15_000, .net = true } },
+        .{ eip2200_storage_schedule, .{ .warm_access = 800, .set = 20_000, .reset = 5_000, .clear = 15_000, .net = true } },
+        .{ eip2929_storage_schedule, .{ .warm_access = 100, .set = 20_000, .reset = 2_900, .clear = 15_000, .net = true } },
+        .{ eip3529_storage_schedule, .{ .warm_access = 100, .set = 20_000, .reset = 2_900, .clear = 4_800, .net = true } },
+    };
+    for (expected) |pair| try std.testing.expectEqual(pair[1], pair[0]);
 }
 
 test "Amsterdam SSTORE separates access and write gas from state gas" {

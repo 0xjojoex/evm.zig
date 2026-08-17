@@ -576,6 +576,7 @@ fn deployRuntimeForVm(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
+        .execution_context = &common.static_execution_context,
         .source = .{ .code = contract_code },
     });
     defer frame.deinit();
@@ -697,6 +698,7 @@ fn timeRuntimeCallForVm(
     var frame = try ExactVm.Interpreter.OwnedCallFrame.init(allocator, .{
         .host = host,
         .msg = &msg,
+        .execution_context = &common.static_execution_context,
         .source = .{ .bytecode = bytecode.view() },
     });
     errdefer frame.deinit();

@@ -323,6 +323,11 @@ fn capacitiesChanged(self: *const FrameStore, before: Capacities) bool {
         after.ios != before.ios;
 }
 
+const test_execution_context = evmz.execution.ExecutionContext{
+    .chain = .{ .chain_id = 1 },
+    .transaction = .{ .origin = evmz.addr(0) },
+};
+
 fn pushTestFrame(
     store: *FrameStore,
     allocator: std.mem.Allocator,
@@ -332,6 +337,7 @@ fn pushTestFrame(
     return store.push(allocator, .{
         .host = host,
         .msg = msg,
+        .execution_context = &test_execution_context,
         .bytecode = evmz.Bytecode.View.empty,
     }, .{ .kind = .root_call });
 }

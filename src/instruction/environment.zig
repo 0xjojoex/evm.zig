@@ -35,7 +35,7 @@ pub fn Handlers(comptime spec: ExactSpec) type {
             try frame.traceAccountAccess(target_address);
             return switch (value) {
                 .balance => try frame.host.getBalance(target_address),
-                .code_size => try frame.host.getCodeSize(target_address),
+                .code_size => (try frame.host.getCode(target_address)).len,
                 .code_hash => try frame.host.getCodeHash(target_address),
             };
         }

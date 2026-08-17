@@ -12,6 +12,7 @@ const trace = @import("./trace.zig");
 const tail_dispatch = @import("./interpreter/tail_dispatch.zig");
 const Opcode = @import("./opcode.zig").Opcode;
 const TerminalCause = @import("./execution.zig").TerminalCause;
+const ExecutionContext = @import("./execution/context.zig").ExecutionContext;
 
 const Error = anyerror;
 
@@ -77,6 +78,9 @@ pub const RunResult = union(enum) {
 pub const Init = struct {
     host: *Host,
     msg: *const Host.Message,
+    /// Environment is an input to execution, not a host capability: the
+    /// owner supplies the transaction-scoped context at frame creation.
+    execution_context: *const ExecutionContext,
     bytecode: Bytecode.View,
 };
 
@@ -215,6 +219,7 @@ pub const CallFrame = struct {
     state: FrameState,
     host: *Host,
     msg: *Host.Message,
+    execution_context: *const ExecutionContext,
     stack: Stack,
     memory: Memory,
     pc: usize = 0,
@@ -230,14 +235,15 @@ pub const CallFrame = struct {
     jumpdest_masks: [*]const usize = Bytecode.View.empty.jumpdest_masks,
 
     comptime {
-        std.debug.assert(@sizeOf(CallFrame) == 184);
+        std.debug.assert(@sizeOf(CallFrame) == 192);
         std.debug.assert(@alignOf(CallFrame) == 8);
         std.debug.assert(@offsetOf(CallFrame, "state") == 0);
         std.debug.assert(@offsetOf(CallFrame, "host") == 16);
         std.debug.assert(@offsetOf(CallFrame, "msg") == 24);
-        std.debug.assert(@offsetOf(CallFrame, "stack") == 32);
-        std.debug.assert(@offsetOf(CallFrame, "memory") == 48);
-        std.debug.assert(@offsetOf(CallFrame, "gas_left") == 96);
+        std.debug.assert(@offsetOf(CallFrame, "execution_context") == 32);
+        std.debug.assert(@offsetOf(CallFrame, "stack") == 40);
+        std.debug.assert(@offsetOf(CallFrame, "memory") == 56);
+        std.debug.assert(@offsetOf(CallFrame, "gas_left") == 104);
     }
 
     pub fn init(
@@ -289,6 +295,7 @@ pub const CallFrame = struct {
         self.host = options.host;
         msg_storage.* = options.msg.*;
         self.msg = msg_storage;
+        self.execution_context = options.execution_context;
         self.stack = stack;
         self.memory = memory;
         self.pc = 0;
@@ -370,16 +377,19 @@ pub const CallFrame = struct {
         self.return_data = io.return_data.slice();
     }
 
-    /// Resume from an engine result while preserving its CALL/CREATE type.
+    /// Resume from an engine result. The suspended action decides whether the
+    /// result settles a CALL or a CREATE; the frame, not the result, is the
+    /// authority for that kind.
     pub fn resumeWith(self: *CallFrame, child: Host.Result) !void {
-        switch (child) {
-            .call => |call_result| try self.resumeWithCall(call_result),
-            .create => |create_result| try self.resumeWithCreate(create_result),
+        const action = self.suspendedAction() orelse return error.FrameNotSuspended;
+        switch (action.*) {
+            .call => try self.resumeWithCall(child),
+            .create => try self.resumeWithCreate(child),
         }
     }
 
     /// Resume only a CALL action. A mismatch leaves the frame suspended.
-    pub fn resumeWithCall(self: *CallFrame, child: Host.CallResult) !void {
+    pub fn resumeWithCall(self: *CallFrame, child: Host.Result) !void {
         const continuation = (try self.takeSuspended(.call)).continuation;
         if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
 
@@ -390,14 +400,17 @@ pub const CallFrame = struct {
     }
 
     /// Resume only a CREATE action. A mismatch leaves the frame suspended.
-    pub fn resumeWithCreate(self: *CallFrame, child: Host.CreateResult) !void {
-        const continuation = (try self.takeSuspended(.create)).continuation;
+    pub fn resumeWithCreate(self: *CallFrame, child: Host.Result) !void {
+        const suspended = try self.takeSuspended(.create);
+        const continuation = suspended.continuation;
         if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
 
         if (child.outcome.status == .success) {
-            // A deployed contract yields its address, never return data.
+            // A deployed contract yields its address, never return data. The
+            // address comes from the suspended message: the create target was
+            // computed by this frame before dispatch.
             try self.replaceReturnData(&.{});
-            self.stack.push(child.address.toU256());
+            self.stack.push(suspended.msg.recipient.toU256());
         } else {
             try self.replaceReturnData(child.output_data);
             self.stack.push(0);
@@ -419,7 +432,7 @@ pub const CallFrame = struct {
 
     /// Fold a returned child frame's gas accounting into this one. Returns
     /// whether execution may continue.
-    fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charged: i64, child: anytype) bool {
+    fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charged: i64, child: Host.Result) bool {
         const succeeded = child.outcome.status == .success;
         const gas_charged = self.trackGas(gas_limit - @max(child.gas_left, 0));
         self.gas_reservoir = child.gas_reservoir;
@@ -625,7 +638,7 @@ pub const CallFrameSlot = struct {
     msg: Host.Message = undefined,
 
     comptime {
-        std.debug.assert(@sizeOf(CallFrameSlot) == 33424);
+        std.debug.assert(@sizeOf(CallFrameSlot) == 33376);
         std.debug.assert(@offsetOf(CallFrameSlot, "stack_storage") == 0);
         std.debug.assert(@offsetOf(CallFrameSlot, "io_storage") == @sizeOf(Stack.Storage));
         std.debug.assert(@offsetOf(CallFrameSlot, "msg") == @offsetOf(CallFrameSlot, "io_storage") + @sizeOf(frame_io.Slot));
@@ -656,6 +669,11 @@ pub const CallFrameSlot = struct {
     }
 };
 
+const test_execution_context = ExecutionContext{
+    .chain = .{ .chain_id = 1 },
+    .transaction = .{ .origin = evmz.addr(0) },
+};
+
 test "call frame can execute with externally supplied stack storage" {
     const code = [_]u8{
         @intFromEnum(Opcode.PUSH1),
@@ -681,6 +699,7 @@ test "call frame can execute with externally supplied stack storage" {
         std.testing.allocator,
         .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .bytecode = bytecode.view(),
         },
@@ -726,6 +745,7 @@ test "call frame can execute with externally supplied memory storage" {
         std.testing.allocator,
         .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .bytecode = bytecode.view(),
         },
@@ -763,6 +783,7 @@ test "interpreter trace cursor records step start and end" {
 
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -831,6 +852,7 @@ test "interpreter captured tail table records a replay span" {
     });
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -892,6 +914,7 @@ test "captured tail memory exhaustion remains a resource error" {
         no_growth_allocator,
         .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .bytecode = bytecode.view(),
         },
@@ -928,6 +951,7 @@ test "interpreter captured tail table records optional memory writes" {
     msg.gas = 100;
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -987,6 +1011,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         msg.gas = case.gas;
         var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
+            .execution_context = &test_execution_context,
             .msg = &msg,
             .source = .{ .code = case.code },
         });
@@ -1016,6 +1041,7 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
     msg.gas = 100;
     var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });
@@ -1043,6 +1069,7 @@ test "yielded action stays in frame-owned sidecar until resume" {
     msg.gas = 100;
     var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
     });
     defer owned.deinit();
@@ -1092,22 +1119,22 @@ test "call and create resumes reject mismatched suspended actions" {
     msg.gas = 100;
     var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &test_execution_context,
         .msg = &msg,
     });
     defer owned.deinit();
 
-    const call_result = Host.CallResult{
+    const call_result = Host.Result{
         .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = 10,
         .gas_refund = 0,
     };
-    const create_result = Host.CreateResult{
+    const create_result = Host.Result{
         .outcome = .{ .status = .success, .cause = .none },
         .output_data = &.{},
         .gas_left = 10,
         .gas_refund = 0,
-        .address = evmz.addr(0xbeef),
     };
 
     owned.frame.state = .running;
@@ -1253,6 +1280,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
 
             host: *Host,
             msg: *const Host.Message,
+            execution_context: *const ExecutionContext,
             source: Source = .{ .code = &.{} },
         };
 
@@ -1279,6 +1307,7 @@ fn OwnedCallFrameFor(comptime spec: Spec) type {
             slot.init(allocator, .{
                 .host = options.host,
                 .msg = options.msg,
+                .execution_context = options.execution_context,
                 .bytecode = bytecode,
             });
             return .{

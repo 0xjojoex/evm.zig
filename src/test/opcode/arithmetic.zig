@@ -31,6 +31,7 @@ test "EXP byte gas comes from the exact spec" {
 
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
+        .execution_context = &mock_host.execution_context,
         .msg = &msg,
         .source = .{ .code = &code },
     });

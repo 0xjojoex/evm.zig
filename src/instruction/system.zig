@@ -159,7 +159,7 @@ pub fn Handlers(comptime spec: Spec) type {
 
             const size_i64 = frame.wordToIntOrHalt(i64, size, .out_of_gas) orelse return;
             const init_code_word_cost = spec.create.initcodeWordGas(is_create2);
-            const init_code_cost = std.math.mul(i64, init_code_word_cost, evmz.calcWordSize(i64, size_i64)) catch {
+            const init_code_cost = std.math.mul(i64, init_code_word_cost, @divFloor(size_i64 + 31, 32)) catch {
                 frame.halt(.out_of_gas);
                 return;
             };

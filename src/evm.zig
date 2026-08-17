@@ -1,3 +1,25 @@
+//! evmz — a composable EVM execution engine.
+//!
+//! The public surface has three tiers of "something to execute", matching
+//! Ethereum's own ontology; each tier strips concerns the next never sees:
+//!
+//! - `Transaction` — what a user submits: the unvalidated protocol object,
+//!   carrying fees, access lists, and authorizations. Run it with
+//!   `Vm.transact`, which owns the lifecycle: validation, intrinsic gas,
+//!   warm sets, fee accounting, receipts.
+//! - `Message` — what the EVM runs once transaction accounting is stripped:
+//!   the root `call | create` identity. Run it with
+//!   `Executor.executeMessage` inside an open scope, or `executeStandalone`
+//!   for the managed lifecycle. The union lives at this tier
+//!   only, because this is where call and create still disagree (init code
+//!   and salt, computed vs given recipient).
+//! - `Host.Message` — engine-internal: the sub-computation request one call
+//!   frame runs, flat because preparation already resolved everything the
+//!   root tier's union expresses.
+//!
+//! `Vm(spec)` compiles one exact engine per specification; `Evm` is the
+//! ready-to-use latest-Ethereum engine.
+
 const std = @import("std");
 
 pub const address = @import("./address.zig");
@@ -69,11 +91,6 @@ pub const AccountView = vm.AccountView;
 pub const BlockResult = vm.BlockResult;
 pub const AfterTransactionContext = vm.AfterTransactionContext;
 pub const FinalizeBlockContext = vm.FinalizeBlockContext;
-
-/// Number of 32-byte EVM words spanning `size` bytes (rounded up).
-pub fn calcWordSize(comptime T: type, size: T) T {
-    return @divFloor(size + 31, 32);
-}
 
 test {
     std.testing.refAllDecls(@This());

@@ -88,7 +88,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
         evmz.t.defaultExecutionContext(sender, 300_000),
         .{ .call = .{ .sender = sender, .recipient = root, .input = &root_input } },
         .legacy(300_000),
-    )).expectCall();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -128,7 +128,7 @@ test "call capture closes an immediate insufficient-balance call" {
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-    )).expectCall();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -164,7 +164,7 @@ test "root insufficient-balance capture preserves unspent gas" {
                 .value = 1,
             } },
             .legacy(gas),
-        )).expectCall();
+        ));
         const span = try capture.finish();
 
         try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status());
@@ -207,7 +207,7 @@ test "call capture retains immediate depth-limit cause" {
         .input_data = &.{},
         .value = 0,
         .code_address = child,
-    })).expectCall();
+    }));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status());
@@ -255,7 +255,7 @@ test "call capture retains opcode-local CALL depth attempt" {
         .input_data = &.{},
         .value = 0,
         .code_address = root,
-    })).expectCall();
+    }));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -357,7 +357,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
             .input_data = &.{},
             .value = 0,
             .code_address = root,
-        })).expectCall();
+        }));
         const span = try capture.finish();
 
         try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -404,7 +404,7 @@ test "call capture distinguishes CREATE collision from rollback" {
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-    )).expectCall();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -445,7 +445,7 @@ test "call capture retains invalid deployed code and local rollback" {
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-    )).expectCall();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -485,7 +485,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
             .init_code = &init_code,
         } },
         .legacy(100),
-    )).expectCreate();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -544,7 +544,7 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
             evmz.t.defaultExecutionContext(sender, 200_000),
             .{ .call = .{ .sender = sender, .recipient = root } },
             .legacy(200_000),
-        )).expectCall();
+        ));
         const span = try capture.finish();
 
         try std.testing.expectEqual(evmz.interpreter.Status.invalid, result.status());
@@ -581,7 +581,7 @@ test "call capture retains pinned write-protection category" {
         evmz.t.defaultExecutionContext(sender, 200_000),
         .{ .call = .{ .sender = sender, .recipient = root } },
         .legacy(200_000),
-    )).expectCall();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
@@ -654,7 +654,7 @@ test "root CREATE capture closes after runtime-code finalization" {
             .init_code = &init_code,
         } },
         .legacy(200_000),
-    )).expectCreate();
+    ));
     const span = try capture.finish();
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());

@@ -94,17 +94,15 @@ fn paddedCopy(input: []const u8, offset: usize, output: []u8) void {
 }
 
 const NativeBackend = struct {
-    const ckzg = @import("ckzg");
-    const kzg_trusted_setup = @import("kzg_trusted_setup");
     const bn254_native = @cImport({
         @cInclude("bn254.h");
     });
     const bls12_native = @cImport({
         @cInclude("bls12.h");
     });
-
-    var kzg_settings: ckzg.Settings = .{};
-    var kzg_settings_mutex: std.atomic.Mutex = .unlocked;
+    const kzg_native = @cImport({
+        @cInclude("kzg.h");
+    });
 
     fn ripemd160(input: []const u8, output: *[32]u8) Status {
         const digest = ripemd160Digest(input);
@@ -137,14 +135,8 @@ const NativeBackend = struct {
     }
 
     fn kzgPointEvaluation(commitment: [48]u8, z: [32]u8, y: [32]u8, proof: [48]u8) Status {
-        const settings = kzgSettings() catch return .invalid;
-        const ok = settings.verifyKzgProof(
-            &ckzg.Bytes48{ .bytes = commitment },
-            &ckzg.Bytes32{ .bytes = z },
-            &ckzg.Bytes32{ .bytes = y },
-            &ckzg.Bytes48{ .bytes = proof },
-        ) catch false;
-        return if (ok) .ok else .invalid;
+        const status = kzg_native.evmz_kzg_verify_proof(&commitment, &z, &y, &proof);
+        return if (status == kzg_native.EVMZ_KZG_OK) .ok else .invalid;
     }
 
     fn bls12G1Add(input: []const u8, output: *[128]u8) Status {
@@ -223,22 +215,6 @@ const NativeBackend = struct {
         return r.equivalent(p256ScalarFromWord(recovered_x));
     }
 
-    fn kzgSettings() !*const ckzg.Settings {
-        while (!kzg_settings_mutex.tryLock()) {
-            std.Thread.yield() catch std.atomic.spinLoopHint();
-        }
-        defer kzg_settings_mutex.unlock();
-        if (!kzg_settings.loaded) {
-            kzg_settings = try ckzg.Settings.loadTrustedSetup(
-                kzg_trusted_setup.g1_monomial_bytes,
-                kzg_trusted_setup.g1_lagrange_bytes,
-                kzg_trusted_setup.g2_monomial_bytes,
-                0,
-            );
-        }
-        return &kzg_settings;
-    }
-
     fn bls12Status(status_code: c_int) Status {
         return switch (status_code) {
             bls12_native.EVMZ_BLS12_OK => .ok,
@@ -255,24 +231,55 @@ const NativeBackend = struct {
     }
 };
 
-test "native KZG settings initialize safely under contention" {
+test "native KZG proof verification known answers" {
     if (build_options.profile != .native) return error.SkipZigTest;
 
-    const Loader = struct {
-        fn run(failed: *std.atomic.Value(bool)) std.Io.Cancelable!void {
-            _ = NativeBackend.kzgSettings() catch {
-                failed.store(true, .release);
-                return;
-            };
-        }
+    // Vector generated with c-kzg-4844 against the mainnet trusted setup:
+    // blob with field element i = i, opened at z = 2.
+    const commitment = [_]u8{
+        0xb6, 0xb9, 0x80, 0x45, 0x94, 0xa3, 0xec, 0x4d, 0x0d, 0x6a, 0x72, 0x33,
+        0xd9, 0xda, 0xa1, 0xbf, 0x15, 0x2b, 0x10, 0xc3, 0x5e, 0xab, 0xe8, 0x92,
+        0x51, 0x97, 0xe9, 0x7b, 0xcf, 0xa4, 0x06, 0xdc, 0x5a, 0x36, 0x97, 0x48,
+        0xdf, 0xef, 0xa3, 0xeb, 0x3f, 0x0b, 0x54, 0xfc, 0x6a, 0x05, 0x08, 0x61,
     };
+    const z = [_]u8{0} ** 31 ++ [_]u8{0x02};
+    const y = [_]u8{
+        0x5a, 0x47, 0x73, 0xa2, 0x49, 0x78, 0xd7, 0x93, 0xda, 0xa1, 0x76, 0x2c,
+        0xa1, 0xd8, 0x89, 0x38, 0x13, 0x74, 0xcf, 0x4f, 0xe7, 0xfd, 0x73, 0x3f,
+        0x17, 0xc8, 0x56, 0x2a, 0x19, 0x2b, 0xb8, 0x7c,
+    };
+    const proof = [_]u8{
+        0x93, 0xa9, 0xeb, 0xcf, 0xfe, 0xd4, 0x78, 0x5e, 0xfe, 0x69, 0xfa, 0xe6,
+        0x65, 0xa5, 0xf2, 0xce, 0xc4, 0x55, 0x57, 0x63, 0xe1, 0xfe, 0xfd, 0xbc,
+        0x36, 0x6a, 0x85, 0xc6, 0xe7, 0xbc, 0xbe, 0x6a, 0xdc, 0xd7, 0x58, 0xc4,
+        0x35, 0xb4, 0x47, 0x63, 0x96, 0x49, 0x1c, 0xa4, 0xd6, 0x8b, 0x68, 0x8f,
+    };
+    try std.testing.expectEqual(.ok, NativeBackend.kzgPointEvaluation(commitment, z, y, proof));
 
-    var failed: std.atomic.Value(bool) = .init(false);
-    var group: std.Io.Group = .init;
-    defer group.cancel(std.testing.io);
-    for (0..8) |_| try group.concurrent(std.testing.io, Loader.run, .{&failed});
-    try group.await(std.testing.io);
-    try std.testing.expect(!failed.load(.acquire));
+    // Wrong claimed evaluation must fail the pairing check.
+    var wrong_y = y;
+    wrong_y[31] ^= 1;
+    try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(commitment, z, wrong_y, proof));
+
+    // Non-canonical field element: exactly the BLS12-381 Fr modulus.
+    const fr_modulus = [_]u8{
+        0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08,
+        0x09, 0xa1, 0xd8, 0x05, 0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe,
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
+    };
+    try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(commitment, fr_modulus, y, proof));
+
+    // On-curve point outside the r-order subgroup (x = 4): the subgroup check
+    // must reject it as commitment and as proof.
+    const non_subgroup = [_]u8{0x80} ++ [_]u8{0} ** 46 ++ [_]u8{0x04};
+    try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(non_subgroup, z, y, proof));
+    try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(commitment, z, y, non_subgroup));
+
+    // Zero polynomial: infinity commitment and proof, y = 0, any canonical z.
+    const infinity = [_]u8{0xc0} ++ [_]u8{0} ** 47;
+    const zero = [_]u8{0} ** 32;
+    try std.testing.expectEqual(.ok, NativeBackend.kzgPointEvaluation(infinity, z, zero, infinity));
+    try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(infinity, z, y, infinity));
 }
 
 const ZkvmBackend = struct {

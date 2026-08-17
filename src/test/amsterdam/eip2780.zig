@@ -15,7 +15,7 @@ test "Amsterdam value-to-empty account state gas is charged at top frame" {
 
     try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
-        .regular_left = evmz.eth.transaction.amsterdam_new_account_state_gas - 1,
+        .regular_left = evmz.eth.eip8037.new_account_state_gas - 1,
     }, 1);
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status());
@@ -31,12 +31,12 @@ test "Amsterdam top-frame value-to-empty account spends state gas on success" {
     try executor.beginTransaction(testExecutionContext(sender, 300_000), sender, recipient);
     const result = try executor.executeCallTransaction(sender, recipient, &.{}, .{
         .regular_left = 50_000,
-        .reservoir = evmz.eth.transaction.amsterdam_new_account_state_gas,
+        .reservoir = evmz.eth.eip8037.new_account_state_gas,
     }, 1);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_reservoir);
-    try std.testing.expectEqual(@as(i64, evmz.eth.transaction.amsterdam_new_account_state_gas), result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, evmz.eth.eip8037.new_account_state_gas), result.state_gas_spent);
     try std.testing.expectEqual(@as(u256, 1), executor.getAccount(recipient).?.balance);
 }
 

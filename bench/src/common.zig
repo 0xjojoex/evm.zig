@@ -9,6 +9,13 @@ pub const Host = evmz.Host;
 pub const caller_address = evmz.addr(0x1000000000000000000000000000000000000001);
 pub const contract_address = evmz.addr(0x2000000000000000000000000000000000000002);
 pub const max_gas = std.math.maxInt(i64);
+/// Shared context for frames driven outside an executor. Matches the
+/// per-host context CountingHost carries.
+pub const static_execution_context = evmz.execution.ExecutionContext{
+    .chain = .{ .chain_id = 1 },
+    .block = .{ .gas_limit = @intCast(max_gas) },
+    .transaction = .{ .origin = caller_address },
+};
 pub const allocator_env_var = "EVMZ_BENCH_ALLOCATOR";
 
 pub const HostProfile = enum {
@@ -37,16 +44,14 @@ pub const HostCounters = struct {
     account_exists: u64 = 0,
     balance: u64 = 0,
     nonce: u64 = 0,
-    code_size: u64 = 0,
+    code_read: u64 = 0,
     code_hash: u64 = 0,
-    copy_code: u64 = 0,
     storage_read: u64 = 0,
     storage_write: u64 = 0,
     storage_load: u64 = 0,
     storage_store: u64 = 0,
     log: u64 = 0,
     block_hash: u64 = 0,
-    execution_context: u64 = 0,
     access_account: u64 = 0,
     access_storage: u64 = 0,
     access_delegated_account: u64 = 0,
@@ -114,8 +119,7 @@ pub const CountingHost = struct {
             .accountExists = accountExists,
             .getBalance = getBalance,
             .getNonce = getNonce,
-            .copyCode = copyCode,
-            .getCodeSize = getCodeSize,
+            .getCode = getCode,
             .getCodeHash = getCodeHash,
             .getStorage = getStorage,
             .setStorage = setStorage,
@@ -123,7 +127,6 @@ pub const CountingHost = struct {
             .storeStorage = storeStorage,
             .emitLog = emitLog,
             .getBlockHash = getBlockHash,
-            .executionContext = executionContext,
             .selfDestruct = selfDestruct,
             .accessStorage = accessStorage,
             .accessDelegatedAccount = accessDelegatedAccount,
@@ -132,12 +135,6 @@ pub const CountingHost = struct {
             .getTransientStorage = getTransientStorage,
             .setTransientStorage = setTransientStorage,
         } };
-    }
-
-    noinline fn executionContext(ptr: *anyopaque) ?*const evmz.execution.ExecutionContext {
-        const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        self.counters.execution_context += 1;
-        return &self.execution_context;
     }
 
     noinline fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
@@ -161,20 +158,11 @@ pub const CountingHost = struct {
         return 0;
     }
 
-    noinline fn copyCode(ptr: *anyopaque, address: AddressWord, code_offset: usize, buffer_data: []u8) !usize {
+    noinline fn getCode(ptr: *anyopaque, address: AddressWord) ![]const u8 {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
-        _ = code_offset;
-        _ = buffer_data;
-        self.counters.copy_code += 1;
-        return 0;
-    }
-
-    noinline fn getCodeSize(ptr: *anyopaque, address: AddressWord) !u256 {
-        const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        _ = address;
-        self.counters.code_size += 1;
-        return 0;
+        self.counters.code_read += 1;
+        return &.{};
     }
 
     noinline fn getCodeHash(ptr: *anyopaque, address: AddressWord) !u256 {
@@ -244,11 +232,9 @@ pub const CountingHost = struct {
         };
     }
 
-    noinline fn emitLog(ptr: *anyopaque, address: Address, topics: []const u256, data: []const u8) !void {
+    noinline fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
-        _ = address;
-        _ = topics;
-        _ = data;
+        _ = event_log;
         self.counters.log += 1;
     }
 
@@ -286,12 +272,12 @@ pub const CountingHost = struct {
     noinline fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         self.counters.call += 1;
-        return Host.Result.fromCall(.{
+        return .{
             .outcome = .{ .status = .success, .cause = .none },
             .gas_left = msg.gas,
             .gas_refund = 0,
             .output_data = &.{},
-        });
+        };
     }
 
     noinline fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
