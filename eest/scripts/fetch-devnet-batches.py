@@ -276,10 +276,20 @@ def main() -> int:
         for batch in corpus["batches"]:
             blocks.extend(download_batch(corpus["catalog_url"], batch, args.output_root))
 
+        fixture_roots = sorted(
+            str(path.resolve())
+            for path in args.output_root.rglob("blockchain_tests")
+            if path.is_dir()
+        )
+        if len(fixture_roots) != len(corpus["batches"]):
+            raise CorpusError(
+                f"extracted {len(fixture_roots)} fixture roots for {len(corpus['batches'])} batches"
+            )
         resolved = {
             **corpus,
             "resolved_at": datetime.now(timezone.utc).isoformat(),
             "fixture_count": sum(int(batch["artifactCount"]) for batch in corpus["batches"]),
+            "fixture_roots": fixture_roots,
             "blocks": sorted(blocks, key=lambda block: int(block["block_number"])),
         }
         args.resolved_manifest.parent.mkdir(parents=True, exist_ok=True)

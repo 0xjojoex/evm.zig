@@ -43,11 +43,29 @@ update batch shares little deep topology. Memoizing each materialized path
 across the batch captures the sharing that does exist, without dedicated batch
 machinery.
 
-## Requirements
+## Install
 
-- Zig (matching the package's `build.zig.zon`).
-- Depends only on the standard library and the sibling `rlp` package for strict
-  RLP encoding/decoding. No global state, database, or Ethereum types.
+`mpt` is one of the modules exported by
+[`evmz`](https://github.com/0xjojoex/evm.zig), which is fetched as a single
+package:
+
+```sh
+zig fetch --save git+https://github.com/0xjojoex/evm.zig
+```
+
+```zig
+// build.zig
+const evmz = b.dependency("evmz", .{
+    .target = target,
+    .optimize = optimize,
+    .core = false, // skip the EVM core and its C dependencies
+});
+exe.root_module.addImport("mpt", evmz.module("mpt"));
+```
+
+Depends only on the Zig standard library and the sibling `rlp` module for
+strict RLP encoding/decoding — wired for you by the same fetch. No global
+state, database, or Ethereum types.
 
 ## Quick start
 
@@ -259,10 +277,20 @@ checks witness-backed replace and delete, differentially checks fixed-key index
 and catalog mutation against full construction, and feeds arbitrary encoded
 nodes and keys through proof lookup.
 
+Run from the repository root:
+
 ```sh
+zig build test-packages
+zig build fuzz-mpt                 # run the seed corpus
+zig build fuzz-mpt --fuzz=10000    # run the builtin fuzzer
+```
+
+The unpublished package harness verifies the MPT-to-RLP dependency boundary:
+
+```sh
+cd pkg/mpt
 zig build test
-zig build fuzz                 # run the seed corpus
-zig build fuzz --fuzz=10000    # run the builtin fuzzer
+zig build fuzz
 ```
 
 ## License

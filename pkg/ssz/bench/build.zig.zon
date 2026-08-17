@@ -4,8 +4,8 @@
     .fingerprint = 0x18c25cb240364b46,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .ssz = .{
-            .path = "..",
+        .evmz = .{
+            .path = "../../..",
         },
         .zbench = .{
             .url = "https://github.com/hendriknielaender/zBench/archive/refs/tags/v0.13.0.tar.gz",

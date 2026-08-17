@@ -3,10 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: scripts/fetch-eest-zkevm-fixtures.sh [--manifest PATH]
+usage: scripts/fetch-eest-zkevm-fixtures.sh [--manifest PATH] [--resolved-manifest PATH]
 
 Downloads EEST zkEVM blockchain fixtures into ../.eest/.
 With --manifest, extracts only the archive-relative paths listed in PATH.
+With --resolved-manifest, records the verified corpus identity, counts, and
+fixture roots.
 
 Environment overrides:
   EEST_ZKEVM_REPO      default: zkevm_repo from ../eest.lock
@@ -24,6 +26,7 @@ USAGE
 }
 
 manifest=""
+resolved_manifest=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
@@ -33,6 +36,11 @@ while [[ $# -gt 0 ]]; do
     --manifest)
       [[ $# -ge 2 ]] || { printf 'error: --manifest needs a path\n' >&2; exit 2; }
       manifest="$2"
+      shift 2
+      ;;
+    --resolved-manifest)
+      [[ $# -ge 2 ]] || { printf 'error: --resolved-manifest needs a path\n' >&2; exit 2; }
+      resolved_manifest="$2"
       shift 2
       ;;
     *)
@@ -161,6 +169,69 @@ else
   done < "${manifest}"
   [[ ${#fixtures[@]} -gt 0 ]] || { printf 'error: manifest is empty: %s\n' "${manifest}" >&2; exit 1; }
   tar -xzf "${archive}" -C "${dest}" "${fixtures[@]}"
+fi
+
+if [[ -n "${resolved_manifest}" ]]; then
+  [[ -z "${manifest}" ]] || {
+    printf 'error: --resolved-manifest requires the complete corpus\n' >&2
+    exit 2
+  }
+  command -v jq >/dev/null || { printf 'error: jq is required for --resolved-manifest\n' >&2; exit 1; }
+  [[ -n "${sha256}" ]] || { printf 'error: resolved corpus requires a pinned SHA-256\n' >&2; exit 1; }
+
+  spec_version="$(lock_value version)"
+  [[ "${spec_version}" =~ ^tests-[a-z0-9]+(-[a-z0-9]+)*@v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    printf 'error: invalid specification fixture release: %s\n' "${spec_version}" >&2
+    exit 1
+  }
+  spec_track="${spec_version#tests-}"
+  spec_track="${spec_track%@v*}"
+  spec_release="${spec_version##*@v}"
+  network="${spec_track}"
+  if [[ "${spec_track}" == *-devnet ]]; then
+    network="${spec_track}-${spec_release%%.*}"
+  fi
+
+  blockchain_root="${dest}/fixtures/blockchain_tests"
+  index="${dest}/fixtures/.meta/index.json"
+  [[ -d "${blockchain_root}" ]] || { printf 'error: missing blockchain fixtures\n' >&2; exit 1; }
+  [[ -f "${index}" ]] || { printf 'error: missing fixture index\n' >&2; exit 1; }
+  fixture_files="$(find "${blockchain_root}" -type f -name '*.json' | wc -l)"
+  indexed_files="$(jq '[.test_cases[] | select(.format == "blockchain_test") | .json_path] | unique | length' "${index}")"
+  indexed_tests="$(jq '[.test_cases[] | select(.format == "blockchain_test")] | length' "${index}")"
+  fixture_count="$({
+    find "${blockchain_root}" -type f -name '*.json' -print0 \
+      | xargs -0 -n 64 jq -r \
+        '[.. | objects | .statelessInputBytes? | select(type == "string")] | length'
+  } | awk '{ total += $1 } END { print total + 0 }')"
+  [[ "${fixture_files}" -gt 0 && "${fixture_files}" -eq "${indexed_files}" ]]
+  [[ "${indexed_tests}" -gt 0 && "${fixture_count}" -gt 0 ]]
+
+  mkdir -p "$(dirname "${resolved_manifest}")"
+  fixture_root="$(cd "${blockchain_root}" && pwd)"
+  jq -n \
+    --arg id "${version}" \
+    --arg digest "${sha256}" \
+    --arg fixture_release "${spec_version}" \
+    --arg network "${network}" \
+    --arg validation_ref "${version}" \
+    --arg fixture_root "${fixture_root}" \
+    --argjson fixture_files "${fixture_files}" \
+    --argjson indexed_tests "${indexed_tests}" \
+    --argjson fixture_count "${fixture_count}" \
+    '{
+      schema_version: 1,
+      mode: "tests-zkevm",
+      id: $id,
+      corpus_digest: $digest,
+      fixture_release: $fixture_release,
+      network: $network,
+      workload: { eest_validation_ref: $validation_ref },
+      fixture_roots: [$fixture_root],
+      fixture_files: $fixture_files,
+      indexed_tests: $indexed_tests,
+      fixture_count: $fixture_count
+    }' > "${resolved_manifest}"
 fi
 
 printf 'Done. Try:\n'

@@ -121,8 +121,10 @@ input. ZisK framing pads the raw result to 256 bytes without hashing it.
 guest instead of natively. The executor strips guest framing before comparison,
 so every executor is judged against the same `statelessOutputBytes` and one set
 of fixture semantics — `expectException`, malformed-input handling, the report
-categories — covers all three. Add `--output-folder` to also emit one
-ERE `BenchmarkRun` row per block for `scripts/report-guest-cycles.py`.
+categories — covers all three. Add `--output-folder` to emit one ERE
+`BenchmarkRun` row per block. CI instead uses `--evidence-dir`, which owns its
+`rows/` directory and writes the aggregate `evidence.json` and `report.md` in
+the same `zkevm` process.
 
 A guest writes into a fixed-width public region and an encoded
 `StatelessValidationResult` is variable-size, so the meaningful length cannot be
@@ -138,12 +140,11 @@ against ~10ms of execution for a typical fixture — so `--jobs N` pays that set
 N times and then amortises it across every fixture the worker handles.
 
 `fixtures/guest-known-failures.json` records corpus-scoped failures expected on
-a pinned backend, with the upstream cause. `report-guest-cycles.py
---known-failures` annotates them and fails if any entry passes or disappears
-from its declared corpus, but never waives the exact-execution gate. A backend
-upgrade that fixes one therefore forces its removal rather than letting the
-list rot. `--report-only` withholds the fixture-failure exit code so those rows
-reach the comparison; configuration, I/O and host-startup failures still fail
+a pinned backend, with the upstream cause. Evidence mode annotates them and
+fails if any entry passes or disappears from its declared corpus. Diagnostic
+evidence may retain exact known failures; `--strict-evidence` permits none. A
+backend upgrade that fixes one therefore forces its removal rather than
+letting the list rot. Configuration, I/O and host-startup failures still fail
 immediately, as does an empty run.
 
 `--report` selects a serial run and writes deterministic JSON with one record

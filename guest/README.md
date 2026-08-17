@@ -5,6 +5,16 @@ backends share the `zkvm_accelerators.h` ABI and the same shape: the vendor
 static library owns `_start`, Zig exports `main`, and no Rust guest wrapper is
 involved.
 
+A guest ELF validates exactly one specification, so devnet releases use the
+compatibility coordinate `guest-<track>@vX.Y.Z[-rc.N]`. The version mirrors the
+complete upstream fixture release: `guest-glamsterdam-devnet@v8.1.0-rc.0`
+pairs with `tests-glamsterdam-devnet@v8.1.0`; it is not evmz software SemVer.
+The independently numbered `tests-zkevm` wire/corpus release is also recorded.
+Devnet tracks carry no compatibility guarantee at any bump; the release
+manifest states what an ELF proves, the stateless schema id is the wire
+compatibility token, and the verification key identifies the exact bytes. See
+[the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
+
 ## Building
 
 `guest-zisk` builds the selected payload as a ZisK RV64 ELF. A real
@@ -88,20 +98,26 @@ surface; ZisK is currently the only enabled backend. Pull requests and pushes
 to `main` replay the digest-pinned `tests-zkevm` corpus, a nightly run
 resolves the latest ten complete `glamsterdam-devnet-7` R2 batches, and
 `workflow_dispatch` also offers the immutable 100-block snapshot in
-[`../eest/fixtures/devnet-glamsterdam-7-pinned.json`](../eest/fixtures/devnet-glamsterdam-7-pinned.json).
+[`eest/fixtures/devnet-glamsterdam-7-pinned.json`](https://github.com/0xjojoex/evm.zig/blob/main/eest/fixtures/devnet-glamsterdam-7-pinned.json).
 Correctness is the gate — every archive digest, execution, and public output
 must match — while cycle changes never fail the workflow. ZisK steps and SP1
 cycles stay separate metrics, and emulator execution duration is never treated
 as proving time.
 
 Reports are absolute: the workflow measures the candidate ELF and does not
-compare against a release. There is no stored release baseline, because no
-guest release exists to be a baseline yet. `report-guest-cycles.py --baseline
-<dir>` still renders per-block deltas between two local result sets.
+compare against a release. The existing `zkevm` command writes the ERE rows,
+aggregated report, and one `evidence.json`; there is no separate reporting
+script or stored release baseline.
+
+A strict `tests-zkevm` dispatch produces the only artifact eligible for guest
+release. `Guest release` accepts that run id, verifies the evidence, tag, source
+commit, and ELF hash, then promotes the tested bytes without rebuilding them.
 
 `zig build zkevm -- --executor zisk|sp1` runs the same ERE-shaped
 measurements locally; pass `--zisk-host`/`--zisk-elf` or
-`--sp1-host`/`--sp1-elf` and fixture paths.
+`--sp1-host`/`--sp1-elf` and fixture paths. `--evidence-dir` enables the
+checkout-owned evidence path used by CI; ZisK is the only evidence backend
+until the SP1 provider is operational.
 
 ## Real proof gate
 

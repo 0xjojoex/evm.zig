@@ -3,9 +3,13 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const ssz_dep = b.dependency("ssz", .{
+    // Consumes the package modules the way an external consumer does, so this
+    // sidecar doubles as the gate that a core-less fetch pulls in no native
+    // dependency.
+    const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,
+        .core = false,
     });
     const zbench_dep = b.dependency("zbench", .{
         .target = target,
@@ -17,7 +21,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    module.addImport("ssz", ssz_dep.module("ssz"));
+    module.addImport("ssz", evmz_dep.module("ssz"));
     module.addImport("zbench", b.createModule(.{
         .root_source_file = zbench_dep.path("src/zbench.zig"),
         .target = target,
