@@ -7,12 +7,8 @@ on:
         description: guest-<track>@vX.Y.Z[-rc.N]
         required: true
         type: string
-      evidence_run_id:
-        description: Successful strict Guest benchmark run
-        required: true
-        type: number
       dry_run:
-        description: Prepare the tested artifact but skip VK generation, signing, and release creation
+        description: Qualify and prepare the guest but skip VK generation, signing, and release creation
         required: true
         default: false
         type: boolean
@@ -29,77 +25,56 @@ env:
   ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:a21622ab8a9b2502f40307208b593f500a22373201e9ae37c2558a7eadb52e17
 
 jobs:
+  qualify:
+    name: Qualify ${{ inputs.tag }}
+    uses: ./.github/workflows/guest-benchmark.yml
+    with:
+      corpus: tests-zkevm
+      release_gate: true
+    permissions:
+      contents: read
+
   verify:
     name: Prepare ${{ inputs.tag }}
+    needs: qualify
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
     outputs:
       elf-name: ${{ steps.bundle.outputs.elf-name }}
-      source-commit: ${{ steps.run.outputs.source-commit }}
-      evidence-url: ${{ steps.run.outputs.run-url }}
+      source-commit: ${{ steps.bundle.outputs.source-commit }}
+      evidence-url: ${{ steps.bundle.outputs.evidence-url }}
 
     steps:
-      - name: Select exact strict benchmark artifact
-        id: run
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ inputs.evidence_run_id }}
-        run: |
-          set -euo pipefail
-          run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
-          test "$(jq -r .conclusion <<<"${run}")" = success
-          test "$(jq -r .event <<<"${run}")" = workflow_dispatch
-          test "$(jq -r .path <<<"${run}")" = .github/workflows/guest-benchmark.yml
-          source_commit="$(jq -er .head_sha <<<"${run}")"
-          run_attempt="$(jq -er .run_attempt <<<"${run}")"
-          artifact_name="guest-zisk-strict-${RUN_ID}-${run_attempt}"
-          artifacts="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts")"
-          jq -e --arg name "${artifact_name}" \
-            '[.artifacts[] | select(.expired | not) | select(.name == $name)] | length == 1' \
-            <<<"${artifacts}"
-          {
-            echo "source-commit=${source_commit}"
-            echo "run-url=$(jq -er .html_url <<<"${run}")"
-            echo "artifact-name=${artifact_name}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Checkout tested source
+      - name: Checkout qualified source
         uses: actions/checkout@v7
         with:
-          ref: ${{ steps.run.outputs.source-commit }}
+          fetch-depth: 0
 
-      - name: Require tested source on main
+      - name: Require qualified source on main
         env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_COMMIT: ${{ steps.run.outputs.source-commit }}
+          SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${SOURCE_COMMIT}" --jq .status)"
-          [[ "${status}" == identical || "${status}" == behind ]]
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
 
       - name: Require a new tag
         env:
           TAG: ${{ inputs.tag }}
         run: test -z "$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
 
-      - name: Download exact evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ inputs.evidence_run_id }}
-          ARTIFACT_NAME: ${{ steps.run.outputs.artifact-name }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/evidence"
-          gh run download "${RUN_ID}" \
-            --name "${ARTIFACT_NAME}" \
-            --dir "${RUNNER_TEMP}/evidence"
+      - name: Download qualified guest
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.qualify.outputs.artifact_name }}
+          path: ${{ runner.temp }}/evidence
 
       - name: Stage tested release bundle
         id: bundle
         env:
-          SOURCE_COMMIT: ${{ steps.run.outputs.source-commit }}
-          EVIDENCE_URL: ${{ steps.run.outputs.run-url }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           source_dir="${RUNNER_TEMP}/evidence"
@@ -122,12 +97,16 @@ jobs:
           install -m 0644 "${elf}" "${artifacts}/${elf_name}"
           install -m 0644 "${evidence}" "${artifacts}/evidence.json"
           install -m 0644 "${report}" "${artifacts}/report.md"
-          echo "elf-name=${elf_name}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "elf-name=${elf_name}"
+            echo "source-commit=${SOURCE_COMMIT}"
+            echo "evidence-url=${EVIDENCE_URL}"
+          } >> "${GITHUB_OUTPUT}"
           {
             echo "## Release evidence"
             echo ""
             echo "- ELF SHA-256: \`${actual_sha}\`"
-            echo "- Strict benchmark run: ${EVIDENCE_URL}"
+            echo "- Qualification run: ${EVIDENCE_URL}"
             echo "- Spec: \`$(jq -er .corpus.network "${evidence}")\`"
             echo "- Fixture release: \`$(jq -er .corpus.fixture_release "${evidence}")\`"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -251,7 +230,7 @@ jobs:
              "- Benchmark evidence: " + $run + "\n" +
              "- ELF SHA-256: " + .guest.elf_sha256 + "\n" +
              "- VK SHA-256: " + $vk_sha + "\n\n" +
-             "The attached ELF is the exact artifact executed by the strict benchmark run."' \
+             "The attached ELF is the exact artifact executed by this release qualification run."' \
             "${evidence}" > "${notes}"
           gh release create "${TAG}" \
             -R "${GITHUB_REPOSITORY}" \

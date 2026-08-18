@@ -78,12 +78,11 @@ const Aggregate = struct {
     unexpected_passes: []const []const u8 = &.{},
     stale_known: []const []const u8 = &.{},
 
-    fn passed(self: Aggregate, expected_fixtures: u64, strict: bool) bool {
+    fn passed(self: Aggregate, expected_fixtures: u64) bool {
         return self.fixture_count > 0 and
             self.fixture_count == expected_fixtures and
             self.total_steps > 0 and
             self.unexpected_failures == 0 and
-            (!strict or self.known_failures == 0) and
             self.unexpected_passes.len == 0 and
             self.stale_known.len == 0;
     }
@@ -217,7 +216,7 @@ pub fn write(io: std.Io, allocator: Allocator, options: Options) !bool {
 
     const aggregate = try aggregateRows(allocator, rows.items, &known);
     defer aggregate.deinit(allocator);
-    const passed = aggregate.passed(manifest.value.fixture_count, options.strict);
+    const passed = aggregate.passed(manifest.value.fixture_count);
     const elf_sha256 = try sha256File(io, allocator, options.elf_path);
     const evidence = Evidence{
         .source_ref = options.source_ref,
@@ -429,7 +428,7 @@ fn sortStrings(strings: [][]const u8) void {
     }.lessThan);
 }
 
-test "strict evidence rejects known failures while diagnostics allow them" {
+test "release evidence accepts exact known failures" {
     const rows = [_]Row{
         .{ .name = "pass", .source = "a.json", .steps = 10, .upstream_matched = true, .crash = null },
         .{ .name = "known", .source = "b.json", .steps = null, .upstream_matched = null, .crash = "provider crash" },
@@ -439,8 +438,19 @@ test "strict evidence rejects known failures while diagnostics allow them" {
     try known.put("known", {});
     const aggregate = try aggregateRows(std.testing.allocator, &rows, &known);
     defer aggregate.deinit(std.testing.allocator);
-    try std.testing.expect(aggregate.passed(2, false));
-    try std.testing.expect(!aggregate.passed(2, true));
+    try std.testing.expect(aggregate.passed(2));
+}
+
+test "release evidence rejects unexpected failures" {
+    const rows = [_]Row{
+        .{ .name = "pass", .source = "a.json", .steps = 10, .upstream_matched = true, .crash = null },
+        .{ .name = "unexpected", .source = "b.json", .steps = null, .upstream_matched = null, .crash = "new crash" },
+    };
+    var known = std.StringHashMap(void).init(std.testing.allocator);
+    defer known.deinit();
+    const aggregate = try aggregateRows(std.testing.allocator, &rows, &known);
+    defer aggregate.deinit(std.testing.allocator);
+    try std.testing.expect(!aggregate.passed(2));
 }
 
 test "known failure drift fails in both directions" {
@@ -455,7 +465,7 @@ test "known failure drift fails in both directions" {
     defer aggregate.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), aggregate.unexpected_passes.len);
     try std.testing.expectEqual(@as(usize, 1), aggregate.stale_known.len);
-    try std.testing.expect(!aggregate.passed(1, false));
+    try std.testing.expect(!aggregate.passed(1));
 }
 
 test "evidence requires an execution metric" {
@@ -466,7 +476,7 @@ test "evidence requires an execution metric" {
     defer known.deinit();
     const aggregate = try aggregateRows(std.testing.allocator, &rows, &known);
     defer aggregate.deinit(std.testing.allocator);
-    try std.testing.expect(!aggregate.passed(1, false));
+    try std.testing.expect(!aggregate.passed(1));
 }
 
 test "prepare removes output from an earlier evidence run" {

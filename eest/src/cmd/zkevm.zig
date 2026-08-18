@@ -248,7 +248,8 @@ fn printUsage() void {
         \\Use --output-folder to also write one ERE BenchmarkRun row per block.
         \\Use --evidence-dir to aggregate those rows into evidence.json and
         \\report.md. Evidence mode owns its rows subdirectory and applies the
-        \\corpus-scoped known-failure gate; --strict-evidence permits none.
+        \\corpus-scoped known-failure gate. --strict-evidence additionally
+        \\requires pinned release-corpus identity; exact ledger matches remain accepted.
         \\
     , .{ default_jobs, max_jobs });
 }

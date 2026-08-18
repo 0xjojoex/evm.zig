@@ -142,10 +142,11 @@ N times and then amortises it across every fixture the worker handles.
 `fixtures/guest-known-failures.json` records corpus-scoped failures expected on
 a pinned backend, with the upstream cause. Evidence mode annotates them and
 fails if any entry passes or disappears from its declared corpus. Diagnostic
-evidence may retain exact known failures; `--strict-evidence` permits none. A
-backend upgrade that fixes one therefore forces its removal rather than
-letting the list rot. Configuration, I/O and host-startup failures still fail
-immediately, as does an empty run.
+and strict evidence may retain exact known failures; strict mode additionally
+requires pinned release-corpus identity. A backend upgrade that fixes one
+therefore forces its removal rather than letting the list rot. Unexpected
+failures, configuration, I/O and host-startup failures still fail immediately,
+as does an empty run.
 
 `--report` selects a serial run and writes deterministic JSON with one record
 per runnable block. Records include revision, fixture family, validation status,

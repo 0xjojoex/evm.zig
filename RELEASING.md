@@ -116,7 +116,7 @@ qualification without changing that compatibility coordinate. The separately
 numbered `tests-zkevm` wire/corpus release remains explicit in `evidence.json`
 and the release notes.
 
-The strict benchmark's `evidence.json` records both the network and exact
+The release qualification's `evidence.json` records both the network and exact
 fixture release compiled into the tested guest. The naming policy pairs a
 devnet tag with that evidence as follows:
 
@@ -127,8 +127,8 @@ fixture_release == "tests-<track>@vX.Y.Z"
 
 Thus `@v8.1.0` names neither devnet-7 nor another devnet-8 fixture line such as
 `v8.2.0`. The release pipeline does not derive this mapping from the tag: it
-promotes the selected successful benchmark artifact, and `evidence.json` is the
-reviewable compatibility record.
+runs the guest benchmark as its qualification job, promotes that job's tested
+artifact, and keeps `evidence.json` as the reviewable compatibility record.
 
 A devnet track offers **no compatibility guarantee at any bump**. Upstream
 publishes every `tests-*` release as a pre-release for the same reason: the
@@ -146,13 +146,13 @@ existing tag syntax.
 
 ### Cutting a guest release
 
-Dispatch `Guest benchmark` with `corpus=tests-zkevm` and
-`release_gate=true`. A successful run emits one release-eligible strict artifact
-containing the tested ELF, `evidence.json`, and its report. Dispatch `Guest
-release` with that run id and the intended tag. The release workflow verifies
-the successful run, source ancestry, and ELF hash before generating the VK and
-signatures; it never rebuilds or searches other runs. Correctness and corpus
-qualification belong to the benchmark that produced the artifact.
+Dispatch `Guest release` with the intended tag. The workflow calls `Guest
+benchmark` internally with the release corpus and qualification checks, then
+passes that same run's tested ELF, `evidence.json`, and report to the release
+jobs. It verifies source ancestry and the ELF hash before generating the VK and
+signatures; it never rebuilds the guest or searches another run. Correctness
+and corpus qualification belong to the benchmark job that produced the
+artifact.
 
 ## Changelog
 

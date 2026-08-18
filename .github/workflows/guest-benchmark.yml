@@ -2,6 +2,20 @@
 name: Guest benchmark
 
 on:
+  workflow_call:
+    inputs:
+      corpus:
+        description: Corpus selection
+        required: true
+        type: string
+      release_gate:
+        description: Produce release-qualified evidence
+        required: true
+        type: boolean
+    outputs:
+      artifact_name:
+        description: Release-qualified guest artifact
+        value: ${{ jobs.measure.outputs.release_artifact_name }}
   pull_request:
     paths:
       - build.zig
@@ -34,26 +48,23 @@ on:
           - pinned
           - rolling
           - tests-zkevm
-      release_gate:
-        description: Strict release qualification; tests-zkevm only
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
+  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-${{ inputs.corpus || (github.event_name == 'schedule' && 'rolling') || 'tests-zkevm' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   measure:
-    name: zisk ${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
+    name: zisk ${{ inputs.corpus || (github.event_name == 'schedule' && 'rolling') || 'tests-zkevm' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      release_artifact_name: ${{ steps.release-artifact.outputs.name }}
     env:
-      CORPUS_MODE: ${{ github.event_name == 'schedule' && 'rolling' || github.event_name == 'workflow_dispatch' && inputs.corpus || 'tests-zkevm' }}
+      CORPUS_MODE: ${{ inputs.corpus || (github.event_name == 'schedule' && 'rolling') || 'tests-zkevm' }}
       CATALOG_URL: https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7
       PINNED_MANIFEST: eest/fixtures/devnet-glamsterdam-7-pinned.json
       CORPUS_ROOT: ${{ github.workspace }}/devnet-corpus
@@ -238,11 +249,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Name release evidence
+        id: release-artifact
+        if: success() && inputs.release_gate
+        run: echo "name=guest-zisk-strict-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
       - name: Upload strict release evidence
         if: success() && inputs.release_gate
         uses: actions/upload-artifact@v7
         with:
-          name: guest-zisk-strict-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.release-artifact.outputs.name }}
           path: |
             ${{ env.CANDIDATE_ELF }}
             guest-evidence/evidence.json
