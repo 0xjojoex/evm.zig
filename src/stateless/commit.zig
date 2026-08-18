@@ -113,10 +113,9 @@ pub fn stateRootAfterCatalog(
     }
     std.debug.assert(account_updates.items.len == dirty_account_count);
 
-    return trie.updateCatalogHashedSorted(
+    return trie.updateHashedSorted(
         &workspace.mpt_region,
-        catalog,
-        catalog.stateCatalogRoot(),
+        catalog.source(catalog.stateCatalogRoot()),
         account_updates.items,
     );
 }
@@ -163,10 +162,9 @@ fn storageRootAfterCatalog(
         .empty
     else
         try catalog.storageCatalogRoot(parent_root);
-    return trie.updateCatalogHashedSorted(
+    return trie.updateHashedSorted(
         &workspace.mpt_region,
-        catalog,
-        root_ref,
+        catalog.source(root_ref),
         updates.items,
     );
 }

@@ -31,7 +31,7 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
 
     var region = mpt.Region.init(std.testing.allocator);
     defer region.deinit();
-    const inserted = try map.update(&region, mpt.empty_root, mpt.WitnessIndex.empty, &.{
+    const inserted = try map.update(&region, mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root), &.{
         .{ .key = .bob, .value = "bob" },
         .{ .key = .alice, .value = "alice" },
     });
@@ -67,8 +67,7 @@ test "typed key facade detects collisions after projection" {
 
     try std.testing.expectError(error.DuplicateKey, map.update(
         &region,
-        mpt.empty_root,
-        mpt.WitnessIndex.empty,
+        mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
         &.{
             .{ .key = 1, .value = "one" },
             .{ .key = 2, .value = "two" },

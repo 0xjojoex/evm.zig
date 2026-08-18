@@ -291,8 +291,7 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     defer region.deinit();
     const via_fixed_index = try trie.updateFixedSorted(
         &region,
-        mpt.empty_root,
-        mpt.WitnessIndex.empty,
+        mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
         fixed_updates[0..unique],
     );
     try expectRootEqual(expected, via_fixed_index);
@@ -302,10 +301,9 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     const root_ref = try builder.authenticateRoot(mpt.empty_root);
     var catalog = try builder.finish();
     defer catalog.deinit();
-    const via_occurrence = try trie.updateCatalogSorted(
+    const via_occurrence = try trie.updateFixedSorted(
         &region,
-        &catalog,
-        root_ref,
+        mpt.catalogSource(&catalog, root_ref),
         fixed_updates[0..unique],
     );
     try expectRootEqual(expected, via_occurrence);

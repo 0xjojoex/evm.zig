@@ -126,8 +126,8 @@ node hashing, encode values, or add domain meaning to the structural trie.
 in Ethereum's MPT and is never stored, so higher layers map domain defaults
 (e.g. a zero storage slot) to a delete rather than an empty value.
 
-**Keys and ordering.** `rootSorted`, `updateSorted`, `updateFixedSorted`, and
-`updateCatalogSorted` require strictly increasing, unique structural keys and
+**Keys and ordering.** `rootSorted`, `updateSorted`, and `updateFixedSorted`
+require strictly increasing, unique structural keys and
 validate that before mutation. `root` copies the entry descriptors into
 allocator-backed scratch and sorts them for you — it never copies key or value
 bytes.
@@ -169,12 +169,13 @@ without exposing catalog records. `Catalog.lookupBound` returns
 `Catalog.BoundLookup`, adding the stable terminal `Catalog.NodeId` needed by
 typed caches.
 
-**Fixed-key mutation.** `updateFixedSorted` and `updateCatalogSorted` share one
-MPT mutation algebra for exactly 32-byte keys. The former resolves
-authenticated nodes lazily from a sealed witness index; the latter carries
-stable catalog handles. Both take a resettable `Region` from the caller, create
-mutable occurrences only along selected paths, retain untouched children as
-authenticated references, and encode dirty ancestors bottom-up — a memoized
+**Fixed-key mutation.** `updateFixedSorted` applies one MPT mutation algebra
+for exactly 32-byte keys through a typed `Source`: `witnessSource(index, root)`
+resolves authenticated nodes lazily from a sealed witness index, while
+`catalogSource(topology, root)` carries stable catalog handles. Either way the
+call takes a resettable `Region` from the caller, creates
+mutable occurrences only along selected paths, retains untouched children as
+authenticated references, and encodes dirty ancestors bottom-up — a memoized
 write overlay, not another authenticated source of truth. Fixed width makes
 branch terminal values and prefix keys structurally invalid; arbitrary-width
 keys remain on `updateSorted` in the sparse engine.
@@ -209,8 +210,8 @@ immutable, and a failed call leaves no partial state.
 `init` takes an allocator retained by the trie; `root`, `rootSorted`,
 `indexWitness`, and `updateSorted` use it, and it must outlive the trie and
 every `WitnessIndex` it creates. Both fixed-key mutation paths take an explicit
-resettable `Region`; the typed `update` and `updateCatalog` facades also
-allocate their projected update descriptors there.
+resettable `Region`; the typed `update` facade also
+allocates its projected update descriptors there.
 
 The primary API has no caller-supplied limits: touched topology grows
 incrementally through the allocator rather than reserving a speculative

@@ -23,11 +23,13 @@ pub const Catalog = Reader(.catalog);
 pub fn Reader(comptime mode: Mode) type {
     return struct {
         const WitnessStateReader = @This();
-        const CatalogState = if (mode == .catalog) trie.WitnessCatalog else void;
-        const IndexedState = if (mode == .indexed) struct {
-            witness: *trie.WitnessIndex,
-            proof_cache: trie.ProofCache,
-        } else void;
+        const Backend = switch (mode) {
+            .indexed => struct {
+                witness: *trie.WitnessIndex,
+                proof_cache: trie.ProofCache,
+            },
+            .catalog => trie.WitnessCatalog,
+        };
 
         pub const Error = error{InvalidWitness};
         pub const RootError = std.mem.Allocator.Error || Error || error{ResourceLimitExceeded};
@@ -35,8 +37,7 @@ pub fn Reader(comptime mode: Mode) type {
 
         allocator: std.mem.Allocator,
         state_root: [32]u8,
-        indexed: IndexedState,
-        catalog: CatalogState,
+        backend: Backend,
         codes: []CodeEntry = &.{},
         accounts: trie.AccountFacts,
 
@@ -51,11 +52,10 @@ pub fn Reader(comptime mode: Mode) type {
                 return .{
                     .allocator = allocator,
                     .state_root = state_root,
-                    .indexed = .{
+                    .backend = .{
                         .witness = witness,
                         .proof_cache = .init(allocator),
                     },
-                    .catalog = {},
                     .codes = try indexCodes(allocator, codes),
                     .accounts = trie.AccountFacts.init(allocator),
                 };
@@ -70,8 +70,7 @@ pub fn Reader(comptime mode: Mode) type {
             return .{
                 .allocator = allocator,
                 .state_root = state_root,
-                .indexed = {},
-                .catalog = catalog,
+                .backend = catalog,
                 .codes = indexed_codes,
                 .accounts = trie.AccountFacts.init(allocator),
             };
@@ -103,17 +102,17 @@ pub fn Reader(comptime mode: Mode) type {
 
         pub fn deinit(self: *WitnessStateReader) void {
             if (comptime mode == .indexed) {
-                self.indexed.proof_cache.deinit();
+                self.backend.proof_cache.deinit();
                 self.accounts.deinit();
                 self.allocator.free(self.codes);
-                self.indexed.witness.deinit();
+                self.backend.witness.deinit();
                 self.* = undefined;
                 return;
             }
 
             self.accounts.deinit();
             self.allocator.free(self.codes);
-            self.catalog.deinit();
+            self.backend.deinit();
             self.* = undefined;
         }
 
@@ -134,7 +133,7 @@ pub fn Reader(comptime mode: Mode) type {
             plan: ClaimPlan,
         ) (std.mem.Allocator.Error || Error)!?ParentFacts {
             if (comptime mode == .indexed) return null;
-            return ParentFacts.authenticate(allocator, plan, &self.catalog) catch |err| switch (err) {
+            return ParentFacts.authenticate(allocator, plan, &self.backend) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.InvalidWitness,
             };
@@ -160,7 +159,7 @@ pub fn Reader(comptime mode: Mode) type {
             commit_view: anytype,
         ) RootError![32]u8 {
             comptime std.debug.assert(mode == .catalog);
-            return narrowRoot(StatelessCommit.stateRootAfterCatalog(allocator, self.state_root, &self.catalog, commit_view));
+            return narrowRoot(StatelessCommit.stateRootAfterCatalog(allocator, self.state_root, &self.backend, commit_view));
         }
 
         fn rootAfterChanges(
@@ -169,19 +168,15 @@ pub fn Reader(comptime mode: Mode) type {
             changes: anytype,
         ) trie.UpdateError![32]u8 {
             if (comptime mode == .catalog) {
-                return trie.stateRootAfterTrackedChangesCatalog(
+                return trie.stateRootAfterChanges(
                     scratch,
-                    self.state_root,
-                    &self.catalog,
-                    &self.accounts,
+                    try trie.catalogSource(&self.backend, self.state_root, &self.accounts),
                     changes,
                 );
             }
-            return trie.stateRootAfterTrackedChangesWithWitness(
+            return trie.stateRootAfterChanges(
                 scratch,
-                self.state_root,
-                self.indexed.witness,
-                &self.accounts,
+                trie.witnessSource(self.backend.witness, self.state_root, &self.accounts),
                 changes,
             );
         }
@@ -206,12 +201,12 @@ pub fn Reader(comptime mode: Mode) type {
         fn readMptAccount(self: *WitnessStateReader, target: Address) Error!?trie.Account {
             const key = trie.hashedAddressKey(target);
             if (comptime mode == .catalog) {
-                return self.catalog.decodedAccount(&key) catch return error.InvalidWitness;
+                return self.backend.decodedAccount(&key) catch return error.InvalidWitness;
             }
             const lookup = trie.cachedProof(
                 self.state_root,
-                self.indexed.witness,
-                &self.indexed.proof_cache,
+                self.backend.witness,
+                &self.backend.proof_cache,
             );
             const encoded = lookup.get(&key) catch return error.InvalidWitness;
             return trie.decodeAccountValue(encoded orelse return null) catch return error.InvalidWitness;
@@ -279,13 +274,13 @@ pub fn Reader(comptime mode: Mode) type {
             if (std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash)) return 0;
             const storage_key = trie.hashedStorageKey(key);
             if (comptime mode == .catalog) {
-                const encoded = self.catalog.storage(account.storage_root, &storage_key) catch return error.InvalidWitness;
+                const encoded = self.backend.storage(account.storage_root, &storage_key) catch return error.InvalidWitness;
                 return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
             }
             const lookup = trie.cachedProof(
                 account.storage_root,
-                self.indexed.witness,
-                &self.indexed.proof_cache,
+                self.backend.witness,
+                &self.backend.proof_cache,
             );
             const encoded = lookup.get(&storage_key) catch return error.InvalidWitness;
             return decodeStorageValue(encoded orelse return 0) catch return error.InvalidWitness;
@@ -315,7 +310,7 @@ test "witness state reader derives root directly from tracked changes" {
     try std.testing.expect(!try witness.reader().accountExists(address.addr(1)));
 
     const actual = try witness.stateRootAfterChanges(std.testing.allocator, changes);
-    const expected = try trie.stateRootAfterTrackedChanges(
+    const expected = try trie.stateRootAfterChangesFromNodes(
         std.testing.allocator,
         trie.empty_root_hash,
         &.{},

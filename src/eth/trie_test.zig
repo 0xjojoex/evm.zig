@@ -35,9 +35,8 @@ const indexWitness = trie.indexWitness;
 const proof = trie.proof;
 const buildWitnessCatalog = trie.buildWitnessCatalog;
 const updateRoot = trie.updateRoot;
-const stateRootAfterTrackedChanges = trie.stateRootAfterTrackedChanges;
-const stateRootAfterTrackedChangesWithWitness = trie.stateRootAfterTrackedChangesWithWitness;
-const stateRootAfterTrackedChangesCatalog = trie.stateRootAfterTrackedChangesCatalog;
+const stateRootAfterChanges = trie.stateRootAfterChanges;
+const stateRootAfterChangesFromNodes = trie.stateRootAfterChangesFromNodes;
 
 const max_rlp_account: Account = .{
     .nonce = std.math.maxInt(u64),
@@ -805,7 +804,7 @@ test "MPT state root consumes tracked changes" {
     state.retain(attempt);
     const changes = state.acceptedView().changes();
 
-    const direct = try stateRootAfterTrackedChanges(scratch, empty_root_hash, &.{}, changes);
+    const direct = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, changes);
     const storage_key = hashedStorageKey(1);
     const storage_value = try storageValue(scratch, 7);
     const storage_root = try root(scratch, &.{.{ .key = &storage_key, .value = storage_value }});
@@ -832,7 +831,7 @@ test "MPT state root consumes tracked changes" {
     try std.testing.expectEqual(@as(u32, 1), wiped_changes.storage_wipes.len());
     try std.testing.expectEqual(@as(u32, 0), wiped_changes.storage_writes.len());
 
-    const wiped_direct = try stateRootAfterTrackedChanges(
+    const wiped_direct = try stateRootAfterChangesFromNodes(
         scratch,
         empty_root_hash,
         &.{},
@@ -865,7 +864,7 @@ test "MPT state root groups interleaved tracked storage writes by address" {
     try std.testing.expectEqual(second, changes.storage_writes.at(1).address);
     try std.testing.expectEqual(first, changes.storage_writes.at(2).address);
 
-    const actual = try stateRootAfterTrackedChanges(scratch, empty_root_hash, &.{}, changes);
+    const actual = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, changes);
 
     const first_storage_keys = [_][32]u8{ hashedStorageKey(1), hashedStorageKey(3) };
     const first_storage_values = [_][]const u8{
@@ -930,27 +929,21 @@ test "MPT state roots agree with cached and witness-loaded accounts" {
     var facts = AccountFacts.init(scratch);
     defer facts.deinit();
     try facts.put(target, previous);
-    const cached = try stateRootAfterTrackedChangesWithWitness(
+    const cached = try stateRootAfterChanges(
         scratch,
-        root_hash,
-        indexed,
-        &facts,
+        trie.witnessSource(indexed, root_hash, &facts),
         changes,
     );
-    const fallback = try stateRootAfterTrackedChangesWithWitness(
+    const fallback = try stateRootAfterChanges(
         scratch,
-        root_hash,
-        indexed,
-        null,
+        trie.witnessSource(indexed, root_hash, null),
         changes,
     );
     var catalog = try buildWitnessCatalog(scratch, root_hash, indexed);
     defer catalog.deinit();
-    const catalog_root = try stateRootAfterTrackedChangesCatalog(
+    const catalog_root = try stateRootAfterChanges(
         scratch,
-        root_hash,
-        &catalog,
-        &facts,
+        try trie.catalogSource(&catalog, root_hash, &facts),
         changes,
     );
     try std.testing.expectEqualSlices(u8, &fallback, &cached);

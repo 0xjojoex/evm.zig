@@ -63,18 +63,12 @@ fn storageTrie(allocator: Allocator) StorageTrie {
 /// Internal hashed-key seam for the dense commit module. Keeping the
 /// structural trie context here avoids instantiating a second Keccak-backed
 /// MPT implementation merely because commit lives in its own source file.
-pub inline fn updateCatalogHashedSorted(
+pub inline fn updateHashedSorted(
     region: *mpt.Region,
-    catalog: *const WitnessCatalog,
-    catalog_root: mpt.Catalog.Root,
+    source: anytype,
     updates: []const mpt.FixedUpdate,
 ) UpdateError![32]u8 {
-    return structuralTrie(region.allocator()).updateCatalogSorted(
-        region,
-        &catalog.topology,
-        catalog_root,
-        updates,
-    );
+    return structuralTrie(region.allocator()).updateFixedSorted(region, source, updates);
 }
 
 pub const Error = Allocator.Error || mpt.Error || error{Overflow};
@@ -280,6 +274,12 @@ pub const WitnessCatalog = struct {
 
     pub fn stateCatalogRoot(self: WitnessCatalog) mpt.Catalog.Root {
         return self.state_root;
+    }
+
+    /// Mutation source over this catalog's topology at `root`. Pointer
+    /// receiver: the returned source borrows the topology in place.
+    pub fn source(self: *const WitnessCatalog, catalog_root: mpt.Catalog.Root) mpt.Source(.catalog) {
+        return .{ .topology = &self.topology, .root = catalog_root };
     }
 
     /// Resolve a storage root by its authenticated digest. Unlike the state
@@ -488,32 +488,108 @@ fn updateRootWithWitness(allocator: Allocator, root_hash: [32]u8, witness: *cons
     return trie.updateSorted(root_hash, witness, sorted);
 }
 
-const ChangesMode = enum { witness, catalog };
+/// Node-resolution source plus pre-authenticated account facts for one
+/// state-root derivation. Construct with `witnessSource`/`catalogSource`; the
+/// argument's type selects the lane at comptime, so each root verb exists
+/// once and this type owns the only witness-vs-catalog branches.
+pub fn StateSource(comptime mode: mpt.SourceMode) type {
+    return struct {
+        const Self = @This();
+        pub const source_mode = mode;
 
-const WitnessChangesSource = struct {
+        resolver: switch (mode) {
+            .witness => *const WitnessIndex,
+            .catalog => *const WitnessCatalog,
+        },
+        root_hash: [32]u8,
+        authenticated_accounts: ?*const AccountFacts,
+
+        fn previousAccount(
+            self: Self,
+            accounts: AccountTrie,
+            target: address.Address,
+        ) UpdateError!Account {
+            if (self.authenticated_accounts) |facts| {
+                if (facts.get(target)) |account| return account orelse Account{};
+            }
+            return switch (mode) {
+                .witness => try loadAccountOrEmpty(accounts, self.root_hash, self.resolver, target),
+                .catalog => try loadCatalogAccountOrEmpty(self.resolver, target),
+            };
+        }
+
+        fn stateSource(self: Self) mpt.Source(mode) {
+            return switch (mode) {
+                .witness => mpt.witnessSource(self.resolver, self.root_hash),
+                .catalog => self.resolver.source(self.resolver.stateCatalogRoot()),
+            };
+        }
+
+        /// Storage-trie source under `digest`. The catalog root resolves
+        /// lazily, so callers must skip resolution for empty update batches:
+        /// an untouched storage trie may be absent from the catalog.
+        fn storageSource(self: Self, digest: [32]u8, wiped: bool) UpdateError!mpt.Source(mode) {
+            return switch (mode) {
+                .witness => mpt.witnessSource(
+                    self.resolver,
+                    if (wiped) empty_root_hash else digest,
+                ),
+                .catalog => self.resolver.source(if (wiped)
+                    .empty
+                else
+                    try self.resolver.storageCatalogRoot(digest)),
+            };
+        }
+    };
+}
+
+pub fn witnessSource(
     witness: *const WitnessIndex,
+    root_hash: [32]u8,
     authenticated_accounts: ?*const AccountFacts,
-};
+) StateSource(.witness) {
+    return .{
+        .resolver = witness,
+        .root_hash = root_hash,
+        .authenticated_accounts = authenticated_accounts,
+    };
+}
 
-const CatalogChangesSource = struct {
+/// Rejects a `root_hash` that does not match the catalog's authenticated
+/// state root, so a mismatched pair never reaches change derivation.
+pub fn catalogSource(
     catalog: *const WitnessCatalog,
-    authenticated_accounts: *const AccountFacts,
-};
+    root_hash: [32]u8,
+    authenticated_accounts: ?*const AccountFacts,
+) error{InvalidNodeReference}!StateSource(.catalog) {
+    try catalog.validateStateRoot(root_hash);
+    return .{
+        .resolver = catalog,
+        .root_hash = root_hash,
+        .authenticated_accounts = authenticated_accounts,
+    };
+}
 
-fn ChangesSource(comptime mode: ChangesMode) type {
-    return if (mode == .witness) WitnessChangesSource else CatalogChangesSource;
+fn assertStateSource(comptime T: type) void {
+    const valid = @typeInfo(T) == .@"struct" and
+        @hasDecl(T, "source_mode") and
+        T == StateSource(T.source_mode);
+    if (!valid) @compileError(
+        "state root derivation requires a trie witnessSource/catalogSource, found " ++ @typeName(T),
+    );
 }
 
 fn storageRootAfterChanges(
-    comptime mode: ChangesMode,
     region: *mpt.Region,
     allocator: Allocator,
     root_hash: [32]u8,
-    source: ChangesSource(mode),
+    source: anytype,
     changes: anytype,
     storage_write_indices: []const u32,
     wiped: bool,
 ) UpdateError![32]u8 {
+    if (storage_write_indices.len == 0) return if (wiped) empty_root_hash else root_hash;
+
     var updates: std.ArrayList(StorageTrie.Update) =
         try .initCapacity(allocator, storage_write_indices.len);
     defer updates.deinit(allocator);
@@ -527,23 +603,11 @@ fn storageRootAfterChanges(
         updates.appendAssumeCapacity(.{ .key = write.key, .value = value });
     }
 
-    const base_root = if (wiped) empty_root_hash else root_hash;
-    const storage = storageTrie(allocator);
-    if (comptime mode == .witness) {
-        return storage.update(region, base_root, source.witness, updates.items);
-    } else {
-        if (updates.items.len == 0) return base_root;
-        const root_ref: mpt.Catalog.Root = if (wiped)
-            .empty
-        else
-            try source.catalog.storageCatalogRoot(root_hash);
-        return storage.updateCatalog(
-            region,
-            &source.catalog.topology,
-            root_ref,
-            updates.items,
-        );
-    }
+    return storageTrie(allocator).update(
+        region,
+        try source.storageSource(root_hash, wiped),
+        updates.items,
+    );
 }
 
 /// Comptime contract for `TrackedState.ChangesView`, kept structural here so
@@ -574,7 +638,9 @@ fn assertTrackedChangesView(comptime View: type) void {
     }
 }
 
-pub fn stateRootAfterTrackedChanges(
+/// Convenience for callers holding raw witness nodes: index them into a
+/// scratch arena and derive the root through a witness source.
+pub fn stateRootAfterChangesFromNodes(
     allocator: Allocator,
     root_hash: [32]u8,
     nodes: []const []const u8,
@@ -586,57 +652,20 @@ pub fn stateRootAfterTrackedChanges(
     const scratch = arena.allocator();
     var witness = try indexWitness(scratch, nodes);
     defer witness.deinit();
-    return stateRootAfterTrackedChangesWithWitness(scratch, root_hash, witness, null, changes);
+    return stateRootAfterChanges(scratch, witnessSource(witness, root_hash, null), changes);
 }
 
-pub fn stateRootAfterTrackedChangesWithWitness(
+/// Post-state root for tracked `changes` applied through `source`
+/// (`witnessSource` or `catalogSource`).
+pub fn stateRootAfterChanges(
     allocator: Allocator,
-    root_hash: [32]u8,
-    witness: *const WitnessIndex,
-    authenticated_accounts: ?*const AccountFacts,
+    source: anytype,
     changes: anytype,
 ) UpdateError![32]u8 {
-    var region = mpt.Region.init(allocator);
-    defer region.deinit();
-    return stateRootAfterTrackedChangesResolved(
-        .witness,
-        allocator,
-        &region,
-        root_hash,
-        .{ .witness = witness, .authenticated_accounts = authenticated_accounts },
-        changes,
-    );
-}
-
-pub fn stateRootAfterTrackedChangesCatalog(
-    allocator: Allocator,
-    root_hash: [32]u8,
-    catalog: *const WitnessCatalog,
-    authenticated_accounts: *const AccountFacts,
-    changes: anytype,
-) UpdateError![32]u8 {
-    try catalog.validateStateRoot(root_hash);
-    var region = mpt.Region.init(allocator);
-    defer region.deinit();
-    return stateRootAfterTrackedChangesResolved(
-        .catalog,
-        allocator,
-        &region,
-        root_hash,
-        .{ .catalog = catalog, .authenticated_accounts = authenticated_accounts },
-        changes,
-    );
-}
-
-fn stateRootAfterTrackedChangesResolved(
-    comptime mode: ChangesMode,
-    allocator: Allocator,
-    region: *mpt.Region,
-    root_hash: [32]u8,
-    source: ChangesSource(mode),
-    changes: anytype,
-) UpdateError![32]u8 {
+    comptime assertStateSource(@TypeOf(source));
     comptime assertTrackedChangesView(@TypeOf(changes));
+    var region = mpt.Region.init(allocator);
+    defer region.deinit();
 
     var batches: AccountBatches = .empty;
     defer batches.deinit(allocator);
@@ -702,28 +731,14 @@ fn stateRootAfterTrackedChangesResolved(
             updates.appendAssumeCapacity(.{ .key = target, .value = null });
             continue;
         }
-        const previous = if (comptime mode == .witness) previous: {
-            if (source.authenticated_accounts) |facts| {
-                if (facts.get(target)) |account| break :previous account orelse Account{};
-            }
-            break :previous try loadAccountOrEmpty(
-                accounts,
-                root_hash,
-                source.witness,
-                target,
-            );
-        } else if (source.authenticated_accounts.get(target)) |account|
-            account orelse Account{}
-        else
-            try loadCatalogAccountOrEmpty(source.catalog, target);
+        const previous = try source.previousAccount(accounts, target);
         const account_change = if (batch.account_change_index) |index|
             changes.accounts.at(index).account
         else
             null;
         const storage_end = batch.storage_start + batch.storage_len;
         const storage_root = try storageRootAfterChanges(
-            mode,
-            region,
+            &region,
             allocator,
             previous.storage_root,
             source,
@@ -746,16 +761,7 @@ fn stateRootAfterTrackedChangesResolved(
         updates.appendAssumeCapacity(.{ .key = target, .value = value });
     }
 
-    if (comptime mode == .witness) {
-        return accounts.update(region, root_hash, source.witness, updates.items);
-    } else {
-        return accounts.updateCatalog(
-            region,
-            &source.catalog.topology,
-            source.catalog.stateCatalogRoot(),
-            updates.items,
-        );
-    }
+    return accounts.update(&region, source.stateSource(), updates.items);
 }
 
 pub fn hashedAddressKey(target: address.Address) [32]u8 {

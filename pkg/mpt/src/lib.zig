@@ -19,7 +19,7 @@
 //! | authenticated reads   | `proof.zig`      | `WitnessIndex.lookup`, allocation-free |
 //! | linked topology reads | `catalog.zig`    | `Catalog.lookup`/`bindSorted` over stable `u32` handles |
 //! | mutate arbitrary keys | `sparse.zig`     | `updateSorted` — variable-width structural keys |
-//! | mutate fixed keys     | `occurrence.zig` | `updateFixedSorted`/`updateCatalogSorted` — resolver-backed fixed-64-nibble algebra |
+//! | mutate fixed keys     | `occurrence.zig` | `updateFixedSorted` over `Source(.witness)`/`Source(.catalog)` — resolver-backed fixed-64-nibble algebra |
 //!
 //! Naming: a `Sorted` suffix means the input must already be strictly
 //! ascending and unique (validated, `error.UnsortedKeys`/`error.DuplicateKey`);
@@ -63,6 +63,42 @@ pub const FixedAbsence = fixed_key.FixedAbsence;
 
 pub const WitnessIndex = proof.WitnessIndex;
 pub const Catalog = @import("catalog.zig").Catalog;
+
+/// Which node-resolution source backs a fixed-key mutation batch.
+pub const SourceMode = enum { witness, catalog };
+
+/// Fixed-key mutation source: the node resolver plus the root the batch
+/// applies to. The value's type selects the engine lane at comptime, so each
+/// mutation verb exists once. Construct with `witnessSource`/`catalogSource`.
+pub fn Source(comptime mode: SourceMode) type {
+    return switch (mode) {
+        .witness => struct {
+            pub const source_mode: SourceMode = .witness;
+            index: *const WitnessIndex,
+            root: Root,
+        },
+        .catalog => struct {
+            pub const source_mode: SourceMode = .catalog;
+            topology: *const Catalog,
+            root: Catalog.Root,
+        },
+    };
+}
+
+pub fn witnessSource(index: *const WitnessIndex, root: Root) Source(.witness) {
+    return .{ .index = index, .root = root };
+}
+
+pub fn catalogSource(topology: *const Catalog, root: Catalog.Root) Source(.catalog) {
+    return .{ .topology = topology, .root = root };
+}
+
+fn sourceModeOf(comptime T: type) SourceMode {
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "source_mode") and T == Source(T.source_mode)) {
+        return T.source_mode;
+    }
+    @compileError("expected mpt.Source(.witness) or mpt.Source(.catalog), found " ++ @typeName(T));
+}
 
 pub const rootBufferSize = construct.bufferSize;
 pub const rootBufferSizeForLimits = construct.bufferSizeForLimits;
@@ -157,40 +193,32 @@ pub fn Trie(comptime KeccakContext: type) type {
         }
 
         /// Apply sorted fixed-32-byte-key updates through the shared mutation
-        /// engine, resolving authenticated nodes lazily from the witness.
+        /// engine, resolving nodes from `source`: a witness source materializes
+        /// authenticated nodes lazily, a catalog source walks pre-authenticated
+        /// linked topology.
         /// Scratch comes from the caller's region and is rewound before return.
         pub fn updateFixedSorted(
             self: Self,
             region: *Region,
-            root_hash: Root,
-            witness: *const WitnessIndex,
+            source: anytype,
             updates: []const FixedUpdate,
         ) (std.mem.Allocator.Error || UpdateError)!Root {
-            return occurrence.updateIndexSorted(
-                self.keccak_context,
-                region,
-                root_hash,
-                proof.sealedIndex(witness),
-                updates,
-            );
-        }
-
-        /// Apply sorted fixed-key updates through an authenticated catalog.
-        /// Scratch comes from the caller's region and is rewound before return.
-        pub fn updateCatalogSorted(
-            self: Self,
-            region: *Region,
-            catalog: *const Catalog,
-            catalog_root: Catalog.Root,
-            updates: []const FixedUpdate,
-        ) (std.mem.Allocator.Error || UpdateError)!Root {
-            return occurrence.updateCatalogSorted(
-                self.keccak_context,
-                region,
-                catalog,
-                catalog_root,
-                updates,
-            );
+            return switch (comptime sourceModeOf(@TypeOf(source))) {
+                .witness => occurrence.updateIndexSorted(
+                    self.keccak_context,
+                    region,
+                    source.root,
+                    proof.sealedIndex(source.index),
+                    updates,
+                ),
+                .catalog => occurrence.updateCatalogSorted(
+                    self.keccak_context,
+                    region,
+                    source.topology,
+                    source.root,
+                    updates,
+                ),
+            };
         }
 
         /// Build a typed-key facade over this configured structural trie.
@@ -241,40 +269,20 @@ pub fn Trie(comptime KeccakContext: type) type {
                 }
 
                 /// Project and sort the batch before fixed-key mutation through
-                /// the sealed witness index. Domain-key ordering cannot be
+                /// `source` (witness or catalog). Domain-key ordering cannot be
                 /// reused because projection may not preserve order.
                 /// Colliding projections are reported as `DuplicateKey`.
                 /// Scratch comes from the caller's region and is rewound before return.
                 pub fn update(
                     self: KeyedSelf,
                     region: *Region,
-                    root_hash: Root,
-                    witness: *const WitnessIndex,
+                    source: anytype,
                     updates: []const KeyedSelf.Update,
                 ) (std.mem.Allocator.Error || UpdateError)!Root {
                     const mark = region.mark();
                     defer region.rewind(mark);
                     const structural_updates = try self.project(region, updates);
-                    return self.structural.updateFixedSorted(region, root_hash, witness, structural_updates);
-                }
-
-                /// `update` through an authenticated catalog.
-                pub fn updateCatalog(
-                    self: KeyedSelf,
-                    region: *Region,
-                    catalog: *const Catalog,
-                    catalog_root: Catalog.Root,
-                    updates: []const KeyedSelf.Update,
-                ) (std.mem.Allocator.Error || UpdateError)!Root {
-                    const mark = region.mark();
-                    defer region.rewind(mark);
-                    const structural_updates = try self.project(region, updates);
-                    return self.structural.updateCatalogSorted(
-                        region,
-                        catalog,
-                        catalog_root,
-                        structural_updates,
-                    );
+                    return self.structural.updateFixedSorted(region, source, structural_updates);
                 }
 
                 fn project(
