@@ -13,6 +13,7 @@ test {
     _ = @import("./test/executor_custom_handler_reentry.zig");
     _ = @import("./test/execution_reentrant_native_contract.zig");
     _ = @import("./test/mpt_package_test.zig");
+    _ = @import("./eth/trie_test.zig");
     _ = @import("./test/eip2200.zig");
     // Opcode semantics are tested against bytecode, independently of which
     // dispatcher implements them. No production module imports these.

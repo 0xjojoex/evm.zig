@@ -17,7 +17,7 @@ pub const CodecError = rlp.ParseError || error{
 
 pub const ResourceError = error{
     ResourceLimitExceeded,
-    WorkspaceTooSmall,
+    BufferTooSmall,
 };
 
 pub const BuildError = InputError || ResourceError;

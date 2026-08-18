@@ -31,14 +31,14 @@ test "witness index resolves every node by digest and misses absent digests" {
     }
 
     const trie = mpt.init(std.testing.allocator);
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
-    const index = indexed.index();
+    const index = indexed;
     try std.testing.expectEqual(@as(usize, node_count), indexed.nodeCount());
 
     for (encoded_nodes[0..node_count], 0..) |encoded, expected| {
         const digest = mpt.StdKeccak256Context.keccak256(.{}, encoded);
-        switch (try trie.lookup(digest, index, "")) {
+        switch (try index.lookup(digest, "")) {
             .present => |value| try std.testing.expectEqual(
                 expected,
                 std.mem.readInt(u64, value[0..8], .big),
@@ -49,7 +49,7 @@ test "witness index resolves every node by digest and misses absent digests" {
     for (0..1_024) |_| {
         var absent: [32]u8 = undefined;
         random.bytes(&absent);
-        try std.testing.expectError(error.MissingNode, trie.lookup(absent, index, ""));
+        try std.testing.expectError(error.MissingNode, index.lookup(absent, ""));
     }
 }
 
@@ -64,11 +64,11 @@ test "catalog index resolves full digests across word-zero probe collisions" {
     const second = leafNode(2);
     const trie = mpt.Trie(CollisionHash).init(std.testing.allocator, .{});
     const encoded_nodes = [_][]const u8{ &first, &second };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
 
     const second_root = CollisionHash.keccak256(.{}, &second);
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root = try builder.authenticateRoot(second_root);
     var catalog = try builder.finishAssumeCollisionResistant();

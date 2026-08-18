@@ -158,7 +158,7 @@ fn storageRootAfterCatalog(
     }
     std.debug.assert(updates.items.len == dirty_storage_count);
 
-    const root_ref: mpt.CatalogRoot = if (wiped or
+    const root_ref: mpt.Catalog.Root = if (wiped or
         std.mem.eql(u8, &parent_root, &trie.empty_root_hash))
         .empty
     else

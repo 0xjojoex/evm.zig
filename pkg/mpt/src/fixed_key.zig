@@ -6,10 +6,11 @@
 
 const std = @import("std");
 
-const catalog = @import("catalog.zig");
+const Catalog = @import("catalog.zig").Catalog;
 const errors = @import("error.zig");
 const nibble = @import("nibble.zig");
 
+/// Fixed 32-byte structural key traversed by the fixed-key lanes.
 pub const FixedKey = [32]u8;
 pub const key_nibbles = @sizeOf(FixedKey) * 2;
 pub const max_path_nodes = key_nibbles + 1;
@@ -36,8 +37,8 @@ pub const BindWorkspace = struct {
 /// Bind sorted unique fixed-width keys against an immutable catalog.
 /// Results retain trie-key order and borrow value spans from witness nodes.
 pub fn bindSorted(
-    topology: catalog.Catalog,
-    root: catalog.RootRef,
+    topology: Catalog,
+    root: Catalog.Root,
     keys: []const FixedKey,
     results: []FixedLookup,
     workspace: *BindWorkspace,
@@ -50,8 +51,8 @@ pub fn bindSorted(
 
 /// Bind keys whose strict sorted order was already established by the caller.
 pub fn bindAssumeSorted(
-    topology: catalog.Catalog,
-    root: catalog.RootRef,
+    topology: Catalog,
+    root: Catalog.Root,
     keys: []const FixedKey,
     results: []FixedLookup,
     workspace: *BindWorkspace,
@@ -155,7 +156,7 @@ pub fn bindAssumeSorted(
 }
 
 const Frame = struct {
-    node: catalog.NodeId,
+    node: Catalog.NodeId,
     begin: usize,
     end: usize,
     depth: u7,
@@ -176,11 +177,11 @@ fn pop(workspace: *BindWorkspace) void {
     workspace.len -= 1;
 }
 
-fn followRequired(link: catalog.Link) Error!catalog.NodeId {
+fn followRequired(link: Catalog.Link) Error!Catalog.NodeId {
     return (try follow(link)) orelse return error.InvalidNodeReference;
 }
 
-fn follow(link: catalog.Link) Error!?catalog.NodeId {
+fn follow(link: Catalog.Link) Error!?Catalog.NodeId {
     return switch (link) {
         .empty => null,
         .@"opaque" => error.MissingNode,

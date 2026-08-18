@@ -49,40 +49,36 @@ test "root sorts descriptors without copying key or value bytes" {
     const trie = mpt.init(std.testing.allocator);
     const expected = try trie.rootSorted(&sorted);
 
-    const needed = try mpt.rootWorkspaceSize(&entries, true);
+    const needed = try mpt.rootBufferSize(&entries, true);
     const buffer = try std.testing.allocator.alloc(u8, needed);
     defer std.testing.allocator.free(buffer);
-    var workspace = mpt.RootWorkspace.init(buffer);
-    const actual = try trie.rootWithWorkspace(&workspace, &entries);
+    const actual = try trie.rootWithBuffer(buffer, &entries);
 
     try std.testing.expectEqualSlices(u8, &expected, &actual);
-    try std.testing.expect(needed - workspace.peak_used_bytes < low_key.len);
 }
 
-test "reported root workspace bound is sufficient for byte-aligned storage" {
+test "reported root buffer bound is sufficient for byte-aligned storage" {
     const entries = [_]mpt.Entry{
         .{ .key = "do", .value = "verb" },
         .{ .key = "dog", .value = "puppy" },
         .{ .key = "doge", .value = "coin" },
         .{ .key = "horse", .value = "stallion" },
     };
-    const needed = try mpt.rootWorkspaceSize(&entries, true);
+    const needed = try mpt.rootBufferSize(&entries, true);
     const backing = try std.testing.allocator.alloc(u8, needed + 1);
     defer std.testing.allocator.free(backing);
     const buffer = backing[1 .. needed + 1];
-    var workspace = mpt.RootWorkspace.init(buffer);
-    _ = try mpt.init(std.testing.allocator).rootWithWorkspace(&workspace, &entries);
-    try std.testing.expect(workspace.peak_used_bytes <= needed);
+    _ = try mpt.init(std.testing.allocator).rootWithBuffer(buffer, &entries);
 }
 
-test "root workspace limit sizing matches materialized entries" {
+test "root buffer limit sizing matches materialized entries" {
     const entries = [_]mpt.Entry{
         .{ .key = "do", .value = "verb" },
         .{ .key = "horse", .value = "stallion" },
     };
     try std.testing.expectEqual(
-        try mpt.rootWorkspaceSize(&entries, true),
-        try mpt.rootWorkspaceSizeForLimits(entries.len, "horse".len, "stallion".len, true),
+        try mpt.rootBufferSize(&entries, true),
+        try mpt.rootBufferSizeForLimits(entries.len, "horse".len, "stallion".len, true),
     );
 }
 
@@ -111,7 +107,7 @@ test "root input failures remain distinct" {
     try std.testing.expectError(error.EmptyValue, mpt.init(std.testing.allocator).rootSorted(&empty_value));
 }
 
-test "caller allocator controls root workspace capacity" {
+test "caller allocator controls root allocation capacity" {
     const entries = [_]mpt.Entry{.{ .key = "dog", .value = "puppy" }};
 
     var fixed_buffer: [128 * 1024]u8 = undefined;
@@ -154,23 +150,20 @@ test "indexed proof lookup authenticates presence and absence without allocation
     };
     const indexing_trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try indexing_trie.indexNodes(&encoded_nodes);
+    var indexed = try indexing_trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     try std.testing.expect(indexed.allocationBytes() > 0);
-    const index = indexed.index();
+    const index = indexed;
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
-    var no_memory: [0]u8 = .{};
-    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
-    const lookup_trie = mpt.init(fixed.allocator());
-    const found = try lookup_trie.lookup(root_hash, index, &[_]u8{0x10});
+    const found = try index.lookup(root_hash, &[_]u8{0x10});
     switch (found) {
         .present => |value| try std.testing.expectEqualSlices(u8, &[_]u8{0x01}, value),
         .absent => return error.ExpectedPresent,
     }
-    try expectAbsence(.missing_branch_child, try lookup_trie.lookup(root_hash, index, &[_]u8{0x11}));
-    try expectAbsence(.divergent_path, try lookup_trie.lookup(root_hash, index, &[_]u8{0x20}));
-    try expectAbsence(.empty_trie, try lookup_trie.lookup(mpt.empty_root, index, "anything"));
+    try expectAbsence(.missing_branch_child, try index.lookup(root_hash, &[_]u8{0x11}));
+    try expectAbsence(.divergent_path, try index.lookup(root_hash, &[_]u8{0x20}));
+    try expectAbsence(.empty_trie, try index.lookup(mpt.empty_root, "anything"));
 }
 
 test "decoded proof cache preserves lookup and canonicality results" {
@@ -180,27 +173,27 @@ test "decoded proof cache preserves lookup and canonicality results" {
     const extension_hash = mpt.StdKeccak256Context.keccak256(.{}, &extension);
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{ &extension, &leaf };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     var cache = mpt.LookupCache.init(std.testing.allocator);
     defer cache.deinit();
 
     try std.testing.expectError(
         error.NonCanonicalNode,
-        mpt.lookupCached(extension_hash, indexed.index(), &[_]u8{0x10}, &cache),
+        indexed.lookupCached(extension_hash, &[_]u8{0x10}, &cache),
     );
     try std.testing.expectError(
         error.NonCanonicalNode,
-        mpt.lookupCached(extension_hash, indexed.index(), &[_]u8{0x10}, &cache),
+        indexed.lookupCached(extension_hash, &[_]u8{0x10}, &cache),
     );
 
     const root_leaf = [_]u8{ 0xc2, 0x20, 0x02 };
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_leaf);
     const root_nodes = [_][]const u8{&root_leaf};
-    var root_indexed = try trie.indexNodes(&root_nodes);
+    var root_indexed = try trie.indexWitness(&root_nodes);
     defer root_indexed.deinit();
-    const first = try mpt.lookupCached(root_hash, root_indexed.index(), "", &cache);
-    const second = try mpt.lookupCached(root_hash, root_indexed.index(), "", &cache);
+    const first = try root_indexed.lookupCached(root_hash, "", &cache);
+    const second = try root_indexed.lookupCached(root_hash, "", &cache);
     switch (first) {
         .present => |value| try std.testing.expectEqualSlices(u8, &[_]u8{0x02}, value),
         .absent => return error.ExpectedPresent,
@@ -224,7 +217,7 @@ test "node index hashes once, deduplicates, and rejects conflicts" {
     const trie = mpt.Trie(CountingKeccak).init(std.testing.allocator, .{ .calls = &calls });
     const leaf = [_]u8{ 0xc2, 0x20, 0x01 };
     const encoded = [_][]const u8{ &leaf, &leaf };
-    var indexed = try trie.indexNodes(&encoded);
+    var indexed = try trie.indexWitness(&encoded);
     defer indexed.deinit();
     try std.testing.expectEqual(@as(usize, 2), calls);
     try std.testing.expectEqual(@as(usize, 1), indexed.nodeCount());
@@ -236,12 +229,11 @@ test "node index hashes once, deduplicates, and rejects conflicts" {
     };
     const conflicting = [_][]const u8{ "a", "b" };
     const constant_trie = mpt.Trie(ConstantKeccak).init(std.testing.allocator, .{});
-    try std.testing.expectError(error.ConflictingNode, constant_trie.indexNodes(&conflicting));
+    try std.testing.expectError(error.ConflictingNode, constant_trie.indexWitness(&conflicting));
 }
 
 test "authenticated witness index capabilities are opaque" {
-    try std.testing.expect(@typeInfo(mpt.NodeIndex) == .@"opaque");
-    try std.testing.expect(@typeInfo(mpt.IndexedNodes) == .@"opaque");
+    try std.testing.expect(@typeInfo(mpt.WitnessIndex) == .@"opaque");
 }
 
 test "proof lookup distinguishes missing witness from malformed topology" {
@@ -255,60 +247,60 @@ test "proof lookup distinguishes missing witness from malformed topology" {
 
     const trie = mpt.init(arena.allocator());
     const missing_nodes = [_][]const u8{&missing_root_node};
-    const missing_indexed = try trie.indexNodes(&missing_nodes);
+    const missing_indexed = try trie.indexWitness(&missing_nodes);
     const missing_root = mpt.StdKeccak256Context.keccak256(.{}, &missing_root_node);
-    try std.testing.expectError(error.MissingNode, trie.lookup(missing_root, missing_indexed.index(), &[_]u8{0x10}));
+    try std.testing.expectError(error.MissingNode, missing_indexed.lookup(missing_root, &[_]u8{0x10}));
 
     const one_occupant_branch = [_]u8{0xd1} ++ [_]u8{0x80} ** 17;
     const malformed_nodes = [_][]const u8{&one_occupant_branch};
-    const malformed_indexed = try trie.indexNodes(&malformed_nodes);
+    const malformed_indexed = try trie.indexWitness(&malformed_nodes);
     const malformed_root = mpt.StdKeccak256Context.keccak256(.{}, &one_occupant_branch);
-    try std.testing.expectError(error.NonCanonicalNode, trie.lookup(malformed_root, malformed_indexed.index(), ""));
+    try std.testing.expectError(error.NonCanonicalNode, malformed_indexed.lookup(malformed_root, ""));
 
     const adjacent_short_nodes = [_]u8{ 0xc4, 0x11, 0xc2, 0x20, 0x01 };
     const adjacent_nodes = [_][]const u8{&adjacent_short_nodes};
-    const adjacent_indexed = try trie.indexNodes(&adjacent_nodes);
+    const adjacent_indexed = try trie.indexWitness(&adjacent_nodes);
     const adjacent_root = mpt.StdKeccak256Context.keccak256(.{}, &adjacent_short_nodes);
-    try std.testing.expectError(error.NonCanonicalNode, trie.lookup(adjacent_root, adjacent_indexed.index(), &[_]u8{0x10}));
+    try std.testing.expectError(error.NonCanonicalNode, adjacent_indexed.lookup(adjacent_root, &[_]u8{0x10}));
 
     const empty_compact = [_]u8{ 0xc2, 0x80, 0x01 };
     const empty_compact_nodes = [_][]const u8{&empty_compact};
-    const empty_compact_indexed = try trie.indexNodes(&empty_compact_nodes);
+    const empty_compact_indexed = try trie.indexWitness(&empty_compact_nodes);
     try std.testing.expectError(
         error.InvalidCompactPath,
-        trie.lookup(mpt.StdKeccak256Context.keccak256(.{}, &empty_compact), empty_compact_indexed.index(), ""),
+        empty_compact_indexed.lookup(mpt.StdKeccak256Context.keccak256(.{}, &empty_compact), ""),
     );
 
     const invalid_flags = [_]u8{ 0xc2, 0x40, 0x01 };
     const invalid_flag_nodes = [_][]const u8{&invalid_flags};
-    const invalid_flag_indexed = try trie.indexNodes(&invalid_flag_nodes);
+    const invalid_flag_indexed = try trie.indexWitness(&invalid_flag_nodes);
     try std.testing.expectError(
         error.InvalidCompactPath,
-        trie.lookup(mpt.StdKeccak256Context.keccak256(.{}, &invalid_flags), invalid_flag_indexed.index(), ""),
+        invalid_flag_indexed.lookup(mpt.StdKeccak256Context.keccak256(.{}, &invalid_flags), ""),
     );
 
     const invalid_padding = [_]u8{ 0xc2, 0x01, 0x01 };
     const invalid_padding_nodes = [_][]const u8{&invalid_padding};
-    const invalid_padding_indexed = try trie.indexNodes(&invalid_padding_nodes);
+    const invalid_padding_indexed = try trie.indexWitness(&invalid_padding_nodes);
     try std.testing.expectError(
         error.InvalidCompactPath,
-        trie.lookup(mpt.StdKeccak256Context.keccak256(.{}, &invalid_padding), invalid_padding_indexed.index(), ""),
+        invalid_padding_indexed.lookup(mpt.StdKeccak256Context.keccak256(.{}, &invalid_padding), ""),
     );
 
     const truncated = [_]u8{ 0xc2, 0x20 };
     const truncated_nodes = [_][]const u8{&truncated};
-    const truncated_indexed = try trie.indexNodes(&truncated_nodes);
+    const truncated_indexed = try trie.indexWitness(&truncated_nodes);
     try std.testing.expectError(
         error.InputTooShort,
-        trie.lookup(mpt.StdKeccak256Context.keccak256(.{}, &truncated), truncated_indexed.index(), ""),
+        truncated_indexed.lookup(mpt.StdKeccak256Context.keccak256(.{}, &truncated), ""),
     );
 
     const trailing = [_]u8{ 0xc2, 0x20, 0x01, 0x00 };
     const trailing_nodes = [_][]const u8{&trailing};
-    const trailing_indexed = try trie.indexNodes(&trailing_nodes);
+    const trailing_indexed = try trie.indexWitness(&trailing_nodes);
     try std.testing.expectError(
         error.TrailingBytes,
-        trie.lookup(mpt.StdKeccak256Context.keccak256(.{}, &trailing), trailing_indexed.index(), ""),
+        trailing_indexed.lookup(mpt.StdKeccak256Context.keccak256(.{}, &trailing), ""),
     );
 }
 
@@ -347,10 +339,10 @@ test "trusted root rejects a mutated reachable node" {
     const mutated = [_]u8{ 0xc2, 0x20, 0x02 };
     const trusted_root = mpt.StdKeccak256Context.keccak256(.{}, &original);
     const encoded_nodes = [_][]const u8{&mutated};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
 
-    try std.testing.expectError(error.MissingNode, trie.lookup(trusted_root, indexed.index(), ""));
+    try std.testing.expectError(error.MissingNode, indexed.lookup(trusted_root, ""));
 }
 
 test "catalog lookup matches proof lookup through embedded topology" {
@@ -366,11 +358,11 @@ test "catalog lookup matches proof lookup through embedded topology" {
     };
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root_ref = try builder.authenticateRoot(root_hash);
     try std.testing.expectEqual(@as(usize, 4), builder.nodeCount());
@@ -406,7 +398,7 @@ test "catalog lookup matches proof lookup through embedded topology" {
     const keys = [_][1]u8{ .{0x10}, .{0x11}, .{0x12}, .{0x20} };
     for (&keys) |*key| {
         try expectSameLookup(
-            try trie.lookup(root_hash, indexed.index(), key),
+            try indexed.lookup(root_hash, key),
             try catalog.lookup(root_ref, key),
         );
     }
@@ -418,11 +410,11 @@ test "catalog keeps missing hashed siblings opaque" {
     const root_node = branchWithHash(leaf_hash);
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root_ref = try builder.authenticateRoot(root_hash);
     var catalog = try builder.finish();
@@ -452,11 +444,11 @@ test "catalog links shared hashed nodes once" {
     const root_node = branchWithTwoHashes(leaf_hash);
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{ &root_node, &leaf };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root_ref = try builder.authenticateRoot(root_hash);
     var catalog = try builder.finish();
@@ -480,11 +472,11 @@ test "catalog links shared hashed nodes once" {
         catalog.resolvedBranchChild(leaf_entry, 1),
     );
     try expectSameLookup(
-        try trie.lookup(root_hash, indexed.index(), &[_]u8{0x00}),
+        try indexed.lookup(root_hash, &[_]u8{0x00}),
         try catalog.lookup(root_ref, &[_]u8{0x00}),
     );
     try expectSameLookup(
-        try trie.lookup(root_hash, indexed.index(), &[_]u8{0x10}),
+        try indexed.lookup(root_hash, &[_]u8{0x10}),
         try catalog.lookup(root_ref, &[_]u8{0x10}),
     );
 }
@@ -494,11 +486,11 @@ test "catalog ignores unreachable malformed witness entries" {
     const malformed = [_]u8{0xd1} ++ [_]u8{0x80} ** 17;
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{ &malformed, &root_node };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root_ref = try builder.authenticateRoot(root_hash);
     var catalog = try builder.finish();
@@ -506,7 +498,7 @@ test "catalog ignores unreachable malformed witness entries" {
 
     try std.testing.expectEqual(@as(usize, 1), catalog.nodeCount());
     try expectSameLookup(
-        try trie.lookup(root_hash, indexed.index(), ""),
+        try indexed.lookup(root_hash, ""),
         try catalog.lookup(root_ref, ""),
     );
 }
@@ -517,15 +509,15 @@ test "catalog validates resolved extension topology before sealing" {
     const extension = [_]u8{ 0xe2, 0x11, 0xa0 } ++ leaf_hash;
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{ &extension, &leaf };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
 
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     _ = try builder.authenticateRoot(mpt.StdKeccak256Context.keccak256(.{}, &extension));
     try std.testing.expectError(error.NonCanonicalNode, builder.finish());
 
-    var fast_builder = try trie.catalogBuilder(indexed.index());
+    var fast_builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer fast_builder.deinit();
     _ = try fast_builder.authenticateRoot(mpt.StdKeccak256Context.keccak256(.{}, &extension));
     try std.testing.expectError(error.NonCanonicalNode, fast_builder.finishAssumeCollisionResistant());
@@ -536,10 +528,10 @@ test "catalog keeps stable handles across authenticated roots" {
     const second_node = [_]u8{ 0xc2, 0x20, 0x02 };
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{ &second_node, &first_node };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
 
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const first = try builder.authenticateRoot(mpt.StdKeccak256Context.keccak256(.{}, &first_node));
     const first_id = first.node.id;
@@ -569,37 +561,13 @@ test "catalog rejects a resolved content-addressed cycle" {
     const root_node = branchWithHash([_]u8{0} ** 32);
     const trie = mpt.Trie(ConstantKeccak).init(std.testing.allocator, .{});
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
 
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     _ = try builder.authenticateRoot([_]u8{0} ** 32);
     try std.testing.expectError(error.InvalidNodeReference, builder.finish());
-}
-
-test "catalog admission bounds indexed, linked, and branch counts" {
-    const leaf = leafWithValueLen(29);
-    const leaf_hash = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
-    const root_node = branchWithHash(leaf_hash);
-    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
-    const trie = mpt.init(std.testing.allocator);
-    const encoded_nodes = [_][]const u8{ &root_node, &leaf };
-    var indexed = try trie.indexNodes(&encoded_nodes);
-    defer indexed.deinit();
-
-    try std.testing.expectError(
-        error.ResourceLimitExceeded,
-        trie.catalogBuilderWithLimits(indexed.index(), .{ .indexed_nodes = 1 }),
-    );
-
-    var linked = try trie.catalogBuilderWithLimits(indexed.index(), .{ .linked_nodes = 2 });
-    defer linked.deinit();
-    try std.testing.expectError(error.ResourceLimitExceeded, linked.authenticateRoot(root_hash));
-
-    var branches = try trie.catalogBuilderWithLimits(indexed.index(), .{ .branches = 0 });
-    defer branches.deinit();
-    try std.testing.expectError(error.ResourceLimitExceeded, branches.authenticateRoot(root_hash));
 }
 
 test "catalog cleans every allocation failure position" {
@@ -610,10 +578,10 @@ test "catalog cleans every allocation failure position" {
             const root_node = branchWithTwoHashes(leaf_hash);
             const trie = mpt.init(allocator);
             const encoded_nodes = [_][]const u8{ &root_node, &leaf };
-            var indexed = try trie.indexNodes(&encoded_nodes);
+            var indexed = try trie.indexWitness(&encoded_nodes);
             defer indexed.deinit();
 
-            var builder = try trie.catalogBuilder(indexed.index());
+            var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
             defer builder.deinit();
             const root = try builder.authenticateRoot(mpt.StdKeccak256Context.keccak256(.{}, &root_node));
             var catalog = try builder.finish();
@@ -627,7 +595,7 @@ test "catalog cleans every allocation failure position" {
 test "sparse update inserts into empty trie" {
     const trie = mpt.init(std.testing.allocator);
     const updates = [_]mpt.Update{.{ .key = "dog", .value = "puppy" }};
-    const actual = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
+    const actual = try trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &updates);
 
     const entries = [_]mpt.Entry{.{ .key = "dog", .value = "puppy" }};
     const expected = try trie.rootSorted(&entries);
@@ -645,13 +613,13 @@ test "sparse insert preserves a witness path longer than the update key" {
 
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
     const short_key = [_]u8{0x00};
     const updates = [_]mpt.Update{.{ .key = &short_key, .value = &[_]u8{0x02} }};
-    const actual = try trie.updateSorted(root_hash, indexed.index(), &updates);
+    const actual = try trie.updateSorted(root_hash, indexed, &updates);
     const expected_entries = [_]mpt.Entry{
         .{ .key = &short_key, .value = &[_]u8{0x02} },
         .{ .key = &long_key, .value = &[_]u8{0x01} },
@@ -665,13 +633,13 @@ test "caller allocator controls sparse update capacity" {
 
     var fixed_buffer: [16 * 1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&fixed_buffer);
-    _ = try mpt.init(fixed.allocator()).updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
+    _ = try mpt.init(fixed.allocator()).updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &updates);
 
     var tiny_buffer: [1]u8 = undefined;
     var tiny = std.heap.FixedBufferAllocator.init(&tiny_buffer);
     try std.testing.expectError(
         error.OutOfMemory,
-        mpt.init(tiny.allocator()).updateSorted(mpt.empty_root, mpt.empty_node_index, &updates),
+        mpt.init(tiny.allocator()).updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &updates),
     );
 }
 
@@ -684,11 +652,11 @@ test "allocating APIs clean every allocation failure position" {
 
             const root_node = [_]u8{ 0xcb, 0x84, 0x20, 'd', 'o', 'g', 0x85, 'p', 'u', 'p', 'p', 'y' };
             const encoded_nodes = [_][]const u8{&root_node};
-            var indexed = try trie.indexNodes(&encoded_nodes);
+            var indexed = try trie.indexWitness(&encoded_nodes);
             defer indexed.deinit();
 
             const replacement = [_]mpt.Update{.{ .key = "dog", .value = "hound" }};
-            _ = try trie.updateSorted(root_hash, indexed.index(), &replacement);
+            _ = try trie.updateSorted(root_hash, indexed, &replacement);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
@@ -709,7 +677,7 @@ test "empty-root batch does not reserve key-depth times node capacity" {
     var fixed = std.heap.FixedBufferAllocator.init(&fixed_buffer);
     _ = try mpt.init(fixed.allocator()).updateSorted(
         mpt.empty_root,
-        mpt.empty_node_index,
+        mpt.WitnessIndex.empty,
         &updates,
     );
 }
@@ -718,17 +686,17 @@ test "sparse update replaces and deletes a root leaf" {
     const root_node = [_]u8{ 0xcb, 0x84, 0x20, 'd', 'o', 'g', 0x85, 'p', 'u', 'p', 'p', 'y' };
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
     const replacement = [_]mpt.Update{.{ .key = "dog", .value = "hound" }};
-    const replaced = try trie.updateSorted(root_hash, indexed.index(), &replacement);
+    const replaced = try trie.updateSorted(root_hash, indexed, &replacement);
     const replaced_entries = [_]mpt.Entry{.{ .key = "dog", .value = "hound" }};
     try std.testing.expectEqualSlices(u8, &(try trie.rootSorted(&replaced_entries)), &replaced);
 
     const deletion = [_]mpt.Update{.{ .key = "dog", .value = null }};
-    try std.testing.expectEqualSlices(u8, &mpt.empty_root, &(try trie.updateSorted(root_hash, indexed.index(), &deletion)));
+    try std.testing.expectEqualSlices(u8, &mpt.empty_root, &(try trie.updateSorted(root_hash, indexed, &deletion)));
 }
 
 test "sparse branch insert and delete agree with full rebuild" {
@@ -744,12 +712,12 @@ test "sparse branch insert and delete agree with full rebuild" {
     };
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
     const insertion = [_]mpt.Update{.{ .key = &[_]u8{0x11}, .value = &[_]u8{0x03} }};
-    const inserted = try trie.updateSorted(root_hash, indexed.index(), &insertion);
+    const inserted = try trie.updateSorted(root_hash, indexed, &insertion);
     const inserted_entries = [_]mpt.Entry{
         .{ .key = &[_]u8{0x10}, .value = &[_]u8{0x01} },
         .{ .key = &[_]u8{0x11}, .value = &[_]u8{0x03} },
@@ -758,7 +726,7 @@ test "sparse branch insert and delete agree with full rebuild" {
     try std.testing.expectEqualSlices(u8, &(try trie.rootSorted(&inserted_entries)), &inserted);
 
     const deletion = [_]mpt.Update{.{ .key = &[_]u8{0x10}, .value = null }};
-    const deleted = try trie.updateSorted(root_hash, indexed.index(), &deletion);
+    const deleted = try trie.updateSorted(root_hash, indexed, &deletion);
     const deleted_entries = [_]mpt.Entry{.{ .key = &[_]u8{0x12}, .value = &[_]u8{0x02} }};
     try std.testing.expectEqualSlices(u8, &(try trie.rootSorted(&deleted_entries)), &deleted);
 }
@@ -780,12 +748,12 @@ test "sparse branch collapse reveals the sole hashed sibling" {
 
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{ &root_node, &sibling };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
 
     const deletion = [_]mpt.Update{.{ .key = &[_]u8{0x00}, .value = null }};
-    const actual = try trie.updateSorted(root_hash, indexed.index(), &deletion);
+    const actual = try trie.updateSorted(root_hash, indexed, &deletion);
     const expected_entries = [_]mpt.Entry{.{
         .key = &[_]u8{0x10},
         .value = &([_]u8{0xab} ** 40),
@@ -794,11 +762,11 @@ test "sparse branch collapse reveals the sole hashed sibling" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 
     const root_only_nodes = [_][]const u8{&root_node};
-    var root_only_indexed = try trie.indexNodes(&root_only_nodes);
+    var root_only_indexed = try trie.indexWitness(&root_only_nodes);
     defer root_only_indexed.deinit();
     try std.testing.expectError(
         error.MissingNode,
-        trie.updateSorted(root_hash, root_only_indexed.index(), &deletion),
+        trie.updateSorted(root_hash, root_only_indexed, &deletion),
     );
 }
 
@@ -810,9 +778,9 @@ test "occurrence catalog update rejects branch values" {
         [_]u8{0x80} ** 15 ++ [_]u8{0x01};
     const nodes = [_][]const u8{ &branch, &child };
     const trie = mpt.init(std.testing.allocator);
-    var indexed = try trie.indexNodes(&nodes);
+    var indexed = try trie.indexWitness(&nodes);
     defer indexed.deinit();
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &branch);
     const root_ref = try builder.authenticateRoot(root_hash);
@@ -827,7 +795,7 @@ test "occurrence catalog update rejects branch values" {
     );
     try std.testing.expectError(
         error.NonCanonicalNode,
-        trie.updateFixedSorted(&region, root_hash, indexed.index(), &update),
+        trie.updateFixedSorted(&region, root_hash, indexed, &update),
     );
 }
 
@@ -835,9 +803,9 @@ test "occurrence catalog update rejects variable-width leaves" {
     const leaf = [_]u8{ 0xc2, 0x20, 0x01 };
     const nodes = [_][]const u8{&leaf};
     const trie = mpt.init(std.testing.allocator);
-    var indexed = try trie.indexNodes(&nodes);
+    var indexed = try trie.indexWitness(&nodes);
     defer indexed.deinit();
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
     const root_ref = try builder.authenticateRoot(root_hash);
@@ -853,7 +821,7 @@ test "occurrence catalog update rejects variable-width leaves" {
     );
     try std.testing.expectError(
         error.InvalidNode,
-        trie.updateFixedSorted(&region, root_hash, indexed.index(), &update),
+        trie.updateFixedSorted(&region, root_hash, indexed, &update),
     );
 }
 
@@ -866,9 +834,9 @@ test "occurrence updates clean every allocation failure position" {
             const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
             const nodes = [_][]const u8{&root_node};
             const trie = mpt.init(allocator);
-            var indexed = try trie.indexNodes(&nodes);
+            var indexed = try trie.indexWitness(&nodes);
             defer indexed.deinit();
-            var builder = try trie.catalogBuilder(indexed.index());
+            var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
             defer builder.deinit();
             const root_ref = try builder.authenticateRoot(root_hash);
             var catalog = try builder.finish();
@@ -880,7 +848,7 @@ test "occurrence updates clean every allocation failure position" {
                 .{ .key = second, .value = &[_]u8{0x02} },
             };
             _ = try trie.updateCatalogSorted(&region, &catalog, root_ref, &updates);
-            _ = try trie.updateFixedSorted(&region, root_hash, indexed.index(), &updates);
+            _ = try trie.updateFixedSorted(&region, root_hash, indexed, &updates);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
@@ -901,7 +869,7 @@ test "occurrence catalog update handles fixed-key insertion from empty root" {
         .{ .key = &second, .value = &[_]u8{0x02} },
         .{ .key = &third, .value = &[_]u8{0x03} },
     };
-    var catalog_builder = try trie.catalogBuilder(mpt.empty_node_index);
+    var catalog_builder = try mpt.Catalog.Builder.init(trie.allocator, mpt.WitnessIndex.empty);
     defer catalog_builder.deinit();
     const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
     var catalog = try catalog_builder.finish();
@@ -920,7 +888,7 @@ test "occurrence catalog update handles fixed-key insertion from empty root" {
 
 test "occurrence catalog update accepts an empty update batch" {
     const trie = mpt.init(std.testing.allocator);
-    var catalog_builder = try trie.catalogBuilder(mpt.empty_node_index);
+    var catalog_builder = try mpt.Catalog.Builder.init(trie.allocator, mpt.WitnessIndex.empty);
     defer catalog_builder.deinit();
     const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
     var catalog = try catalog_builder.finish();
@@ -944,9 +912,9 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     const root_node = fixedKeyLeaf(first, 0x01);
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
     const nodes = [_][]const u8{&root_node};
-    var indexed = try trie.indexNodes(&nodes);
+    var indexed = try trie.indexWitness(&nodes);
     defer indexed.deinit();
-    var catalog_builder = try trie.catalogBuilder(indexed.index());
+    var catalog_builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer catalog_builder.deinit();
     const root_ref = try catalog_builder.authenticateRoot(root_hash);
     var catalog = try catalog_builder.finish();
@@ -963,7 +931,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&replaced_entries)),
-        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &replacement)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed, &replacement)),
     );
 
     const split = [_]mpt.FixedUpdate{
@@ -983,7 +951,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&split_entries)),
-        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &split)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed, &split)),
     );
 
     const delete_only = [_]mpt.FixedUpdate{.{ .key = first, .value = null }};
@@ -995,7 +963,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &mpt.empty_root,
-        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &delete_only)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed, &delete_only)),
     );
 
     const replace_with_other = [_]mpt.FixedUpdate{
@@ -1011,7 +979,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&compressed_entries)),
-        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &replace_with_other)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed, &replace_with_other)),
     );
 }
 
@@ -1042,7 +1010,7 @@ test "sparse update uses bounded frames for deep Patricia topology" {
     mpt.sortUpdates(&updates);
 
     const trie = mpt.init(std.testing.allocator);
-    const actual = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);
+    const actual = try trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &updates);
     const expected = try trie.rootSorted(&entries);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
@@ -1052,20 +1020,20 @@ test "sparse update validates the full batch before mutation" {
     try std.testing.expectEqualSlices(
         u8,
         &mpt.empty_root,
-        &(try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &.{})),
+        &(try trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &.{})),
     );
     const unsorted = [_]mpt.Update{
         .{ .key = "b", .value = "1" },
         .{ .key = "a", .value = "2" },
     };
-    try std.testing.expectError(error.UnsortedKeys, trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &unsorted));
+    try std.testing.expectError(error.UnsortedKeys, trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &unsorted));
     const duplicate = [_]mpt.Update{
         .{ .key = "a", .value = "1" },
         .{ .key = "a", .value = "2" },
     };
-    try std.testing.expectError(error.DuplicateKey, trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &duplicate));
+    try std.testing.expectError(error.DuplicateKey, trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &duplicate));
     const empty = [_]mpt.Update{.{ .key = "a", .value = "" }};
-    try std.testing.expectError(error.EmptyValue, trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &empty));
+    try std.testing.expectError(error.EmptyValue, trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &empty));
 }
 
 fn expectAbsence(expected: mpt.Absence, lookup: mpt.Lookup) !void {
@@ -1149,10 +1117,10 @@ fn fixedKeyLeaf(key: mpt.Root, value: u8) [36]u8 {
 
 fn expectRootAccepted(trie: anytype, root_node: []const u8) !void {
     const encoded_nodes = [_][]const u8{root_node};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, root_node);
-    try expectAbsence(.divergent_path, try trie.lookup(root_hash, indexed.index(), ""));
+    try expectAbsence(.divergent_path, try indexed.lookup(root_hash, ""));
 }
 
 fn expectBranchValue(
@@ -1162,10 +1130,10 @@ fn expectBranchValue(
     key: []const u8,
     expected: []const u8,
 ) !void {
-    var indexed = try trie.indexNodes(encoded_nodes);
+    var indexed = try trie.indexWitness(encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, root_node);
-    const lookup = try trie.lookup(root_hash, indexed.index(), key);
+    const lookup = try indexed.lookup(root_hash, key);
     switch (lookup) {
         .present => |value| try std.testing.expectEqualSlices(u8, expected, value),
         .absent => return error.ExpectedPresent,
@@ -1179,10 +1147,10 @@ fn expectBranchError(
     encoded_nodes: []const []const u8,
     key: []const u8,
 ) !void {
-    var indexed = try trie.indexNodes(encoded_nodes);
+    var indexed = try trie.indexWitness(encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, root_node);
-    try std.testing.expectError(expected, trie.lookup(root_hash, indexed.index(), key));
+    try std.testing.expectError(expected, indexed.lookup(root_hash, key));
 }
 
 fn expectHex(actual: []const u8, comptime expected_hex: []const u8) !void {

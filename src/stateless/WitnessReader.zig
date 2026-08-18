@@ -25,7 +25,7 @@ pub fn Reader(comptime mode: Mode) type {
         const WitnessStateReader = @This();
         const CatalogState = if (mode == .catalog) trie.WitnessCatalog else void;
         const IndexedState = if (mode == .indexed) struct {
-            nodes: *trie.IndexedNodes,
+            witness: *trie.WitnessIndex,
             proof_cache: trie.ProofCache,
         } else void;
 
@@ -43,16 +43,16 @@ pub fn Reader(comptime mode: Mode) type {
         pub fn init(
             allocator: std.mem.Allocator,
             state_root: [32]u8,
-            indexed: *trie.IndexedNodes,
+            witness: *trie.WitnessIndex,
             codes: []const []const u8,
         ) !WitnessStateReader {
             if (comptime mode == .indexed) {
-                errdefer indexed.deinit();
+                errdefer witness.deinit();
                 return .{
                     .allocator = allocator,
                     .state_root = state_root,
                     .indexed = .{
-                        .nodes = indexed,
+                        .witness = witness,
                         .proof_cache = .init(allocator),
                     },
                     .catalog = {},
@@ -61,12 +61,12 @@ pub fn Reader(comptime mode: Mode) type {
                 };
             }
 
-            errdefer indexed.deinit();
-            var catalog = try buildCatalog(allocator, state_root, indexed);
+            errdefer witness.deinit();
+            var catalog = try buildCatalog(allocator, state_root, witness);
             errdefer catalog.deinit();
             const indexed_codes = try indexCodes(allocator, codes);
-            // Catalog nodes borrow witness bytes, not the construction index.
-            indexed.deinit();
+            // Catalog nodes borrow encoded witness bytes, not index storage.
+            witness.deinit();
             return .{
                 .allocator = allocator,
                 .state_root = state_root,
@@ -86,15 +86,15 @@ pub fn Reader(comptime mode: Mode) type {
             nodes: []const []const u8,
             codes: []const []const u8,
         ) !WitnessStateReader {
-            return init(allocator, state_root, try trie.indexNodes(allocator, nodes), codes);
+            return init(allocator, state_root, try trie.indexWitness(allocator, nodes), codes);
         }
 
         fn buildCatalog(
             allocator: std.mem.Allocator,
             state_root: [32]u8,
-            indexed: *const trie.IndexedNodes,
+            witness: *const trie.WitnessIndex,
         ) CatalogInitError!trie.WitnessCatalog {
-            return trie.buildWitnessCatalog(allocator, state_root, indexed) catch |err| switch (err) {
+            return trie.buildWitnessCatalog(allocator, state_root, witness) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.ResourceLimitExceeded => error.ResourceLimitExceeded,
                 else => error.InvalidNode,
@@ -106,7 +106,7 @@ pub fn Reader(comptime mode: Mode) type {
                 self.indexed.proof_cache.deinit();
                 self.accounts.deinit();
                 self.allocator.free(self.codes);
-                self.indexed.nodes.deinit();
+                self.indexed.witness.deinit();
                 self.* = undefined;
                 return;
             }
@@ -169,7 +169,7 @@ pub fn Reader(comptime mode: Mode) type {
             changes: anytype,
         ) trie.UpdateError![32]u8 {
             if (comptime mode == .catalog) {
-                return trie.stateRootAfterChangesCatalog(
+                return trie.stateRootAfterTrackedChangesCatalog(
                     scratch,
                     self.state_root,
                     &self.catalog,
@@ -177,10 +177,10 @@ pub fn Reader(comptime mode: Mode) type {
                     changes,
                 );
             }
-            return trie.stateRootAfterChangesIndexed(
+            return trie.stateRootAfterTrackedChangesWithWitness(
                 scratch,
                 self.state_root,
-                self.indexed.nodes,
+                self.indexed.witness,
                 &self.accounts,
                 changes,
             );
@@ -210,7 +210,7 @@ pub fn Reader(comptime mode: Mode) type {
             }
             const lookup = trie.cachedProof(
                 self.state_root,
-                self.indexed.nodes,
+                self.indexed.witness,
                 &self.indexed.proof_cache,
             );
             const encoded = lookup.get(&key) catch return error.InvalidWitness;
@@ -284,7 +284,7 @@ pub fn Reader(comptime mode: Mode) type {
             }
             const lookup = trie.cachedProof(
                 account.storage_root,
-                self.indexed.nodes,
+                self.indexed.witness,
                 &self.indexed.proof_cache,
             );
             const encoded = lookup.get(&storage_key) catch return error.InvalidWitness;
@@ -315,7 +315,7 @@ test "witness state reader derives root directly from tracked changes" {
     try std.testing.expect(!try witness.reader().accountExists(address.addr(1)));
 
     const actual = try witness.stateRootAfterChanges(std.testing.allocator, changes);
-    const expected = try trie.stateRootAfterChanges(
+    const expected = try trie.stateRootAfterTrackedChanges(
         std.testing.allocator,
         trie.empty_root_hash,
         &.{},
@@ -416,10 +416,10 @@ test "catalog witness reader releases its construction index" {
 
     var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const allocator = counted.allocator();
-    const indexed = try trie.indexNodes(allocator, &nodes);
-    const indexed_bytes = indexed.allocationBytes();
+    const witness = try trie.indexWitness(allocator, &nodes);
+    const indexed_bytes = witness.allocationBytes();
     const freed_before = counted.freed_bytes;
-    var catalog = try Catalog.init(allocator, state_root, indexed, &.{});
+    var catalog = try Catalog.init(allocator, state_root, witness, &.{});
     defer catalog.deinit();
 
     try std.testing.expect(counted.freed_bytes - freed_before >= indexed_bytes);

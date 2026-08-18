@@ -475,6 +475,8 @@ pub const StorageWipes = struct {
 /// Borrowed semantic delta. Ordering is unspecified; consumers own sorting,
 /// allocation, persistence batches, and any retained representation.
 pub const ChangesView = struct {
+    pub const is_tracked_changes_view = true;
+
     handle: *const anyopaque,
     layer: ChangeLayer,
     accounts: AccountChanges,

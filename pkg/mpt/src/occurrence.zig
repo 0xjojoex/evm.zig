@@ -6,7 +6,7 @@
 const std = @import("std");
 const RewindableRegion = @import("rewindable_region");
 
-const catalog = @import("catalog.zig");
+const Catalog = @import("catalog.zig").Catalog;
 const encode = @import("encode.zig");
 const errors = @import("error.zig");
 const fixed_key = @import("fixed_key.zig");
@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const UpdateError = errors.UpdateError;
 const AllocUpdateError = Allocator.Error || UpdateError;
 
+/// Final value or deletion for one fixed 32-byte structural key.
 pub const Update = struct {
     key: fixed_key.FixedKey,
     value: ?[]const u8,
@@ -48,11 +49,11 @@ const IndexSource = struct {
 };
 
 fn Source(comptime mode: SourceMode) type {
-    return if (mode == .catalog) catalog.NodeId else IndexSource;
+    return if (mode == .catalog) Catalog.NodeId else IndexSource;
 }
 
 fn BranchSource(comptime mode: SourceMode) type {
-    return if (mode == .catalog) *const catalog.Node else *const node_codec.Node.Branch;
+    return if (mode == .catalog) *const Catalog.Node else *const node_codec.Node.Branch;
 }
 
 fn MutableNode(comptime mode: SourceMode) type {
@@ -151,7 +152,7 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
     return struct {
         const Self = @This();
         const Occurrence = MutableNode(mode);
-        const SourceResolver = if (mode == .catalog) *const catalog.Catalog else *const proof.NodeIndex;
+        const SourceResolver = if (mode == .catalog) *const Catalog else *const proof.NodeIndex;
 
         allocator: Allocator,
         keccak_context: KeccakContext,
@@ -216,7 +217,7 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
             return self.materializeIndex(id, source);
         }
 
-        fn materializeCatalog(self: *Self, id: OccurrenceId, source: catalog.NodeId) AllocUpdateError!void {
+        fn materializeCatalog(self: *Self, id: OccurrenceId, source: Catalog.NodeId) AllocUpdateError!void {
             const topology = self.source_resolver;
             const entry = topology.node(source) orelse return error.InvalidNodeReference;
             switch (entry.kind) {
@@ -312,7 +313,7 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
 
         fn appendCatalogDeferred(
             self: *Self,
-            link: catalog.Link,
+            link: Catalog.Link,
             reference: node_codec.Reference,
             parent: Parent,
         ) AllocUpdateError!OccurrenceId {
@@ -922,8 +923,8 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
 pub fn updateCatalogSorted(
     keccak_context: anytype,
     region: *Region,
-    topology: *const catalog.Catalog,
-    root_ref: catalog.RootRef,
+    topology: *const Catalog,
+    root_ref: Catalog.Root,
     updates: []const Update,
 ) AllocUpdateError!hash.Root {
     const root_hash = root_ref.digest();
@@ -977,7 +978,7 @@ fn updateResolved(
     comptime mode: SourceMode,
     keccak_context: anytype,
     allocator: Allocator,
-    source_resolver: if (mode == .catalog) *const catalog.Catalog else *const proof.NodeIndex,
+    source_resolver: if (mode == .catalog) *const Catalog else *const proof.NodeIndex,
     root_source: ?Source(mode),
     root_hash: hash.Root,
     updates: []const Update,

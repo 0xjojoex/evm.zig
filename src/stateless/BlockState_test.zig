@@ -445,13 +445,13 @@ test "storage wipe projections deduplicate scope reverts" {
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_wipes.len());
 }
 
-test "dense commit projection matches generic catalog commit across account lifecycles" {
+test "dense commit projection matches independent roots across account lifecycles" {
     inline for (.{
         DenseCommitCase.update,
         DenseCommitCase.delete,
         DenseCommitCase.wipe_recreate,
         DenseCommitCase.storage_only,
-    }) |case| try expectDenseCommitMatches(case);
+    }) |case| try expectDenseCommitMatchesIndependentRoot(case);
 }
 
 test "dense commit reclaims independent storage roots and error scopes" {
@@ -474,7 +474,7 @@ test "dense commit reclaims independent storage roots and error scopes" {
         plan.storageId(account_ids[1], slots[1]).?,
     };
 
-    var indexed = try trie.indexNodes(allocator, &.{});
+    var indexed = try trie.indexWitness(allocator, &.{});
     defer indexed.deinit();
     var catalog = try trie.buildWitnessCatalog(allocator, trie.empty_root_hash, indexed);
     defer catalog.deinit();
@@ -492,29 +492,8 @@ test "dense commit reclaims independent storage roots and error scopes" {
     state.seal(attempt);
     state.retain(attempt);
 
-    var account_facts = trie.AccountFacts.init(allocator);
-    defer account_facts.deinit();
     const accepted = state.acceptedView();
-    const generic = try trie.stateRootAfterChangesCatalog(
-        allocator,
-        trie.empty_root_hash,
-        &catalog,
-        &account_facts,
-        accepted.changes(),
-    );
-
     const wrong_root = [_]u8{0x42} ** 32;
-    try std.testing.expectError(
-        error.InvalidNodeReference,
-        trie.stateRootAfterChangesCatalog(
-            allocator,
-            wrong_root,
-            &catalog,
-            &account_facts,
-            accepted.changes(),
-        ),
-    );
-
     var commit_buffer: [128 * 1024]u8 = undefined;
     var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
     try std.testing.expectError(
@@ -535,7 +514,29 @@ test "dense commit reclaims independent storage roots and error scopes" {
         accepted.commit(),
     );
     try std.testing.expectEqual(@as(usize, 0), commit_fixed.end_index);
-    try std.testing.expectEqualSlices(u8, &generic, &dense);
+
+    var account_keys: [targets.len][32]u8 = undefined;
+    var account_pairs: [targets.len]trie.Pair = undefined;
+    const balances = [_]u256{ 10, 20 };
+    const storage_values = [_]u256{ 3, 5 };
+    for (targets, slots, balances, storage_values, 0..) |target, slot, balance, value, index| {
+        const storage_key = trie.hashedStorageKey(slot);
+        const encoded_storage = try trie.storageValue(allocator, value);
+        const storage_root = try trie.root(allocator, &.{.{
+            .key = &storage_key,
+            .value = encoded_storage,
+        }});
+        account_keys[index] = trie.hashedAddressKey(target);
+        account_pairs[index] = .{
+            .key = &account_keys[index],
+            .value = try trie.accountValueFrom(allocator, .{
+                .balance = balance,
+                .storage_root = storage_root,
+            }),
+        };
+    }
+    const expected = try trie.root(allocator, &account_pairs);
+    try std.testing.expectEqualSlices(u8, &expected, &dense);
 }
 
 const DenseCommitCase = enum {
@@ -545,7 +546,7 @@ const DenseCommitCase = enum {
     storage_only,
 };
 
-fn expectDenseCommitMatches(case: DenseCommitCase) !void {
+fn expectDenseCommitMatchesIndependentRoot(case: DenseCommitCase) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -564,7 +565,7 @@ fn expectDenseCommitMatches(case: DenseCommitCase) !void {
     const account_leaf = try denseCommitLeaf(allocator, trie.hashedAddressKey(target), account_value);
     const state_root = crypto.keccak256(account_leaf);
     const nodes = [_][]const u8{ account_leaf, storage_leaf };
-    var indexed = try trie.indexNodes(allocator, &nodes);
+    var indexed = try trie.indexWitness(allocator, &nodes);
     defer indexed.deinit();
     var catalog = try trie.buildWitnessCatalog(allocator, state_root, indexed);
     defer catalog.deinit();
@@ -600,17 +601,7 @@ fn expectDenseCommitMatches(case: DenseCommitCase) !void {
     state.seal(attempt);
     state.retain(attempt);
 
-    var account_facts = trie.AccountFacts.init(allocator);
-    defer account_facts.deinit();
-    try account_facts.put(target, parent);
     const accepted = state.acceptedView();
-    const generic = try trie.stateRootAfterChangesCatalog(
-        allocator,
-        state_root,
-        &catalog,
-        &account_facts,
-        accepted.changes(),
-    );
     var commit_buffer: [64 * 1024]u8 = undefined;
     var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
     const dense = try StatelessCommit.stateRootAfterCatalog(
@@ -620,7 +611,30 @@ fn expectDenseCommitMatches(case: DenseCommitCase) !void {
         accepted.commit(),
     );
     try std.testing.expectEqual(@as(usize, 0), commit_fixed.end_index);
-    try std.testing.expectEqualSlices(u8, &generic, &dense);
+
+    const expected = if (case == .delete)
+        trie.empty_root_hash
+    else expected: {
+        const next_storage_value = try trie.storageValue(allocator, 9);
+        const next_storage_key = trie.hashedStorageKey(slot);
+        const next_storage_root = try trie.root(allocator, &.{.{
+            .key = &next_storage_key,
+            .value = next_storage_value,
+        }});
+        const next_account: trie.Account = switch (case) {
+            .update => .{ .nonce = 1, .balance = 12, .storage_root = next_storage_root },
+            .wipe_recreate => .{ .nonce = 2, .balance = 5, .storage_root = next_storage_root },
+            .storage_only => .{ .storage_root = next_storage_root },
+            .delete => unreachable,
+        };
+        const next_account_value = try trie.accountValueFrom(allocator, next_account);
+        const next_account_key = trie.hashedAddressKey(target);
+        break :expected try trie.root(allocator, &.{.{
+            .key = &next_account_key,
+            .value = next_account_value,
+        }});
+    };
+    try std.testing.expectEqualSlices(u8, &expected, &dense);
 }
 
 fn denseCommitLeaf(

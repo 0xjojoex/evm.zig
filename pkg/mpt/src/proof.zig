@@ -1,11 +1,11 @@
-//! Witness-backed proof lookup: index encoded nodes by hash, then walk the trie.
+//! Witness-backed proof reads: index encoded nodes by hash, then walk the trie.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const errors = @import("error.zig");
 const IndexError = errors.IndexError;
 const LookupError = errors.LookupError;
-const InternalIndexError = IndexError || error{WorkspaceTooSmall};
 const hash = @import("hash.zig");
 const nibble = @import("nibble.zig");
 const node = @import("node.zig");
@@ -115,14 +115,119 @@ pub const NodeRecord = struct {
     encoded: []const u8,
 };
 
-pub const IndexStorage = struct {
-    sealed: IndexData = .{},
+/// Opaque content-addressed node index backing a sealed `WitnessIndex`.
+/// Safe code can only obtain a pointer through a sealed `WitnessIndex`, so raw
+/// records cannot be assembled into a value accepted by lookup or update
+/// operations. Root-relative authentication happens while traversing it.
+pub const NodeIndex = opaque {};
+
+const WitnessData = struct {
+    allocator: ?Allocator,
+    records: []NodeRecord,
+    table: []u32,
+    sealed: IndexData,
 };
 
-/// Opaque authenticated witness-index capability. Safe code can only obtain a
-/// pointer from an allocator-owned `IndexedNodes`; raw records cannot be
-/// assembled into a value accepted by lookup or update operations.
-pub const NodeIndex = opaque {};
+var empty_witness_data: WitnessData = .{
+    .allocator = null,
+    .records = &.{},
+    .table = &.{},
+    .sealed = .{},
+};
+
+/// Allocator-owned sealed witness index. Encoded node bytes stay borrowed and
+/// must outlive the index; the allocator that built it must outlive it too.
+/// Opaque: a pointer only comes from `Trie.indexWitness` or `.empty`, so raw
+/// records cannot be assembled into an accepted index.
+pub const WitnessIndex = opaque {
+    /// Static index over zero witness nodes; never deinitialized.
+    pub const empty: *const WitnessIndex = @ptrCast(&empty_witness_data);
+
+    pub fn deinit(self: *WitnessIndex) void {
+        const data = witnessData(self);
+        if (data.allocator) |allocator| {
+            allocator.free(data.table);
+            allocator.free(data.records);
+            allocator.destroy(data);
+        }
+    }
+
+    /// Resolve `key` against the trie rooted at `root_hash`, returning the
+    /// stored value or the reason the key is absent. Allocation-free; the
+    /// returned value borrows from the encoded witness bytes.
+    pub fn lookup(
+        self: *const WitnessIndex,
+        root_hash: hash.Root,
+        key: []const u8,
+    ) LookupError!Lookup {
+        return lookupWithCache(root_hash, sealedIndex(self), key, null) catch |err| switch (err) {
+            error.OutOfMemory => unreachable,
+            else => |lookup_err| return lookup_err,
+        };
+    }
+
+    /// `lookup` that memoizes decoded nodes in `cache` across repeated reads.
+    pub fn lookupCached(
+        self: *const WitnessIndex,
+        root_hash: hash.Root,
+        key: []const u8,
+        cache: *LookupCache,
+    ) (Allocator.Error || LookupError)!Lookup {
+        return lookupWithCache(root_hash, sealedIndex(self), key, cache);
+    }
+
+    /// Unique nodes retained after first-occurrence deduplication.
+    pub fn nodeCount(self: *const WitnessIndex) usize {
+        return witnessConstData(self).sealed.records.len;
+    }
+
+    /// Requested bytes retained by this owned index, excluding allocator
+    /// alignment and bookkeeping. The empty index uses static storage.
+    pub fn allocationBytes(self: *const WitnessIndex) usize {
+        const data = witnessConstData(self);
+        if (data.allocator == null) return 0;
+        return @sizeOf(WitnessData) +
+            data.records.len * @sizeOf(NodeRecord) +
+            data.table.len * @sizeOf(u32);
+    }
+};
+
+fn witnessData(witness: *WitnessIndex) *WitnessData {
+    return @ptrCast(@alignCast(witness));
+}
+
+fn witnessConstData(witness: *const WitnessIndex) *const WitnessData {
+    return @ptrCast(@alignCast(witness));
+}
+
+/// Package-internal: the sealed capability behind an owned witness index.
+pub fn sealedIndex(witness: *const WitnessIndex) *const NodeIndex {
+    return witnessConstData(witness).sealed.indexFromData();
+}
+
+/// Hash each witness node and seal an allocator-owned deduplicated index.
+pub fn indexWitness(
+    keccak_context: anytype,
+    allocator: Allocator,
+    encoded_nodes: []const []const u8,
+) (Allocator.Error || IndexError)!*WitnessIndex {
+    if (encoded_nodes.len == 0) return @constCast(WitnessIndex.empty);
+
+    const records = try allocator.alloc(NodeRecord, encoded_nodes.len);
+    errdefer allocator.free(records);
+    const table = try allocator.alloc(u32, tableCapacity(encoded_nodes.len));
+    errdefer allocator.free(table);
+    const data = try allocator.create(WitnessData);
+    errdefer allocator.destroy(data);
+    data.* = .{
+        .allocator = allocator,
+        .records = records,
+        .table = table,
+        .sealed = .{},
+    };
+    try buildIndex(keccak_context, &data.sealed, records, table, encoded_nodes);
+    return @ptrCast(data);
+}
 
 /// Table capacity for `node_count` records: a power of two with at most 50%
 /// load, so probe chains stay short and the mask is one AND.
@@ -172,6 +277,10 @@ const IndexData = struct {
             slot = @intCast((slot + 1) & mask);
         }
     }
+
+    fn indexFromData(data: *const IndexData) *const NodeIndex {
+        return @ptrCast(data);
+    }
 };
 
 pub const IndexedNode = struct {
@@ -184,16 +293,16 @@ pub const IndexedNode = struct {
 /// Records keep first-occurrence order, so positions are dense and stable.
 /// Errors with `ConflictingNode` when two nodes share a hash but differ in
 /// bytes.
-pub fn indexNodes(
+fn buildIndex(
     keccak_context: anytype,
-    index_storage: *IndexStorage,
+    sealed: *IndexData,
     storage: []NodeRecord,
     table: []u32,
     encoded_nodes: []const []const u8,
-) InternalIndexError!*const NodeIndex {
-    if (storage.len < encoded_nodes.len) return error.WorkspaceTooSmall;
+) IndexError!void {
+    std.debug.assert(storage.len >= encoded_nodes.len);
     const capacity = tableCapacity(encoded_nodes.len);
-    if (table.len < capacity) return error.WorkspaceTooSmall;
+    std.debug.assert(table.len >= capacity);
     // Position entries are u32; a witness cannot hold 4G nodes.
     std.debug.assert(encoded_nodes.len < std.math.maxInt(u32));
 
@@ -220,15 +329,10 @@ pub fn indexNodes(
             slot = @intCast((slot + 1) & mask);
         }
     }
-    index_storage.sealed = .{
+    sealed.* = .{
         .records = storage[0..unique_len],
         .table = active_table,
     };
-    return indexFromData(&index_storage.sealed);
-}
-
-pub fn emptyIndex(storage: *const IndexStorage) *const NodeIndex {
-    return indexFromData(&storage.sealed);
 }
 
 pub fn nodeCount(index: *const NodeIndex) usize {
@@ -254,22 +358,6 @@ fn dataFromIndex(index: *const NodeIndex) *const IndexData {
 
 /// Walk the trie rooted at `root` within `index` to resolve `key`, following
 /// hashed child references through the witness nodes.
-pub fn lookup(root: hash.Root, index: *const NodeIndex, key: []const u8) LookupError!Lookup {
-    return lookupWithCache(root, index, key, null) catch |err| switch (err) {
-        error.OutOfMemory => unreachable,
-        else => |lookup_err| return lookup_err,
-    };
-}
-
-pub fn lookupCached(
-    root: hash.Root,
-    index: *const NodeIndex,
-    key: []const u8,
-    cache: *LookupCache,
-) (std.mem.Allocator.Error || LookupError)!Lookup {
-    return lookupWithCache(root, index, key, cache);
-}
-
 fn lookupWithCache(
     root: hash.Root,
     index: *const NodeIndex,
@@ -380,7 +468,7 @@ test "decoded-node cache indexes many witness positions" {
     const records = try std.testing.allocator.alloc(NodeRecord, node_count);
     defer std.testing.allocator.free(records);
     const index_data = IndexData{ .records = records };
-    const index = indexFromData(&index_data);
+    const index = index_data.indexFromData();
     const encoded_leaf = [_]u8{ 0xc2, 0x20, 0x01 };
     for (0..node_count) |position| {
         try std.testing.expect((try cache.decode(index, position, &encoded_leaf, false)) == .leaf);

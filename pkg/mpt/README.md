@@ -83,11 +83,10 @@ const entries = [_]mpt.Entry{
 const root_hash = try trie.root(&entries);
 
 // 2. Verify a key against a trusted root, using a sealed witness index.
-var indexed = try trie.indexNodes(encoded_nodes);
-defer indexed.deinit();
-const index = indexed.index();
+var witness = try trie.indexWitness(encoded_nodes);
+defer witness.deinit();
 
-switch (try trie.lookup(trusted_root, index, "dog")) {
+switch (try witness.lookup(trusted_root, "dog")) {
     .present => |value| { /* authenticated value bytes */ },
     .absent  => |reason| { /* valid non-existence: reason says why */ },
 }
@@ -97,11 +96,15 @@ const updates = [_]mpt.Update{
     .{ .key = "do",  .value = null },    // delete
     .{ .key = "dog", .value = "hound" }, // insert/replace
 };
-const post_root = try trie.updateSorted(trusted_root, index, &updates);
+const post_root = try trie.updateSorted(trusted_root, witness, &updates);
 ```
 
 `mpt.init(allocator)` uses the stdlib Keccak context. For an accelerated
 Keccak implementation, use `mpt.Trie(MyKeccak).init(allocator, context)`.
+
+Operations that execute Keccak — root construction, witness indexing, and
+every mutation — are `Trie` methods. Hash-free reads live on the data they
+read: `WitnessIndex.lookup`, `Catalog.lookup`, `Catalog.bindSorted`.
 
 An optional typed-key facade projects domain keys into fixed 32-byte structural
 keys while leaving values raw:
@@ -111,7 +114,7 @@ const Structural = mpt.Trie(MyKeccak);
 const Accounts = Structural.Keyed(Address, AccountKeyContext);
 const accounts = Accounts.init(structural_trie, account_key_context);
 
-const result = try accounts.lookup(root_hash, index, address);
+const result = try accounts.lookup(root_hash, witness, address);
 ```
 
 `KeyContext.trieKey(self, key)` owns only key projection. It does not change
@@ -131,34 +134,40 @@ bytes.
 
 `Trie(...).Keyed(Key, KeyContext)` accepts typed keys whose `trieKey`
 projection returns `mpt.FixedKey` (`[32]u8`). Typed lookup projects one key on
-the stack; typed root and update batches materialize projected keys and sort by
-those bytes before the structural call, because domain-key ordering is not
+the stack; typed update batches materialize projected keys and sort by those
+bytes before the structural call, because domain-key ordering is not
 structural-key ordering.
 
-**Witness node index.** `indexNodes` borrows a slice of encoded nodes, hashes
-each exactly once, and builds an allocator-owned open-addressed position table
-at no more than 50% load — first-occurrence record order, identical duplicates
-collapsed, one digest with conflicting bytes rejected. `IndexedNodes.index()`
-returns an opaque borrowed capability serving any number of allocation-free
-lookups and resolver-backed updates; raw records cannot be assembled into an
-accepted index. `deinit()` releases records and table through the retained
-allocator while the encoded node bytes stay borrowed, and `allocationBytes()`
-reports the retained bytes for guest budgeting. Extra irrelevant nodes do not
-fail a proof.
+Naming follows one rule: a `Sorted` suffix means the input must already be
+strictly ascending (validated), `AssumeSorted` means the caller guarantees it,
+and an unsuffixed variant sorts for the caller.
 
-**Authenticated catalog.** `catalogBuilder(index)` is an optional ingestion
-layer over the sealed index. `authenticateRoot` decodes the witness-present
-topology reachable from a trusted root into stable `u32` handles; `finish`
-rejects resolved cycles and noncanonical extension topology, then seals an
-immutable catalog whose lookup path performs no hashing, digest search,
-allocation, or RLP decoding. Embedded children are always linked; a hashed
-child absent from the witness stays opaque and produces `MissingNode` only when
-a lookup or update selects it. Several state or storage roots may share one
-builder, and content-addressed nodes retain one handle.
-`CatalogBuilder.leafValue` lets ingestion code inspect authenticated leaf
-payloads without exposing catalog records. `Catalog.lookupBound` returns
-`BoundLookup`, adding the stable terminal `CatalogNodeId` needed by typed
-caches.
+**Witness index.** `Trie.indexWitness` borrows a slice of encoded nodes,
+hashes each exactly once, and seals an allocator-owned open-addressed position
+table at no more than 50% load — first-occurrence record order, identical
+duplicates collapsed, one digest with conflicting bytes rejected. The returned
+`*WitnessIndex` is opaque: a valid pointer only comes from `indexWitness` (or
+the static `WitnessIndex.empty`), so raw records cannot be assembled into an
+accepted index. It serves any number of allocation-free `lookup`s and
+resolver-backed updates. `deinit()` releases records and table through the
+retained allocator while the encoded node bytes stay borrowed, and
+`allocationBytes()` reports the retained bytes for guest budgeting. Extra
+irrelevant nodes do not fail a proof.
+
+**Authenticated catalog.** `Catalog.Builder.init(allocator, witness)` is an
+optional ingestion layer over the sealed index; it never hashes, because nodes
+were authenticated when the witness was sealed. `authenticateRoot` decodes the
+witness-present topology reachable from a trusted root into stable `u32`
+handles; `finish` rejects resolved cycles and noncanonical extension topology,
+then seals an immutable catalog whose lookup path performs no hashing, digest
+search, allocation, or RLP decoding. Embedded children are always linked; a
+hashed child absent from the witness stays opaque and produces `MissingNode`
+only when a lookup or update selects it. Several state or storage roots may
+share one builder, and content-addressed nodes retain one handle.
+`Builder.leafValue` lets ingestion code inspect authenticated leaf payloads
+without exposing catalog records. `Catalog.lookupBound` returns
+`Catalog.BoundLookup`, adding the stable terminal `Catalog.NodeId` needed by
+typed caches.
 
 **Fixed-key mutation.** `updateFixedSorted` and `updateCatalogSorted` share one
 MPT mutation algebra for exactly 32-byte keys. The former resolves
@@ -170,14 +179,13 @@ write overlay, not another authenticated source of truth. Fixed width makes
 branch terminal values and prefix keys structurally invalid; arbitrary-width
 keys remain on `updateSorted` in the sparse engine.
 
-**Fixed-key binding.** `bindSorted` and `bindAssumeSorted` batch authenticated
-lookups through a catalog without allocation or RLP decoding, sharing prefixes
-across a fixed 65-frame `BindWorkspace`. `FixedLookup` uses the smaller
-fixed-key absence algebra, which omits the impossible `empty_branch_value`
-result.
+**Fixed-key binding.** `Catalog.bindSorted` and `Catalog.bindAssumeSorted`
+batch authenticated lookups through the catalog without allocation or RLP
+decoding, sharing prefixes across a fixed 65-frame `Catalog.BindWorkspace`.
+`FixedLookup` uses the smaller fixed-key absence algebra, which omits the
+impossible `empty_branch_value` result.
 
-**Lookup outcomes.** `lookup` (also exported as the top-level `mpt.lookup`)
-returns a `Lookup` union:
+**Lookup outcomes.** `WitnessIndex.lookup` returns a `Lookup` union:
 
 - `.present` — the authenticated value bytes, borrowed from the bag; they
   cannot outlive it.
@@ -187,7 +195,8 @@ returns a `Lookup` union:
 
 An omitted-but-required hashed node instead returns `error.MissingNode` — an
 incomplete witness, never a proof of absence. Repeated arbitrary-key reads may
-pass a `LookupCache` to `lookupCached`; the cache owns only memoization.
+pass a `LookupCache` to `WitnessIndex.lookupCached`; the cache owns only
+memoization.
 
 **Sparse update.** `updateSorted` materializes only the nodes on changed paths;
 unvisited hashed siblings stay as blind 32-byte references. A non-null value
@@ -198,8 +207,8 @@ immutable, and a failed call leaves no partial state.
 ## Resource model
 
 `init` takes an allocator retained by the trie; `root`, `rootSorted`,
-`indexNodes`, and `updateSorted` use it, and it must outlive the trie and every
-`IndexedNodes` it creates. Both fixed-key mutation paths take an explicit
+`indexWitness`, and `updateSorted` use it, and it must outlive the trie and
+every `WitnessIndex` it creates. Both fixed-key mutation paths take an explicit
 resettable `Region`; the typed `update` and `updateCatalog` facades also
 allocate their projected update descriptors there.
 
@@ -213,9 +222,9 @@ or application boundary — the stateless guest, for example, validates SSZ list
 and byte-list maxima before invoking MPT, and its fixed allocator independently
 caps memory.
 
-`RootWorkspace`, `rootWorkspaceSize(entries, include_sort)`,
-`rootWorkspaceSizeForLimits`, and the root `*WithWorkspace` entry points remain
-advanced APIs for exact full-root scratch reuse; the limits form computes a
+`rootBufferSize(entries, include_sort)`, `rootBufferSizeForLimits`, and the
+root `*WithBuffer` entry points remain advanced APIs for exact full-root buffer
+reuse; the limits form computes a
 bound before descriptors are materialized. Indexing and sparse update
 deliberately have no caller-storage sizing API: bounded callers use a fixed
 allocator rather than exposing mutable index records or relying on an
@@ -234,12 +243,8 @@ constructed by ordinary proof/update users. Its descriptors encode
 node-relative spans as `u16`, so catalog ingestion rejects an encoded node
 larger than 65,535 bytes with `ResourceLimitExceeded` — a catalog-only bound
 that leaves the generic proof and sparse-update APIs unchanged.
-`catalogBuilderWithLimits` additionally bounds indexed node count, linked nodes
-(including embedded occurrences), and branch rows; exceeding a bound returns
-`ResourceLimitExceeded`, and applications can retain the ordinary proof reader
-as a correctness-preserving fallback. All of this happens after the witness
-index exists, so wire admission must separately bound raw witness count and
-bytes. The package chooses no policy numbers for either layer.
+The catalog is built only after the witness index exists, so it does not replace
+wire-level admission bounds on raw witness count and bytes.
 
 ## Keccak execution context
 
@@ -268,10 +273,10 @@ canonical anchors, insertion-order independence, typed absence, missing and
 conflicting nodes, one-occupant branches, exact 31/32/33-byte reference
 behavior, malformed compact paths and RLP, sparse insert/replace/delete with
 hashed-sibling collapse, allocator exhaustion, long retained witness paths, and
-misaligned/undersized full-root workspace.
+misaligned/undersized full-root buffer.
 
 The fuzz gate generates shared-prefix, divergent, and prefix-chain tries and
-requires sorted, unsorted, exact-size-workspace, and sparse-from-empty
+requires sorted, unsorted, exact-size-buffer, and sparse-from-empty
 construction to agree on one root. It also round-trips generated leaf proofs,
 checks witness-backed replace and delete, differentially checks fixed-key index
 and catalog mutation against full construction, and feeds arbitrary encoded

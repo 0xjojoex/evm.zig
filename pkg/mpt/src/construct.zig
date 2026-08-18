@@ -1,7 +1,7 @@
 //! Trie root construction from a complete set of key/value entries.
 //!
-//! Builds the trie iteratively in the workspace (no recursion, no heap) and
-//! returns only the resulting root hash.
+//! Builds the trie iteratively in the caller-provided buffer (no recursion,
+//! no heap) and returns only the resulting root hash.
 
 const std = @import("std");
 const rlp = @import("rlp");
@@ -10,15 +10,13 @@ const Error = @import("error.zig").BuildError;
 const node_hash = @import("hash.zig");
 const Root = node_hash.Root;
 const nibble = @import("nibble.zig");
-const Workspace = @import("workspace.zig").Workspace;
-
 /// A key/value pair to insert into the trie. Both slices are borrowed.
 pub const Entry = struct {
     key: []const u8,
     value: []const u8,
 };
 
-/// Checked workspace requirements derived from one concrete operation.
+/// Checked buffer requirements derived from one concrete operation.
 pub const Requirements = struct {
     key_bytes: usize,
     node_capacity: usize,
@@ -26,7 +24,7 @@ pub const Requirements = struct {
     step_capacity: usize,
 };
 
-/// Derive workspace requirements from a complete root input.
+/// Derive buffer requirements from a complete root input.
 pub fn requirements(entries: []const Entry) Error!Requirements {
     if (entries.len == 0) return .{
         .key_bytes = 0,
@@ -88,15 +86,15 @@ fn itemUpperBound(payload_len: usize) Error!usize {
         error.ResourceLimitExceeded;
 }
 
-/// Bytes of workspace needed to build a root. Set `include_sort` when the
+/// Bytes of buffer needed to build a root. Set `include_sort` when the
 /// entries will be passed unsorted to `root`.
-pub fn workspaceSize(entries: []const Entry, include_sort: bool) Error!usize {
-    return workspaceSizeFor(entries.len, try requirements(entries), include_sort);
+pub fn bufferSize(entries: []const Entry, include_sort: bool) Error!usize {
+    return bufferSizeFor(entries.len, try requirements(entries), include_sort);
 }
 
-/// Derive workspace bytes without first materializing `Entry` descriptors.
+/// Derive buffer bytes without first materializing `Entry` descriptors.
 /// The caller supplies exact maxima from its own typed input representation.
-pub fn workspaceSizeForLimits(
+pub fn bufferSizeForLimits(
     entry_count: usize,
     max_key_bytes: usize,
     max_value_bytes: usize,
@@ -105,7 +103,7 @@ pub fn workspaceSizeForLimits(
     if (entry_count == 0) return 0;
     const node_capacity = std.math.mul(usize, entry_count, 3) catch
         return error.ResourceLimitExceeded;
-    return workspaceSizeFor(entry_count, .{
+    return bufferSizeFor(entry_count, .{
         .key_bytes = max_key_bytes,
         .node_capacity = node_capacity,
         .node_rlp_bytes = try nodeRlpUpperBound(max_key_bytes, max_value_bytes),
@@ -114,7 +112,7 @@ pub fn workspaceSizeForLimits(
     }, include_sort);
 }
 
-pub fn workspaceSizeFor(entry_count: usize, needed: Requirements, include_sort: bool) Error!usize {
+pub fn bufferSizeFor(entry_count: usize, needed: Requirements, include_sort: bool) Error!usize {
     if (entry_count == 0) return 0;
     const possible_nodes = std.math.mul(usize, entry_count, 3) catch
         return error.ResourceLimitExceeded;
@@ -123,13 +121,13 @@ pub fn workspaceSizeFor(entry_count: usize, needed: Requirements, include_sort: 
         return error.ResourceLimitExceeded;
     }
 
-    const workspace_alignment = @max(
+    const buffer_alignment = @max(
         @alignOf(Entry),
         @alignOf(Node),
         @alignOf(Task),
         @alignOf(Reference),
     );
-    var offset: usize = workspace_alignment - 1;
+    var offset: usize = buffer_alignment - 1;
     if (include_sort) offset = try addRegion(Entry, offset, entry_count);
     offset = try addRegion(Node, offset, capacity);
     offset = try addRegion(Task, offset, capacity);
@@ -186,53 +184,50 @@ const Reference = union(enum) {
 /// `error.UnsortedKeys` if they are not.
 pub fn rootSorted(
     keccak_context: anytype,
-    workspace: *Workspace,
+    buffer: []u8,
     entries: []const Entry,
     needed: Requirements,
 ) Error!Root {
-    workspace.reset();
     if (entries.len == 0) return node_hash.empty_root;
     try validateEntries(entries, true);
-    return buildRoot(keccak_context, workspace, entries, needed);
+    return buildRoot(keccak_context, buffer, entries, needed);
 }
 
 /// Build the root from `entries` in any order; they are copied into the
-/// workspace and sorted before building.
+/// buffer and sorted before building.
 pub fn root(
     keccak_context: anytype,
-    workspace: *Workspace,
+    buffer: []u8,
     entries: []const Entry,
     needed: Requirements,
 ) Error!Root {
-    workspace.reset();
     if (entries.len == 0) return node_hash.empty_root;
     try validateEntries(entries, false);
 
-    var fixed = std.heap.FixedBufferAllocator.init(workspace.buffer);
+    var fixed = std.heap.FixedBufferAllocator.init(buffer);
     const allocator = fixed.allocator();
-    const sorted = allocator.dupe(Entry, entries) catch return error.WorkspaceTooSmall;
+    const sorted = allocator.dupe(Entry, entries) catch return error.BufferTooSmall;
     std.mem.sortUnstable(Entry, sorted, {}, struct {
         fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
             return std.mem.lessThan(u8, lhs.key, rhs.key);
         }
     }.lessThan);
     try validateOrder(sorted);
-    return buildRootWithAllocator(keccak_context, workspace, &fixed, sorted, needed);
+    return buildRootWithAllocator(keccak_context, &fixed, sorted, needed);
 }
 
 fn buildRoot(
     keccak_context: anytype,
-    workspace: *Workspace,
+    buffer: []u8,
     entries: []const Entry,
     needed: Requirements,
 ) Error!Root {
-    var fixed = std.heap.FixedBufferAllocator.init(workspace.buffer);
-    return buildRootWithAllocator(keccak_context, workspace, &fixed, entries, needed);
+    var fixed = std.heap.FixedBufferAllocator.init(buffer);
+    return buildRootWithAllocator(keccak_context, &fixed, entries, needed);
 }
 
 fn buildRootWithAllocator(
     keccak_context: anytype,
-    workspace: *Workspace,
     fixed: *std.heap.FixedBufferAllocator,
     entries: []const Entry,
     needed: Requirements,
@@ -245,15 +240,15 @@ fn buildRootWithAllocator(
         return error.ResourceLimitExceeded;
     }
 
-    const nodes = allocator.alloc(Node, capacity) catch return error.WorkspaceTooSmall;
-    const tasks = allocator.alloc(Task, capacity) catch return error.WorkspaceTooSmall;
-    const references = allocator.alloc(Reference, capacity) catch return error.WorkspaceTooSmall;
+    const nodes = allocator.alloc(Node, capacity) catch return error.BufferTooSmall;
+    const tasks = allocator.alloc(Task, capacity) catch return error.BufferTooSmall;
+    const references = allocator.alloc(Reference, capacity) catch return error.BufferTooSmall;
     const compact_buffer_len = std.math.add(usize, needed.key_bytes, 1) catch
         return error.ResourceLimitExceeded;
     const compact_buffer = allocator.alloc(u8, compact_buffer_len) catch
-        return error.WorkspaceTooSmall;
+        return error.BufferTooSmall;
     const node_buffer = allocator.alloc(u8, needed.node_rlp_bytes) catch
-        return error.WorkspaceTooSmall;
+        return error.BufferTooSmall;
 
     var node_len: usize = 1;
     nodes[0] = .pending;
@@ -345,7 +340,6 @@ fn buildRootWithAllocator(
         }
     }
 
-    workspace.peak_used_bytes = fixed.end_index;
     return root_hash;
 }
 
