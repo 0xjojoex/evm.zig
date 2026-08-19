@@ -710,7 +710,7 @@ pub fn ExecutorType(
             try self.openTransactionScope(context, mode);
             errdefer self.discardStateTransition();
 
-            try transaction_runtime.initializeMessageScope(self, message, scope_init);
+            try transaction_runtime.initializeMessageScope(self, message, scope_init, .none);
         }
 
         fn beginSystemCall(

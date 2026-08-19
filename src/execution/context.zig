@@ -9,6 +9,46 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 
+/// Typed extension supplied by a custom transaction program and borrowed by
+/// instruction handlers through `ExecutionContext`. The pointed-to runtime is
+/// mutable and transaction-owned; the core only transports it.
+pub const TransactionExtension = struct {
+    ptr: ?*anyopaque = null,
+    type_id: ?*const u8 = null,
+
+    pub fn init(runtime: anytype) TransactionExtension {
+        const Pointer = @TypeOf(runtime);
+        const info = switch (@typeInfo(Pointer)) {
+            .pointer => |pointer| pointer,
+            else => @compileError("transaction extension requires a pointer"),
+        };
+        if (info.size != .one)
+            @compileError("transaction extension requires a single-item pointer");
+        if (info.is_const)
+            @compileError("transaction extension requires mutable transaction state");
+        return .{
+            .ptr = @ptrCast(runtime),
+            .type_id = &TypeId(info.child).identity,
+        };
+    }
+
+    /// A different runtime type reads as absent by design, allowing custom
+    /// transaction families with distinct handlers to share one opcode table.
+    pub fn get(self: TransactionExtension, comptime Runtime: type) ?*Runtime {
+        if (self.type_id != &TypeId(Runtime).identity) return null;
+        return @ptrCast(@alignCast(self.ptr orelse return null));
+    }
+
+    fn TypeId(comptime Runtime: type) type {
+        return struct {
+            // Keep the returned container explicitly keyed by the requested type.
+            const RuntimeType = Runtime;
+            // The address identifies this type instantiation; the value is never read.
+            var identity: u8 = 0;
+        };
+    }
+};
+
 pub const ChainEnvironment = struct {
     /// Required: a default would silently choose one family's chain identity.
     chain_id: u256,
@@ -40,6 +80,9 @@ pub const TransactionEnvironment = struct {
     /// GASPRICE: the effective gas price, not the transaction's max fee.
     gas_price: u256 = 0,
     blob_hashes: []const u256 = &.{},
+    /// Optional custom-family extension. Core opcodes ignore it; externally
+    /// installed instructions may request their exact runtime type.
+    extension: TransactionExtension = .{},
 };
 
 pub const ExecutionContext = struct {
@@ -66,6 +109,17 @@ pub const ExecutionContext = struct {
             std.meta.eql(a.block, b.block) and
             std.meta.eql(a_transaction, b_transaction) and
             std.mem.eql(u256, a.transaction.blob_hashes, b.transaction.blob_hashes);
+    }
+
+    /// Whether two roots belong to the same custom transaction session.
+    /// `ORIGIN` may change per root; all chain, block, fee, blob, and extension
+    /// identity must remain transaction-stable.
+    pub fn sameRootSession(a: ExecutionContext, b: ExecutionContext) bool {
+        var a_root = a;
+        var b_root = b;
+        a_root.transaction.origin = std.mem.zeroes(Address);
+        b_root.transaction.origin = std.mem.zeroes(Address);
+        return a_root.eql(b_root);
     }
 };
 
@@ -105,4 +159,29 @@ test "execution context equality compares borrowed blob values" {
     b_hashes[1] = 43;
     b.chain.chain_id = 8;
     try std.testing.expect(!a.eql(b));
+}
+
+test "transaction extension preserves type and identity" {
+    const Runtime = struct { value: u64 };
+    const Other = struct { value: u64 };
+    var first = Runtime{ .value = 7 };
+    var second = Runtime{ .value = 7 };
+    const first_extension = TransactionExtension.init(&first);
+    const second_extension = TransactionExtension.init(&second);
+
+    try std.testing.expectEqual(@as(u64, 7), first_extension.get(Runtime).?.value);
+    try std.testing.expect(first_extension.get(Other) == null);
+    try std.testing.expect(!std.meta.eql(first_extension, second_extension));
+}
+
+test "multi-root context may only rebind origin" {
+    const first: ExecutionContext = .{
+        .chain = .{ .chain_id = 1 },
+        .transaction = .{ .origin = Address.fromBytes([_]u8{1} ** 20) },
+    };
+    var second = first;
+    second.transaction.origin = Address.fromBytes([_]u8{2} ** 20);
+    try std.testing.expect(first.sameRootSession(second));
+    second.transaction.gas_price = 1;
+    try std.testing.expect(!first.sameRootSession(second));
 }

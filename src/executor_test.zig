@@ -1725,6 +1725,107 @@ test "active transaction finishes into pending state" {
     try std.testing.expect(!executor.hasCurrentTransaction());
 }
 
+test "multi-root transaction preserves committed roots and isolates failed roots" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Runtime = struct { marker: u8 };
+    const sender = evmz.addr(0xaaaa);
+    const first_contract = evmz.addr(0x1111);
+    const second_contract = evmz.addr(0x2222);
+    const failed_contract = evmz.addr(0x3333);
+    const first_origin = evmz.addr(0xaaaa_0001);
+    const second_origin = evmz.addr(0xaaaa_0002);
+    const failed_origin = evmz.addr(0xaaaa_0003);
+    const first_code = evmz.t.bytecode(.{
+        .PUSH1, 1,      .PUSH0, .SSTORE,
+        .PUSH1, 1,      .PUSH0, .TSTORE,
+        .PUSH0, .PUSH0, .LOG0,  .STOP,
+    });
+    const second_code = evmz.t.bytecode(.{
+        .ORIGIN, .PUSH0,  .SSTORE,
+        .PUSH0,  .TLOAD,  .PUSH1,
+        1,       .SSTORE, .PUSH0,
+        .PUSH0,  .LOG0,   .STOP,
+    });
+    const failed_code = evmz.t.bytecode(.{
+        .ORIGIN, .PUSH0, .SSTORE,
+        .PUSH1,  3,      .PUSH0,
+        .TSTORE, .PUSH0, .PUSH0,
+        .LOG0,   .PUSH0, .PUSH0,
+        .REVERT,
+    });
+
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, first_contract, .{ .code = &first_code });
+    try evmz.t.seedExecutorAccount(&executor, second_contract, .{ .code = &second_code });
+    try evmz.t.seedExecutorAccount(&executor, failed_contract, .{ .code = &failed_code });
+
+    var runtime = Runtime{ .marker = 7 };
+    const session_context = execution_values.ExecutionContext{
+        .chain = .{ .chain_id = 1 },
+        .transaction = .{
+            .origin = first_origin,
+            .extension = .init(&runtime),
+        },
+    };
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, session_context);
+
+    const first = try transaction_runtime.runRoot(&executor, .{
+        .context = session_context,
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = first_contract,
+        } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, first.result.status());
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(first_contract, 0));
+    try std.testing.expectEqual(@as(u256, 1), try executor.state.getTransientStorage(first_contract, 0));
+    try std.testing.expect(executor.state.isAccountWarm(first_contract));
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
+
+    var second_context = session_context;
+    second_context.transaction.origin = second_origin;
+    const second = try transaction_runtime.runRoot(&executor, .{
+        .context = second_context,
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = second_contract,
+        } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, second.result.status());
+    try std.testing.expectEqual(second_origin.toU256(), try executor.getStorage(second_contract, 0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(second_contract, 1));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getTransientStorage(first_contract, 0));
+    try std.testing.expect(executor.state.isAccountWarm(first_contract));
+    try std.testing.expect(executor.state.isAccountWarm(second_contract));
+    try std.testing.expectEqual(@as(usize, 2), executor.logView().len());
+    try std.testing.expect(executor.execution_context.?.transaction.extension.get(Runtime).? == &runtime);
+
+    var failed_context = session_context;
+    failed_context.transaction.origin = failed_origin;
+    const failed = try transaction_runtime.runRoot(&executor, .{
+        .context = failed_context,
+        .message = .{ .call = .{
+            .sender = sender,
+            .recipient = failed_contract,
+        } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.revert, failed.result.status());
+    try std.testing.expect(!executor.state.isAccountWarm(failed_contract));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(failed_contract, 0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getTransientStorage(failed_contract, 0));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(first_contract, 0));
+    try std.testing.expectEqual(second_origin.toU256(), try executor.getStorage(second_contract, 0));
+    try std.testing.expect(executor.state.isAccountWarm(first_contract));
+    try std.testing.expect(executor.state.isAccountWarm(second_contract));
+    try std.testing.expectEqual(@as(usize, 2), executor.logView().len());
+}
+
 test "transaction nonce advancement survives payload rollback" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);

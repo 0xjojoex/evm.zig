@@ -19,6 +19,8 @@ pub inline fn requireActive(executor: anytype) void {
     std.debug.assert(hasActive(executor));
 }
 
+pub const RootAccessReservation = enum { none, reserve };
+
 pub fn begin(executor: anytype, mode: Mode) !void {
     std.debug.assert(executor.transaction_runtime_state == null);
     std.debug.assert(executor.execution_context == null);
@@ -43,9 +45,13 @@ pub fn initializeMessageScope(
     executor: anytype,
     message: execution.Message,
     scope_init: execution.ExecutionScopeInit,
+    root_access_reservation: RootAccessReservation,
 ) !void {
     const initial_warm_set = scope_init.initial_warm_set;
-    if (initial_warm_set.accounts.len != 0 or initial_warm_set.storage_slots.len != 0) {
+    if (root_access_reservation == .reserve or
+        initial_warm_set.accounts.len != 0 or
+        initial_warm_set.storage_slots.len != 0)
+    {
         const root_accounts: usize = switch (message) {
             .call => 2,
             .create => 1,
@@ -97,7 +103,54 @@ pub fn beginExecution(
     executor.state.beginScope();
     errdefer closeExecutionScope(executor);
 
-    try initializeMessageScope(executor, request.message, scope_init);
+    try initializeMessageScope(executor, request.message, scope_init, .none);
+}
+
+/// Open one transaction-scoped execution session that may run multiple EVM
+/// roots. Unlike `beginExecution`, this does not bind or warm a root message;
+/// the family transition may take an outer checkpoint before `runRoot`.
+pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) !void {
+    requireActive(executor);
+    std.debug.assert(executor.execution_context == null);
+    std.debug.assert(executor.checkpoint_top == 0);
+    std.debug.assert(!executor.state.scopeActive());
+
+    executor.execution_context = context;
+    executor.scope_root = null;
+    executor.state.beginScope();
+}
+
+/// Execute one independently rollback-armed EVM root inside an open custom
+/// transaction session. Warmth and logs survive successful roots; transient
+/// storage is cleared before every root and cannot be resurrected by an outer
+/// rollback. Failed-root state, warmth, and logs roll back to the root boundary.
+pub fn runRoot(
+    executor: anytype,
+    request: execution.EvmExecutionRequest,
+    scope_init: execution.ExecutionScopeInit,
+) @TypeOf(executor.executeTransactionRequestPhased(request)) {
+    requireActive(executor);
+    const runtime_state = &executor.transaction_runtime_state.?;
+    runtime_state.payload_started = true;
+    std.debug.assert(executor.execution_context != null);
+    std.debug.assert(executor.state.scopeActive());
+    std.debug.assert(executor.execution_context.?.sameRootSession(request.context));
+
+    executor.state.clearTransientStorage();
+    executor.execution_context = request.context;
+    executor.scope_root = null;
+
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
+    try initializeMessageScope(executor, request.message, scope_init, .reserve);
+
+    const outcome = try executor.executeTransactionRequestPhased(request);
+    if (outcome.stage == .preparation or executionRolledBack(outcome.result.outcome.status)) {
+        checkpoint.restore();
+    } else {
+        checkpoint.commit();
+    }
+    return outcome;
 }
 
 pub fn runPayload(
