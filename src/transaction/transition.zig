@@ -34,14 +34,13 @@ pub fn ImplType(
         const authorization_spec = spec.authorization;
         const settlement_spec = spec.settlement;
 
-        // Carrier decls the program binder reads; the `transact` signature is
-        // welded to them at bind time.
-        pub const Context = ContextType;
-        pub const Transaction = transaction.Transaction;
-        pub const Output = OutputType;
-        pub const Rejection = transaction_validation.ValidationError;
+        // The `transact` signature is the contract; these aliases only keep
+        // the implementation readable.
+        const Context = ContextType;
+        const Output = OutputType;
+        const Rejection = transaction_validation.ValidationError;
 
-        pub const Error = Context.Error || error{
+        const Error = Context.Error || error{
             Overflow,
         };
 

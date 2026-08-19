@@ -172,15 +172,22 @@ const DepositPrepared = struct {
 
 /// OP owns deposit policy; the shared transaction program owns active and
 /// pending state plus the caller resolution contract.
-fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
+fn DepositTransition(
+    comptime OpContext: type,
+    comptime EthereumVm: type,
+    comptime FamilyError: type,
+) type {
     return struct {
+        // The `transact` signature is the contract; these aliases only keep
+        // the implementation readable.
+        const Context = OpContext;
+        const Error = FamilyError;
+
         const Gas = EthereumVm.Gas;
         const Settlement = EthereumVm.Settlement;
 
-        pub const Error = OpContext.Error || error{ Overflow, MissingCreateRecipient };
-
         pub fn transact(
-            context: *OpContext,
+            context: *Context,
             tx: DepositTransaction,
         ) Error!evmz.transaction.TransitionOutcomeType(DepositOutput, DepositRejection) {
             if (tx.is_system_transaction) {
@@ -306,36 +313,6 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
     };
 }
 
-fn OpTransition(
-    comptime OpContext: type,
-    comptime EthereumTransition: type,
-    comptime DepositImplementation: type,
-) type {
-    return struct {
-        pub const Context = OpContext;
-        pub const Transaction = OpTransaction;
-        pub const Output = OpOutput;
-        pub const Rejection = OpRejection;
-        pub const Error = EthereumTransition.Error || DepositImplementation.Error;
-
-        pub fn transact(
-            context: *OpContext,
-            tx: OpTransaction,
-        ) Error!evmz.transaction.TransitionOutcomeType(OpOutput, OpRejection) {
-            return switch (tx) {
-                .ethereum => |ethereum| switch (try EthereumTransition.transact(context, ethereum)) {
-                    .rejected => |reason| .{ .rejected = .{ .ethereum = reason } },
-                    .completed => |output| .{ .completed = .{ .ethereum = output } },
-                },
-                .deposit => |deposit| switch (try DepositImplementation.transact(context, deposit)) {
-                    .rejected => |reason| .{ .rejected = .{ .deposit = reason } },
-                    .completed => |output| .{ .completed = .{ .deposit = output } },
-                },
-            };
-        }
-    };
-}
-
 /// Minimal family-owned inclusion record. A real OP BlockSTF remains above
 /// this fold and owns OP payload/header validation.
 pub const OpIncludedTransaction = struct {
@@ -421,11 +398,16 @@ pub fn OpFamily(comptime revision: OpRevision) type {
 
 fn OpFamilyFromSpec(comptime revision: OpRevision, comptime spec_value: evmz.eth.Spec) type {
     const EthereumVm = evmz.Vm(spec_value);
-    const Context = EthereumVm.Context(OpInput);
-    const EthereumTransition = EthereumVm.Transition(OpInput);
-    const DepositImplementation = DepositTransition(Context, EthereumVm);
-    const CombinedTransition = OpTransition(Context, EthereumTransition, DepositImplementation);
-    const TransactionVm = EthereumVm.Program(CombinedTransition);
+    const Error = EthereumVm.Error || error{MissingCreateRecipient};
+    const Deposit = struct {
+        fn bind(comptime Context: type) type {
+            return DepositTransition(Context, EthereumVm, Error);
+        }
+    };
+    const TransactionVm = EthereumVm.NamedFamily(OpInput, .{
+        .ethereum = EthereumVm.Transition,
+        .deposit = Deposit.bind,
+    }, OpOutput, OpRejection, Error);
     const BlockExecution = TransactionVm.Block(OpBlockProgram);
 
     return struct {
@@ -434,6 +416,7 @@ fn OpFamilyFromSpec(comptime revision: OpRevision, comptime spec_value: evmz.eth
         pub const Evm = EthereumVm;
         pub const Vm = TransactionVm;
         pub const Block = BlockExecution;
+        pub const FamilyError = Error;
 
         pub fn input(env: evmz.Env, tx: OpTransaction) OpInput {
             return OpInput.init(revision, env, tx);

@@ -62,13 +62,18 @@ test "exact VM closes the complete spec without revision state" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const Cancun = evmz.Vm(evmz.eth.cancun);
     const Context = Cancun.Context(Cancun.TransactInput);
-    const Transition = Cancun.Transition(Cancun.TransactInput);
+    const Transition = Cancun.Transition(Context);
     const TransitionContextPointer = @typeInfo(@TypeOf(Transition.transact)).@"fn".params[0].type.?;
 
     comptime {
         std.debug.assert(!@hasField(Cancun.Executor.Init, "revision"));
         std.debug.assert(!@hasField(Cancun.Executor, "revision_id"));
         std.debug.assert(Cancun.specification.transaction.max_initcode_size == evmz.eth.cancun.transaction.max_initcode_size);
+        std.debug.assert(Transition.Context == Context);
+        std.debug.assert(Transition.Transaction == Cancun.Transaction);
+        std.debug.assert(Transition.Output == Cancun.Output);
+        std.debug.assert(Transition.Rejection == Cancun.Rejection);
+        std.debug.assert(Transition.Error == Cancun.Error);
         std.debug.assert(@typeInfo(TransitionContextPointer).pointer.child == Context);
         std.debug.assert(Cancun.Executor == evmz.executor.ExecutorType(
             Cancun.specification,
@@ -82,6 +87,71 @@ test "exact VM closes the complete spec without revision state" {
     try std.testing.expect(@hasDecl(Cancun, "BlockExecution"));
     try std.testing.expect(!@hasDecl(Cancun, "TransactionPolicy"));
     try std.testing.expect(!@hasDecl(Cancun, "ExecutionProtocol"));
+}
+
+fn SmallTransition(comptime Context: type) type {
+    return struct {
+        pub fn transact(
+            context: *Context,
+            value: u8,
+        ) Context.Error!transaction.TransitionOutcomeType(u32, error{SmallRejected}) {
+            if (value == 0) return .{ .rejected = error.SmallRejected };
+            try context.beginTransaction();
+            return .{ .completed = value };
+        }
+    };
+}
+
+fn LargeTransition(comptime Context: type) type {
+    return struct {
+        pub fn transact(
+            context: *Context,
+            value: u16,
+        ) Context.Error!transaction.TransitionOutcomeType(bool, error{LargeRejected}) {
+            if (value == 0) return .{ .rejected = error.LargeRejected };
+            try context.beginTransaction();
+            return .{ .completed = value > 255 };
+        }
+    };
+}
+
+test "family welds branch carriers and exposes an engine-complete program" {
+    const Base = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const FamilyTransaction = union(enum) {
+        small: u8,
+        large: u16,
+    };
+    const FamilyInput = struct { tx: FamilyTransaction };
+    const Family = Base.Family(FamilyInput, .{
+        .small = SmallTransition,
+        .large = LargeTransition,
+    });
+
+    comptime {
+        std.debug.assert(Family.Transaction == FamilyTransaction);
+        std.debug.assert(@FieldType(Family.Output, "small") == u32);
+        std.debug.assert(@FieldType(Family.Output, "large") == bool);
+        std.debug.assert(@FieldType(Family.Rejection, "small") == error{SmallRejected});
+        std.debug.assert(Family.Interpreter == Base.Interpreter);
+        std.debug.assert(Family.Gas == Base.Gas);
+        std.debug.assert(Family.Settlement == Base.Settlement);
+    }
+
+    var executor = Family.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    var family = Family.init(&executor);
+    const outcome = try family.transact(.{ .tx = .{ .small = 7 } });
+    const output = switch (outcome) {
+        .rejected => return error.UnexpectedRejection,
+        .executed => |executed| executed.retainResult(),
+    };
+    try std.testing.expectEqual(@as(u32, 7), output.small);
+
+    const rejected = try family.transact(.{ .tx = .{ .large = 0 } });
+    switch (rejected) {
+        .executed => return error.UnexpectedExecution,
+        .rejected => |reason| try std.testing.expectEqual(error.LargeRejected, reason.large),
+    }
 }
 
 test "exact VM compile options can opt into step capture" {

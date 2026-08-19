@@ -122,9 +122,13 @@ pub fn VmType(
     return struct {
         const Self = @This();
 
-        const EthereumTxTransition = Self.Transition(FamilyTransactInput);
-
-        const TransactionRuntime = Self.Program(EthereumTxTransition);
+        const TransactionRuntime = Self.Program(
+            FamilyTransactInput,
+            TxExecutionResult,
+            transaction.validation.ValidationError,
+            TransactError,
+            Self.Transition,
+        );
 
         const BlockExecutionType = TransactionRuntime.Block(ethereum_block_program.ImplType(TransactionRuntime));
 
@@ -194,19 +198,76 @@ pub fn VmType(
             return transaction.program.ContextType(Executor, Input);
         }
 
-        /// Bind Ethereum transaction stage helpers to a custom input type.
-        pub fn Transition(comptime Input: type) type {
-            return transaction.transition.ImplType(spec, Executor, Context(Input), TxExecutionResult);
+        /// The Ethereum transaction transition, as a constructor over one
+        /// authoring context. Pass it to `Program` or a family directly; a
+        /// standalone instance is `Transition(Context(Input))`.
+        pub fn Transition(comptime TransitionContext: type) type {
+            const Implementation = transaction.transition.ImplType(
+                spec,
+                Executor,
+                TransitionContext,
+                TxExecutionResult,
+            );
+            return transaction.program.BoundTransitionType(TransitionContext, Implementation);
         }
 
         /// Bind one closed transaction workflow to this VM.
         ///
-        /// All carriers are derived from the implementation's `transact`
-        /// signature; its authoring context must be this VM's `Context(Input)`.
-        pub fn Program(comptime ImplementationType: type) type {
-            const Bound = transaction.program.ProgramType(ImplementationType);
-            comptime std.debug.assert(Bound.Executor == Executor);
-            return Bound;
+        /// `semantics` is a `fn (comptime Context: type) type` transition
+        /// constructor; the binder constructs `Context(Input)` and welds the
+        /// `transact` signature to the carrier parameters stated here.
+        pub fn Program(
+            comptime Input: type,
+            comptime ProgramOutput: type,
+            comptime ProgramRejection: type,
+            comptime ProgramError: type,
+            comptime semantics: transaction.program.TransitionConstructor,
+        ) type {
+            return transaction.program.ProgramType(
+                Executor,
+                Input,
+                ProgramOutput,
+                ProgramRejection,
+                ProgramError,
+                semantics,
+            );
+        }
+
+        /// Compose transition constructors over one explicit family input.
+        /// Output and rejection unions are generated from branch signatures.
+        pub fn Family(comptime Input: type, comptime members: anytype) type {
+            const semantics = transaction.program.FamilyTransitionType(members);
+            const Bound = semantics(Context(Input));
+            return Self.Program(
+                Input,
+                Bound.Output,
+                Bound.Rejection,
+                executor_module.errors.Error || Bound.Error,
+                semantics,
+            );
+        }
+
+        /// Compose transition constructors while preserving caller-declared
+        /// output, rejection, and error types at the public program surface.
+        pub fn NamedFamily(
+            comptime Input: type,
+            comptime members: anytype,
+            comptime FamilyOutput: type,
+            comptime FamilyRejection: type,
+            comptime FamilyError: type,
+        ) type {
+            return Self.Program(
+                Input,
+                FamilyOutput,
+                FamilyRejection,
+                FamilyError,
+                transaction.program.NamedFamilyTransitionType(
+                    members,
+                    FamilyOutput,
+                    FamilyRejection,
+                    FamilyError,
+                ),
+            );
         }
     };
 }
