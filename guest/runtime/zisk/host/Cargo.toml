@@ -5,5 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "4b9f758fabc4955cac20af837019ccc31b803a46" }
-ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "4b9f758fabc4955cac20af837019ccc31b803a46" }
+zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
+zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
+ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }

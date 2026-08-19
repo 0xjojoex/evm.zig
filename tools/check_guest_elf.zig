@@ -276,7 +276,7 @@ const Checker = struct {
         if (options.require_target) {
             const attributes = try checker.findSection(sections, section_names, ".riscv.attributes") orelse return checker.fail("missing .riscv.attributes");
             try checker.checkArchitecture(try checker.sectionBytes(attributes), options.allow_attribute_a);
-            try checker.checkExecutableSections(sections);
+            try checker.checkExecutableSections(sections, options.allow_rev8);
         }
 
         var start_symbol: ?Symbol = null;
@@ -320,7 +320,7 @@ const Checker = struct {
         return .{ .load_count = loads.len };
     }
 
-    fn checkExecutableSections(checker: *Checker, sections: []const Section) error{InvalidElf}!void {
+    fn checkExecutableSections(checker: *Checker, sections: []const Section, allow_rev8: bool) error{InvalidElf}!void {
         for (sections) |section_value| {
             if (section_value.flags & 0x4 == 0) continue;
             const bytes = try checker.sectionBytes(section_value);
@@ -330,7 +330,7 @@ const Checker = struct {
             var offset: usize = 0;
             while (offset < bytes.len) : (offset += 4) {
                 const instruction = std.mem.readInt(u32, bytes[offset..][0..4], .little);
-                if (forbiddenInstruction(instruction)) |kind| {
+                if (forbiddenInstruction(instruction, allow_rev8)) |kind| {
                     return checker.failFmt("{s} instruction at 0x{x}", .{ kind, section_value.address + offset });
                 }
             }
@@ -338,10 +338,10 @@ const Checker = struct {
     }
 };
 
-/// Instructions the ZisK RV64IM emulator does not execute. `rev8` is the one
-/// Zbb encoding Zig's backend emits toward this target, so it is named
-/// alongside the atomic and floating-point opcode families.
-fn forbiddenInstruction(instruction: u32) ?[]const u8 {
+/// Instruction families rejected by the conservative guest gate. ZisK v1.1's
+/// target deliberately emits `rev8`, so that one encoding has a narrow waiver;
+/// atomic and floating-point instructions remain forbidden.
+fn forbiddenInstruction(instruction: u32, allow_rev8: bool) ?[]const u8 {
     const opcode = instruction & 0x7f;
     if (opcode == 0x2f) return "atomic";
     if (opcode == 0x07 or opcode == 0x27 or opcode == 0x43 or opcode == 0x47 or
@@ -349,17 +349,18 @@ fn forbiddenInstruction(instruction: u32) ?[]const u8 {
     {
         return "floating-point";
     }
-    if (instruction & 0xfff0707f == 0x6b805013) return "rev8";
+    if (!allow_rev8 and instruction & 0xfff0707f == 0x6b805013) return "rev8";
     return null;
 }
 
-/// The attribute waiver covers conformance deviation:
+/// The atomic attribute waiver covers conformance deviation:
 /// the vendor static library declares `A` while contributing no atomic
-/// instructions. The executable-section scan stays unconditional, so the
-/// waiver never excuses actual atomics.
+/// instructions. The executable-section scan stays unconditional, and the
+/// `rev8` waiver never excuses actual atomics or floating-point instructions.
 const CheckOptions = struct {
     require_target: bool = false,
     allow_attribute_a: bool = false,
+    allow_rev8: bool = false,
 };
 
 const Options = struct {
@@ -380,8 +381,10 @@ fn parseOptions(init: std.process.Init, allocator: Allocator) !Options {
             check.require_target = true;
         } else if (std.mem.eql(u8, arg, "--allow-attribute-a")) {
             check.allow_attribute_a = true;
+        } else if (std.mem.eql(u8, arg, "--allow-rev8")) {
+            check.allow_rev8 = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            std.debug.print("usage: check-guest-elf [--require-rv64im-zicclsm [--allow-attribute-a]] ELF\n", .{});
+            std.debug.print("usage: check-guest-elf [--require-rv64im-zicclsm [--allow-attribute-a] [--allow-rev8]] ELF\n", .{});
             std.process.exit(0);
         } else if (std.mem.startsWith(u8, arg, "-") or path != null) {
             return error.InvalidArguments;
@@ -389,14 +392,14 @@ fn parseOptions(init: std.process.Init, allocator: Allocator) !Options {
             path = arg;
         }
     }
-    if (check.allow_attribute_a and !check.require_target) return error.InvalidArguments;
+    if ((check.allow_attribute_a or check.allow_rev8) and !check.require_target) return error.InvalidArguments;
     return .{ .path = path orelse return error.InvalidArguments, .check = check };
 }
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const options = parseOptions(init, allocator) catch {
-        std.debug.print("usage: check-guest-elf [--require-rv64im-zicclsm [--allow-attribute-a]] ELF\n", .{});
+        std.debug.print("usage: check-guest-elf [--require-rv64im-zicclsm [--allow-attribute-a] [--allow-rev8]] ELF\n", .{});
         std.process.exit(2);
     };
     const data = std.Io.Dir.cwd().readFileAlloc(init.io, options.path, allocator, max_elf_bytes) catch |err| {
@@ -440,11 +443,13 @@ test "rejects compressed-instruction ELF flag" {
 }
 
 test "opcode scan forbids atomic, floating-point, and rev8 instructions" {
-    try std.testing.expectEqualStrings("atomic", forbiddenInstruction(0x100522af).?); // amoadd.w
-    try std.testing.expectEqualStrings("floating-point", forbiddenInstruction(0x0005a507).?); // flw
-    try std.testing.expectEqualStrings("rev8", forbiddenInstruction(0x6b855513).?); // rev8 a0, a0
-    try std.testing.expectEqual(null, forbiddenInstruction(0x00000013)); // nop
-    try std.testing.expectEqual(null, forbiddenInstruction(0x40555513)); // srai a0, a0, 0x5
+    try std.testing.expectEqualStrings("atomic", forbiddenInstruction(0x100522af, false).?); // amoadd.w
+    try std.testing.expectEqualStrings("floating-point", forbiddenInstruction(0x0005a507, false).?); // flw
+    try std.testing.expectEqualStrings("rev8", forbiddenInstruction(0x6b855513, false).?); // rev8 a0, a0
+    try std.testing.expectEqual(null, forbiddenInstruction(0x00000013, false)); // nop
+    try std.testing.expectEqual(null, forbiddenInstruction(0x40555513, false)); // srai a0, a0, 0x5
+    try std.testing.expectEqual(null, forbiddenInstruction(0x6b855513, true)); // rev8 a0, a0
+    try std.testing.expectEqualStrings("atomic", forbiddenInstruction(0x100522af, true).?); // amoadd.w
 }
 
 test "opcode scan covers every executable section" {
@@ -457,8 +462,10 @@ test "opcode scan covers every executable section" {
         .{ .name_offset = 0, .kind = 1, .flags = 0, .address = 0, .offset = 0, .size = 4, .link = 0, .entry_size = 0 },
         .{ .name_offset = 0, .kind = 1, .flags = 0x4, .address = 0x1000, .offset = 4, .size = 4, .link = 0, .entry_size = 0 },
     };
-    try std.testing.expectError(error.InvalidElf, checker.checkExecutableSections(&sections));
+    try std.testing.expectError(error.InvalidElf, checker.checkExecutableSections(&sections, false));
     try std.testing.expectEqualStrings("rev8 instruction at 0x1000", checker.failure);
+
+    try checker.checkExecutableSections(&sections, true);
 }
 
 test "accepts required architecture attributes" {

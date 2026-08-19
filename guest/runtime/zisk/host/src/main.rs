@@ -8,7 +8,8 @@ use std::{
     path::PathBuf,
     time::Instant,
 };
-use zisk_core::{Riscv2zisk, ZiskRom};
+use zisk_core::ZiskRom;
+use zisk_transpiler_riscv::Riscv2zisk;
 use ziskemu::{Emu, EmuOptions};
 
 const READY: &[u8; 8] = b"EVZKH001";

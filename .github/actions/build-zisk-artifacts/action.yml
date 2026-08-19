@@ -86,11 +86,13 @@ runs:
         if [[ ! -e "${zisk_sysroot}/bin/cargo" ]]; then
           ln -s "${host_cargo}" "${zisk_sysroot}/bin/cargo"
         fi
-        if rustup run zisk rustc --print cfg --target riscv64ima-zisk-zkvm-elf \
-          | grep -Eq 'target_feature="(zbb|zbkb|zbs)"'; then
-          echo "error: incompatible ZisK Rust target" >&2
-          exit 1
-        fi
+        target_cfg="$(rustup run zisk rustc --print cfg --target riscv64ima-zisk-zkvm-elf)"
+        for feature in zbb zbkb zbs; do
+          if ! grep -Fq "target_feature=\"${feature}\"" <<< "${target_cfg}"; then
+            echo "error: ZisK Rust target is missing ${feature}" >&2
+            exit 1
+          fi
+        done
         echo "${ZISK_HOME}/bin" >> "${GITHUB_PATH}"
 
     - name: Checkout pinned ZisK source

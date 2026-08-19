@@ -72,9 +72,9 @@ jobs:
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
       ZIG_VERSION: 0.16.0
-      ZISK_VERSION: 1.0.0-alpha
-      ZISK_COMMIT: 4b9f758fabc4955cac20af837019ccc31b803a46
-      ZISK_RUST_TOOLCHAIN: zisk-1.0.0
+      ZISK_VERSION: 1.1.0-alpha
+      ZISK_COMMIT: 9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93
+      ZISK_RUST_TOOLCHAIN: zisk-3.0.0
 
     steps:
       - name: Checkout
@@ -196,6 +196,7 @@ jobs:
           zig build check-guest-elf -- \
             --require-rv64im-zicclsm \
             --allow-attribute-a \
+            --allow-rev8 \
             "${candidate}"
           if [[ "${RELEASE_GATE}" == true ]]; then
             zig build guest-zisk \

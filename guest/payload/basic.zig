@@ -9,7 +9,7 @@ const sender = evmz.addr(0xaaaa);
 const contract = evmz.addr(0xbbbb);
 const gas_limit: u64 = 1_000_000;
 const magic: u32 = 0x4556_4d5a; // EVMZ
-const zisk_output_addr: usize = 0xa0010000;
+const zisk_output_addr: usize = 0xa0410000;
 
 const bytecode = [_]u8{
     0x60, 0x2a, // PUSH1 42
