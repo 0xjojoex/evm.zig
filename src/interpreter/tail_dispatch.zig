@@ -1161,9 +1161,13 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             const word_gas = keccakWordGas(size, ip, sp, mem_gas, ctx) orelse return .done;
             const final_gas = chargeGas(ip, sp, mem_gas, ctx, word_gas) orelse return .out_of_gas;
             const input = ctx.frame.memory.readBytes(offset, size);
-            const result = if (input.len == 0) evmz.crypto.keccak256_empty else evmz.crypto.keccak256(input);
+            var result: [32]u8 align(8) = undefined;
+            if (input.len == 0)
+                result = evmz.crypto.keccak256_empty
+            else
+                evmz.crypto.keccak256Into(input, &result);
             const nsp = sp - 1;
-            (nsp - 1)[0] = evmz.uint256.fromBytes32(&result);
+            evmz.uint256.readAlignedBytes32Into(&result, &(nsp - 1)[0]);
             return tailNext(ip, nsp, final_gas, ctx);
         }
 

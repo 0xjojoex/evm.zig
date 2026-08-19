@@ -27,19 +27,30 @@ Experimental:
 
 ## Install
 
-Requires Zig `0.16.0+`.
-
 ```sh
 zig fetch --save git+https://github.com/0xjojoex/evm.zig
 ```
+
+One fetch exports four modules; import the ones you need.
 
 ```zig
 // build.zig
 const evmz = b.dependency("evmz", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("evmz", evmz.module("evmz"));
+exe.root_module.addImport("rlp", evmz.module("rlp")); // also: mpt, ssz
 ```
 
-This follows `main`; pin a commit for reproducible builds.
+`rlp`, `mpt`, and `ssz` are self-contained pure-Zig codecs. To use them without
+configuring the EVM core — and without fetching any C dependency — pass
+`.core = false` to `b.dependency`. For a zkVM guest, pass `.profile = .zkvm`.
+
+This follows `main`; pin a commit for reproducible builds. Each release
+supports one Zig minor, and every module ships at the package version — see
+[the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
+
+| evmz | Zig |
+| --- | --- |
+| `main` | `0.16.x` |
 
 ## Quick start
 
@@ -82,7 +93,8 @@ execution.retain();
 
 `retain()` accepts the execution into the executor's pending branch. Block-level
 code can consume `executor.acceptedChanges()` and persist it. See
-[`examples/basic.zig`](examples/basic.zig) for runnable transaction execution
+[`examples/basic.zig`](https://github.com/0xjojoex/evm.zig/blob/main/examples/basic.zig)
+for runnable transaction execution
 and provisional storage-change inspection.
 
 ## Execution layers
@@ -123,8 +135,9 @@ const MyEvm = evmz.Vm(my_cancun);
 
 `Spec.extend` patches parameters and semantic functions. Complete instruction,
 precompile, transaction, or block bindings can also be replaced. See
-[`examples/custom_fork/`](examples/custom_fork/) and
-[`examples/op_deposit.zig`](examples/op_deposit.zig).
+[`examples/custom_fork/`](https://github.com/0xjojoex/evm.zig/tree/main/examples/custom_fork)
+and
+[`examples/op_deposit.zig`](https://github.com/0xjojoex/evm.zig/blob/main/examples/op_deposit.zig).
 
 ## Stateless validation and zkVM guests
 
@@ -179,7 +192,7 @@ snapshot measured on 2026-08-13; lower is better:
 | Snailtracer         | **19.965 ms** |   59.804 ms | 37.990 ms |
 
 Both full snapshots, fixtures, methodology, and reproduction commands are in
-[`bench/README.md`](bench/README.md#published-snapshots).
+[`bench/README.md`](https://github.com/0xjojoex/evm.zig/blob/main/bench/README.md#published-snapshots).
 
 <details>
 <summary>The evmz approach</summary>
@@ -223,7 +236,8 @@ where you know at ship time what you need
 Standalone Zig libraries under `pkg/` can be fetched independently:
 
 - [`pkg/rlp`](pkg/rlp) — strict RLP encoding and decoding
-- [`pkg/mpt`](pkg/mpt) — Merkle Patricia Trie proofs and sparse updates
+- [`pkg/mpt`](pkg/mpt) — stateless MPT proofs, authenticated catalogs, and
+  sparse/fixed-key updates
 - [`pkg/ssz`](pkg/ssz) — comptime-typed SSZ encoding and decoding
 
 ## Scope
@@ -249,6 +263,9 @@ zig build debug -- 6001600201        # interactive bytecode debugger
 
 `tidy` reports review candidates and never edits source; pass `--strict` to
 promote advisory findings.
+
+See [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md)
+for the single-root package version, tag, and changelog conventions.
 
 ## License
 

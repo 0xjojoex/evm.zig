@@ -132,6 +132,37 @@ pub const BlockBuilder = struct {
     }
 };
 
+/// Claim-only adapter over the generic canonical builder. State domains expose
+/// this same contract whether verification is address-keyed or dense-ID based.
+pub const ClaimVerifier = struct {
+    expected: bal.BlockAccessList,
+    builder: BlockBuilder,
+
+    pub fn init(allocator: Allocator, expected: bal.BlockAccessList) ClaimVerifier {
+        return .{
+            .expected = expected,
+            .builder = BlockBuilder.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *ClaimVerifier) void {
+        self.builder.deinit();
+        self.* = undefined;
+    }
+
+    pub fn append(
+        self: *ClaimVerifier,
+        view: anytype,
+        block_access_index: bal.BlockAccessIndex,
+    ) !void {
+        try self.builder.append(view, block_access_index);
+    }
+
+    pub fn matchesClaim(self: *ClaimVerifier) !bool {
+        return self.builder.matchesClaim(self.expected);
+    }
+};
+
 const ObservationFold = struct {
     allocator: Allocator,
     accounts: std.ArrayList(FoldAccount) = .empty,
@@ -165,9 +196,9 @@ const ObservationFold = struct {
         var account_index: u32 = 0;
         while (account_index < view.accounts.len()) : (account_index += 1) {
             const fact = view.accounts.at(account_index);
-            if (!fact.observation.semantic_access and !fact.effect.any()) continue;
+            const fields = try observation.accountFields(view, fact) orelse continue;
             const target = try self.accountFor(fact.address);
-            try target.appendAccountFact(self.allocator, view, fact);
+            try target.appendAccountFields(self.allocator, fields);
         }
 
         var storage_index: u32 = 0;
@@ -284,42 +315,15 @@ const FoldAccount = struct {
         return self.storage_indices.get(slot);
     }
 
-    fn appendAccountFact(
+    fn appendAccountFields(
         self: *FoldAccount,
         allocator: Allocator,
-        view: anytype,
-        fact: anytype,
+        fields: observation.AccountFields,
     ) !void {
-        if (fact.effect.balance_written or
-            (!fact.effect.storage_wiped and
-                (fact.effect.nonce_written or fact.effect.code_written)))
-        {
-            const original = accountOrZero(fact.original);
-            const current = accountOrZero(fact.current);
-            if (fact.effect.balance_written) {
-                self.appendBalance(.{
-                    .original = original.balance,
-                    .current = current.balance,
-                });
-            }
-            if (fact.effect.nonce_written and !fact.effect.storage_wiped) {
-                self.appendNonce(.{
-                    .original = original.nonce,
-                    .current = current.nonce,
-                });
-            }
-            if (fact.effect.code_written and !fact.effect.storage_wiped) {
-                const code = view.code(current.code_hash) orelse
-                    return error.ObservationCodeUnavailable;
-                try self.appendCode(allocator, .{
-                    .original_hash = original.code_hash,
-                    .current_hash = current.code_hash,
-                    .current_code = code.bytes,
-                });
-            }
-        }
-
-        self.storage_wiped = self.storage_wiped or fact.effect.storage_wiped;
+        if (fields.balance) |value| self.appendBalance(value);
+        if (fields.nonce) |value| self.appendNonce(value);
+        if (fields.code) |value| try self.appendCode(allocator, value);
+        self.storage_wiped = self.storage_wiped or fields.storage_wiped;
     }
 
     fn appendBalance(self: *FoldAccount, balance: observation.ValueObservation) void {
@@ -384,15 +388,6 @@ const FoldAccount = struct {
         };
     }
 };
-
-fn accountOrZero(value: anytype) Account {
-    if (@TypeOf(value) == ?Account) return value orelse .{};
-    return switch (value orelse .absent) {
-        .loaded => |account| account,
-        .absent => .{},
-        .exists_only => unreachable,
-    };
-}
 
 fn foldAccountLessThan(_: void, lhs: FoldAccount, rhs: FoldAccount) bool {
     return Address.order(lhs.address, rhs.address) == .lt;

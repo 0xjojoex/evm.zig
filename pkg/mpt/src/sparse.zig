@@ -5,9 +5,8 @@
 //! returns the new root. All transient storage comes from the allocator passed
 //! to `Trie.init`; a fixed allocator is the bounded mode.
 //!
-//! This engine needs no authenticated catalog, so it serves validation lanes
-//! that discover touched keys only during execution. Catalog-backed updates
-//! live in the occurrence engine.
+//! This engine remains the variable-width structural path. Fixed 32-byte keys
+//! use the occurrence engine with either an index or catalog source.
 
 const std = @import("std");
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const mpt = @import("mpt");
+const fixed_key_nibbles = @sizeOf(mpt.FixedKey) * 2;
 
 test "catalog fixed batch binds shared prefixes without allocation" {
     const leaf0 = try encodeZeroLeaf(63, 1);
@@ -19,13 +20,13 @@ test "catalog fixed batch binds shared prefixes without allocation" {
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
 
-    const key0 = [_]u8{0} ** mpt.fixed_key.key_bytes;
-    const key1 = [_]u8{0x10} ++ [_]u8{0} ** (mpt.fixed_key.key_bytes - 1);
-    const key2 = [_]u8{0x20} ++ [_]u8{0} ** (mpt.fixed_key.key_bytes - 1);
-    const keys = [_][mpt.fixed_key.key_bytes]u8{ key0, key1, key2 };
-    var results: [keys.len]mpt.fixed_key.Lookup = undefined;
-    var workspace = mpt.fixed_key.Workspace.init();
-    try mpt.fixed_key.bindSorted(catalog, root, &keys, &results, &workspace);
+    const key0: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
+    const key1: mpt.FixedKey = [_]u8{0x10} ++ [_]u8{0} ** (@sizeOf(mpt.FixedKey) - 1);
+    const key2: mpt.FixedKey = [_]u8{0x20} ++ [_]u8{0} ** (@sizeOf(mpt.FixedKey) - 1);
+    const keys = [_]mpt.FixedKey{ key0, key1, key2 };
+    var results: [keys.len]mpt.FixedLookup = undefined;
+    var workspace: mpt.BindWorkspace = .{};
+    try mpt.bindSorted(catalog, root, &keys, &results, &workspace);
 
     try std.testing.expectEqualSlices(u8, &.{0x01}, results[0].present);
     try std.testing.expectEqualSlices(u8, &.{0x02}, results[1].present);
@@ -41,31 +42,31 @@ test "catalog fixed batch binds shared prefixes without allocation" {
 }
 
 test "catalog fixed batch rejects key order before walking" {
-    const low = [_]u8{0} ** mpt.fixed_key.key_bytes;
-    const high = [_]u8{0xff} ** mpt.fixed_key.key_bytes;
-    var results: [2]mpt.fixed_key.Lookup = undefined;
-    var workspace = mpt.fixed_key.Workspace.init();
+    const low: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
+    const high: mpt.FixedKey = [_]u8{0xff} ** @sizeOf(mpt.FixedKey);
+    var results: [2]mpt.FixedLookup = undefined;
+    var workspace: mpt.BindWorkspace = .{};
     var builder = try mpt.init(std.testing.allocator).catalogBuilder(mpt.empty_node_index);
     defer builder.deinit();
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
 
-    const descending = [_][mpt.fixed_key.key_bytes]u8{ high, low };
+    const descending = [_]mpt.FixedKey{ high, low };
     try std.testing.expectError(
         error.UnsortedKeys,
-        mpt.fixed_key.bindSorted(catalog, .empty, &descending, &results, &workspace),
+        mpt.bindSorted(catalog, .empty, &descending, &results, &workspace),
     );
-    const duplicate = [_][mpt.fixed_key.key_bytes]u8{ low, low };
+    const duplicate = [_]mpt.FixedKey{ low, low };
     try std.testing.expectError(
         error.DuplicateKey,
-        mpt.fixed_key.bindSorted(catalog, .empty, &duplicate, &results, &workspace),
+        mpt.bindSorted(catalog, .empty, &duplicate, &results, &workspace),
     );
 }
 
 test "catalog fixed batch preserves fixed-key validation and missing-node errors" {
-    const key = [_]u8{0} ** mpt.fixed_key.key_bytes;
-    var results: [1]mpt.fixed_key.Lookup = undefined;
-    var workspace = mpt.fixed_key.Workspace.init();
+    const key: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
+    var results: [1]mpt.FixedLookup = undefined;
+    var workspace: mpt.BindWorkspace = .{};
     const trie = mpt.init(std.testing.allocator);
 
     const short_leaf = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x01};
@@ -81,7 +82,7 @@ test "catalog fixed batch preserves fixed-key validation and missing-node errors
     defer short_catalog.deinit();
     try std.testing.expectError(
         error.InvalidNode,
-        mpt.fixed_key.bindSorted(short_catalog, short_root, &.{key}, &results, &workspace),
+        mpt.bindSorted(short_catalog, short_root, &.{key}, &results, &workspace),
     );
 
     const missing_digest = [_]u8{0x55} ** 32;
@@ -99,12 +100,12 @@ test "catalog fixed batch preserves fixed-key validation and missing-node errors
     defer missing_catalog.deinit();
     try std.testing.expectError(
         error.MissingNode,
-        mpt.fixed_key.bindSorted(missing_catalog, missing_root, &.{key}, &results, &workspace),
+        mpt.bindSorted(missing_catalog, missing_root, &.{key}, &results, &workspace),
     );
 }
 
 test "catalog fixed batch rejects branch values" {
-    const key = [_]u8{0} ** mpt.fixed_key.key_bytes;
+    const key: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
     const child = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x02};
     const child_hash = mpt.StdKeccak256Context.keccak256(.{}, &child);
     const branch = [_]u8{0xf1} ++ [_]u8{0xa0} ++ child_hash ++
@@ -118,15 +119,15 @@ test "catalog fixed batch rejects branch values" {
     const root = try builder.authenticateRoot(mpt.StdKeccak256Context.keccak256(.{}, &branch));
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
-    var results: [1]mpt.fixed_key.Lookup = undefined;
-    var workspace = mpt.fixed_key.Workspace.init();
+    var results: [1]mpt.FixedLookup = undefined;
+    var workspace: mpt.BindWorkspace = .{};
     try std.testing.expectError(
         error.NonCanonicalNode,
-        mpt.fixed_key.bindSorted(catalog, root, &.{key}, &results, &workspace),
+        mpt.bindSorted(catalog, root, &.{key}, &results, &workspace),
     );
 }
 
-fn expectAbsence(expected: mpt.fixed_key.Absence, actual: mpt.fixed_key.Lookup) !void {
+fn expectAbsence(expected: mpt.FixedAbsence, actual: mpt.FixedLookup) !void {
     switch (actual) {
         .present => return error.ExpectedAbsent,
         .absent => |absence| try std.testing.expectEqual(expected, absence),
@@ -134,7 +135,7 @@ fn expectAbsence(expected: mpt.fixed_key.Absence, actual: mpt.fixed_key.Lookup) 
 }
 
 fn encodeZeroLeaf(suffix_nibbles: usize, value: u8) ![]u8 {
-    std.debug.assert(suffix_nibbles <= mpt.fixed_key.key_nibbles);
+    std.debug.assert(suffix_nibbles <= fixed_key_nibbles);
     const compact_len = 1 + suffix_nibbles / 2;
     const compact_prefix_len: usize = if (compact_len == 1) 0 else 1;
     const payload_len = compact_prefix_len + compact_len + 1;

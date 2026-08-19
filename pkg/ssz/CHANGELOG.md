@@ -4,22 +4,9 @@ All notable changes to the `ssz` package are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the package uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Releases are cut from `pkg/ssz` on evmz `main` and published to the generated
-`release/ssz` branch as `ssz-vX.Y.Z`.
-
-## [Unreleased]
-
-### Added
-
-- Borrowed SSZ views and packed bitfields.
-- Borrowed Merkle child roots on the `hash_tree_root` path.
-
-### Changed
-
-- Consolidated borrowed decoding onto a single codec surface.
-- `Mapped` takes its mapping as a namespace type with `pub fn toWire`/`fromWire`
-  instead of a struct of function pointers, so one `WireMapping` declaration now
-  serves both `ssz.Mapped` and `rlp.Mapped`.
+This is a closed record of the `ssz-v0.1.0` subtree release. The module now
+ships at the evmz package version; later entries live in the root
+[CHANGELOG.md](../../CHANGELOG.md).
 
 ## [0.1.0] - 2026-07-22
 
@@ -36,5 +23,4 @@ Releases are cut from `pkg/ssz` on evmz `main` and published to the generated
 - Verified against the `ethereum/consensus-specs` SSZ corpus
   (`zig build ssz-conformance`).
 
-[Unreleased]: https://github.com/0xjojoex/evm.zig/compare/ssz-v0.1.0...main
 [0.1.0]: https://github.com/0xjojoex/evm.zig/releases/tag/ssz-v0.1.0

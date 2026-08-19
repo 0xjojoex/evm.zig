@@ -13,10 +13,8 @@ const mpt = @import("mpt");
 
 const Allocator = std.mem.Allocator;
 const ParentFacts = @This();
-const TrieKey = [mpt.fixed_key.key_bytes]u8;
-
 pub const AccountParent = union(enum) {
-    absent: mpt.fixed_key.Absence,
+    absent: mpt.FixedAbsence,
     present: trie.Account,
 };
 
@@ -30,9 +28,7 @@ pub const StorageFact = struct {
     value: u256,
 };
 
-pub const Error = std.mem.Allocator.Error ||
-    mpt.fixed_key.BatchError ||
-    trie.ProofLookupError;
+pub const Error = std.mem.Allocator.Error || trie.ProofLookupError;
 
 accounts: []AccountFact = &.{},
 storage: []StorageFact = &.{},
@@ -62,17 +58,17 @@ pub fn authenticate(
     // Account and storage lookups are serial, so they reuse the same typed
     // scratch slices and capacity is their maximum.
     const scratch_capacity = @max(plan.accountCount(), plan.storageCount());
-    const keys = try allocator.alloc(TrieKey, scratch_capacity);
+    const keys = try allocator.alloc(mpt.FixedKey, scratch_capacity);
     defer allocator.free(keys);
-    const results = try allocator.alloc(mpt.fixed_key.Lookup, scratch_capacity);
+    const results = try allocator.alloc(mpt.FixedLookup, scratch_capacity);
     defer allocator.free(results);
     const account_keys = keys[0..plan.accountCount()];
     const account_results = results[0..plan.accountCount()];
     for (plan.account_trie_order, 0..) |id, index| {
         account_keys[index] = plan.accountTrieKey(id);
     }
-    var workspace = mpt.fixed_key.Workspace.init();
-    try mpt.fixed_key.bindSorted(
+    var workspace: mpt.BindWorkspace = .{};
+    try mpt.bindAssumeSorted(
         catalog.topology,
         catalog.stateCatalogRoot(),
         account_keys,
@@ -113,7 +109,7 @@ pub fn authenticate(
         for (order, 0..) |storage_id, offset| {
             storage_keys[begin + offset] = plan.storageTrieKey(storage_id);
         }
-        try mpt.fixed_key.bindSorted(
+        try mpt.bindAssumeSorted(
             catalog.topology,
             try catalog.storageCatalogRoot(parent.storage_root),
             storage_keys[begin..end],

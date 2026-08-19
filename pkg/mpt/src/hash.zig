@@ -24,7 +24,18 @@ pub const StdKeccak256Context = struct {
 
 /// Compile-time check for the fixed Keccak-256 execution-provider contract.
 pub fn assertKeccakContext(comptime Context: type) void {
-    if (!std.meta.hasFn(Context, "keccak256")) {
+    const valid = if (std.meta.hasFn(Context, "keccak256")) blk: {
+        const info = @typeInfo(@TypeOf(Context.keccak256)).@"fn";
+        break :blk !info.is_var_args and
+            info.params.len == 2 and
+            info.params[0].type != null and
+            info.params[0].type.? == Context and
+            info.params[1].type != null and
+            info.params[1].type.? == []const u8 and
+            info.return_type != null and
+            info.return_type.? == Root;
+    } else false;
+    if (!valid) {
         @compileError("MPT Keccak context must provide keccak256(self, []const u8) [32]u8");
     }
 }

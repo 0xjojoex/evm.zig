@@ -1,7 +1,7 @@
 //! Writes one ERE `BenchmarkRun`-compatible JSON row per executed block.
 //!
-//! `report-guest-cycles.py` consumes these rows, so the field names follow ERE's
-//! schema rather than this repository's naming.
+//! Guest evidence and external ERE tooling consume these rows, so the field
+//! names follow ERE's schema rather than this repository's naming.
 
 const std = @import("std");
 const executor = @import("stateless_executor.zig");

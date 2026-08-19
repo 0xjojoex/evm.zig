@@ -289,6 +289,12 @@ test "raw parser preserves exact spans and rejects trailing input" {
     try std.testing.expectError(error.UnexpectedLength, exact.nextBytesExact(20));
 }
 
+test "raw parser distinguishes length overflow from truncated payload" {
+    const overflowing = [_]u8{0xb7 + @sizeOf(usize)} ++ [_]u8{0xff} ** @sizeOf(usize);
+    try std.testing.expectError(error.LengthOverflow, rlp.parseExact(&overflowing));
+    try std.testing.expectError(error.InputTooShort, rlp.parseExact(&.{ 0xb8, 0x38 }));
+}
+
 test "recursive exact validation finds malformed nested items" {
     var stack: [8]rlp.Cursor = undefined;
     try rlp.validateExact(&.{ 0xc1, 0x01 }, &stack, 2);

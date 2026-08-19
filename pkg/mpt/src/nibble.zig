@@ -16,7 +16,34 @@ pub const Path = struct {
 
     /// The nibble at `index` within the window.
     pub fn nibbleAt(self: Path, index: usize) u8 {
+        std.debug.assert(index < self.len);
         return keyNibbleAt(self.key, self.start + index);
+    }
+
+    /// Return a sub-window without copying or expanding its packed bytes.
+    pub fn slice(self: Path, start: usize, end: usize) Path {
+        std.debug.assert(start <= end);
+        std.debug.assert(end <= self.len);
+        return .{
+            .key = self.key,
+            .start = self.start + start,
+            .len = end - start,
+        };
+    }
+
+    pub fn commonPrefix(self: Path, other: Path) usize {
+        const limit = @min(self.len, other.len);
+        var len: usize = 0;
+        while (len < limit and self.nibbleAt(len) == other.nibbleAt(len)) : (len += 1) {}
+        return len;
+    }
+
+    pub fn startsWith(self: Path, prefix: Path) bool {
+        return prefix.len <= self.len and self.commonPrefix(prefix) == prefix.len;
+    }
+
+    pub fn eql(self: Path, other: Path) bool {
+        return self.len == other.len and self.commonPrefix(other) == self.len;
     }
 };
 
@@ -93,7 +120,7 @@ pub fn compactLen(path_len: usize) usize {
 
 /// Hex-prefix-encode `path` into `out`, flagged `terminal` for a leaf or not
 /// for an extension. Returns the written slice.
-pub fn encodeCompact(out: []u8, path: Path, terminal: bool) errors.BuildError![]const u8 {
+pub fn encodeCompact(out: []u8, path: Path, terminal: bool) error{WorkspaceTooSmall}![]const u8 {
     const encoded_len = compactLen(path.len);
     if (out.len < encoded_len) return error.WorkspaceTooSmall;
 

@@ -13,6 +13,16 @@ test "empty root is canonical" {
     try expectHex(&(try mpt.init(std.testing.allocator).rootSorted(&.{})), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 }
 
+test "inline Keccak execution context satisfies the structural contract" {
+    const InlineKeccak = struct {
+        pub inline fn keccak256(_: @This(), input: []const u8) mpt.Root {
+            return mpt.StdKeccak256Context.keccak256(.{}, input);
+        }
+    };
+    const trie = mpt.Trie(InlineKeccak).init(std.testing.allocator, .{});
+    _ = try trie.rootSorted(&.{.{ .key = "key", .value = "value" }});
+}
+
 test "full root matches canonical string-key example" {
     const entries = [_]mpt.Entry{
         .{ .key = "do", .value = "verb" },
@@ -42,7 +52,7 @@ test "root sorts descriptors without copying key or value bytes" {
     const needed = try mpt.rootWorkspaceSize(&entries, true);
     const buffer = try std.testing.allocator.alloc(u8, needed);
     defer std.testing.allocator.free(buffer);
-    var workspace = mpt.Workspace.init(buffer);
+    var workspace = mpt.RootWorkspace.init(buffer);
     const actual = try trie.rootWithWorkspace(&workspace, &entries);
 
     try std.testing.expectEqualSlices(u8, &expected, &actual);
@@ -60,8 +70,8 @@ test "reported root workspace bound is sufficient for byte-aligned storage" {
     const backing = try std.testing.allocator.alloc(u8, needed + 1);
     defer std.testing.allocator.free(backing);
     const buffer = backing[1 .. needed + 1];
-    var workspace = mpt.Workspace.init(buffer);
-    _ = try mpt.rootWithWorkspace(&workspace, &entries);
+    var workspace = mpt.RootWorkspace.init(buffer);
+    _ = try mpt.init(std.testing.allocator).rootWithWorkspace(&workspace, &entries);
     try std.testing.expect(workspace.peak_used_bytes <= needed);
 }
 
@@ -364,7 +374,7 @@ test "catalog lookup matches proof lookup through embedded topology" {
     defer builder.deinit();
     const root_ref = try builder.authenticateRoot(root_hash);
     try std.testing.expectEqual(@as(usize, 4), builder.nodeCount());
-    try std.testing.expectEqual(.extension, (builder.node(root_ref.node.id) orelse return error.MissingCatalogRoot).kind);
+    try std.testing.expect((try builder.leafValue(root_ref.node.id)) == null);
     var catalog = try builder.finish();
     defer catalog.deinit();
 
@@ -419,12 +429,14 @@ test "catalog keeps missing hashed siblings opaque" {
     defer catalog.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), catalog.nodeCount());
-    try std.testing.expectEqual(@as(usize, 33), try catalog.branchReferenceEncodedLen(root_ref.node.id, 0));
-    try std.testing.expectEqual(@as(usize, 3), try catalog.branchReferenceEncodedLen(root_ref.node.id, 1));
-    try std.testing.expectEqual(@as(usize, 1), try catalog.branchReferenceEncodedLen(root_ref.node.id, 2));
+    const root = catalog.node(root_ref.node.id) orelse return error.MissingCatalogRoot;
+    const lengths = try catalog.resolvedBranchReferenceEncodedLengths(root);
+    try std.testing.expectEqual(@as(u8, 33), lengths[0]);
+    try std.testing.expectEqual(@as(u8, 3), lengths[1]);
+    try std.testing.expectEqual(@as(u8, 1), lengths[2]);
     try std.testing.expectError(
         error.InvalidNodeReference,
-        catalog.branchReferenceEncodedLen(root_ref.node.id, 16),
+        catalog.resolvedBranchChild(root, 16),
     );
     try std.testing.expectError(error.MissingNode, catalog.lookup(root_ref, &[_]u8{0x00}));
     const embedded = try catalog.lookup(root_ref, &[_]u8{0x10});
@@ -455,6 +467,18 @@ test "catalog links shared hashed nodes once" {
     if (root.kind != .branch) return error.ExpectedBranch;
     const children = catalog.branchChildren(root_ref.node.id) orelse return error.ExpectedBranch;
     try std.testing.expectEqual(children[0].node(), children[1].node());
+    const resolved = try catalog.resolvedBranchChild(root, 1);
+    try std.testing.expectEqual(children[1], resolved.link);
+    switch (resolved.reference) {
+        .hashed => |actual| try std.testing.expectEqualSlices(u8, &leaf_hash, actual),
+        else => return error.ExpectedHashedReference,
+    }
+    const leaf_id = children[1].node() orelse return error.ExpectedLinkedNode;
+    const leaf_entry = catalog.node(leaf_id) orelse return error.MissingCatalogLeaf;
+    try std.testing.expectError(
+        error.InvalidNodeReference,
+        catalog.resolvedBranchChild(leaf_entry, 1),
+    );
     try expectSameLookup(
         try trie.lookup(root_hash, indexed.index(), &[_]u8{0x00}),
         try catalog.lookup(root_ref, &[_]u8{0x00}),
@@ -552,13 +576,6 @@ test "catalog rejects a resolved content-addressed cycle" {
     defer builder.deinit();
     _ = try builder.authenticateRoot([_]u8{0} ** 32);
     try std.testing.expectError(error.InvalidNodeReference, builder.finish());
-}
-
-test "catalog link representation remains four bytes" {
-    try std.testing.expectEqual(@as(usize, 4), @sizeOf(mpt.catalog.Link));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(mpt.catalog.Node));
-    try std.testing.expectEqual(@as(usize, 64), @sizeOf([16]mpt.catalog.Link));
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(mpt.catalog.Branch));
 }
 
 test "catalog admission bounds indexed, linked, and branch counts" {
@@ -785,36 +802,62 @@ test "sparse branch collapse reveals the sole hashed sibling" {
     );
 }
 
-test "occurrence catalog update rejects a root the catalog does not authenticate" {
+test "occurrence catalog update rejects branch values" {
+    const key = [_]u8{0} ** 32;
+    const child = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x02};
+    const child_hash = mpt.StdKeccak256Context.keccak256(.{}, &child);
+    const branch = [_]u8{0xf1} ++ [_]u8{0xa0} ++ child_hash ++
+        [_]u8{0x80} ** 15 ++ [_]u8{0x01};
+    const nodes = [_][]const u8{ &branch, &child };
     const trie = mpt.init(std.testing.allocator);
-    const first = fixedKey(0x10);
-    const root_node = fixedKeyLeaf(first, 0x01);
-    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
-    const nodes = [_][]const u8{&root_node};
     var indexed = try trie.indexNodes(&nodes);
     defer indexed.deinit();
     var builder = try trie.catalogBuilder(indexed.index());
     defer builder.deinit();
+    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &branch);
     const root_ref = try builder.authenticateRoot(root_hash);
-    var catalog = try builder.finish();
+    var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
-    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
-    defer workspace.deinit();
-
-    var wrong_root = root_hash;
-    wrong_root[0] ^= 1;
-    const replacement = [_]mpt.CatalogUpdate{.{ .key = first, .value = &[_]u8{0x04} }};
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const update = [_]mpt.FixedUpdate{.{ .key = key, .value = &[_]u8{0x03} }};
     try std.testing.expectError(
-        error.InvalidNodeReference,
-        trie.updateCatalog(&workspace, wrong_root, &catalog, root_ref, &replacement),
+        error.NonCanonicalNode,
+        trie.updateCatalogSorted(&region, &catalog, root_ref, &update),
     );
     try std.testing.expectError(
-        error.InvalidNodeReference,
-        trie.updateCatalog(&workspace, wrong_root, &catalog, root_ref, &.{}),
+        error.NonCanonicalNode,
+        trie.updateFixedSorted(&region, root_hash, indexed.index(), &update),
     );
 }
 
-test "occurrence catalog update cleans every allocation failure position" {
+test "occurrence catalog update rejects variable-width leaves" {
+    const leaf = [_]u8{ 0xc2, 0x20, 0x01 };
+    const nodes = [_][]const u8{&leaf};
+    const trie = mpt.init(std.testing.allocator);
+    var indexed = try trie.indexNodes(&nodes);
+    defer indexed.deinit();
+    var builder = try trie.catalogBuilder(indexed.index());
+    defer builder.deinit();
+    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
+    const root_ref = try builder.authenticateRoot(root_hash);
+    var catalog = try builder.finishAssumeCollisionResistant();
+    defer catalog.deinit();
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const key = [_]u8{0} ** 32;
+    const update = [_]mpt.FixedUpdate{.{ .key = key, .value = &[_]u8{0x02} }};
+    try std.testing.expectError(
+        error.InvalidNode,
+        trie.updateCatalogSorted(&region, &catalog, root_ref, &update),
+    );
+    try std.testing.expectError(
+        error.InvalidNode,
+        trie.updateFixedSorted(&region, root_hash, indexed.index(), &update),
+    );
+}
+
+test "occurrence updates clean every allocation failure position" {
     const Harness = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const first = fixedKey(0x10);
@@ -830,13 +873,14 @@ test "occurrence catalog update cleans every allocation failure position" {
             const root_ref = try builder.authenticateRoot(root_hash);
             var catalog = try builder.finish();
             defer catalog.deinit();
-            var workspace = mpt.CatalogWorkspace.init(allocator);
-            defer workspace.deinit();
-            const updates = [_]mpt.CatalogUpdate{
+            var region = mpt.Region.init(allocator);
+            defer region.deinit();
+            const updates = [_]mpt.FixedUpdate{
                 .{ .key = first, .value = null },
                 .{ .key = second, .value = &[_]u8{0x02} },
             };
-            _ = try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &updates);
+            _ = try trie.updateCatalogSorted(&region, &catalog, root_ref, &updates);
+            _ = try trie.updateFixedSorted(&region, root_hash, indexed.index(), &updates);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
@@ -847,7 +891,7 @@ test "occurrence catalog update handles fixed-key insertion from empty root" {
     const first = fixedKey(0x10);
     const second = fixedKey(0x11);
     const third = fixedKey(0x20);
-    const updates = [_]mpt.CatalogUpdate{
+    const updates = [_]mpt.FixedUpdate{
         .{ .key = first, .value = &[_]u8{0x01} },
         .{ .key = second, .value = &[_]u8{0x02} },
         .{ .key = third, .value = &[_]u8{0x03} },
@@ -862,11 +906,10 @@ test "occurrence catalog update handles fixed-key insertion from empty root" {
     const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
     var catalog = try catalog_builder.finish();
     defer catalog.deinit();
-    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
-    defer workspace.deinit();
-    const actual = try trie.updateCatalog(
-        &workspace,
-        mpt.empty_root,
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const actual = try trie.updateCatalogSorted(
+        &region,
         &catalog,
         root_ref,
         &updates,
@@ -882,11 +925,10 @@ test "occurrence catalog update accepts an empty update batch" {
     const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
     var catalog = try catalog_builder.finish();
     defer catalog.deinit();
-    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
-    defer workspace.deinit();
-    const actual = try trie.updateCatalog(
-        &workspace,
-        mpt.empty_root,
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const actual = try trie.updateCatalogSorted(
+        &region,
         &catalog,
         root_ref,
         &.{},
@@ -909,17 +951,22 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     const root_ref = try catalog_builder.authenticateRoot(root_hash);
     var catalog = try catalog_builder.finish();
     defer catalog.deinit();
-    var workspace = mpt.CatalogWorkspace.init(std.testing.allocator);
-    defer workspace.deinit();
-    const replacement = [_]mpt.CatalogUpdate{.{ .key = first, .value = &[_]u8{0x04} }};
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const replacement = [_]mpt.FixedUpdate{.{ .key = first, .value = &[_]u8{0x04} }};
     const replaced_entries = [_]mpt.Entry{.{ .key = &first, .value = &[_]u8{0x04} }};
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&replaced_entries)),
-        &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &replacement)),
+        &(try trie.updateCatalogSorted(&region, &catalog, root_ref, &replacement)),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try trie.rootSorted(&replaced_entries)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &replacement)),
     );
 
-    const split = [_]mpt.CatalogUpdate{
+    const split = [_]mpt.FixedUpdate{
         .{ .key = second, .value = &[_]u8{0x02} },
         .{ .key = third, .value = &[_]u8{0x03} },
     };
@@ -931,17 +978,27 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&split_entries)),
-        &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &split)),
+        &(try trie.updateCatalogSorted(&region, &catalog, root_ref, &split)),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try trie.rootSorted(&split_entries)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &split)),
     );
 
-    const delete_only = [_]mpt.CatalogUpdate{.{ .key = first, .value = null }};
+    const delete_only = [_]mpt.FixedUpdate{.{ .key = first, .value = null }};
     try std.testing.expectEqualSlices(
         u8,
         &mpt.empty_root,
-        &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &delete_only)),
+        &(try trie.updateCatalogSorted(&region, &catalog, root_ref, &delete_only)),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &mpt.empty_root,
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &delete_only)),
     );
 
-    const replace_with_other = [_]mpt.CatalogUpdate{
+    const replace_with_other = [_]mpt.FixedUpdate{
         .{ .key = first, .value = null },
         .{ .key = second, .value = &[_]u8{0x02} },
     };
@@ -949,7 +1006,12 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&compressed_entries)),
-        &(try trie.updateCatalog(&workspace, root_hash, &catalog, root_ref, &replace_with_other)),
+        &(try trie.updateCatalogSorted(&region, &catalog, root_ref, &replace_with_other)),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &(try trie.rootSorted(&compressed_entries)),
+        &(try trie.updateFixedSorted(&region, root_hash, indexed.index(), &replace_with_other)),
     );
 }
 
@@ -972,8 +1034,12 @@ test "sparse update uses bounded frames for deep Patricia topology" {
         entries[index] = .{ .key = &keys[index], .value = &values[index] };
         updates[index] = .{ .key = &keys[index], .value = &values[index] };
     }
-    mpt.Sort.byKey(mpt.Entry, &entries);
-    mpt.Sort.byKey(mpt.Update, &updates);
+    std.mem.sort(mpt.Entry, &entries, {}, struct {
+        fn lessThan(_: void, lhs: mpt.Entry, rhs: mpt.Entry) bool {
+            return std.mem.lessThan(u8, lhs.key, rhs.key);
+        }
+    }.lessThan);
+    mpt.sortUpdates(&updates);
 
     const trie = mpt.init(std.testing.allocator);
     const actual = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, &updates);

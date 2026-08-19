@@ -5,12 +5,10 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .rlp = .{
-            .url = "git+https://github.com/0xjojoex/evm.zig.git#rlp-v0.1.0",
-            .hash = "rlp-0.1.0-SlXDVcYLAgA2p-rqTGgOFCKbdBmAFIaSx5WOD9mOXAet",
+            .path = "../rlp",
         },
     },
     .paths = .{
-        "CHANGELOG.md",
         "LICENSE-MIT",
         "LICENSE-APACHE",
         "README.md",

@@ -1,7 +1,7 @@
 const std = @import("std");
 const mpt = @import("mpt");
 
-test "typed key facade delegates root, proof, and sparse update to structural MPT" {
+test "typed key facade delegates root, proof, and fixed update to structural MPT" {
     const DomainKey = enum(u8) {
         alice = 1,
         bob = 2,
@@ -9,7 +9,7 @@ test "typed key facade delegates root, proof, and sparse update to structural MP
     const KeyContext = struct {
         namespace: u8,
 
-        pub fn trieKey(self: @This(), key: DomainKey) mpt.Root {
+        pub inline fn trieKey(self: @This(), key: DomainKey) mpt.FixedKey {
             const input = [_]u8{ self.namespace, @intFromEnum(key) };
             return mpt.StdKeccak256Context.keccak256(.{}, &input);
         }
@@ -36,7 +36,9 @@ test "typed key facade delegates root, proof, and sparse update to structural MP
     });
     try std.testing.expectEqualSlices(u8, &raw_root, &typed_root);
 
-    const inserted = try map.update(mpt.empty_root, mpt.empty_node_index, &.{
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
+    const inserted = try map.update(&region, mpt.empty_root, mpt.empty_node_index, &.{
         .{ .key = .bob, .value = "bob" },
         .{ .key = .alice, .value = "alice" },
     });
@@ -49,7 +51,7 @@ test "typed key facade delegates root, proof, and sparse update to structural MP
     @memcpy(leaf[3..35], &alice_key);
     leaf[35] = 0x01;
     const leaf_root = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
-    var indexed = try map.indexNodes(&.{&leaf});
+    var indexed = try map.structural.indexNodes(&.{&leaf});
     defer indexed.deinit();
 
     switch (try map.lookup(leaf_root, indexed.index(), .alice)) {
@@ -60,19 +62,22 @@ test "typed key facade delegates root, proof, and sparse update to structural MP
 
 test "typed key facade detects collisions after projection" {
     const KeyContext = struct {
-        pub fn trieKey(_: @This(), _: u8) mpt.Root {
+        pub fn trieKey(_: @This(), _: u8) mpt.FixedKey {
             return [_]u8{0x11} ** 32;
         }
     };
     const Structural = mpt.Trie(mpt.StdKeccak256Context);
     const Map = Structural.Keyed(u8, KeyContext);
     const map = Map.init(Structural.init(std.testing.allocator, .{}), .{});
+    var region = mpt.Region.init(std.testing.allocator);
+    defer region.deinit();
 
     try std.testing.expectError(error.DuplicateKey, map.root(&.{
         .{ .key = 1, .value = "one" },
         .{ .key = 2, .value = "two" },
     }));
     try std.testing.expectError(error.DuplicateKey, map.update(
+        &region,
         mpt.empty_root,
         mpt.empty_node_index,
         &.{
