@@ -1274,6 +1274,16 @@ pub fn closeScope(self: *TrackedState) void {
     tx.scope.clearRetainingCapacity();
 }
 
+/// Clear EIP-1153 state at a custom transaction root boundary while retaining
+/// transaction-scoped warmth, logs, and the surrounding rollback journal.
+/// The clear is not journaled: an outer rollback must not resurrect transient
+/// values whose root lifetime has ended.
+pub fn clearTransientStorage(self: *TrackedState) void {
+    const tx = self.mutableTransaction();
+    std.debug.assert(tx.scope.active);
+    tx.scope.transient_storage.clearRetainingCapacity();
+}
+
 pub fn seal(self: *TrackedState, id: AttemptId) void {
     const tx = self.assertCurrent(id);
     std.debug.assert(!tx.sealed);

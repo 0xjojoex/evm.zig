@@ -377,6 +377,7 @@ pub const Message = union(enum) {
 pub const ChainEnvironment = execution_context.ChainEnvironment;
 pub const BlockEnvironment = execution_context.BlockEnvironment;
 pub const TransactionEnvironment = execution_context.TransactionEnvironment;
+pub const TransactionExtension = execution_context.TransactionExtension;
 pub const ExecutionContext = execution_context.ExecutionContext;
 
 /// A storage slot that is already warm when root execution starts.

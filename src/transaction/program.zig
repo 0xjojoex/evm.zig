@@ -427,6 +427,30 @@ pub fn ContextType(
                 return executor_errors.normalize(err);
         }
 
+        /// Open a custom-family session containing more than one EVM root.
+        /// The supplied context establishes the transaction-lifetime extension;
+        /// each root may rebind `ORIGIN` through its own request.
+        pub fn beginRootSession(
+            self: *Self,
+            context: execution.ExecutionContext,
+        ) ContextError!void {
+            return runtime_ops.beginRootSession(self.activeExecutor(), context) catch |err|
+                return executor_errors.normalize(err);
+        }
+
+        /// Execute one root in the open custom-family session. The full request
+        /// context is provisional: only `ORIGIN` may differ from the session,
+        /// enforced by the runtime until another consumer justifies a narrower
+        /// root-context type.
+        pub fn runRoot(
+            self: *Self,
+            request: execution.EvmExecutionRequest,
+            init_value: execution.ExecutionScopeInit,
+        ) ContextError!executor_engine.TransactionExecutionOutcome {
+            return runtime_ops.runRoot(self.activeExecutor(), request, init_value) catch |err|
+                return executor_errors.normalize(err);
+        }
+
         /// Open the root message scope after family prelude work is complete.
         ///
         /// Call exactly once before `runPayload`.

@@ -4,7 +4,7 @@ const std = @import("std");
 
 const blob_mod = @import("./transaction/blob.zig");
 pub const authorization = @import("./transaction/authorization.zig");
-const gas_mod = @import("./transaction/gas.zig");
+pub const gas = @import("./transaction/gas.zig");
 const settlement_mod = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
 pub const envelope = @import("./transaction/envelope.zig");
@@ -21,11 +21,11 @@ pub const BlobSchedule = blob_mod.BlobSchedule;
 pub const ExcessBlobGasInput = blob_mod.ExcessBlobGasInput;
 pub const TxKind = transaction_mod.TxKind;
 pub const SenderCodeKind = transaction_mod.SenderCodeKind;
-pub const IntrinsicGasOptions = gas_mod.IntrinsicGasOptions;
-pub const FloorGasInput = gas_mod.FloorGasInput;
-pub const GasCharge = gas_mod.GasCharge;
-pub const InitialGas = gas_mod.InitialGas;
-pub const GasPlan = gas_mod.GasPlan;
+pub const IntrinsicGasOptions = gas.IntrinsicGasOptions;
+pub const FloorGasInput = gas.FloorGasInput;
+pub const GasCharge = gas.GasCharge;
+pub const InitialGas = gas.InitialGas;
+pub const GasPlan = gas.GasPlan;
 pub const AccessListEntry = transaction_mod.AccessListEntry;
 pub const AuthorizationTuple = transaction_mod.AuthorizationTuple;
 pub const AuthorizationSuccessInput = authorization.SuccessInput;
@@ -50,7 +50,7 @@ pub const effectiveGasPrice = transaction_mod.effectiveGasPrice;
 // The opcode-visible context is projected by `Env.executionContext`, so there is
 // no free-function form to re-export here.
 pub const executionRequest = transaction_mod.executionRequest;
-pub const accessListCounts = gas_mod.accessListCounts;
+pub const accessListCounts = gas.accessListCounts;
 pub const fakeExponential = blob_mod.fakeExponential;
 pub const checkedGasCost = settlement_mod.checkedGasCost;
 pub const Prepared = transaction_mod.Prepared;
@@ -61,7 +61,7 @@ pub const signingHash = signing.signingHash;
 pub const recoverAuthorizationSigner = signing.recoverAuthorizationSigner;
 pub const TransitionOutcomeType = program.TransitionOutcomeType;
 pub const TransactOutcomeType = program.TransactOutcomeType;
-pub const GasRuntime = gas_mod.Runtime;
+pub const GasRuntime = gas.Runtime;
 pub const SettlementRuntime = settlement_mod.Runtime;
 
 test {

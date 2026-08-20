@@ -315,6 +315,29 @@ test "transient state and owned logs follow checkpoint rollback" {
     try std.testing.expectEqual(@as(usize, 0), state.tx.?.logs.data.items.len);
 }
 
+test "transient root clear does not resurrect values through nested rollback" {
+    var state = TrackedState.init(std.testing.allocator);
+    defer state.deinit();
+
+    _ = state.beginTransaction();
+    state.beginScope();
+    const group_checkpoint = state.checkpoint();
+    try state.setTransientStorage(addr(1), 4, 12);
+    try std.testing.expectEqual(@as(u256, 12), try state.getTransientStorage(addr(1), 4));
+
+    state.clearTransientStorage();
+    try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
+    const root_checkpoint = state.checkpoint();
+    try state.setTransientStorage(addr(1), 4, 13);
+    state.revertToCheckpoint(root_checkpoint);
+    try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
+
+    state.revertToCheckpoint(group_checkpoint);
+    try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
+    try std.testing.expectEqual(@as(usize, 0), state.tx.?.undo.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.tx.?.undo.transient_undo.items.len);
+}
+
 test "compact journal order unwinds typed undo arenas" {
     var backing = TestReader{};
     var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());

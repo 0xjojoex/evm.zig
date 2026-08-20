@@ -718,6 +718,15 @@ pub fn closeScope(self: *StatelessBlockState) void {
     self.scope_depth = 0;
 }
 
+/// Clear EIP-1153 state at a custom transaction root boundary while retaining
+/// transaction-scoped warmth, logs, and the surrounding rollback journal.
+/// The clear may occur inside an outer checkpoint and is not journaled: rollback
+/// must not resurrect transient values whose root lifetime has ended.
+pub fn clearTransientStorage(self: *StatelessBlockState) void {
+    self.assertTransaction();
+    self.transient_storage.clearRetainingCapacity();
+}
+
 pub fn scopeActive(self: *const StatelessBlockState) bool {
     return self.scope_depth != 0;
 }
@@ -2449,6 +2458,35 @@ test "warm undo exists only for the cold to warm transition" {
     try std.testing.expect(state.accountWarm(id));
     discardTestTransaction(&state, attempt);
     try std.testing.expect(!state.accountWarm(id));
+}
+
+test "dense transient root clear does not resurrect values through nested rollback" {
+    const target = address.addr(1);
+    const claims = [_]bal.AccountChanges{.{ .address = target }};
+    const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+    const account_facts = [_]records.AccountFact{
+        .{ .parent = .{ .absent = .empty_trie } },
+    };
+    var state = try initTestState(std.testing.allocator, plan, &account_facts, &.{});
+    defer state.deinit();
+    const attempt = beginTestTransaction(&state);
+
+    const group_checkpoint = state.checkpoint();
+    try state.setTransientStorage(.fromAddress(target), 4, 12);
+    try std.testing.expectEqual(@as(u256, 12), state.getTransientStorage(.fromAddress(target), 4));
+
+    state.clearTransientStorage();
+    try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(.fromAddress(target), 4));
+    const root_checkpoint = state.checkpoint();
+    try state.setTransientStorage(.fromAddress(target), 4, 13);
+    state.revertToCheckpoint(root_checkpoint);
+    try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(.fromAddress(target), 4));
+
+    state.revertToCheckpoint(group_checkpoint);
+    try std.testing.expectEqual(@as(u256, 0), state.getTransientStorage(.fromAddress(target), 4));
+    try std.testing.expectEqual(@as(usize, 0), state.journal.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.journal.transient.items.len);
+    discardTestTransaction(&state, attempt);
 }
 
 test "dense state initialization cleans every allocation failure" {
