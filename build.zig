@@ -400,6 +400,7 @@ pub fn build(b: *std.Build) void {
     const optimize_name = @tagName(optimize);
     const bench_optimize_name = @tagName(bench_optimize);
     if (pathExists(b, "eest/build.zig")) {
+        addEestDelegate(b, "fixture-lock-check", "Verify fixture pins have one source of truth", "fixture-lock-check", optimize_name, null, evmz_build, ci_step);
         addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null, evmz_build, ci_step);
         addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", optimize_name, null, evmz_build, null);

@@ -877,7 +877,7 @@ test "stateless BlockSTF EEST runner validates a witness-backed empty Cancun blo
     const unsuccessful_output_field =
         "\"statelessOutputBytes\": \"0x" ++
         "36bf02569d0c0a7806f23f6eb474c4d90c3e8abcba7db4aaae6f3157f0395e28" ++
-        "002500000001000000000000000c0000000400000008000000080000000000000000000000" ++
+        "0001000000000000000115" ++
         "\", \"executionWitness\":";
     const expected_invalid_fixture = try std.mem.replaceOwned(
         u8,

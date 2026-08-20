@@ -7,8 +7,8 @@ involved.
 
 A guest ELF validates exactly one specification, so devnet releases use the
 compatibility coordinate `guest-<track>@vX.Y.Z[-rc.N]`. The version mirrors the
-complete upstream fixture release: `guest-glamsterdam-devnet@v8.1.0-rc.0`
-pairs with `tests-glamsterdam-devnet@v8.1.0`; it is not evmz software SemVer.
+complete upstream fixture release: `guest-<track>@vX.Y.Z-rc.0` pairs with
+`tests-<track>@vX.Y.Z`; it is not evmz software SemVer.
 The independently numbered `tests-zkevm` wire/corpus release is also recorded.
 Devnet tracks carry no compatibility guarantee at any bump; the release
 manifest states what an ELF proves, the stateless schema id is the wire

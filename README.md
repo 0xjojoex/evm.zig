@@ -9,13 +9,15 @@ RV64 guest on SP1 and ZisK.
 ## Status
 
 evmz is pre-release. The version is `0.0.0`, the public API may change between
-commits, and the project has not been audited. `67,066/67,066` EEST vectors
-pass for Glamsterdam devnet-7.
+commits, and the project has not been audited. `main` tracks the latest
+supported execution-spec prereleases. Dedicated fixture-pin branches preserve
+older devnet lines such as Glamsterdam devnet-7; the branch-local `eest.lock`
+is authoritative for every exact fixture release.
 
 Implemented:
 
-- Ethereum execution through Glamsterdam devnet-7, whose execution-layer fork is
-  Amsterdam
+- Ethereum execution through the latest supported Glamsterdam prerelease, whose
+  execution-layer fork is Amsterdam
 - Stateless block validation from execution witnesses
 - Native, SP1, and ZisK execution of the stateless validator
 

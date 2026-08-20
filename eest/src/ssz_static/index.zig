@@ -1,6 +1,8 @@
-//! Generated from consensus-specs v1.7.0-alpha.12 resolved pyspec.
+//! Generated from the consensus-specs resolved pyspec pinned by eest.lock.
 //! Maps preset/fork fixture names to deduplicated schema codecs.
 //! Regenerate with scripts/generate-consensus-ssz-schemas.py.
+
+pub const source_release = "v1.7.0-alpha.13";
 
 pub const Preset = enum {
     mainnet,

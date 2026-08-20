@@ -393,7 +393,6 @@ def emit_container(
 
 
 def emit_fork_module(
-    version: str,
     fork: str,
     shapes: dict[tuple[Any, ...], Shape],
 ) -> str:
@@ -406,7 +405,7 @@ def emit_fork_module(
         if shape_for(dependency, shapes).declaration_fork != fork
     }
     lines = [
-        f"//! Generated from consensus-specs {version} resolved pyspec.",
+        "//! Generated from the consensus-specs resolved pyspec pinned by eest.lock.",
         f"//! Unique named schema shapes first required at {fork}.",
         "//! Regenerate with scripts/generate-consensus-ssz-schemas.py.",
         "",
@@ -428,9 +427,11 @@ def emit_index(
 ) -> str:
     by_context = {(context.preset, context.fork): context for context in contexts}
     lines = [
-        f"//! Generated from consensus-specs {version} resolved pyspec.",
+        "//! Generated from the consensus-specs resolved pyspec pinned by eest.lock.",
         "//! Maps preset/fork fixture names to deduplicated schema codecs.",
         "//! Regenerate with scripts/generate-consensus-ssz-schemas.py.",
+        "",
+        f'pub const source_release = "{version}";',
         "",
     ]
     lines.append("pub const Preset = enum {")
@@ -479,7 +480,7 @@ def main() -> None:
     for fork in FORKS:
         output = args.output / f"{fork}.zig"
         count = sum(shape.declaration_fork == fork for shape in shapes.values())
-        output.write_text(emit_fork_module(args.version, fork, shapes), encoding="ascii")
+        output.write_text(emit_fork_module(fork, shapes), encoding="ascii")
         generated.append(output)
         print(f"generated {output}: {count} unique shapes")
 

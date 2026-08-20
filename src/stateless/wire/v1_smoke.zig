@@ -88,12 +88,7 @@ pub fn amsterdamSmokeInput(
             .execution_requests = execution_requests,
         } },
         .witness = .{ .headers = parent_headers },
-        .chain_config = .{
-            .chain_id = 1,
-            .active_fork = .{
-                .activation = .{ .block_number = 0 },
-            },
-        },
+        .chain_id = 1,
     };
 }
 

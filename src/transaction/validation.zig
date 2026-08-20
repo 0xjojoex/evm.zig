@@ -432,12 +432,12 @@ test "transaction validation includes Amsterdam access-list data surcharge" {
         .sender_balance = 100_000,
     }));
     try std.testing.expectEqual(ValidationError.intrinsic_gas_too_low, testRuntime(@import("../eth/spec.zig").amsterdam).validate(.{
-        .gas_limit = 24_327,
+        .gas_limit = 23_227,
         .access_list_counts = access_counts,
         .sender_balance = 100_000,
     }).?);
     try std.testing.expectEqual(@as(?ValidationError, null), testRuntime(@import("../eth/spec.zig").amsterdam).validate(.{
-        .gas_limit = 24_328,
+        .gas_limit = 23_228,
         .access_list_counts = access_counts,
         .sender_balance = 100_000,
     }));

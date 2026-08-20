@@ -207,12 +207,13 @@ fn failureLessThan(_: void, lhs: Failure, rhs: Failure) bool {
 }
 
 fn defaultFixturePath(io: std.Io, allocator: std.mem.Allocator, shared_root: ?[]const u8) ![]u8 {
-    var value = lock.readValue(io, allocator, "consensus_dest") catch |err| switch (err) {
+    var value = lock.readValue(io, allocator, "consensus_release") catch |err| switch (err) {
         error.MissingEestLockKey => return error.MissingConsensusLockKey,
         else => return err,
     };
     defer value.deinit(allocator);
-    const relative = value.bytes;
+    const relative = try lock.relativeReleasePath(allocator, .consensus, value.bytes);
+    defer allocator.free(relative);
     if (shared_root) |root| {
         const suffix = if (std.mem.startsWith(u8, relative, ".eest/")) relative[6..] else relative;
         return std.fs.path.join(allocator, &.{ root, suffix });

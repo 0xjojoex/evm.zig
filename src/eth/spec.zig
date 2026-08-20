@@ -142,11 +142,8 @@ const semantics = struct {
         } else if (!options.is_self_transfer) {
             gas = std.math.add(u64, gas, eip8038.cold_account_access_cost) catch return null;
         }
-        if (options.value != 0 and !options.is_self_transfer) {
-            gas = std.math.add(u64, gas, eip8037.transfer_log_cost) catch return null;
-            if (!options.is_create) {
-                gas = std.math.add(u64, gas, eip8037.tx_value_cost) catch return null;
-            }
+        if (options.value != 0 and !options.is_create and !options.is_self_transfer) {
+            gas = std.math.add(u64, gas, eip8037.tx_value_cost) catch return null;
         }
         return gas;
     }
@@ -918,5 +915,5 @@ test "legacy SSTORE schedules match their EIP repricings" {
 test "Amsterdam SSTORE separates access and write gas from state gas" {
     try std.testing.expectEqual(execution.StorageGas{ .cost = 10_000, .refund = 0 }, amsterdam.storage.sstoreGas(.added));
     try std.testing.expectEqual(execution.StorageGas{ .cost = 0, .refund = 10_000 }, amsterdam.storage.sstoreGas(.added_deleted));
-    try std.testing.expectEqual(execution.StorageGas{ .cost = 0, .refund = -2_480 }, amsterdam.storage.sstoreGas(.deleted_restored));
+    try std.testing.expectEqual(execution.StorageGas{ .cost = 0, .refund = -1_616 }, amsterdam.storage.sstoreGas(.deleted_restored));
 }

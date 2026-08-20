@@ -6,16 +6,21 @@ const address = @import("../address.zig");
 const Revision = @import("../eth/revision.zig").Revision;
 const Spec = @import("../spec.zig").Spec;
 const BlockPreparedCode = @import("../eth/BlockPreparedCode.zig");
+const Withdrawal = @import("../eth/Withdrawal.zig");
 const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
+const eth_header = @import("../eth/header.zig");
 const input_mod = @import("./input.zig");
 const trie = @import("../eth/trie.zig");
 const rlp = @import("rlp");
 const state = @import("../state.zig");
 const stateless_tx = @import("./tx.zig");
 const transaction = @import("../transaction.zig");
+const uint256 = @import("../uint256.zig");
 const Backend = @import("../backend.zig").Backend;
+
+const max_rlp_block_size = 8 * 1024 * 1024;
 
 pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || stateless_tx.Error || error{
     MissingParentHeader,
@@ -117,6 +122,9 @@ fn validateWithScratchExact(
 ) Error!block_stf.Result {
     const block = &input.block;
     if (!blockShapeValid(ExactBlockStf.fork, block)) return .{ .status = .invalid_block_body };
+    if (ExactBlockStf.fork.isImpl(.osaka) and !blockRlpSizeValid(ExactBlockStf.fork, block, max_rlp_block_size)) {
+        return .{ .status = .invalid_block_body };
+    }
     var header_chain = try HeaderChain.init(
         allocator,
         input.witness.headers,
@@ -255,7 +263,9 @@ fn blockShapeValid(revision: Revision, block: *const input_mod.Block) bool {
     {
         return false;
     }
-    if (!has_cancun and block.versioned_hashes.len != 0) return false;
+    if (has_cancun) {
+        if (!versionedHashesMatch(block.transactions, block.versioned_hashes)) return false;
+    } else if (block.versioned_hashes.len != 0) return false;
     if (!revision.isImpl(.prague) and block.execution_requests.len != 0) return false;
 
     if (revision.isImpl(.amsterdam)) {
@@ -264,6 +274,78 @@ fn blockShapeValid(revision: Revision, block: *const input_mod.Block) bool {
         return false;
     }
     return true;
+}
+
+fn versionedHashesMatch(
+    transactions: []const block_stf.TransactionInput,
+    expected: []const [32]u8,
+) bool {
+    var expected_index: usize = 0;
+    for (transactions) |entry| {
+        for (entry.tx.blob_hashes) |actual| {
+            if (expected_index == expected.len or
+                actual != std.mem.readInt(u256, &expected[expected_index], .big))
+            {
+                return false;
+            }
+            expected_index += 1;
+        }
+    }
+    return expected_index == expected.len;
+}
+
+fn blockRlpSizeValid(revision: Revision, block: *const input_mod.Block, limit: usize) bool {
+    return (blockRlpEncodedLen(revision, block) catch return false) <= limit;
+}
+
+fn blockRlpEncodedLen(
+    revision: Revision,
+    block: *const input_mod.Block,
+) (rlp.EncodeError || eth_header.Error)!usize {
+    const zero_hash = [_]u8{0} ** 32;
+    const header = eth_header.ExecutionHeader{
+        .parent_hash = block.parent_hash,
+        .coinbase = block.fee_recipient,
+        .state_root = block.state_root,
+        .transactions_root = zero_hash,
+        .receipts_root = block.receipts_root,
+        .logs_bloom = block.logs_bloom,
+        .number = block.number,
+        .gas_limit = block.gas_limit,
+        .gas_used = block.gas_used,
+        .timestamp = block.timestamp,
+        .extra_data = block.extra_data,
+        .prev_randao = uint256.toBytes32(block.prev_randao),
+        .base_fee_per_gas = if (revision.isImpl(.london)) block.base_fee_per_gas else null,
+        .withdrawals_root = if (revision.isImpl(.shanghai)) zero_hash else null,
+        .blob_gas_used = if (revision.isImpl(.cancun)) block.blob_gas_used else null,
+        .excess_blob_gas = if (revision.isImpl(.cancun)) block.excess_blob_gas else null,
+        .parent_beacon_block_root = if (revision.isImpl(.cancun)) block.parent_beacon_block_root else null,
+        .requests_hash = if (revision.isImpl(.prague)) zero_hash else null,
+        .block_access_list_hash = if (revision.isImpl(.amsterdam)) zero_hash else null,
+        .slot_number = if (revision.isImpl(.amsterdam)) block.slot_number else null,
+    };
+
+    var transaction_payload_len: usize = 0;
+    for (block.transactions) |entry| {
+        const encoded_len = if (entry.encoded.len != 0 and entry.encoded[0] >= 0xc0)
+            entry.encoded.len
+        else
+            try rlp.encodedLen([]const u8, entry.encoded);
+        transaction_payload_len = std.math.add(usize, transaction_payload_len, encoded_len) catch
+            return error.EncodedLengthOverflow;
+    }
+
+    var payload_len = try header.encodedLen(revision);
+    payload_len = std.math.add(usize, payload_len, try rlp.listEncodedLen(transaction_payload_len)) catch
+        return error.EncodedLengthOverflow;
+    payload_len = std.math.add(usize, payload_len, 1) catch return error.EncodedLengthOverflow;
+    payload_len = std.math.add(
+        usize,
+        payload_len,
+        try rlp.encodedLen([]const Withdrawal, block.withdrawals),
+    ) catch return error.EncodedLengthOverflow;
+    return rlp.listEncodedLen(payload_len);
 }
 
 fn currentBlobBaseFeeExact(
@@ -436,9 +518,46 @@ test "normalized stateless block shape uses actual fields" {
     incomplete_cancun.excess_blob_gas = null;
     try std.testing.expect(!blockShapeValid(.cancun, &incomplete_cancun));
 
+    const first_hash = (@as(u256, 1) << 248) | 1;
+    const second_hash = (@as(u256, 1) << 248) | 2;
+    const blob_hashes = [_]u256{ first_hash, second_hash };
+    const transactions = [_]block_stf.TransactionInput{.{
+        .tx = .{
+            .kind = .blob,
+            .sender = address.Address.fromBytes([_]u8{0} ** 20),
+            .gas_limit = 21_000,
+            .blob_hashes = &blob_hashes,
+        },
+        .encoded = &.{0x03},
+    }};
+    const expected_hashes = [_][32]u8{
+        uint256.toBytes32(first_hash),
+        uint256.toBytes32(second_hash),
+    };
+    cancun.transactions = &transactions;
+    cancun.versioned_hashes = &expected_hashes;
+    try std.testing.expect(blockShapeValid(.cancun, &cancun));
+
+    var wrong_order = cancun;
+    wrong_order.versioned_hashes = &.{ expected_hashes[1], expected_hashes[0] };
+    try std.testing.expect(!blockShapeValid(.cancun, &wrong_order));
+
+    var missing_hash = cancun;
+    missing_hash.versioned_hashes = expected_hashes[0..1];
+    try std.testing.expect(!blockShapeValid(.cancun, &missing_hash));
+
+    var extra_hash = cancun;
+    extra_hash.versioned_hashes = &.{ expected_hashes[0], expected_hashes[1], expected_hashes[0] };
+    try std.testing.expect(!blockShapeValid(.cancun, &extra_hash));
+
     var amsterdam = cancun;
     amsterdam.block_access_list = &.{};
     try std.testing.expect(blockShapeValid(.amsterdam, &amsterdam));
+
+    const exact_rlp_size = try blockRlpEncodedLen(.amsterdam, &amsterdam);
+    try std.testing.expect(blockRlpSizeValid(.amsterdam, &amsterdam, exact_rlp_size));
+    amsterdam.extra_data = &.{0x80};
+    try std.testing.expect(!blockRlpSizeValid(.amsterdam, &amsterdam, exact_rlp_size));
 }
 
 test "stateless validator is specialized by the complete spec" {

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/eest-lock.sh"
+
 usage() {
   cat <<'USAGE'
 usage: scripts/fetch-eest-fixtures.sh
@@ -8,13 +11,13 @@ usage: scripts/fetch-eest-fixtures.sh
 Downloads generated EEST JSON fixtures into ../.eest/, which is gitignored.
 
 Environment overrides:
-  EEST_REPO       default: repo from ../eest.lock
-  EEST_VERSION    default: version from ../eest.lock
-  EEST_ARTIFACT   default: artifact from ../eest.lock
-  EEST_URL        default: url from ../eest.lock, or GitHub release URL
-  EEST_SHA256     default: sha256 from ../eest.lock for the locked release
-  EEST_DEST       default: dest from ../eest.lock
-  EEST_CACHE      default: ../.eest/cache
+  EEST_STATE_REPO      repository override
+  EEST_STATE_RELEASE   release override
+  EEST_STATE_ARTIFACT  artifact override
+  EEST_STATE_URL       download URL override
+  EEST_STATE_SHA256    checksum override
+  EEST_STATE_DEST      extraction destination override
+  EEST_CACHE           shared archive cache override
   EEST_TRACKS     optional space-separated fixture directories to extract;
                   supported: state_tests transaction_tests blockchain_tests_sync
   EEST_PRUNE_OUT_OF_SCOPE
@@ -23,11 +26,9 @@ Environment overrides:
 Example:
   scripts/fetch-eest-fixtures.sh
   EEST_TRACKS="state_tests blockchain_tests_sync" scripts/fetch-eest-fixtures.sh
-  zig build eest -- ../.eest/fixtures/tests-glamsterdam-devnet-v7.2.0/fixtures/state_tests/path/to/test.json
+  zig build eest
 
-State fixture defaults come from eest.lock. The current lock tracks the
-Glamsterdam devnet EEST release for Amsterdam work; override
-EEST_REPO/EEST_VERSION/EEST_ARTIFACT/EEST_URL for ad-hoc fixture tracks.
+State fixture defaults come from the authoritative state track in eest.lock.
 USAGE
 }
 
@@ -38,75 +39,27 @@ case "${1:-}" in
     ;;
 esac
 
-lock_path=""
-lock_prefix=""
-if [[ -f "../eest.lock" ]]; then
-  lock_path="../eest.lock"
-  lock_prefix=".."
-elif [[ -f "eest.lock" ]]; then
-  lock_path="eest.lock"
-fi
-
-lock_value() {
-  local key="$1"
-  [[ -n "${lock_path}" ]] || return 1
-  awk -F= -v key="${key}" '
-    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-    {
-      lhs=$1
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
-      if (lhs == key) {
-        sub(/^[^=]*=/, "")
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-        print
-        exit
-      }
-    }
-  ' "${lock_path}"
-}
-
-lock_path_value() {
-  local key="$1"
-  local value
-  value="$(lock_value "${key}")"
-  [[ -n "${value}" ]] || return 1
-  if [[ "${value}" = /* || -z "${lock_prefix}" ]]; then
-    printf '%s\n' "${value}"
-  else
-    printf '%s/%s\n' "${lock_prefix}" "${value}"
-  fi
-}
-
-lock_repo="$(lock_value repo || true)"
-lock_version="$(lock_value version || true)"
-lock_artifact="$(lock_value artifact || true)"
-lock_url="$(lock_value url || true)"
-lock_sha256="$(lock_value sha256 || true)"
-
-repo="${EEST_REPO:-${lock_repo:-ethereum/execution-specs}}"
-version="${EEST_VERSION:-${lock_version:-tests-glamsterdam-devnet@v7.2.0}}"
-artifact="${EEST_ARTIFACT:-${lock_artifact:-fixtures_glamsterdam-devnet.tar.gz}}"
-version_slug="${version//@/-}"
-url_version="${version//@/%40}"
-dest="${EEST_DEST:-$(lock_path_value dest || printf '../.eest/fixtures/%s' "${version_slug}")}"
-cache="${EEST_CACHE:-../.eest/cache}"
+repo="${EEST_STATE_REPO:-$(eest_lock_value state_repo)}"
+release="${EEST_STATE_RELEASE:-$(eest_lock_value state_release)}"
+artifact="${EEST_STATE_ARTIFACT:-$(eest_lock_value state_artifact)}"
+release_slug="$(eest_release_slug "${release}")"
+dest="${EEST_STATE_DEST:-$(eest_release_path state "${release}")}"
+cache="${EEST_CACHE:-${EEST_LOCK_REPO_ROOT}/.eest/cache}"
 tracks="${EEST_TRACKS:-}"
 prune_out_of_scope="${EEST_PRUNE_OUT_OF_SCOPE:-1}"
-if [[ -n "${EEST_URL:-}" ]]; then
-  url="${EEST_URL}"
-elif [[ -z "${EEST_REPO:-}" && -z "${EEST_VERSION:-}" && -z "${EEST_ARTIFACT:-}" && -n "${lock_url}" ]]; then
-  url="${lock_url}"
+if [[ -n "${EEST_STATE_URL:-}" ]]; then
+  url="${EEST_STATE_URL}"
 else
-  url="https://github.com/${repo}/releases/download/${url_version}/${artifact}"
+  url="$(eest_release_url "${repo}" "${release}" "${artifact}")"
 fi
-if [[ -n "${EEST_SHA256:-}" ]]; then
-  sha256="${EEST_SHA256}"
-elif [[ -z "${EEST_REPO:-}" && -z "${EEST_VERSION:-}" && -z "${EEST_ARTIFACT:-}" && -z "${EEST_URL:-}" ]]; then
-  sha256="${lock_sha256}"
+if [[ -n "${EEST_STATE_SHA256:-}" ]]; then
+  sha256="${EEST_STATE_SHA256}"
+elif [[ -z "${EEST_STATE_REPO:-}" && -z "${EEST_STATE_RELEASE:-}" && -z "${EEST_STATE_ARTIFACT:-}" && -z "${EEST_STATE_URL:-}" ]]; then
+  sha256="$(eest_lock_value state_sha256)"
 else
   sha256=""
 fi
-archive="${cache}/${version_slug}-${artifact}"
+archive="${cache}/${release_slug}-${artifact}"
 out_of_scope_tracks=(
   "fixtures/blockchain_tests"
   "fixtures/blockchain_tests_engine"

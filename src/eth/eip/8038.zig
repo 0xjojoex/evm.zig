@@ -20,30 +20,30 @@ const gas = @import("../gas.zig");
 pub const cold_account_access_cost: u64 = 3_000;
 
 /// COLD_STORAGE_ACCESS: cold SLOAD/SSTORE slot touch.
-pub const cold_storage_access_cost: u64 = 3_000;
+pub const cold_storage_access_cost: u64 = 2_100;
 
 // Write component.
 /// ACCOUNT_WRITE: writing an account leaf, for value transfer, SELFDESTRUCT,
 /// CREATE, and EIP-7702 delegation.
-pub const account_write_cost: u64 = 8_000;
+pub const account_write_cost: u64 = 9_000;
 
 /// STORAGE_WRITE: writing a storage slot. State growth is charged separately
 /// as EIP-8037 state-gas.
 pub const storage_write_cost: u64 = 10_000;
 
 /// STORAGE_CLEAR_REFUND: refund when a storage write clears a slot.
-pub const storage_clear_refund: u64 = 12_480;
+pub const storage_clear_refund: u64 = 11_616;
 
 /// CREATE_ACCESS: combined access and write cost for CREATE/CREATE2 and
 /// contract-creation transactions; new-account bytes are state-gas.
-pub const create_access_cost: u64 = 11_000;
+pub const create_access_cost: u64 = account_write_cost + cold_account_access_cost;
 
 // Prepaid access, charged from the transaction access list.
 /// ACCESS_LIST_ADDRESS_COST, up from EIP-2930's 2 400.
-pub const access_list_address_cost: u64 = 3_000;
+pub const access_list_address_cost: u64 = 2_900;
 
 /// ACCESS_LIST_STORAGE_KEY_COST, up from EIP-2930's 1 900.
-pub const access_list_storage_key_cost: u64 = 3_000;
+pub const access_list_storage_key_cost: u64 = 2_000;
 
 /// CALL_VALUE, redefined by the EIP as `ACCOUNT_WRITE + CALL_STIPEND`.
 pub const call_value_cost: u64 = account_write_cost + gas.call_stipend;

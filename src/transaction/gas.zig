@@ -228,8 +228,8 @@ test "transaction gas helpers" {
     try std.testing.expectEqual(@as(u64, 21_008), Frontier.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
     try std.testing.expectEqual(@as(u64, 53_008), Homestead.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
     try std.testing.expectEqual(@as(u64, 53_010), Shanghai.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 23_010), Amsterdam.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 88_198), Amsterdam.intrinsicGasForTransaction(&([_]u8{1} ** 4059), .{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 24_010), Amsterdam.intrinsicGasForTransaction(&.{ 0, 0 }, .{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 89_198), Amsterdam.intrinsicGasForTransaction(&([_]u8{1} ** 4059), .{ .is_create = true }));
     try std.testing.expectEqual(@as(u64, 12_000), Amsterdam.intrinsicBaseGas(.{ .is_self_transfer = true }));
     try std.testing.expectEqual(@as(u64, 15_000), Amsterdam.intrinsicBaseGas(.{}));
     try std.testing.expectEqual(@as(u64, 21_000), Amsterdam.intrinsicBaseGas(.{ .value = 1 }));
@@ -237,14 +237,14 @@ test "transaction gas helpers" {
         .value = 1,
         .creates_account = true,
     }));
-    try std.testing.expectEqual(@as(u64, 23_000), Amsterdam.intrinsicBaseGas(.{ .is_create = true }));
-    try std.testing.expectEqual(@as(u64, 24_756), Amsterdam.intrinsicBaseGas(.{ .is_create = true, .value = 1 }));
-    try std.testing.expectEqual(@as(u64, 24_328), Amsterdam.intrinsicGasForTransaction(&.{}, .{ .access_list_counts = .{
+    try std.testing.expectEqual(@as(u64, 24_000), Amsterdam.intrinsicBaseGas(.{ .is_create = true }));
+    try std.testing.expectEqual(@as(u64, 24_000), Amsterdam.intrinsicBaseGas(.{ .is_create = true, .value = 1 }));
+    try std.testing.expectEqual(@as(u64, 23_228), Amsterdam.intrinsicGasForTransaction(&.{}, .{ .access_list_counts = .{
         .addresses = 1,
         .storage_keys = 1,
     } }));
     try std.testing.expectEqual(@as(u64, 22_816), Amsterdam.intrinsicGasForTransaction(&.{}, .{ .authorization_count = 1 }));
-    try std.testing.expectEqual(@as(u64, 32_144), Amsterdam.intrinsicGasForTransaction(&.{}, .{
+    try std.testing.expectEqual(@as(u64, 31_044), Amsterdam.intrinsicGasForTransaction(&.{}, .{
         .authorization_count = 1,
         .access_list_counts = .{
             .addresses = 1,
@@ -292,10 +292,10 @@ test "transaction gas plan computes executable gas after intrinsic and floor cos
         .addresses = 1,
         .storage_keys = 3,
     } });
-    try std.testing.expectEqual(@as(u64, 34_444), amsterdam_access_list.intrinsic_gas);
+    try std.testing.expectEqual(@as(u64, 31_344), amsterdam_access_list.intrinsic_gas);
     try std.testing.expectEqual(@as(u64, 22_552), amsterdam_access_list.floor_gas);
-    try std.testing.expectEqual(@as(u64, 34_444), amsterdam_access_list.minimum_gas);
-    try std.testing.expectEqual(@as(u64, 65_556), amsterdam_access_list.execution.?.regular_left);
+    try std.testing.expectEqual(@as(u64, 31_344), amsterdam_access_list.minimum_gas);
+    try std.testing.expectEqual(@as(u64, 68_656), amsterdam_access_list.execution.?.regular_left);
 
     const prague_authorization = Prague.gasPlan(&.{}, 100_000, .{ .authorization_count = 1 });
     try std.testing.expectEqual(@as(u64, 46_000), prague_authorization.intrinsic_gas);
@@ -363,9 +363,9 @@ test "Amsterdam gas plan executes only capped regular gas" {
 test "Amsterdam calldata floor includes only decomposed regular transaction primitives" {
     const Amsterdam = runtime(@import("../eth.zig").amsterdam);
     const input = [_]u8{1} ** 4059;
-    const plan = Amsterdam.gasPlan(&input, 282_776, .{ .is_create = true });
-    try std.testing.expectEqual(@as(u64, 88_198), plan.intrinsic_gas);
-    try std.testing.expectEqual(@as(u64, 282_776), plan.floor_gas);
+    const plan = Amsterdam.gasPlan(&input, 283_776, .{ .is_create = true });
+    try std.testing.expectEqual(@as(u64, 89_198), plan.intrinsic_gas);
+    try std.testing.expectEqual(@as(u64, 283_776), plan.floor_gas);
     try std.testing.expectEqual(@as(u64, 194_578), plan.execution.?.regular_left);
 
     const value_and_authorization_floor = Amsterdam.floorGasForTransaction(&input, .{

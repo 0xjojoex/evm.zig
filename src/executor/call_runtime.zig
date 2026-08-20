@@ -920,6 +920,7 @@ pub fn bind(comptime Executor: type) type {
                 .code_address = recipient,
             };
             const call_result = (try runNativeCall(self, &message)) orelse unreachable;
+            if (call_result.status() == .success) try touchEmptyCallRecipient(self, &message);
             return call_result.executionResult(self.lastOutputData());
         }
 
@@ -955,6 +956,9 @@ pub fn bind(comptime Executor: type) type {
             };
 
             const host_result = try executePreparedCallMessage(self, message, options.bytecode);
+            if (host_result.status() == .success and options.bytecode.bytes.len == 0) {
+                try touchEmptyCallRecipient(self, &message);
+            }
             return host_result.executionResult(self.lastOutputData());
         }
 

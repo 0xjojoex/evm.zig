@@ -1,43 +1,34 @@
-# EEST fixture download defaults.
-#
-# Amsterdam fixture work tracks the moving Glamsterdam devnet EEST release from
-# ethereum/execution-specs. `Spec.stable` remains Osaka; this lock is for the
-# active `Spec.latest` fixture lane.
-repo=ethereum/execution-specs
-version=tests-glamsterdam-devnet@v7.2.0
-artifact=fixtures_glamsterdam-devnet.tar.gz
-url=https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet%40v7.2.0/fixtures_glamsterdam-devnet.tar.gz
-sha256=29ba214eaf37c880c845179994cb62e82a0fb63e58f83e6c640d85f3e7d7a796
-dest=.eest/fixtures/tests-glamsterdam-devnet-v7.2.0
+# Authoritative fixture release pins. URLs and cache destinations are derived
+# from each track's repository, release, and artifact by the shared lock
+# resolvers; do not copy release strings into scripts, source, or documentation.
 
-# Benchmark fixture download defaults. Benchmark fixtures are published on the
-# tests-benchmark release track in ethereum/execution-specs.
+# Glamsterdam state, transaction, and regular BlockSTF fixtures.
+state_repo=ethereum/execution-specs
+state_release=tests-glamsterdam-devnet@v8.1.0
+state_artifact=fixtures_glamsterdam-devnet.tar.gz
+state_sha256=3bdb3783c988d8a2dbc0dd6bb2dc0986b4559829513229a48bcc2840557c2e22
+
+# Benchmark fixtures are cached for future adapters; bench/ remains the active
+# performance lane.
 benchmark_repo=ethereum/execution-specs
-benchmark_version=tests-benchmark@v0.0.9
+benchmark_release=tests-benchmark@v0.0.9
 benchmark_artifact=fixtures_benchmark.tar.gz
-benchmark_url=https://github.com/ethereum/execution-specs/releases/download/tests-benchmark%40v0.0.9/fixtures_benchmark.tar.gz
-benchmark_dest=.eest/benchmarks/tests-benchmark-v0.0.9
+benchmark_sha256=5aee5d1bf7430d5b6ca5b48269dd2a1fb0f9df39ac1e980bac9fc56ad403b8c7
 
-# zkEVM stateless fixture download defaults. These fixtures are published on
-# the tests-zkevm release track and carry statelessInputBytes/statelessOutputBytes
-# for the native stateless/ERE runners.
+# Stateless zkEVM fixtures and their corpus-scoped extraction manifests.
 zkevm_repo=ethereum/execution-specs
-zkevm_version=tests-zkevm@v0.6.2
+zkevm_release=tests-zkevm@v0.8.0
 zkevm_artifact=fixtures_zkevm.tar.gz
-zkevm_url=https://github.com/ethereum/execution-specs/releases/download/tests-zkevm%40v0.6.2/fixtures_zkevm.tar.gz
-zkevm_sha256=cf9395b2cb1a87c195fd827ea03dce65a37c6036bb182441da28e7b0f6d45f40
-zkevm_dest=.eest/fixtures/tests-zkevm-v0.6.2
+zkevm_sha256=f19f782fb5cefb7466e852e101d28883452221f03cfa1867eec5d520a3112c5c
+zkevm_mutations_manifest=eest/fixtures/stateless-mutations-tests-zkevm-v0.8.0.txt
+zkevm_steps_manifest=eest/fixtures/zisk-steps-tests-zkevm-v0.8.0.txt
 
-# Consensus-spec SSZ conformance fixtures. The fetch script extracts generic
-# fixtures plus preset-specific static objects from the three release archives.
-consensus_version=v1.7.0-alpha.12
+# Consensus-spec SSZ conformance fixtures.
+consensus_repo=ethereum/consensus-specs
+consensus_release=v1.7.0-alpha.13
 consensus_general_artifact=general.tar.gz
-consensus_general_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.12/general.tar.gz
-consensus_general_sha256=329f3cf58927df2614ecafbce78eb3c5258a13e8731d2f410bb31d8e4a5b9eaf
+consensus_general_sha256=b98e5328037a84993254085700b8d9eae304beca81d0944fe05274ca3523ed8b
 consensus_mainnet_artifact=mainnet.tar.gz
-consensus_mainnet_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.12/mainnet.tar.gz
-consensus_mainnet_sha256=f0057d2acdea2730ec68cac2c796aad89174e10e9b38ac68ad7d8aa1c0cbd85c
+consensus_mainnet_sha256=bf69706c9cc2c423e3bbaeb5ae7eb53a9e5adfdef84e3731296bb646fe2e8149
 consensus_minimal_artifact=minimal.tar.gz
-consensus_minimal_url=https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.12/minimal.tar.gz
-consensus_minimal_sha256=7d79e0e96fdd666aa70cb741372935c5d30d4ad607ae399885212e9714a58b07
-consensus_dest=.eest/consensus/v1.7.0-alpha.12
+consensus_minimal_sha256=94bafd73514385645404007e6ec8b47aed13ca443b8e75621f40fce5ce1f47a2

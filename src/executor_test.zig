@@ -880,6 +880,14 @@ test "exact spec drives empty call recipient touching" {
     try std.testing.expect(try emptyCallRecipientMaterialized(TouchEmptyCallRecipient.specification));
 }
 
+test "top-level empty call recipient follows EIP-161 fork boundary" {
+    const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
+    const SpuriousDragon = evmz.t.Vm(.spurious_dragon) orelse return error.SkipZigTest;
+
+    try std.testing.expect(try topLevelEmptyCallRecipientMaterialized(Frontier.specification));
+    try std.testing.expect(!try topLevelEmptyCallRecipientMaterialized(SpuriousDragon.specification));
+}
+
 test "exact spec drives child call gas forwarding" {
     const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
     const overrides = struct {
@@ -1079,6 +1087,25 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
         .sender = sender,
         .recipient = contract,
     } }, .legacy(100_000)));
+
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    return executor.state.accountExists(recipient);
+}
+
+fn topLevelEmptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x3333);
+    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    var executor = Exec.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    const result = try runStandalone(
+        &executor,
+        testExecutionContext(sender, 100_000),
+        .{ .call = .{ .sender = sender, .recipient = recipient } },
+        .legacy(100_000),
+    );
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     return executor.state.accountExists(recipient);

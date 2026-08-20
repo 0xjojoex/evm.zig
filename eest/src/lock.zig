@@ -10,6 +10,13 @@ pub const Value = struct {
     }
 };
 
+pub const Track = enum {
+    state,
+    benchmark,
+    zkevm,
+    consensus,
+};
+
 /// Read an owned raw value from the nearest EEST lockfile.
 pub fn readValue(
     io: std.Io,
@@ -57,17 +64,88 @@ pub fn parseValue(bytes: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+pub fn readPath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    key: []const u8,
+) ![]u8 {
+    var value = try readValue(io, allocator, key);
+    defer value.deinit(allocator);
+    return resolvePath(allocator, value.relative_prefix, value.bytes);
+}
+
+pub fn releasePath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    track: Track,
+) ![]u8 {
+    var release = try readValue(io, allocator, releaseKey(track));
+    defer release.deinit(allocator);
+    const relative = try relativeReleasePath(allocator, track, release.bytes);
+    defer allocator.free(relative);
+    return resolvePath(allocator, release.relative_prefix, relative);
+}
+
+pub fn relativeReleasePath(
+    allocator: std.mem.Allocator,
+    track: Track,
+    release: []const u8,
+) ![]u8 {
+    const slug = try allocator.dupe(u8, release);
+    defer allocator.free(slug);
+    for (slug) |*byte| {
+        if (byte.* == '@') byte.* = '-';
+    }
+    const category = switch (track) {
+        .state, .zkevm => "fixtures",
+        .benchmark => "benchmarks",
+        .consensus => "consensus",
+    };
+    return std.fs.path.join(allocator, &.{ ".eest", category, slug });
+}
+
+fn releaseKey(track: Track) []const u8 {
+    return switch (track) {
+        .state => "state_release",
+        .benchmark => "benchmark_release",
+        .zkevm => "zkevm_release",
+        .consensus => "consensus_release",
+    };
+}
+
+fn resolvePath(
+    allocator: std.mem.Allocator,
+    relative_prefix: []const u8,
+    path: []const u8,
+) ![]u8 {
+    if (std.fs.path.isAbsolute(path) or relative_prefix.len == 0) {
+        return allocator.dupe(u8, path);
+    }
+    return std.fs.path.join(allocator, &.{ relative_prefix, path });
+}
+
 test "EEST lock parser trims comments and values" {
     const bytes =
         \\# comment
-        \\ repo = ethereum/execution-specs
-        \\version=tests-glamsterdam-devnet@v7.2.0
-        \\artifact = fixtures_glamsterdam-devnet.tar.gz
+        \\ state_repo = example/specs
+        \\state_release=example@release
+        \\state_artifact = fixtures.tar.gz
         \\
     ;
 
-    try std.testing.expectEqualStrings("ethereum/execution-specs", parseValue(bytes, "repo").?);
-    try std.testing.expectEqualStrings("tests-glamsterdam-devnet@v7.2.0", parseValue(bytes, "version").?);
-    try std.testing.expectEqualStrings("fixtures_glamsterdam-devnet.tar.gz", parseValue(bytes, "artifact").?);
+    try std.testing.expectEqualStrings("example/specs", parseValue(bytes, "state_repo").?);
+    try std.testing.expectEqualStrings("example@release", parseValue(bytes, "state_release").?);
+    try std.testing.expectEqualStrings("fixtures.tar.gz", parseValue(bytes, "state_artifact").?);
     try std.testing.expectEqual(@as(?[]const u8, null), parseValue(bytes, "missing"));
+}
+
+test "fixture release paths are derived from track and release" {
+    const allocator = std.testing.allocator;
+    const state = try relativeReleasePath(allocator, .state, "example@release");
+    defer allocator.free(state);
+    const consensus = try relativeReleasePath(allocator, .consensus, "release-alpha");
+    defer allocator.free(consensus);
+
+    try std.testing.expectEqualStrings(".eest/fixtures/example-release", state);
+    try std.testing.expectEqualStrings(".eest/consensus/release-alpha", consensus);
 }

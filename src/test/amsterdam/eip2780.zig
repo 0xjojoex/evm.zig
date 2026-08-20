@@ -7,6 +7,39 @@ const Interpreter = evmz.interpreter;
 const eip7702 = evmz.eip7702;
 const transaction = evmz.transaction;
 
+test "EIP-2780 transaction reference cases have decomposed intrinsic gas" {
+    const AmsterdamGas = transaction.GasRuntime(evmz.eth.amsterdam);
+    const cases = [_]struct {
+        name: []const u8,
+        options: transaction.IntrinsicGasOptions,
+        expected: u64,
+    }{
+        .{ .name = "ETH transfer to self", .options = .{ .value = 1, .is_self_transfer = true }, .expected = 12_000 },
+        .{ .name = "no-transfer to EOA", .options = .{}, .expected = 15_000 },
+        .{ .name = "no-transfer to contract", .options = .{}, .expected = 15_000 },
+        .{ .name = "ETH transfer to existing EOA", .options = .{ .value = 1 }, .expected = 21_000 },
+        .{ .name = "ETH transfer to contract", .options = .{ .value = 1 }, .expected = 21_000 },
+        .{ .name = "no-transfer to delegated account", .options = .{}, .expected = 15_000 },
+        .{ .name = "ETH transfer to delegated account", .options = .{ .value = 1 }, .expected = 21_000 },
+        .{ .name = "ETH transfer to self with delegated sender", .options = .{ .value = 1, .is_self_transfer = true }, .expected = 12_000 },
+        .{ .name = "ETH transfer creating new account", .options = .{ .value = 1, .creates_account = true }, .expected = 21_000 },
+        .{ .name = "create without value", .options = .{ .is_create = true, .creates_account = true }, .expected = 24_000 },
+        .{ .name = "create with value", .options = .{ .is_create = true, .value = 1, .creates_account = true }, .expected = 24_000 },
+        .{ .name = "create over pre-existing balance", .options = .{ .is_create = true, .value = 1 }, .expected = 24_000 },
+    };
+
+    const gas = AmsterdamGas{};
+    for (cases) |case| {
+        std.testing.expectEqual(
+            case.expected,
+            gas.intrinsicGasForTransaction(&.{}, case.options),
+        ) catch |err| {
+            std.debug.print("EIP-2780 reference case failed: {s}\n", .{case.name});
+            return err;
+        };
+    }
+}
+
 test "Amsterdam value-to-empty account state gas is charged at top frame" {
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
