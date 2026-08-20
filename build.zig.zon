@@ -10,8 +10,8 @@
             .lazy = true,
         },
         .mcl = .{
-            .url = "https://github.com/herumi/mcl/archive/refs/tags/v3.06.tar.gz",
-            .hash = "N-V-__8AAIbQPgBN3AkA58o43UT3Y6jkn55OesBXTWc63zEF",
+            .url = "https://github.com/herumi/mcl/archive/refs/tags/v3.08.tar.gz",
+            .hash = "N-V-__8AAA3HPgD6Du1UslCL4qG97Y3blIoJACv5GuPFZpEu",
             .lazy = true,
         },
         .xkcp = .{
@@ -20,8 +20,8 @@
             .lazy = true,
         },
         .libsecp256k1 = .{
-            .url = "https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.7.1.tar.gz",
-            .hash = "N-V-__8AAO1SWwCbwhTAU7t6L3XQtTy6TzE8CiOGHjENn_rl",
+            .url = "https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v0.8.0.tar.gz",
+            .hash = "N-V-__8AAFwQbQAc-L8ZUw4rqyk_OWdYX4-V8crqiWlJ1dhl",
             .lazy = true,
         },
     },
