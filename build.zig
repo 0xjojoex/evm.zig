@@ -439,12 +439,12 @@ pub fn build(b: *std.Build) void {
         "guest-heap-bytes",
         "Fixed guest payload heap capacity in bytes",
     ) orelse 480 * 1024 * 1024;
-    // 0xA0030000 + 536674304 = 0xC0000000, ZisK's RAM top.
+    // 0xA0430000 + 532480000 = 0xC0000000, ZisK's RAM top.
     const guest_zisk_ram_bytes = b.option(
         u64,
         "guest-zisk-ram-bytes",
         "ZisK guest RAM envelope in bytes",
-    ) orelse 536674304;
+    ) orelse 532480000;
 
     const guest_payload_steps = addGuestPayloadTests(b, target, optimize, evmz_mod, guest_heap_bytes);
     ci_step.dependOn(guest_payload_steps.tests);
