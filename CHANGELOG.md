@@ -31,7 +31,8 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   Fixture roots travel in the resolved corpus manifest, and the `rev8` scan
   joined `check-guest-elf`.
 - Updated the pinned ZisK backend to `v1.1.0-alpha` with its `zisk-3.0.0`
-  toolchain, new guest memory map, and complete BLS12-381 operations.
+  toolchain, new guest memory map, complete BLS12-381 operations, and
+  unaligned scalar-memory lowering for the Rust provider.
 
 ### RLP
 

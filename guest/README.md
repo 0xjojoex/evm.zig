@@ -26,6 +26,11 @@ zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dziskos-staticlib=/path/to/libziskos_staticlib.a
 ```
 
+Build the ZisK provider with
+`CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS="-C target-feature=+unaligned-scalar-mem"`.
+The pinned CI build uses this target policy. A provider built without it produces
+a different guest ELF and verification key.
+
 For SP1 (v6.3.1), download the released SDK and verify its pinned archive:
 
 ```sh

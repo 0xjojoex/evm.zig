@@ -117,6 +117,7 @@ runs:
         HOST_MANIFEST: ${{ inputs.host-manifest }}
         ZISK_HOME: ${{ inputs.zisk-home }}
         ZISK_SOURCE: ${{ inputs.source-dir }}
+        CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS: "-C target-feature=+unaligned-scalar-mem"
       run: |
         set -euo pipefail
         "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
