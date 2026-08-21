@@ -44,6 +44,7 @@ pub fn validationErrorMatchesEest(error_value: ValidationError, expected: []cons
 pub fn rawEestExceptionName(error_value: transaction_envelope.RawValidationError) []const u8 {
     return switch (error_value) {
         .unsupported_transaction_type => "TransactionException.UNSUPPORTED_TRANSACTION_TYPE",
+        .nonce_overflow => "TransactionException.NONCE_OVERFLOW",
         .type_4_tx_pre_fork => "TransactionException.TYPE_4_TX_PRE_FORK",
         .type_4_empty_authorization_list => "TransactionException.TYPE_4_EMPTY_AUTHORIZATION_LIST",
         .type_4_invalid_authorization_format => "TransactionException.TYPE_4_INVALID_AUTHORIZATION_FORMAT",
