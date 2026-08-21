@@ -5,7 +5,7 @@
 //!
 //! Layer note: most declarations here are exact spec data and pure semantics.
 //! `eth.block_stf` is the concrete Ethereum block-transition layer above
-//! the bound `Vm.BlockExecution`; raw message execution still lives under
+//! `Vm.BlockExecution`; raw message execution still lives under
 //! `executor/` and opcode behavior under `instruction/`.
 
 pub const revision = @import("eth/revision.zig");

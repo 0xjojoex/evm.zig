@@ -349,8 +349,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             defer executor.deinit();
 
             const progress = self.accumulator.progress;
-            var runtime = Engine.init(&executor);
-            const outcome = try runtime.transact(.{
+            const outcome = try Engine.Advanced.transact(&executor, .{
                 .env = self.env,
                 .tx = rejected.transaction,
                 .progress = .{

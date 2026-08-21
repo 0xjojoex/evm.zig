@@ -23,6 +23,7 @@
 const std = @import("std");
 
 pub const address = @import("./address.zig");
+pub const block = @import("./block.zig");
 pub const BlockHashSource = @import("./BlockHashSource.zig");
 pub const code = @import("./code.zig");
 pub const crypto = @import("./crypto.zig");
@@ -54,6 +55,11 @@ const vm = @import("./vm.zig");
 pub const Vm = vm.Vm;
 pub const VmWithOptions = vm.VmWithOptions;
 pub const VmType = vm.VmType;
+pub const Engine = vm.Engine;
+pub const EngineWithOptions = vm.EngineWithOptions;
+pub const EngineType = vm.EngineType;
+pub const BalStatelessEngine = vm.BalStatelessEngine;
+pub const BalStatelessEngineWithOptions = vm.BalStatelessEngineWithOptions;
 pub const BalStatelessVm = vm.BalStatelessVm;
 pub const BalStatelessVmWithOptions = vm.BalStatelessVmWithOptions;
 
@@ -65,6 +71,7 @@ pub const addr = address.addr;
 pub const Address = address.Address;
 pub const AddressWord = address.AddressWord;
 pub const Bytecode = code.Bytecode;
+pub const Spec = spec.Spec;
 pub const Committer = vm.Committer;
 pub const eip7702 = executor.eip7702;
 pub const Env = vm.Env;

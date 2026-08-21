@@ -25,8 +25,7 @@ pub fn transact(
     executor: *ExactVm.Executor,
     input: ExactVm.TransactInput,
 ) ExactVm.Error!ExactVm.Outcome {
-    var runtime = ExactVm.init(executor);
-    return runtime.transact(input);
+    return ExactVm.Advanced.transact(executor, input);
 }
 
 pub fn expectExecuted(result: anytype) !TxExecutionResult {

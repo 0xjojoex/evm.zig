@@ -239,6 +239,92 @@ test "transaction STF validates and executes a call" {
     try std.testing.expectEqual(@as(u256, 0x2a), storageChange(changes, contract, 0).?.value);
 }
 
+test "Vm owns transaction and block execution runtime" {
+    const sender = addr(0xaaaa);
+    const recipient = addr(0xbbbb);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
+
+    var vm = Default.init(std.testing.allocator, .{
+        .state = .{ .reader = memory.reader() },
+    });
+    defer vm.deinit();
+
+    const standalone = try vm.transact(.{
+        .env = .{ .gas_limit = 1_000_000 },
+        .tx = .{
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 21_000,
+        },
+    });
+    switch (standalone) {
+        .executed => |executed| executed.discard(),
+        .rejected => return error.UnexpectedRejection,
+    }
+
+    var block = try Default.BlockExecution.init(&vm.executor, .{ .gas_limit = 1_000_000 });
+    defer block.discardIfUnfinished();
+    const included = switch (try block.transact(.{
+        .sender = sender,
+        .to = recipient,
+        .gas_limit = 21_000,
+    })) {
+        .included => |value| value,
+        .rejected => return error.UnexpectedRejection,
+    };
+    try std.testing.expectEqual(TxStatus.success, included.result.status);
+    const result = block.finish();
+    try std.testing.expectEqual(@as(u64, 1), result.tx_count);
+    try std.testing.expectEqual(included.receipt.gas_used, result.gas_used);
+    try std.testing.expectError(
+        error.UncommittedChanges,
+        Default.BlockExecution.init(&vm.executor, .{ .gas_limit = 1_000_000 }),
+    );
+    vm.executor.discardAccepted();
+}
+
+test "Ethereum block observation fails before retain and fold mutation" {
+    const ObserverError = error{ObservationRejected};
+    const Observer = struct {
+        pub fn observe(_: *@This(), _: anytype) ObserverError!void {
+            return error.ObservationRejected;
+        }
+    };
+    const sender = addr(0xaaaa);
+    const recipient = addr(0xbbbb);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
+
+    var vm = Default.init(std.testing.allocator, .{
+        .state = .{ .reader = memory.reader() },
+    });
+    defer vm.deinit();
+    var block = try Default.BlockExecution.init(&vm.executor, .{ .gas_limit = 1_000_000 });
+    defer block.discardIfUnfinished();
+    var observer = Observer{};
+
+    const Observed = @TypeOf(block.observe(&observer));
+    comptime std.debug.assert(
+        @typeInfo(@TypeOf(Observed.transact)).@"fn".return_type.? ==
+            (Default.BlockExecution.Error || ObserverError)!Default.BlockExecution.Outcome,
+    );
+    try std.testing.expectError(
+        error.ObservationRejected,
+        block.observe(&observer).transact(.{
+            .sender = sender,
+            .to = recipient,
+            .gas_limit = 21_000,
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), block.progress().tx_count);
+    try std.testing.expect(!vm.executor.hasCurrentTransaction());
+    try std.testing.expect(!vm.executor.acceptedView().hasChanges());
+}
+
 test "executed transaction discards without allocating" {
     const sender = addr(0xaaaa);
     const contract = addr(0xbbbb);
@@ -718,12 +804,11 @@ test "transaction STF uses comptime transaction gas policy" {
             .intrinsicBaseGas = Overrides.intrinsicBaseGas,
         },
     }) orelse return error.SkipZigTest;
-    var custom_executor = HighIntrinsicVm.Executor.init(std.testing.allocator, .{
+    var high_intrinsic_vm = HighIntrinsicVm.init(std.testing.allocator, .{
         .state = .{ .reader = memory.reader() },
     });
-    defer custom_executor.deinit();
+    defer high_intrinsic_vm.deinit();
 
-    var high_intrinsic_vm = HighIntrinsicVm.init(&custom_executor);
     const custom_result = try high_intrinsic_vm.transact(.{
         .env = .{ .gas_limit = 1_000_000 },
         .tx = tx,
@@ -750,10 +835,10 @@ test "exact spec owns total transaction gas limit as a value" {
     const Strict = evmz.t.CustomVm(.london, .{
         .transaction = .{ .total_gas_limit = .{ .replace = 20_000 } },
     }) orelse return error.SkipZigTest;
-    var strict_executor = Strict.Executor.init(std.testing.allocator, .{
+    var strict_vm = Strict.init(std.testing.allocator, .{
         .state = .{ .reader = memory.reader() },
     });
-    defer strict_executor.deinit();
+    defer strict_vm.deinit();
 
     const input: London.TransactInput = .{
         .env = .{ .gas_limit = 1_000_000 },
@@ -763,18 +848,16 @@ test "exact spec owns total transaction gas limit as a value" {
             .gas_limit = 21_000,
         },
     };
-    var strict_vm = Strict.init(&strict_executor);
     const strict_result = try strict_vm.transact(input);
     try std.testing.expectEqual(
         EthValidationError.gas_allowance_exceeded,
         try expectRejected(strict_result),
     );
 
-    var standard_executor = London.Executor.init(std.testing.allocator, .{
+    var default_vm = London.init(std.testing.allocator, .{
         .state = .{ .reader = memory.reader() },
     });
-    defer standard_executor.deinit();
-    var default_vm = London.init(&standard_executor);
+    defer default_vm.deinit();
     const default_result = try default_vm.transact(input);
     const executed = switch (default_result) {
         .executed => |value| value,

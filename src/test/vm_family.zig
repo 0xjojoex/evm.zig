@@ -2,7 +2,6 @@ const std = @import("std");
 const support = @import("vm_support.zig");
 
 const evmz = support.evmz;
-const transaction = support.transaction;
 const Default = support.Default;
 const addr = support.addr;
 const Env = support.Env;
@@ -19,6 +18,32 @@ test "supported state domains analyze as complete engine products" {
 
     std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Tracked));
     std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Dense));
+}
+
+test "exact Engine derives one coherent transaction authoring chain" {
+    const ExactVm = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const ExactEngine = evmz.Engine(ExactVm.specification);
+    const Input = struct {
+        env: evmz.Env,
+        tx: evmz.Transaction,
+        progress: evmz.transaction.PreparationBlockProgress = .{},
+    };
+    const Context = ExactEngine.Context(Input);
+    const Transition = ExactEngine.EthereumTransition(Input);
+    const ExpectedTransact = fn (
+        *Context,
+        evmz.Transaction,
+    ) (Context.Error || error{Overflow})!evmz.transaction.TransitionOutcomeType(
+        evmz.TxExecutionResult,
+        evmz.transaction.validation.ValidationError,
+    );
+
+    comptime {
+        std.debug.assert(ExactEngine.Executor == ExactVm.Executor);
+        std.debug.assert(Context.Executor == ExactEngine.Executor);
+        std.debug.assert(Context.Input == Input);
+        std.debug.assert(@TypeOf(Transition.transact) == ExpectedTransact);
+    }
 }
 
 test "Amsterdam BlockSTF combines spec and state capabilities" {
@@ -47,6 +72,78 @@ fn analyzeEngineProduct(comptime Engine: type) void {
     std.testing.refAllDecls(Engine);
 }
 
+test "hand-written multi-variant family dispatches through ProgramType" {
+    const Base = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const ExactEngine = evmz.Engine(Base.specification);
+    const Executor = ExactEngine.Executor;
+
+    const FamilyTransaction = union(enum) {
+        small: u8,
+        large: u16,
+    };
+    const FamilyOutput = union(enum) {
+        small: u32,
+        large: bool,
+    };
+    const FamilyRejection = union(enum) {
+        small: error{SmallRejected},
+        large: error{LargeRejected},
+    };
+    const FamilyInput = struct { tx: FamilyTransaction };
+    const Context = ExactEngine.Context(FamilyInput);
+    const Family = struct {
+        pub fn transact(
+            context: *Context,
+            tx: FamilyTransaction,
+        ) Context.Error!evmz.transaction.TransitionOutcomeType(FamilyOutput, FamilyRejection) {
+            switch (tx) {
+                .small => |value| {
+                    if (value == 0) return .{ .rejected = .{ .small = error.SmallRejected } };
+                    try context.beginTransaction();
+                    return .{ .completed = .{ .small = value } };
+                },
+                .large => |value| {
+                    if (value == 0) return .{ .rejected = .{ .large = error.LargeRejected } };
+                    try context.beginTransaction();
+                    return .{ .completed = .{ .large = value > 255 } };
+                },
+            }
+        }
+    };
+    const Program = ExactEngine.Program(
+        FamilyInput,
+        FamilyOutput,
+        FamilyRejection,
+        Context.Error,
+        Family,
+    );
+
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+
+    const outcome = try Program.transact(&executor, .{ .tx = .{ .small = 7 } });
+    const output = switch (outcome) {
+        .rejected => return error.UnexpectedRejection,
+        .executed => |executed| executed.retainResult(),
+    };
+    try std.testing.expectEqual(@as(u32, 7), output.small);
+    try std.testing.expect(!executor.hasCurrentTransaction());
+
+    // A rejected non-Ethereum branch must leave no pending executor state.
+    const rejected = try Program.transact(&executor, .{ .tx = .{ .large = 0 } });
+    switch (rejected) {
+        .executed => return error.UnexpectedExecution,
+        .rejected => |reason| try std.testing.expectEqual(error.LargeRejected, reason.large),
+    }
+    try std.testing.expect(!executor.hasCurrentTransaction());
+
+    const executed_large = try Program.transact(&executor, .{ .tx = .{ .large = 300 } });
+    switch (executed_large) {
+        .rejected => return error.UnexpectedRejection,
+        .executed => |executed| try std.testing.expect(executed.retainResult().large),
+    }
+}
+
 test "Env execution context derives opcode-visible gas limit from the environment" {
     const origin = addr(0xaaaa);
     const env = Env{ .chain_id = 10, .gas_limit = 30_000_000 };
@@ -61,20 +158,11 @@ test "Env execution context derives opcode-visible gas limit from the environmen
 test "exact VM closes the complete spec without revision state" {
     if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const Cancun = evmz.Vm(evmz.eth.cancun);
-    const Context = Cancun.Context(Cancun.TransactInput);
-    const Transition = Cancun.Transition(Context);
-    const TransitionContextPointer = @typeInfo(@TypeOf(Transition.transact)).@"fn".params[0].type.?;
 
     comptime {
         std.debug.assert(!@hasField(Cancun.Executor.Init, "revision"));
         std.debug.assert(!@hasField(Cancun.Executor, "revision_id"));
         std.debug.assert(Cancun.specification.transaction.max_initcode_size == evmz.eth.cancun.transaction.max_initcode_size);
-        std.debug.assert(Transition.Context == Context);
-        std.debug.assert(Transition.Transaction == Cancun.Transaction);
-        std.debug.assert(Transition.Output == Cancun.Output);
-        std.debug.assert(Transition.Rejection == Cancun.Rejection);
-        std.debug.assert(Transition.Error == Cancun.Error);
-        std.debug.assert(@typeInfo(TransitionContextPointer).pointer.child == Context);
         std.debug.assert(Cancun.Executor == evmz.executor.ExecutorType(
             Cancun.specification,
             Cancun.BlockState,
@@ -83,75 +171,23 @@ test "exact VM closes the complete spec without revision state" {
     }
 
     try std.testing.expect(@hasDecl(Cancun, "transact"));
-    try std.testing.expect(@hasDecl(Cancun, "Program"));
     try std.testing.expect(@hasDecl(Cancun, "BlockExecution"));
+    try std.testing.expect(!@hasDecl(Cancun, "beginBlock"));
+    try std.testing.expect(!@hasDecl(Cancun, "Context"));
+    try std.testing.expect(!@hasDecl(Cancun, "Transition"));
+    try std.testing.expect(!@hasDecl(Cancun, "Program"));
+    try std.testing.expect(!@hasDecl(Cancun, "Family"));
+    try std.testing.expect(!@hasDecl(Cancun, "NamedFamily"));
+    inline for (.{
+        "TransactionLog",
+        "TransactionLogs",
+        "Prelude",
+        "PreludeContext",
+        "Gas",
+        "Settlement",
+    }) |name| try std.testing.expect(!@hasDecl(Cancun, name));
     try std.testing.expect(!@hasDecl(Cancun, "TransactionPolicy"));
     try std.testing.expect(!@hasDecl(Cancun, "ExecutionProtocol"));
-}
-
-fn SmallTransition(comptime Context: type) type {
-    return struct {
-        pub fn transact(
-            context: *Context,
-            value: u8,
-        ) Context.Error!transaction.TransitionOutcomeType(u32, error{SmallRejected}) {
-            if (value == 0) return .{ .rejected = error.SmallRejected };
-            try context.beginTransaction();
-            return .{ .completed = value };
-        }
-    };
-}
-
-fn LargeTransition(comptime Context: type) type {
-    return struct {
-        pub fn transact(
-            context: *Context,
-            value: u16,
-        ) Context.Error!transaction.TransitionOutcomeType(bool, error{LargeRejected}) {
-            if (value == 0) return .{ .rejected = error.LargeRejected };
-            try context.beginTransaction();
-            return .{ .completed = value > 255 };
-        }
-    };
-}
-
-test "family welds branch carriers and exposes an engine-complete program" {
-    const Base = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
-    const FamilyTransaction = union(enum) {
-        small: u8,
-        large: u16,
-    };
-    const FamilyInput = struct { tx: FamilyTransaction };
-    const Family = Base.Family(FamilyInput, .{
-        .small = SmallTransition,
-        .large = LargeTransition,
-    });
-
-    comptime {
-        std.debug.assert(Family.Transaction == FamilyTransaction);
-        std.debug.assert(@FieldType(Family.Output, "small") == u32);
-        std.debug.assert(@FieldType(Family.Output, "large") == bool);
-        std.debug.assert(@FieldType(Family.Rejection, "small") == error{SmallRejected});
-        std.debug.assert(Family.Interpreter == Base.Interpreter);
-        std.debug.assert(Family.Gas == Base.Gas);
-        std.debug.assert(Family.Settlement == Base.Settlement);
-    }
-
-    var executor = Family.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var family = Family.init(&executor);
-    const outcome = try family.transact(.{ .tx = .{ .small = 7 } });
-    const output = switch (outcome) {
-        .rejected => return error.UnexpectedRejection,
-        .executed => |executed| executed.retainResult(),
-    };
-    try std.testing.expectEqual(@as(u32, 7), output.small);
-
-    const rejected = try family.transact(.{ .tx = .{ .large = 0 } });
-    switch (rejected) {
-        .executed => return error.UnexpectedExecution,
-        .rejected => |reason| try std.testing.expectEqual(error.LargeRejected, reason.large),
-    }
 }
 
 test "exact VM compile options can opt into step capture" {

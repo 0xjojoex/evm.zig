@@ -219,8 +219,7 @@ pub fn Lane(comptime Engine: type) type {
             });
             defer execution.deinit();
 
-            var runtime = Engine.init(&execution.executor);
-            const outcome = try runtime.observe().transact(.{
+            const outcome = try Engine.Advanced.observe(&execution.executor).transact(.{
                 .env = context.env,
                 .tx = included.transaction,
                 .progress = .{

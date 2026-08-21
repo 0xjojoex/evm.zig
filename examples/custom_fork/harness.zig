@@ -46,12 +46,11 @@ pub fn transact(comptime VmType: type, allocator: std.mem.Allocator, request: Re
         if (account.code.len != 0) try stored.setCode(account.code);
     }
 
-    var executor = VmType.Executor.init(allocator, .{
+    var vm = VmType.init(allocator, .{
         .state = .{ .reader = memory.reader() },
     });
-    defer executor.deinit();
+    defer vm.deinit();
 
-    var vm = VmType.init(&executor);
     const outcome = try vm.transact(.{
         .env = .{ .gas_limit = request.gas_limit },
         .tx = .{
@@ -71,12 +70,12 @@ pub fn transact(comptime VmType: type, allocator: std.mem.Allocator, request: Re
     const execution = executed.result();
     var deployed_code_len: usize = 0;
     if (execution.created_address) |created| {
-        deployed_code_len = (try executor.getCode(created)).len;
+        deployed_code_len = (try vm.executor.getCode(created)).len;
     }
 
     var storage_value: u256 = 0;
     if (request.read_storage) |slot| {
-        storage_value = try executor.getStorage(slot.address, slot.key);
+        storage_value = try vm.executor.getStorage(slot.address, slot.key);
     }
 
     return .{

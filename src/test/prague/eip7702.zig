@@ -35,8 +35,7 @@ fn expectDelegatedTargetWarm(comptime ExactVm: type, comptime kind: transaction.
     implementation_code[22] = evmz.Opcode.STOP.toByte();
     try evmz.t.seedExecutorAccount(&executor, implementation, .{ .code = &implementation_code });
 
-    var vm = ExactVm.init(&executor);
-    const outcome = try vm.transact(.{
+    const outcome = try ExactVm.Advanced.transact(&executor, .{
         .env = .{ .gas_limit = 100_000 },
         .tx = .{
             .kind = kind,

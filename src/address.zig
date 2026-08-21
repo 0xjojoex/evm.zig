@@ -104,6 +104,32 @@ pub const Address = extern struct {
 
     pub const Rlp = rlp.Mapped(@This(), rlp.FixedBytes(len), WireMapping);
     pub const Ssz = ssz.Mapped(@This(), ssz.ByteVector(len), WireMapping);
+
+    /// Ergonomic address constructor for unsigned integer literals, small unsigned integers,
+    /// address bytes, and comptime-known 40-character hex strings with an optional 0x prefix.
+    pub inline fn addr(value: anytype) Address {
+        const T = @TypeOf(value);
+        if (T == Address) return value;
+
+        return switch (@typeInfo(T)) {
+            .comptime_int => {
+                if (value < 0) @compileError("addr integer literal must be non-negative");
+                if (value > std.math.maxInt(u160)) @compileError("addr integer literal does not fit in u160");
+                return .fromU160(@intCast(value));
+            },
+            .int => |info| {
+                if (info.signedness != .unsigned) @compileError("addr only accepts unsigned integer types");
+                if (info.bits > 160) @compileError("addr integer type " ++ @typeName(T) ++ " is wider than u160; narrow explicitly");
+                return .fromU160(@intCast(value));
+            },
+            .array => |array| {
+                if (array.child == u8 and array.len == Address.len) return .fromBytes(value);
+                @compileError("addr only accepts [20]u8 address bytes by value; use a string or []const u8 for hex");
+            },
+            .pointer => |pointer| fromPointer(T, pointer, value),
+            else => @compileError("addr does not accept " ++ @typeName(T)),
+        };
+    }
 };
 
 /// Word-aligned account identity used across execution callbacks and dense
@@ -158,31 +184,7 @@ comptime {
     std.debug.assert(@alignOf(AddressWord) == 8);
 }
 
-/// Ergonomic address constructor for unsigned integer literals, small unsigned integers,
-/// address bytes, and comptime-known 40-character hex strings with an optional 0x prefix.
-pub inline fn addr(value: anytype) Address {
-    const T = @TypeOf(value);
-    if (T == Address) return value;
-
-    return switch (@typeInfo(T)) {
-        .comptime_int => {
-            if (value < 0) @compileError("addr integer literal must be non-negative");
-            if (value > std.math.maxInt(u160)) @compileError("addr integer literal does not fit in u160");
-            return .fromU160(@intCast(value));
-        },
-        .int => |info| {
-            if (info.signedness != .unsigned) @compileError("addr only accepts unsigned integer types");
-            if (info.bits > 160) @compileError("addr integer type " ++ @typeName(T) ++ " is wider than u160; narrow explicitly");
-            return .fromU160(@intCast(value));
-        },
-        .array => |array| {
-            if (array.child == u8 and array.len == Address.len) return .fromBytes(value);
-            @compileError("addr only accepts [20]u8 address bytes by value; use a string or []const u8 for hex");
-        },
-        .pointer => |pointer| fromPointer(T, pointer, value),
-        else => @compileError("addr does not accept " ++ @typeName(T)),
-    };
-}
+pub const addr = Address.addr;
 
 inline fn fromPointer(comptime T: type, comptime pointer: std.builtin.Type.Pointer, value: T) Address {
     return switch (pointer.size) {

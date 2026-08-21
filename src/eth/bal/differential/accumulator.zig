@@ -13,6 +13,7 @@ const ShardFold = @import("../shard_fold.zig").ShardFold;
 const observation = @import("../observation.zig");
 const lane = @import("lane.zig");
 const vm = @import("../../../vm.zig");
+const block_execution = @import("../../../vm/block_execution.zig");
 
 pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
     const Lane = lane.Lane(Engine);
@@ -146,19 +147,17 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
     };
 }
 
-/// Match the authoritative block program: either receipt-gas or dimensional
-/// block-gas overflow is a block-gas admission rejection.
+/// Delegate to the authoritative block-fold arithmetic: either receipt-gas or
+/// dimensional block-gas overflow is a block-gas admission rejection.
 pub fn advanceProgress(
     env: vm.Env,
     progress: vm.BlockResult,
     result: vm.TxExecutionResult,
 ) !vm.BlockResult {
-    var next = progress;
-    next.gas_used = std.math.add(u64, next.gas_used, result.gas.used) catch return error.BlockGasExceeded;
-    next.block_gas = next.block_gas.add(result.gas.block) catch return error.BlockGasExceeded;
-    if (!next.block_gas.withinLimit(env.gas_limit)) return error.BlockGasExceeded;
-    next.tx_count = std.math.add(u64, next.tx_count, 1) catch return error.BlockProgressOverflow;
-    return next;
+    return block_execution.advance(progress, env, result.gas) catch |err| switch (err) {
+        error.BlockGasExceeded => error.BlockGasExceeded,
+        error.Overflow => error.BlockProgressOverflow,
+    };
 }
 
 pub fn executionExceedsBlockGas(

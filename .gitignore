@@ -8,3 +8,4 @@ bench/revm/target/
 output/
 .kraft/
 guest/runtime/sp1/host/target/
+examples/spikes

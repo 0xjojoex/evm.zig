@@ -97,8 +97,7 @@ test "Amsterdam created contract selfdestruct removes empty account at commit" {
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10_000_000 });
 
-    var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecuted(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.transact(&executor, .{
         .env = .{ .gas_limit = 1_000_000, .coinbase = execution_context.block.coinbase },
         .tx = .{
             .sender = sender,

@@ -12,21 +12,27 @@ const execution = @import("../execution.zig");
 const executor = @import("../executor.zig");
 const transaction = @import("../transaction.zig");
 const transaction_prepare = @import("prepare.zig");
+const transaction_result = @import("result.zig");
 const transaction_validation = @import("validation.zig");
 const tx_settlement = @import("settlement.zig");
 
 const Address = address.Address;
 
-/// Build the Ethereum transaction implementation for one exact execution spec.
-/// The bound Context carries the public block environment and
-/// progress; `Output` is the family-facing executed transaction result.
+/// Build Ethereum's transaction transition from source dependencies. Executor
+/// and Context are derived here instead of becoming additional type roots.
 pub fn ImplType(
     comptime spec: ExactSpec,
-    comptime ExactExecutor: type,
-    comptime ContextType: type,
-    comptime OutputType: type,
+    comptime StateDomain: type,
+    comptime compile_options: executor.CompileOptions,
+    comptime InputType: type,
 ) type {
-    comptime std.debug.assert(ContextType.Executor == ExactExecutor);
+    comptime StateDomain.checkSpec(spec);
+    const ExactContext = transaction.program.ContextTypeWithState(
+        spec,
+        StateDomain,
+        compile_options,
+        InputType,
+    );
     const PreparedTransaction = transaction.Prepared(tx_settlement.DefaultPlan);
 
     return struct {
@@ -36,11 +42,12 @@ pub fn ImplType(
 
         // The `transact` signature is the contract; these aliases only keep
         // the implementation readable.
-        const Context = ContextType;
-        const Output = OutputType;
-        const Rejection = transaction_validation.ValidationError;
+        const Context = ExactContext;
+        pub const Input = InputType;
+        pub const Output = transaction_result.Execution;
+        pub const Rejection = transaction_validation.ValidationError;
 
-        const Error = Context.Error || error{
+        pub const Error = Context.Error || error{
             Overflow,
         };
 

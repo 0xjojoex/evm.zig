@@ -7,15 +7,15 @@
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
-const block_program = @import("../block_program.zig");
+const block = @import("../block.zig");
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
 const CaptureContext = @import("../executor/capture_context.zig").Context;
 const InstrumentationMode = @import("../executor/instrumentation.zig").Mode;
 const executor_engine = @import("../executor.zig");
 const executor_errors = @import("../executor/error.zig");
-const Host = @import("../Host.zig");
-const interpreter = @import("../Interpreter.zig");
+const ExactSpec = @import("../spec.zig").Spec;
+const block_state = @import("../vm/block_state.zig");
 const state = @import("../state.zig");
 const gas = @import("gas.zig");
 const runtime_ops = @import("runtime.zig");
@@ -36,310 +36,63 @@ pub fn TransactOutcomeType(comptime Executed: type, comptime Rejection: type) ty
     };
 }
 
-pub fn transactInBlock(
-    transaction_program: anytype,
-    input: anytype,
-    mode: InstrumentationMode,
-) @TypeOf(transaction_program.transactOwned(input, true, null, mode)) {
-    return transaction_program.transactOwned(input, true, null, mode);
-}
-
-pub fn transactInBlockWithPrelude(
-    transaction_program: anytype,
-    input: anytype,
-    prelude: anytype,
-    mode: InstrumentationMode,
-) @TypeOf(transaction_program.transactOwned(input, true, prelude, mode)) {
-    return transaction_program.transactOwned(input, true, prelude, mode);
-}
-
-/// Type-erased block-prelude transport shared by every program instantiation.
-/// Constructed only by `Prelude.init`, which validates the typed `run`
-/// signature before erasing it.
-pub const PreludeBinding = struct {
+/// Private transport stored by the transaction runtime after a typed prelude
+/// binding has crossed the public boundary.
+const ErasedPreludeBinding = struct {
     handle: *anyopaque,
     run: *const fn (*anyopaque, *anyopaque) anyerror!void,
 };
 
-/// A transition is a constructor: `fn (comptime Context: type) type`. The
-/// binder supplies the authoring Context, so the implementation can never
-/// disagree with it. The returned type declares exactly one contract member:
-///
-///   pub fn transact(*Context, Transaction) Error!TransitionOutcomeType(Output, Rejection)
-///
-/// The signature is the single statement of every carrier; `transitionShape`
-/// derives them from the function type alone. The error set must be spelled
-/// explicitly — deriving an inferred set would force analysis of the whole
-/// transact graph at every instantiation.
-pub const TransitionShape = struct {
-    Transaction: type,
-    Output: type,
-    Rejection: type,
-    Error: type,
-};
-
-fn transitionShape(comptime Context: type, comptime Implementation: type) TransitionShape {
-    if (!@hasDecl(Implementation, "transact"))
-        @compileError("transition implementation must declare `transact`");
-    const info = @typeInfo(@TypeOf(Implementation.transact)).@"fn";
-    if (info.params.len != 2 or info.params[0].type.? != *Context)
-        @compileError("`transact` must take (*Context, Transaction)");
-    const error_union = switch (@typeInfo(info.return_type.?)) {
-        .error_union => |value| value,
-        else => @compileError("`transact` must return `Error!TransitionOutcomeType(Output, Rejection)`"),
-    };
-    if (@typeInfo(error_union.payload) != .@"union" or
-        !@hasField(error_union.payload, "completed") or
-        !@hasField(error_union.payload, "rejected"))
-        @compileError("`transact` must return `Error!TransitionOutcomeType(Output, Rejection)`");
-    const Output = @FieldType(error_union.payload, "completed");
-    const Rejection = @FieldType(error_union.payload, "rejected");
-    if (error_union.payload != TransitionOutcomeType(Output, Rejection))
-        @compileError("`transact` must return the canonical `TransitionOutcomeType` union");
-    return .{
-        .Transaction = info.params[1].type.?,
-        .Output = Output,
-        .Rejection = Rejection,
-        .Error = error_union.error_set,
-    };
-}
-
-/// Reify a transition implementation's signature as a tooling-visible public
-/// contract. The implementation remains the single source of truth; these
-/// aliases are generated after its function type has been validated.
-pub fn BoundTransitionType(comptime ExactContext: type, comptime Implementation: type) type {
-    const shape = transitionShape(ExactContext, Implementation);
-
+/// A prelude capability whose identity includes the only extra errors its
+/// erased callback may produce.
+pub fn PreludeBinding(comptime PreludeError: type) type {
     return struct {
-        pub const Context = ExactContext;
-        pub const Transaction = shape.Transaction;
-        pub const Output = shape.Output;
-        pub const Rejection = shape.Rejection;
-        pub const Error = shape.Error;
-        pub const transact = Implementation.transact;
+        pub const Error = PreludeError;
+
+        erased: ErasedPreludeBinding,
     };
 }
 
-/// The uniform transition contract: the binder passes the authoring Context
-/// in; the constructor returns the implementation bound to it.
-pub const TransitionConstructor = fn (comptime type) type;
-
-const FamilyCarrier = enum {
-    transaction,
-    output,
-    rejection,
-};
-
-fn familyFields(comptime members: anytype) []const std.builtin.Type.StructField {
-    const container = switch (@typeInfo(@TypeOf(members))) {
-        .@"struct" => |value| value,
-        else => @compileError("family members must be a named tuple of transition constructors"),
-    };
-    if (container.fields.len < 2 or container.fields.len > 256)
-        @compileError("a transaction family must contain between 2 and 256 variants");
-    for (container.fields) |field| {
-        if (@typeInfo(field.type) != .@"fn")
-            @compileError("every family member must be a `fn (comptime Context: type) type` transition constructor");
-    }
-    return container.fields;
-}
-
-fn carrierType(comptime shape: TransitionShape, comptime carrier: FamilyCarrier) type {
-    return switch (carrier) {
-        .transaction => shape.Transaction,
-        .output => shape.Output,
-        .rejection => shape.Rejection,
-    };
-}
-
-fn generatedFamilyUnion(
-    comptime fields: []const std.builtin.Type.StructField,
-    comptime shapes: []const TransitionShape,
-    comptime carrier: FamilyCarrier,
-) type {
-    var names: [fields.len][]const u8 = undefined;
-    var values: [fields.len]u8 = undefined;
-    var types: [fields.len]type = undefined;
-    var attributes: [fields.len]std.builtin.Type.UnionField.Attributes = undefined;
-    for (fields, shapes, 0..) |field, shape, index| {
-        names[index] = field.name;
-        values[index] = @intCast(index);
-        types[index] = carrierType(shape, carrier);
-        attributes[index] = .{};
-    }
-    const Tag = @Enum(u8, .exhaustive, &names, &values);
-    return @Union(.auto, Tag, &names, &types, &attributes);
-}
-
-fn validateFamilyUnion(
-    comptime Family: type,
-    comptime fields: []const std.builtin.Type.StructField,
-    comptime shapes: []const TransitionShape,
-    comptime carrier: FamilyCarrier,
-) void {
-    const family = switch (@typeInfo(Family)) {
-        .@"union" => |value| value,
-        else => @compileError("family carriers must be tagged unions"),
-    };
-    if (family.tag_type == null or family.fields.len != fields.len)
-        @compileError("family carrier tags must exactly match the member fields");
-    for (fields, shapes) |field, shape| {
-        if (!@hasField(Family, field.name))
-            @compileError("family carrier is missing the `" ++ field.name ++ "` tag");
-        if (@FieldType(Family, field.name) != carrierType(shape, carrier))
-            @compileError("family carrier `" ++ field.name ++ "` has the wrong payload type");
-    }
-}
-
-fn familyImplementation(
-    comptime FamilyContext: type,
-    comptime members: anytype,
-    comptime NamedOutput: type,
-    comptime NamedRejection: type,
-    comptime NamedError: type,
-) type {
-    if (!@hasField(FamilyContext.Input, "tx"))
-        @compileError("family input must contain a `tx` field");
-    const TransactionType = @FieldType(FamilyContext.Input, "tx");
-
-    // Every member is instantiated with the shared family Context, so branch
-    // contexts cannot disagree; shapes come from each branch's signature.
-    const fields = familyFields(members);
-    comptime var shapes: [fields.len]TransitionShape = undefined;
-    inline for (fields, 0..) |field, index| {
-        shapes[index] = transitionShape(FamilyContext, @field(members, field.name)(FamilyContext));
-    }
-    const shape_slice: []const TransitionShape = &shapes;
-    validateFamilyUnion(TransactionType, fields, shape_slice, .transaction);
-
-    const OutputType = if (NamedOutput == void)
-        generatedFamilyUnion(fields, shape_slice, .output)
-    else
-        NamedOutput;
-    const RejectionType = if (NamedRejection == void)
-        generatedFamilyUnion(fields, shape_slice, .rejection)
-    else
-        NamedRejection;
-    validateFamilyUnion(OutputType, fields, shape_slice, .output);
-    validateFamilyUnion(RejectionType, fields, shape_slice, .rejection);
-    comptime var DerivedError: type = error{};
-    inline for (shape_slice) |shape| DerivedError = DerivedError || shape.Error;
-    const ErrorType = if (NamedError == void) DerivedError else NamedError;
-    if (ErrorType != DerivedError)
-        @compileError("family `Error` must exactly match the branch error union");
-
-    return struct {
-        // Generated carriers, re-declared for tooling; the binder derives the
-        // same set from the `transact` signature below.
-        pub const Transaction = TransactionType;
-        pub const Output = OutputType;
-        pub const Rejection = RejectionType;
-        pub const Error = ErrorType;
-
-        pub fn transact(
-            context: *FamilyContext,
-            transaction_value: Transaction,
-        ) Error!TransitionOutcomeType(Output, Rejection) {
-            return switch (transaction_value) {
-                inline else => |branch_transaction, tag| {
-                    const name = @tagName(tag);
-                    const Branch = @field(members, name)(FamilyContext);
-                    return switch (try Branch.transact(context, branch_transaction)) {
-                        .rejected => |reason| .{
-                            .rejected = @unionInit(Rejection, name, reason),
-                        },
-                        .completed => |result| .{
-                            .completed = @unionInit(Output, name, result),
-                        },
-                    };
-                },
-            };
-        }
-    };
-}
-
-/// Compose transition constructors into one family transition constructor.
-/// Output and rejection unions are generated from the branch signatures; the
-/// transaction union is the family input's declared `tx` type.
-pub fn FamilyTransitionType(comptime members: anytype) TransitionConstructor {
-    return struct {
-        fn bind(comptime Context: type) type {
-            return familyImplementation(Context, members, void, void, void);
-        }
-    }.bind;
-}
-
-/// Compose a family over caller-declared output, rejection, and error
-/// carriers. Their types are welded to the branch signatures at bind time.
-pub fn NamedFamilyTransitionType(
-    comptime members: anytype,
+/// Internal transaction-program binder. Callers provide the executor's source
+/// inputs and the family's concrete carriers; derived Executor and Context
+/// types stay inside the binder.
+pub fn ProgramType(
+    comptime spec: ExactSpec,
+    comptime StateDomain: type,
+    comptime compile_options: executor_engine.CompileOptions,
+    comptime Input: type,
     comptime Output: type,
     comptime Rejection: type,
     comptime Error: type,
-) TransitionConstructor {
-    return struct {
-        fn bind(comptime Context: type) type {
-            return familyImplementation(Context, members, Output, Rejection, Error);
-        }
-    }.bind;
-}
-
-/// Bind transaction semantics above one transition constructor.
-/// Concrete VM types expose this through `VM.Program(...)`.
-///
-/// The binder constructs the authoring Context from `Executor` and `Input` and
-/// instantiates `semantics` with it, so the implementation can never disagree
-/// with its Context. The explicit carrier parameters are the single public
-/// statement of the program surface; the shape derived from the `transact`
-/// signature is welded to them.
-pub fn ProgramType(
-    comptime ExactExecutor: type,
-    comptime Input: type,
-    comptime OutputType: type,
-    comptime RejectionType: type,
-    comptime ErrorType: type,
-    comptime semantics: TransitionConstructor,
+    comptime Family: type,
 ) type {
-    const ExactContext = ContextType(ExactExecutor, Input);
-    const Implementation = semantics(ExactContext);
-    const shape = transitionShape(ExactContext, Implementation);
-    if (shape.Transaction != @FieldType(Input, "tx"))
-        @compileError("`transact` must take the type of the input's `tx` field");
-    if (shape.Output != OutputType)
-        @compileError("`transact` output must match the program output type");
-    if (shape.Rejection != RejectionType)
-        @compileError("`transact` rejection must match the program rejection type");
-
-    const ContextError = executor_errors.Error;
+    comptime StateDomain.checkSpec(spec);
+    const ExactExecutor = executor_engine.ExecutorType(spec, StateDomain, compile_options);
+    const ExactContext = ContextTypeWithState(
+        spec,
+        StateDomain,
+        compile_options,
+        Input,
+    );
     const Runtime = RuntimeStateType(ExactExecutor, Input);
-
-    const ProgramError = ContextError || shape.Error;
-    if (ErrorType != ProgramError)
-        @compileError("transition errors must exactly match the program error type");
+    const ExpectedTransact = fn (
+        *ExactContext,
+        @FieldType(Input, "tx"),
+    ) Error!TransitionOutcomeType(Output, Rejection);
+    if (!@hasDecl(Family, "transact") or @TypeOf(Family.transact) != ExpectedTransact)
+        @compileError("family must declare `transact(*Context, Transaction) Error!TransitionOutcomeType(Output, Rejection)`");
 
     return struct {
         const Self = @This();
 
-        // Keep the public contract on direct comptime parameters. Routing these
-        // aliases through `Implementation` makes ZLS lose `vm.transact`'s input
-        // and return types even though the compiler can derive both.
-        pub const specification = ExactExecutor.specification;
         pub const Executor = ExactExecutor;
-        pub const Context = ExactContext;
-        pub const Transaction = @FieldType(Input, "tx");
-        pub const TransactInput = Input;
-        pub const Output = OutputType;
-        pub const TransactionLog = Host.Log;
-        pub const TransactionLogs = Executor.State.LogView;
-        pub const Rejection = RejectionType;
-        pub const Executed = Executor.Executed(Output);
-        pub const Prelude = PreludeFor(error{});
         pub const PreludeContext = PreludeContextFor(error{});
-        pub const Outcome = TransactOutcomeType(Executed, Rejection);
-        pub const Error = ErrorType;
-        pub const Interpreter = interpreter.Interpreter(specification);
-        pub const Gas = gas.Runtime(specification);
-        pub const Settlement = settlement.Runtime(specification);
+        pub const TransactInput = Input;
+
+        const Context = ExactContext;
+        // pub const Transaction = @FieldType(Input, "tx");
+        const Executed = Executor.Executed(Output);
+        const Outcome = TransactOutcomeType(Executed, Rejection);
 
         /// Prelude author context whose error set is widened by one block
         /// implementation's `PreludeError`. Instantiating this never rebuilds
@@ -350,71 +103,72 @@ pub fn ProgramType(
 
         /// Typed prelude validator matching `PreludeContextFor(PreludeError)`.
         pub fn PreludeFor(comptime PreludeError: type) type {
-            return PreludeType(PreludeContextFor(PreludeError));
+            return PreludeType(PreludeContextFor(PreludeError), PreludeError);
         }
 
         pub const Instrumented = struct {
-            program: *Self,
+            executor: *Executor,
             mode: InstrumentationMode,
 
-            pub fn transact(self: Instrumented, input_value: TransactInput) Error!Outcome {
-                return @errorCast(self.program.transactOwned(input_value, false, null, self.mode));
+            pub fn transact(self: Instrumented, input_value: Input) Error!Outcome {
+                return @errorCast(Self.transactOwned(self.executor, input_value, null, null, self.mode));
             }
         };
-
-        executor: *Executor,
-
-        /// Bind this exact family program to one caller-owned Executor.
-        ///
-        /// The program borrows the Executor; it owns no state and must not
-        /// outlive that Executor.
-        pub fn init(executor: *Executor) @This() {
-            return .{ .executor = executor };
-        }
-
-        /// Close this transaction program over one block-fold policy.
-        ///
-        /// Env, Included, and Result are decls of the implementation. The
-        /// returned type is the only public in-block transaction entry point;
-        /// block claims and transaction-runtime choreography stay internal to
-        /// that type.
-        pub fn Block(comptime BlockImplementation: type) type {
-            return block_program.BlockProgramType(Self, BlockImplementation);
-        }
 
         /// Execute one family transaction.
         ///
         /// Rejection opens no pending state. Completion returns the sole
         /// rollback-armed `Executed` owner, which the caller must retain or
         /// discard before reusing this Executor.
-        pub fn transact(self: *@This(), input_value: TransactInput) Error!Outcome {
-            // No prelude runs outside a block fold, so every possible error
-            // is a member of the declared program set.
-            return @errorCast(self.transactOwned(input_value, false, null, .normal));
+        pub fn transact(executor: *Executor, input_value: Input) Error!Outcome {
+            return @errorCast(Self.transactOwned(executor, input_value, null, null, .normal));
         }
 
         /// Borrow a transaction facade that records state observations.
-        pub fn observe(self: *Self) Instrumented {
-            return .{ .program = self, .mode = .observed };
+        pub fn observe(executor: *Executor) Instrumented {
+            return .{ .executor = executor, .mode = .observed };
         }
 
         /// Borrow a transaction facade bound to caller-owned capture storage.
-        pub fn capture(self: *Self, context: *CaptureContext) Instrumented {
-            return .{ .program = self, .mode = .{ .captured = context } };
+        pub fn capture(executor: *Executor, context: *CaptureContext) Instrumented {
+            return .{ .executor = executor, .mode = .{ .captured = context } };
         }
 
-        /// Internal error type is open: a block prelude may fail with the
-        /// block implementation's own `PreludeError`, which only the block
-        /// binder can name. Public entry points narrow with `@errorCast`.
+        pub fn transactInBlock(
+            executor: *Executor,
+            claim: block.Claim,
+            input_value: Input,
+            mode: InstrumentationMode,
+        ) Error!Outcome {
+            return @errorCast(Self.transactOwned(executor, input_value, claim, null, mode));
+        }
+
+        pub fn transactInBlockWithPrelude(
+            comptime PreludeError: type,
+            executor: *Executor,
+            claim: block.Claim,
+            input_value: Input,
+            prelude: PreludeBinding(PreludeError),
+            mode: InstrumentationMode,
+        ) (Error || PreludeError)!Outcome {
+            return @errorCast(Self.transactOwned(executor, input_value, claim, prelude.erased, mode));
+        }
+
+        /// One non-generic body for every entry: the erased prelude transports
+        /// failures as `anyerror`, and each public wrapper above narrows back to
+        /// its audited error set with one `@errorCast`. Keeping the body free of
+        /// a `PreludeError` parameter means a chain's non-empty prelude set never
+        /// duplicates the validation/preparation/execution machine code.
         fn transactOwned(
-            self: *@This(),
-            input_value: TransactInput,
-            block_claimed: bool,
-            prelude: ?PreludeBinding,
+            executor: *Executor,
+            input_value: Input,
+            claim: ?block.Claim,
+            prelude: ?ErasedPreludeBinding,
             mode: InstrumentationMode,
         ) anyerror!Outcome {
-            const executor = self.executor;
-            if (!block_claimed)
+            if (claim) |active_claim|
+                active_claim.requireActive(executor)
+            else
                 std.debug.assert(executor.active_block_execution_generation == null);
             std.debug.assert(!executor.hasCurrentTransaction());
             executor.clearLogs();
@@ -427,14 +181,13 @@ pub fn ProgramType(
             };
             errdefer runtime.discardIfActive();
             var context: Context = .{ .runtime = &runtime };
-            const outcome = Implementation.transact(&context, input_value.tx) catch |err| {
+            const outcome = Family.transact(&context, input_value.tx) catch |err| {
                 // A recorded prelude failure outranks whatever transport or
                 // follow-on error the implementation surfaced.
                 if (runtime.preludeFailure()) |prelude_error| return prelude_error;
                 return err;
             };
-            if (runtime.preludeFailure()) |prelude_error|
-                return prelude_error;
+            if (runtime.preludeFailure()) |prelude_error| return prelude_error;
             return switch (outcome) {
                 .rejected => |reason| blk: {
                     runtime.discardIfActive();
@@ -461,7 +214,7 @@ fn RuntimeStateType(
 
         const PreludeState = union(enum) {
             none,
-            pending: PreludeBinding,
+            pending: ErasedPreludeBinding,
             consumed,
             failed: anyerror,
         };
@@ -535,11 +288,14 @@ fn PreludeContextType(
     };
 }
 
-fn PreludeType(comptime Context: type) type {
+fn PreludeType(comptime Context: type, comptime PreludeError: type) type {
     const ContextError = Context.Error;
+    const BindingType = PreludeBinding(PreludeError);
 
     return struct {
-        pub fn init(pointer: anytype) PreludeBinding {
+        pub const Binding = BindingType;
+
+        pub fn init(pointer: anytype) BindingType {
             const Pointer = @TypeOf(pointer);
             const pointer_info = switch (@typeInfo(Pointer)) {
                 .pointer => |info| info,
@@ -561,21 +317,38 @@ fn PreludeType(comptime Context: type) type {
                 }
             };
             return .{
-                .handle = @ptrCast(pointer),
-                .run = Adapter.run,
+                .erased = .{
+                    .handle = @ptrCast(pointer),
+                    .run = Adapter.run,
+                },
             };
         }
     };
 }
 
-/// Concrete family-authoring context assembled from flat lexical carriers.
-///
-/// `Executor` and `Input` are exported so binders can derive every other
-/// carrier from a transition's `*Context` parameter alone.
+/// Concrete tracked-state authoring context assembled from source dependencies.
 pub fn ContextType(
-    comptime ExecutorType: type,
+    comptime spec: ExactSpec,
+    comptime compile_options: executor_engine.CompileOptions,
     comptime InputType: type,
 ) type {
+    return ContextTypeWithState(
+        spec,
+        block_state.Tracked(spec),
+        compile_options,
+        InputType,
+    );
+}
+
+/// State-domain form used by exact engines such as the BAL stateless VM.
+pub fn ContextTypeWithState(
+    comptime spec: ExactSpec,
+    comptime StateDomain: type,
+    comptime compile_options: executor_engine.CompileOptions,
+    comptime InputType: type,
+) type {
+    comptime StateDomain.checkSpec(spec);
+    const ExecutorType = executor_engine.ExecutorType(spec, StateDomain, compile_options);
     const ContextError = executor_errors.Error;
     const RuntimeState = RuntimeStateType(ExecutorType, InputType);
 
@@ -587,7 +360,8 @@ pub fn ContextType(
         pub const Executor = ExecutorType;
         pub const Input = InputType;
         pub const Error = ContextError;
-        pub const specification = Executor.specification;
+        pub const Gas = gas.Runtime(spec);
+        pub const Settlement = settlement.Runtime(spec);
 
         fn runtimeState(self: *const Self) *RuntimeState {
             return self.runtime;
