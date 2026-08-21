@@ -42,8 +42,9 @@ pub const prepared_code = @import("./prepared_code.zig");
 pub const rlp = @import("rlp");
 pub const spec = @import("./spec.zig");
 pub const state = @import("./state.zig");
+/// Coherent Ethereum execution-state and block-lifecycle choices.
+pub const state_domain = @import("./eth/state_domain.zig");
 pub const stateless = @import("./stateless.zig");
-/// Block-lifetime state capability selecting the tracked or stateless lane.
 pub const Backend = @import("./backend.zig").Backend;
 pub const t = @import("./t.zig");
 pub const trace = @import("./trace.zig");

@@ -22,14 +22,13 @@ const Address = address.Address;
 /// and Context are derived here instead of becoming additional type roots.
 pub fn ImplType(
     comptime spec: ExactSpec,
-    comptime StateDomain: type,
+    comptime ExecutionState: type,
     comptime compile_options: executor.CompileOptions,
     comptime InputType: type,
 ) type {
-    comptime StateDomain.checkSpec(spec);
-    const ExactContext = transaction.program.ContextTypeWithState(
+    const ExactContext = transaction.program.ContextType(
         spec,
-        StateDomain,
+        ExecutionState,
         compile_options,
         InputType,
     );

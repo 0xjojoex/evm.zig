@@ -14,7 +14,7 @@ test "execution resource interfaces omit legacy prefetch and verify hooks" {
     try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
 }
 
-test "Executor observation boundary hides StateModel pending views" {
+test "Executor observation boundary hides pending state views" {
     const Executor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const Executed = Executor.Executed(void);
 

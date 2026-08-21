@@ -715,7 +715,7 @@ fn FixtureHost(comptime revision: evmz.eth.Revision) type {
             // Same fork boundary the executor reads for account existence, so
             // take it from the same fact rather than restating the revision.
             return self.store.stateRootAfterChangesWithOptions(allocator, self.executor.acceptedChanges(), .{
-                .empty_accounts = if (ExactVm.specification.retains_empty_accounts) .include else .omit,
+                .empty_accounts = if (ExactVm.spec.retains_empty_accounts) .include else .omit,
             });
         }
     };

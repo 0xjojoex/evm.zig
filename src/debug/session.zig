@@ -14,7 +14,6 @@
 
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const call_runtime = @import("../executor/call_runtime.zig");
 const tail_dispatch = @import("../interpreter/tail_dispatch.zig");
 
 const Host = evmz.Host;
@@ -57,9 +56,10 @@ pub const Pause = union(enum) {
     finished: Completion,
 };
 
-pub fn SessionType(comptime Executor: type) type {
-    const runtime = call_runtime.bind(Executor);
-    const StepDispatch = tail_dispatch.Dispatch(Executor.specification, .{
+pub fn SessionType(comptime Vm: type) type {
+    const Executor = Vm.Executor;
+    const runtime = Executor.Runtime;
+    const StepDispatch = tail_dispatch.Dispatch(Vm.spec, .{
         .traced = false,
         .continuation = .step,
     });

@@ -98,12 +98,20 @@ pub fn Operations(
             deposit_request_data: []const u8,
             observer: anytype,
         ) ![]const []const u8 {
+            const finalize_calls = Engine.spec.block.finalizeBlock(.{
+                .number = env.number,
+                .timestamp = env.timestamp,
+                .transaction_count = progress.tx_count,
+                .gas_used = progress.gas_used,
+                .block_gas = progress.block_gas.total,
+                .state_gas = progress.block_gas.state,
+            });
             return block_stf.deriveRequests(
                 allocator,
                 executor,
-                env,
-                progress,
+                block_stf.lifecycleExecutionContext(env),
                 deposit_request_data,
+                finalize_calls.slice(),
                 observer,
             );
         }
@@ -148,7 +156,7 @@ pub fn Observer(comptime revision: Revision, comptime Engine: type) type {
 /// Scheduling the whole `run` call through another task is valid, but the
 /// caller must join or cancel that task before calling `deinit`.
 pub fn Executor(comptime revision: Revision, comptime Engine: type) type {
-    if (!Engine.specification.block.block_access_list) {
+    if (!Engine.spec.block.block_access_list) {
         @compileError("BalExecutor requires a fork that commits to an EIP-7928 block access list; " ++
             @tagName(revision) ++ " does not");
     }

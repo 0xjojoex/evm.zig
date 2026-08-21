@@ -81,7 +81,7 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
             {
                 return error.CandidateArtifactMismatch;
             }
-            const after_calls = Engine.specification.block.afterTransaction(.{
+            const after_calls = Engine.spec.block.afterTransaction(.{
                 .number = self.env.number,
                 .timestamp = self.env.timestamp,
                 .transaction_index = next_progress.tx_count - 1,

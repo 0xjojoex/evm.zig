@@ -168,8 +168,10 @@ const DepositPrepared = struct {
 /// OP owns deposit policy; the shared transaction program owns active and
 /// pending state plus the caller resolution contract.
 fn DepositTransition(comptime spec: evmz.Spec) type {
+    const Vm = OpVm(spec);
+
     return struct {
-        const Context = evmz.transaction.program.ContextType(spec, .{}, OpInput);
+        const Context = Vm.Context;
         const Error = Context.Error || error{ MissingCreateRecipient, Overflow };
 
         const Gas = Context.Gas;
@@ -294,7 +296,7 @@ fn DepositTransition(comptime spec: evmz.Spec) type {
         ) ?evmz.execution.ExecutionGas {
             const execution_gas = gas_plan.execution orelse return null;
             if (tx.to == null and tx.input.len > gas_planner.maxInitcodeSize()) return null;
-            if (Context.specification.transaction.total_gas_limit) |limit| {
+            if (spec.transaction.total_gas_limit) |limit| {
                 if (tx.gas_limit > limit) return null;
             }
             return execution_gas;
@@ -345,8 +347,6 @@ pub fn OpVm(comptime spec: evmz.Spec) type {
         const Self = @This();
         const Engine = evmz.Engine(spec);
 
-        pub const specification = spec;
-        pub const compile_options = evmz.executor.CompileOptions{};
         pub const Executor = Engine.Executor;
         pub const Init = struct {
             state_reader: ?evmz.StateReader = null,
@@ -959,8 +959,8 @@ test "Ecotone rejects blob transactions while retaining Cancun execution" {
     });
 
     try std.testing.expectEqual(@FieldType(Ecotone.Rejection, "ethereum").type_3_tx_pre_fork, outcome.rejected.ethereum);
-    try std.testing.expect(Ecotone.specification.transaction.active_kinds.contains(.dynamic_fee));
-    try std.testing.expect(!Ecotone.specification.transaction.active_kinds.contains(.blob));
+    try std.testing.expect(ecotone_spec.transaction.active_kinds.contains(.dynamic_fee));
+    try std.testing.expect(!ecotone_spec.transaction.active_kinds.contains(.blob));
 }
 
 test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions" {
@@ -1022,12 +1022,12 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
 
 test "Fjord activates RIP-7212 P256VERIFY at 3450 gas" {
     const p256_address = evmz.precompile.Contract.p256verify.toAddress();
-    try std.testing.expect(!Ecotone.specification.precompile.active(p256_address));
-    try std.testing.expect(Fjord.specification.precompile.active(p256_address));
+    try std.testing.expect(!ecotone_spec.precompile.active(p256_address));
+    try std.testing.expect(fjord_spec.precompile.active(p256_address));
 
     const gas = fjord_precompile_config.gas.get(.p256verify) + 1;
-    const precompile = Fjord.specification.precompile.resolve(p256_address).?;
-    const result = try Fjord.specification.precompile.execute(precompile, .{
+    const precompile = fjord_spec.precompile.resolve(p256_address).?;
+    const result = try fjord_spec.precompile.execute(precompile, .{
         .allocator = std.testing.allocator,
         .input_data = &.{},
         .gas = gas,

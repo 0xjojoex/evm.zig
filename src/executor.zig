@@ -60,7 +60,6 @@ const host_callbacks = @import("./executor/host_callbacks.zig");
 const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 pub const state_io = @import("./executor/state_io.zig");
 pub const system_contracts = @import("./executor/system_contracts.zig");
-pub const transfer_logs = @import("./executor/transfer_logs.zig");
 const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
 const transaction_runtime = @import("./transaction/runtime.zig");
@@ -87,13 +86,13 @@ const ScopeRoot = struct {
     }
 };
 
-/// Construct the public initializer for one state domain. Only domains with a
-/// semantic empty baseline may omit `state`; authenticated dense domains keep
+/// Construct the public initializer for one execution-state implementation.
+/// Implementations with a semantic empty baseline may omit `state`;
+/// authenticated dense state keeps
 /// the field structurally required.
-fn ExecutorInitType(comptime StateDomain: type) type {
-    const StateInit = StateDomain.ExecutorStateInit;
-    if (@hasDecl(StateDomain, "default_executor_state_init")) {
-        const default_state: StateInit = StateDomain.default_executor_state_init;
+fn ExecutorInitType(comptime Execution: type) type {
+    const StateInit = Execution.Init;
+    if (Execution.default_init) |default_state| {
         return struct {
             state: StateInit = default_state,
             /// Caller-owned derived-artifact service. Its allocation, I/O,
@@ -139,34 +138,35 @@ pub const CompileOptions = struct {
     step_capture: bool = false,
 };
 
-/// Compile one exact executor over a state domain.
+/// Compile one exact executor over an execution-state implementation.
 ///
 /// The domain defines how its executor state is constructed. Admission,
 /// authenticated facts, and commitment construction remain outside this
 /// executor boundary.
 pub fn ExecutorType(
     comptime spec: ExactSpec,
-    comptime StateDomain: type,
+    comptime ExecutionState: type,
     comptime options_value: CompileOptions,
 ) type {
+    comptime ExecutionState.checkSpec(spec);
+
     return struct {
         const Self = @This();
-        const runtime = call_runtime.bind(Self);
-        const callbacks = host_callbacks.bind(Self);
+        pub const Runtime = call_runtime.RuntimeType(spec, ExecutionState, options_value);
+        const callbacks = host_callbacks.bind(spec, ExecutionState, options_value);
 
-        pub const specification = spec;
         pub const compile_options = options_value;
-        pub const State = StateDomain.State;
-        pub const StateAddress = StateDomain.StateAddress;
+        pub const State = ExecutionState.State;
+        pub const StateAddress = ExecutionState.StateAddress;
         pub const BranchCheckpoint = State.BranchCheckpoint;
-        pub const Init = ExecutorInitType(StateDomain);
+        pub const Init = ExecutorInitType(ExecutionState);
 
         pub inline fn stateAddress(value: Address) StateAddress {
-            return StateDomain.stateAddress(value);
+            return ExecutionState.stateAddress(value);
         }
 
         pub inline fn executionAddress(value: AddressWord) StateAddress {
-            return StateDomain.executionAddress(value);
+            return ExecutionState.executionAddress(value);
         }
 
         allocator: std.mem.Allocator,
@@ -528,7 +528,7 @@ pub fn ExecutorType(
         pub fn init(allocator: std.mem.Allocator, options: Init) Self {
             return .{
                 .allocator = allocator,
-                .state = StateDomain.initExecutorState(allocator, options.state),
+                .state = ExecutionState.init(spec, allocator, options.state),
                 .frame_store = .{ .stable_metadata_capacity = default_max_live_frames },
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = call_scratch_storage.Slot.init(allocator),
@@ -1007,12 +1007,12 @@ pub fn ExecutorType(
             gas: execution_values.ExecutionGas,
             value: u256,
         ) !execution_values.ExecutionResult {
-            return runtime.executeCallTransaction(self, sender, recipient, input, gas, value);
+            return Runtime.executeCallTransaction(self, sender, recipient, input, gas, value);
         }
 
         /// Execute a raw call with caller-provided prepared bytecode.
         pub fn executePreparedCallTransaction(self: *Self, options: PreparedCallTransaction) !execution_values.ExecutionResult {
-            return runtime.executePreparedCallTransaction(self, options);
+            return Runtime.executePreparedCallTransaction(self, options);
         }
 
         /// Execute a raw call/create message inside an already-open tx scope.
@@ -1021,12 +1021,12 @@ pub fn ExecutorType(
         /// fully-managed raw-message lifecycle.
         pub fn executeMessage(self: *Self, message: Message, gas: execution_values.ExecutionGas) !EvmResult {
             self.validateScopeRoot(.fromMessage(message));
-            const call_capture = try runtime.beginRootCapture(self, message, gas);
+            const call_capture = try Runtime.beginRootCapture(self, message, gas);
             const result = try switch (message) {
-                .call => |call| runtime.executeCall(self, call, gas),
-                .create => |create| runtime.executeCreate(self, create, gas),
+                .call => |call| Runtime.executeCall(self, call, gas),
+                .create => |create| Runtime.executeCreate(self, create, gas),
             };
-            if (call_capture) |token| try runtime.finishRootHostCapture(self, token, result);
+            if (call_capture) |token| try Runtime.finishRootHostCapture(self, token, result);
             return result;
         }
 
@@ -1108,9 +1108,9 @@ pub fn ExecutorType(
                 .call => |call| try self.traceAccountAccess(call.recipient),
                 .create => |create| try self.traceAccountAccess(create.recipient),
             }
-            const call_capture = try runtime.beginRootCapture(self, request.message, request.gas);
+            const call_capture = try Runtime.beginRootCapture(self, request.message, request.gas);
             const outcome = try switch (request.message) {
-                .call => |call| runtime.executeCallTransactionPhased(
+                .call => |call| Runtime.executeCallTransactionPhased(
                     self,
                     call.sender,
                     call.recipient,
@@ -1118,13 +1118,13 @@ pub fn ExecutorType(
                     request.gas,
                     call.value,
                 ),
-                .create => |create| runtime.executeCreateTransactionPhased(
+                .create => |create| Runtime.executeCreateTransactionPhased(
                     self,
                     create,
                     request.gas,
                 ),
             };
-            if (call_capture) |token| try runtime.finishRootCapture(self, token, outcome.result);
+            if (call_capture) |token| try Runtime.finishRootCapture(self, token, outcome.result);
             return outcome;
         }
 
@@ -1171,9 +1171,9 @@ pub fn ExecutorType(
             var execution_checkpoint = self.checkpoint();
             defer execution_checkpoint.deinit();
 
-            const resolved = try runtime.resolveCode(self, recipient);
-            const resolved_view = try runtime.resolvedCodeView(self, resolved);
-            const bytecode = try runtime.resolveExecutionCodeView(self, resolved_view);
+            const resolved = try Runtime.resolveCode(self, recipient);
+            const resolved_view = try Runtime.resolvedCodeView(self, resolved);
+            const bytecode = try Runtime.resolveExecutionCodeView(self, resolved_view);
             try self.traceAccountAccess(recipient);
             const message = Host.Message{
                 .depth = 0,
@@ -1188,8 +1188,8 @@ pub fn ExecutorType(
             };
 
             const host_result = try switch (mode) {
-                .normal, .observed => runtime.executePreparedCallMessageDirect(self, message, bytecode),
-                .captured => runtime.executePreparedCallMessage(self, message, bytecode),
+                .normal, .observed => Runtime.executePreparedCallMessageDirect(self, message, bytecode),
+                .captured => Runtime.executePreparedCallMessage(self, message, bytecode),
             };
 
             if (executionRolledBack(host_result.status())) {
@@ -1208,12 +1208,30 @@ pub fn ExecutorType(
             if (value == 0) return true;
             if (!try self.state.subtractBalance(stateAddress(sender), value)) return false;
             try self.state.addBalance(stateAddress(recipient), value);
-            try transfer_logs.emit(self, .{
+            try self.emitTransferLog(.{
                 .from = sender,
                 .to = recipient,
                 .amount = value,
             });
             return true;
+        }
+
+        pub fn emitTransferLog(self: *Self, input: evmz.execution.ValueTransferInput) !void {
+            const transfer_log = spec.valueTransferLog(input) orelse return;
+
+            const topics = [_]u256{
+                transfer_log.topic,
+                input.from.toU256(),
+                input.to.toU256(),
+            };
+            var data: [32]u8 = undefined;
+            std.mem.writeInt(u256, &data, input.amount, .big);
+
+            try self.state.emitLog(Host.Log{
+                .address = transfer_log.address,
+                .topics = &topics,
+                .data = &data,
+            });
         }
 
         /// Increment an account nonce, saturating at `maxInt(u64)`.

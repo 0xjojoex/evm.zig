@@ -10,6 +10,7 @@ const std = @import("std");
 
 const Executor = @import("../executor.zig");
 const address = @import("../address.zig");
+const block_program = @import("../block_program.zig");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const bal_differential = @import("bal/differential.zig");
@@ -375,7 +376,7 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
     // Header shape is revision-owned while execution reads the spec, so the two
     // must agree or a block would record no access list yet still owe the
     // header an access-list hash. Catch that when the engine is bound.
-    if (ExactVm.specification.block.block_access_list != revision.isImpl(.amsterdam)) {
+    if (ExactVm.spec.block.block_access_list != revision.isImpl(.amsterdam)) {
         @compileError("engine spec block_access_list disagrees with the " ++
             @tagName(revision) ++ " header lineage");
     }
@@ -383,14 +384,14 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
     const AssumeDecodedBlockInputAlias = AssumeDecodedBlockInput;
     const ProduceInputAlias = ProduceInput;
     const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
-    const block_access_list_enabled = ExactVm.specification.block.block_access_list;
+    const block_access_list_enabled = ExactVm.spec.block.block_access_list;
     const bal_production_enabled = block_access_list_enabled and
-        ExactVm.BlockState.supports_block_production;
+        ExactVm.StateDomain.Lifecycle.supports_block_production;
     const bal_differential_enabled = block_access_list_enabled and
-        ExactVm.BlockState.supports_external_observation_capture;
+        ExactVm.StateDomain.Lifecycle.supports_external_observation_capture;
     const Producer = struct {
         fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
-            try requireCaptureSupport(ExactVm.BlockState, ExactVm.compile_options, input.capture);
+            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, ExactVm.compile_options, input.capture);
             return produceExact(revision, ExactVm, allocator, input);
         }
 
@@ -398,14 +399,14 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedProduceInputAlias,
         ) !ProduceOutcome {
-            try requireCaptureSupport(ExactVm.BlockState, ExactVm.compile_options, input.capture);
+            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, ExactVm.compile_options, input.capture);
             return produceAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
     };
 
     return struct {
         pub const fork = revision;
-        pub const specification = ExactVm.specification;
+        pub const spec = ExactVm.spec;
         pub const compile_options = ExactVm.compile_options;
         pub const Vm = ExactVm;
         pub const BlockInput = BlockInputAlias;
@@ -430,8 +431,8 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             struct {};
 
         pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
-            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
-            try requireDifferentialSupport(ExactVm.BlockState, input.bal_differential);
+            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, compile_options, input.capture);
+            try requireDifferentialSupport(ExactVm.StateDomain.Lifecycle, input.bal_differential);
             return applyExact(revision, ExactVm, allocator, input);
         }
 
@@ -439,8 +440,8 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedBlockInputAlias,
         ) !Result {
-            try requireCaptureSupport(ExactVm.BlockState, compile_options, input.capture);
-            try requireDifferentialSupport(ExactVm.BlockState, input.bal_differential);
+            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, compile_options, input.capture);
+            try requireDifferentialSupport(ExactVm.StateDomain.Lifecycle, input.bal_differential);
             return applyAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
     };
@@ -455,12 +456,12 @@ fn requireStepCaptureSupport(
 }
 
 fn requireCaptureSupport(
-    comptime BlockState: type,
+    comptime Lifecycle: type,
     comptime options: vm.CompileOptions,
     capture: ?ExecutionCapture,
 ) !void {
     try requireStepCaptureSupport(options, capture);
-    if (!BlockState.supports_external_observation_capture and
+    if (!Lifecycle.supports_external_observation_capture and
         capture != null and capture.?.observations != null)
     {
         return error.ObservationCaptureUnavailable;
@@ -468,10 +469,10 @@ fn requireCaptureSupport(
 }
 
 fn requireDifferentialSupport(
-    comptime BlockState: type,
+    comptime Lifecycle: type,
     differential: ?*BalDifferentialReport,
 ) !void {
-    if (!BlockState.supports_external_observation_capture and differential != null)
+    if (!Lifecycle.supports_external_observation_capture and differential != null)
         return error.BalDifferentialUnavailable;
 }
 
@@ -534,8 +535,8 @@ fn applyAssumeDecodedExact(
     input: AssumeDecodedBlockInput,
 ) !Result {
     resetBalReport(input);
-    const result = (if (comptime Engine.specification.block.block_access_list and
-        Engine.BlockState.supports_external_observation_capture)
+    const result = (if (comptime Engine.spec.block.block_access_list and
+        Engine.StateDomain.Lifecycle.supports_external_observation_capture)
     blk: {
         if (input.bal_differential) |report| {
             var observer = differential_executor.Observer(revision, Engine).init(
@@ -567,7 +568,7 @@ fn applyAssumeDecodedExact(
             observer,
         );
     } else blk: {
-        if (comptime Engine.specification.block.block_access_list) {
+        if (comptime Engine.spec.block.block_access_list) {
             std.debug.assert(input.bal_differential == null);
         }
         const observer = {};
@@ -631,8 +632,8 @@ fn produceAssumeDecodedExact(
     input: AssumeDecodedProduceInput,
 ) !ProduceOutcome {
     comptime {
-        std.debug.assert(Engine.specification.block.block_access_list);
-        std.debug.assert(Engine.BlockState.supports_block_production);
+        std.debug.assert(Engine.spec.block.block_access_list);
+        std.debug.assert(Engine.StateDomain.Lifecycle.supports_block_production);
     }
 
     const observer = {};
@@ -682,7 +683,7 @@ fn foldedResult(status: Status, tx_index: usize, progress: vm.BlockResult, reque
 
 /// Adapter required by BlockExecution's observation capability. Consensus BAL
 /// folding and optional external diagnostics remain separate authorities.
-fn StateObservationSink(comptime BlockState: type, comptime BalFold: type) type {
+fn StateObservationSink(comptime Lifecycle: type, comptime BalFold: type) type {
     return struct {
         bal_fold: ?*BalFold,
         external_target: ?ObservationTarget,
@@ -697,7 +698,7 @@ fn StateObservationSink(comptime BlockState: type, comptime BalFold: type) type 
                 try fold.append(observations, self.block_access_index);
             }
             if (self.external_target) |target| {
-                try BlockState.consumeObservationTarget(
+                try Lifecycle.consumeObservationTarget(
                     target,
                     self.block_access_index,
                     observations,
@@ -848,11 +849,12 @@ fn PayloadFold(
                 .cumulative_block_gas = progress_after.block_gas.total,
                 .cumulative_state_gas = progress_after.block_gas.state,
             };
+            const after_calls = Engine.spec.block.afterTransaction(after_context);
             const after_result = if (self.step_capture.active())
                 Executor.system_contracts.applyAfterTransactionCaptured(
                     self.executor,
                     lifecycleExecutionContext(self.env),
-                    after_context,
+                    after_calls.slice(),
                     self.step_capture.contextPtr(),
                     self.collector,
                 )
@@ -860,14 +862,14 @@ fn PayloadFold(
                 Executor.system_contracts.applyAfterTransactionObserved(
                     self.executor,
                     lifecycleExecutionContext(self.env),
-                    after_context,
+                    after_calls.slice(),
                     self.collector,
                 )
             else
                 Executor.system_contracts.applyAfterTransaction(
                     self.executor,
                     lifecycleExecutionContext(self.env),
-                    after_context,
+                    after_calls.slice(),
                 );
             after_result catch |err| switch (err) {
                 error.InvalidWitness => return Result{ .status = .invalid_witness, .tx_index = tx_index },
@@ -917,7 +919,7 @@ fn BlockRun(comptime Engine: type) type {
             std.debug.assert(self.candidate_ready);
             std.debug.assert(!self.committed);
             const executor = &self.executor.?;
-            try Engine.BlockState.commit(&self.state_backend, executor.acceptedView());
+            try Engine.StateDomain.Lifecycle.commit(&self.state_backend, executor.acceptedView());
             self.committed = true;
         }
 
@@ -947,12 +949,12 @@ pub fn applyExecution(
 
     if (!block_rules.blockBodyValid(
         revision,
-        Engine.specification.block.block_access_list,
+        Engine.spec.block.block_access_list,
         input,
         claims,
     )) return .{ .status = .invalid_block_body };
 
-    var result = if (comptime Engine.specification.block.block_access_list and
+    var result = if (comptime Engine.spec.block.block_access_list and
         @TypeOf(observer) == void)
     blk: {
         if (input.block_access_list != null) {
@@ -1001,7 +1003,7 @@ fn produceExecution(
 
     if (!block_rules.blockBodyValid(
         revision,
-        Engine.specification.block.block_access_list,
+        Engine.spec.block.block_access_list,
         input,
         null,
     )) return .{ .rejected = .{ .status = .invalid_block_body } };
@@ -1029,7 +1031,7 @@ fn executeBlock(
 ) !Result {
     // One spec fact gates the header field, observation recording, claim
     // verification, and the candidate lane.
-    const block_access_list_enabled = Engine.specification.block.block_access_list;
+    const block_access_list_enabled = Engine.spec.block.block_access_list;
     const block_access_list = if (comptime @hasField(@TypeOf(input), "block_access_list"))
         input.block_access_list
     else
@@ -1077,7 +1079,7 @@ fn executeBlock(
     var observed_block_access_list_encoded: ?[]u8 = null;
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
-    const executor_state = Engine.BlockState.admit(allocator, .{
+    const executor_state = Engine.StateDomain.Lifecycle.admit(allocator, .{
         .backend = &run.state_backend,
         .validated_claim = bal_claim.accounts(),
         .precheck_claim_state = precheck_claim_state,
@@ -1101,11 +1103,11 @@ fn executeBlock(
     }
 
     const BalFold = if (verifies_bal_claim)
-        Engine.BlockState.BalClaimVerifier
+        Engine.StateDomain.Lifecycle.BalClaimVerifier
     else
         tracked_state_projector.BlockBuilder;
     var bal_fold = if (comptime verifies_bal_claim)
-        try Engine.BlockState.initBalClaimVerifier(
+        try Engine.StateDomain.Lifecycle.initBalClaimVerifier(
             allocator,
             &executor.state,
             bal_claim.accounts().?,
@@ -1113,7 +1115,7 @@ fn executeBlock(
     else
         tracked_state_projector.BlockBuilder.init(allocator);
     defer bal_fold.deinit();
-    var observation_sink = StateObservationSink(Engine.BlockState, BalFold){
+    var observation_sink = StateObservationSink(Engine.StateDomain.Lifecycle, BalFold){
         .bal_fold = if (block_access_list_enabled) &bal_fold else null,
         .external_target = if (input.capture) |capture| capture.observations else null,
     };
@@ -1136,18 +1138,19 @@ fn executeBlock(
             .parent_hash = header.parent_hash,
             .parent_beacon_block_root = header.parent_beacon_block_root,
         };
+        const before_calls = Engine.spec.block.beforeBlock(context);
         const before_result = if (observe_state)
             Executor.system_contracts.applyBeforeBlockObserved(
                 executor,
                 lifecycleExecutionContext(input.env),
-                context,
+                before_calls.slice(),
                 &observation_sink,
             )
         else
             Executor.system_contracts.applyBeforeBlock(
                 executor,
                 lifecycleExecutionContext(input.env),
-                context,
+                before_calls.slice(),
             );
         before_result catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
@@ -1224,22 +1227,30 @@ fn executeBlock(
         };
     };
 
+    const finalize_calls = Engine.spec.block.finalizeBlock(.{
+        .number = input.env.number,
+        .timestamp = input.env.timestamp,
+        .transaction_count = block.progress().tx_count,
+        .gas_used = block.progress().gas_used,
+        .block_gas = block.progress().block_gas.total,
+        .state_gas = block.progress().block_gas.state,
+    });
     const derived_requests_result = if (observe_state)
         deriveRequests(
             allocator,
             executor,
-            input.env,
-            block.progress(),
+            lifecycleExecutionContext(input.env),
             accumulated.deposit_request_data.items,
+            finalize_calls.slice(),
             &observation_sink,
         )
     else
         deriveRequests(
             allocator,
             executor,
-            input.env,
-            block.progress(),
+            lifecycleExecutionContext(input.env),
             accumulated.deposit_request_data.items,
+            finalize_calls.slice(),
             {},
         );
     const derived_requests = derived_requests_result catch |err| {
@@ -1310,7 +1321,7 @@ fn executeBlock(
         .gas_used = block_result.gas_used,
         .block_gas_used = block_result.block_gas.total,
         .block_state_gas_used = block_result.block_gas.state,
-        .state_root = Engine.BlockState.stateRoot(
+        .state_root = Engine.StateDomain.Lifecycle.stateRoot(
             allocator,
             &run.state_backend,
             accepted_state,
@@ -1380,14 +1391,15 @@ fn transactPayload(
             self: *@This(),
             prelude: Engine.BlockExecution.PreludeContext,
         ) Engine.BlockExecution.PreludeContext.Error!void {
-            try Executor.system_contracts.applyBeforeTransactionPrelude(
+            const calls = Engine.spec.block.beforeTransaction(.{
+                .number = self.env.number,
+                .timestamp = self.env.timestamp,
+                .transaction_index = self.transaction_index,
+            });
+            try Executor.system_contracts.applyPreludeSystemCalls(
                 prelude,
                 lifecycleExecutionContext(self.env),
-                .{
-                    .number = self.env.number,
-                    .timestamp = self.env.timestamp,
-                    .transaction_index = self.transaction_index,
-                },
+                calls.slice(),
             );
         }
     };
@@ -1468,9 +1480,9 @@ pub fn applyWithdrawals(
 pub fn deriveRequests(
     allocator: std.mem.Allocator,
     executor: anytype,
-    env: Env,
-    progress: vm.BlockResult,
+    execution_context: execution.ExecutionContext,
     deposit_request_data: []const u8,
+    finalize_calls: []const block_program.FinalizeSystemCall,
     observer: anytype,
 ) ![]const []const u8 {
     var requests: std.ArrayList([]const u8) = .empty;
@@ -1487,28 +1499,20 @@ pub fn deriveRequests(
         deposit_request_owned = false;
     }
 
-    const finalize_context: FinalizeBlockContext = .{
-        .number = env.number,
-        .timestamp = env.timestamp,
-        .transaction_count = progress.tx_count,
-        .gas_used = progress.gas_used,
-        .block_gas = progress.block_gas.total,
-        .state_gas = progress.block_gas.state,
-    };
     const block_end_requests = if (comptime @TypeOf(observer) != void)
         try Executor.system_contracts.applyFinalizeBlockObserved(
             executor,
-            lifecycleExecutionContext(env),
+            execution_context,
             allocator,
-            finalize_context,
+            finalize_calls,
             observer,
         )
     else
         try Executor.system_contracts.applyFinalizeBlock(
             executor,
-            lifecycleExecutionContext(env),
+            execution_context,
             allocator,
-            finalize_context,
+            finalize_calls,
         );
     var moved_block_end_requests = false;
     errdefer if (!moved_block_end_requests) freeRequests(allocator, block_end_requests);
@@ -1533,7 +1537,7 @@ pub fn transactionBlobGasUsed(
 ) !u64 {
     if (tx.kind != .blob or !revision.isImpl(.cancun)) return 0;
     const blob_count = std.math.cast(u64, tx.blob_hashes.len) orelse return error.BlobGasOverflow;
-    const schedule = Engine.specification.transaction.blob_schedule orelse return error.BlobGasOverflow;
+    const schedule = Engine.spec.transaction.blob_schedule orelse return error.BlobGasOverflow;
     const gas_per_blob = schedule.gas_per_blob;
     return std.math.mul(u64, blob_count, gas_per_blob) catch error.BlobGasOverflow;
 }
@@ -1550,17 +1554,17 @@ pub fn blockBlobGasLimit(
 }
 
 fn calcProtocolExcessBlobGas(comptime Engine: type, input: ParentBlobGas) ?u256 {
-    const schedule = Engine.specification.transaction.blob_schedule orelse return 0;
+    const schedule = Engine.spec.transaction.blob_schedule orelse return 0;
     return schedule.calcExcessBlobGasForSchedule(input);
 }
 
 fn effectiveBlobSchedule(comptime Engine: type, params: transaction.BlobParams) ?transaction.BlobSchedule {
-    const schedule = Engine.specification.transaction.blob_schedule orelse return null;
+    const schedule = Engine.spec.transaction.blob_schedule orelse return null;
     return schedule.withParams(params);
 }
 
 fn effectiveBlobScheduleOptional(comptime Engine: type, params: ?transaction.BlobParams) ?transaction.BlobSchedule {
-    const schedule = Engine.specification.transaction.blob_schedule orelse return null;
+    const schedule = Engine.spec.transaction.blob_schedule orelse return null;
     return if (params) |value| schedule.withParams(value) else schedule;
 }
 

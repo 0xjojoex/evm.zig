@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const executor_module = @import("../executor.zig");
+const exec = @import("../executor.zig");
 
 const Address = evmz.Address;
 const Bytecode = evmz.Bytecode;
@@ -13,12 +13,16 @@ const ExecutionContext = evmz.execution.ExecutionContext;
 const ExecutionResult = evmz.execution.ExecutionResult;
 const FrameResult = Interpreter.FrameResult;
 const call_scratch_storage = @import("./call_scratch.zig");
-const CaptureContext = executor_module.CaptureContext;
+const CaptureContext = exec.CaptureContext;
 
-pub fn bind(comptime Executor: type) type {
+pub fn RuntimeType(
+    comptime spec: evmz.Spec,
+    comptime ExecutionState: type,
+    comptime options_value: exec.CompileOptions,
+) type {
+    const Executor = exec.ExecutorType(spec, ExecutionState, options_value);
     return struct {
         const State = Executor.State;
-        const spec = Executor.specification;
         const BoundInterpreter = Interpreter.Interpreter(spec);
 
         pub const ScratchScope = struct {
@@ -164,7 +168,7 @@ pub fn bind(comptime Executor: type) type {
                 if (self.frame_base == 0) {
                     if (self.capture_context) |context| {
                         if (context.capturesSteps()) {
-                            try context.reserveFrameCapacity(executor_module.default_max_live_frames);
+                            try context.reserveFrameCapacity(exec.default_max_live_frames);
                         }
                     }
                 }
@@ -692,9 +696,9 @@ pub fn bind(comptime Executor: type) type {
 
         pub fn executeCall(
             self: *Executor,
-            options: executor_module.Call,
+            options: exec.Call,
             gas: ExecutionGas,
-        ) !executor_module.EvmResult {
+        ) !exec.EvmResult {
             const result = try executeCallTransaction(
                 self,
                 options.sender,
@@ -731,7 +735,7 @@ pub fn bind(comptime Executor: type) type {
             input: []const u8,
             gas: ExecutionGas,
             value: u256,
-        ) !executor_module.TransactionExecutionOutcome {
+        ) !exec.TransactionExecutionOutcome {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -833,7 +837,7 @@ pub fn bind(comptime Executor: type) type {
 
         fn chargeTopFrameCreateStateGas(
             self: *Executor,
-            options: executor_module.Create,
+            options: exec.Create,
             gas: *ExecutionGas,
         ) !TopFrameStateGasCharge {
             // The integrated rule compares the pre-transaction account to the
@@ -926,7 +930,7 @@ pub fn bind(comptime Executor: type) type {
 
         pub fn executePreparedCallTransaction(
             self: *Executor,
-            options: executor_module.PreparedCallTransaction,
+            options: exec.PreparedCallTransaction,
         ) !ExecutionResult {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
@@ -1010,9 +1014,9 @@ pub fn bind(comptime Executor: type) type {
         /// sender nonce; only raw and nested CREATE increment their creator.
         pub fn executeCreateTransactionPhased(
             self: *Executor,
-            options: executor_module.Create,
+            options: exec.Create,
             gas: ExecutionGas,
-        ) !executor_module.TransactionExecutionOutcome {
+        ) !exec.TransactionExecutionOutcome {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -1050,9 +1054,9 @@ pub fn bind(comptime Executor: type) type {
 
         pub fn executeCreate(
             self: *Executor,
-            options: executor_module.Create,
+            options: exec.Create,
             gas: ExecutionGas,
-        ) !executor_module.EvmResult {
+        ) !exec.EvmResult {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -1455,7 +1459,7 @@ pub fn bind(comptime Executor: type) type {
 
             _ = try self.state.subtractBalance(Executor.stateAddress(msg.sender), msg.value);
             try self.state.addBalance(Executor.stateAddress(create_address), msg.value);
-            try executor_module.transfer_logs.emit(self, .{
+            try self.emitTransferLog(.{
                 .from = msg.sender,
                 .to = create_address,
                 .amount = msg.value,
@@ -1589,7 +1593,7 @@ pub fn bind(comptime Executor: type) type {
 test "CREATE final stabilization reuses already-stable output" {
     const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const Executor = Berlin.Executor;
-    const runtime = bind(Executor);
+    const runtime = Executor.Runtime;
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var executor = Executor.init(failing_allocator.allocator(), .{});
@@ -1622,7 +1626,7 @@ test "EIP-7610 creation collision applies retroactively to every revision" {
 test "interior checkpoint guard restores unresolved state and preserves commits" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Cancun.Executor;
-    const runtime = bind(Executor);
+    const runtime = Executor.Runtime;
     const address = evmz.addr(0x1234);
 
     var executor = Executor.init(std.testing.allocator, .{});
@@ -1654,7 +1658,7 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
 test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Cancun.Executor;
-    const runtime = bind(Executor);
+    const runtime = Executor.Runtime;
     const sender = evmz.addr(0x1111);
     const root_address = evmz.addr(0x2222);
     const parent_write = evmz.addr(0x3333);
@@ -1730,7 +1734,7 @@ test "nested runtime error restores its transferred checkpoint once" {
     };
     const Exact = evmz.t.CustomVm(.cancun, .{ .instruction = custom_instructions }) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const runtime = bind(Executor);
+    const runtime = Executor.Runtime;
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
 
@@ -1764,7 +1768,7 @@ test "nested runtime error restores its transferred checkpoint once" {
 
 fn expectCreationCollision(comptime revision: evmz.eth.Revision, target: Address) !void {
     const Exact = evmz.Vm(evmz.eth.specAt(revision));
-    const Runtime = bind(Exact.Executor);
+    const Runtime = Exact.Executor.Runtime;
     var executor = Exact.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var target_account = evmz.state.MemoryAccount.init(std.testing.allocator);
@@ -1776,7 +1780,7 @@ fn expectCreationCollision(comptime revision: evmz.eth.Revision, target: Address
 test "nested call runtime owns its segment and keeps capture indices global" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const runtime = bind(Executor);
+    const runtime = Executor.Runtime;
     const child_address = evmz.addr(0x3333);
 
     var executor = Executor.init(std.testing.allocator, .{});

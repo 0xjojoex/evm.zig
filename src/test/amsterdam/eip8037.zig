@@ -11,7 +11,7 @@ const eip8037 = evmz.eth.eip8037;
 const eip8038 = evmz.eth.eip8038;
 
 test "Amsterdam authorization policy charges the first authority write" {
-    const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
+    const adjustment = evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = true,
         .account_already_written = false,
         .clears_delegation = false,
@@ -26,7 +26,7 @@ test "Amsterdam authorization policy charges the first authority write" {
 }
 
 test "Amsterdam authorization policy charges a newly-created authority leaf" {
-    const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
+    const adjustment = evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = false,
         .account_already_written = false,
         .clears_delegation = true,
@@ -40,14 +40,14 @@ test "Amsterdam authorization policy charges a newly-created authority leaf" {
 }
 
 test "Amsterdam authorization policy charges create then clear only once" {
-    var adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
+    var adjustment = evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = false,
         .account_already_written = false,
         .clears_delegation = false,
         .delegated_before_transaction = false,
         .delegation_set_before = false,
     });
-    adjustment.add(evmz.Evm.specification.authorization.successGasAdjustment(.{
+    adjustment.add(evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = true,
         .account_already_written = true,
         .clears_delegation = true,
@@ -61,7 +61,7 @@ test "Amsterdam authorization policy charges create then clear only once" {
 }
 
 test "Amsterdam invalid authorization policy has no runtime charge" {
-    const adjustment = evmz.Evm.specification.authorization.invalid_gas_adjustment;
+    const adjustment = evmz.Evm.spec.authorization.invalid_gas_adjustment;
 
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_state_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_write_charge);

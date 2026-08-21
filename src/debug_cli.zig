@@ -21,8 +21,8 @@ const Address = evmz.Address;
 const Host = evmz.Host;
 const Status = evmz.execution.Status;
 const Executor = evmz.Evm.Executor;
-const Session = debug.SessionType(Executor);
-const instruction_spec = evmz.Evm.specification.instruction;
+const Session = debug.SessionType(evmz.Evm);
+const instruction_spec = evmz.Evm.spec.instruction;
 const disassemble = evmz.instruction.disassemble;
 
 const Words = std.mem.TokenIterator(u8, .any);

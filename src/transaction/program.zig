@@ -5,7 +5,7 @@
 //! is stored beside that state, never inside Executor.
 
 const std = @import("std");
-
+const vm = @import("../vm.zig");
 const Address = @import("../address.zig").Address;
 const block = @import("../block.zig");
 const crypto = @import("../crypto.zig");
@@ -15,7 +15,6 @@ const InstrumentationMode = @import("../executor/instrumentation.zig").Mode;
 const executor_engine = @import("../executor.zig");
 const executor_errors = @import("../executor/error.zig");
 const ExactSpec = @import("../spec.zig").Spec;
-const block_state = @import("../vm/block_state.zig");
 const state = @import("../state.zig");
 const gas = @import("gas.zig");
 const runtime_ops = @import("runtime.zig");
@@ -58,7 +57,7 @@ pub fn PreludeBinding(comptime PreludeError: type) type {
 /// types stay inside the binder.
 pub fn ProgramType(
     comptime spec: ExactSpec,
-    comptime StateDomain: type,
+    comptime ExecutionState: type,
     comptime compile_options: executor_engine.CompileOptions,
     comptime Input: type,
     comptime Output: type,
@@ -66,17 +65,10 @@ pub fn ProgramType(
     comptime Error: type,
     comptime Family: type,
 ) type {
-    comptime StateDomain.checkSpec(spec);
-    const ExactExecutor = executor_engine.ExecutorType(spec, StateDomain, compile_options);
-    const ExactContext = ContextTypeWithState(
-        spec,
-        StateDomain,
-        compile_options,
-        Input,
-    );
-    const Runtime = RuntimeStateType(ExactExecutor, Input);
+    const Engine = vm.EngineType(spec, ExecutionState, compile_options);
+    const Runtime = RuntimeStateType(spec, ExecutionState, compile_options, Input);
     const ExpectedTransact = fn (
-        *ExactContext,
+        *Engine.Context(Input),
         @FieldType(Input, "tx"),
     ) Error!TransitionOutcomeType(Output, Rejection);
     if (!@hasDecl(Family, "transact") or @TypeOf(Family.transact) != ExpectedTransact)
@@ -85,12 +77,11 @@ pub fn ProgramType(
     return struct {
         const Self = @This();
 
-        pub const Executor = ExactExecutor;
+        pub const Executor = Engine.Executor;
         pub const PreludeContext = PreludeContextFor(error{});
         pub const TransactInput = Input;
 
-        const Context = ExactContext;
-        // pub const Transaction = @FieldType(Input, "tx");
+        const Context = Engine.Context(Input);
         const Executed = Executor.Executed(Output);
         const Outcome = TransactOutcomeType(Executed, Rejection);
 
@@ -98,7 +89,7 @@ pub fn ProgramType(
         /// implementation's `PreludeError`. Instantiating this never rebuilds
         /// the program itself.
         pub fn PreludeContextFor(comptime PreludeError: type) type {
-            return PreludeContextType(Executor, Runtime, PreludeError);
+            return PreludeContextType(Runtime, PreludeError);
         }
 
         /// Typed prelude validator matching `PreludeContextFor(PreludeError)`.
@@ -204,9 +195,13 @@ pub fn ProgramType(
 }
 
 fn RuntimeStateType(
-    comptime Executor: type,
+    comptime spec: ExactSpec,
+    ExecutionState: type,
+    comptime compile_options: vm.CompileOptions,
     comptime Input: type,
 ) type {
+    const Executor = vm.EngineType(spec, ExecutionState, compile_options).Executor;
+
     const Error = executor_errors.Error;
 
     return struct {
@@ -256,7 +251,6 @@ fn RuntimeStateType(
 }
 
 fn PreludeContextType(
-    comptime Executor: type,
     comptime Runtime: type,
     comptime PreludeError: type,
 ) type {
@@ -268,7 +262,6 @@ fn PreludeContextType(
         const Self = @This();
 
         pub const Error = ContextError;
-        pub const specification = Executor.specification;
 
         fn runtimeState(self: Self) *Runtime {
             return self.runtime;
@@ -326,39 +319,24 @@ fn PreludeType(comptime Context: type, comptime PreludeError: type) type {
     };
 }
 
-/// Concrete tracked-state authoring context assembled from source dependencies.
+/// Execution-state-complete Context constructor for engine and program wiring.
 pub fn ContextType(
     comptime spec: ExactSpec,
+    comptime ExecutionState: type,
     comptime compile_options: executor_engine.CompileOptions,
-    comptime InputType: type,
+    comptime Input: type,
 ) type {
-    return ContextTypeWithState(
-        spec,
-        block_state.Tracked(spec),
-        compile_options,
-        InputType,
-    );
-}
-
-/// State-domain form used by exact engines such as the BAL stateless VM.
-pub fn ContextTypeWithState(
-    comptime spec: ExactSpec,
-    comptime StateDomain: type,
-    comptime compile_options: executor_engine.CompileOptions,
-    comptime InputType: type,
-) type {
-    comptime StateDomain.checkSpec(spec);
-    const ExecutorType = executor_engine.ExecutorType(spec, StateDomain, compile_options);
+    const Engine = vm.EngineType(spec, ExecutionState, compile_options);
     const ContextError = executor_errors.Error;
-    const RuntimeState = RuntimeStateType(ExecutorType, InputType);
+    const RuntimeState = RuntimeStateType(spec, ExecutionState, compile_options, Input);
 
     return struct {
         runtime: *RuntimeState,
 
         const Self = @This();
 
-        pub const Executor = ExecutorType;
-        pub const Input = InputType;
+        const Executor = Engine.Executor;
+
         pub const Error = ContextError;
         pub const Gas = gas.Runtime(spec);
         pub const Settlement = settlement.Runtime(spec);

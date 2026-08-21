@@ -13,7 +13,7 @@ const executor_module = @import("./executor.zig");
 const execution = @import("./execution.zig");
 const Host = @import("./Host.zig");
 const interpreter = @import("./Interpreter.zig");
-const block_state = @import("./vm/block_state.zig");
+const state_domain = @import("./eth/state_domain.zig");
 const transaction = @import("./transaction.zig");
 const transaction_result = @import("./transaction/result.zig");
 
@@ -79,11 +79,11 @@ pub fn EngineWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return EngineType(spec, block_state.Tracked(spec), options_value);
+    return EngineType(spec, state_domain.Tracked.Execution, options_value);
 }
 
 pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: CompileOptions) type {
-    return VmType(spec, block_state.Tracked(spec), options_value);
+    return VmType(spec, state_domain.Tracked, options_value);
 }
 
 pub fn BalStatelessVm(comptime spec: engine_spec.Spec) type {
@@ -98,38 +98,38 @@ pub fn BalStatelessEngineWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return EngineType(spec, block_state.BalStateless, options_value);
+    return EngineType(spec, state_domain.BalStateless.Execution, options_value);
 }
 
 pub fn BalStatelessVmWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return VmType(spec, block_state.BalStateless, options_value);
+    return VmType(spec, state_domain.BalStateless, options_value);
 }
 
 pub fn VmType(
-    comptime spec: engine_spec.Spec,
-    comptime BlockStateType: type,
+    comptime specification: engine_spec.Spec,
+    comptime StateDomainType: type,
     comptime options_value: CompileOptions,
 ) type {
-    const ExactEngine = EngineType(spec, BlockStateType, options_value);
-    const Family = ExactEngine.EthereumTransition(FamilyTransactInput);
-    const Program = ExactEngine.Program(
-        FamilyTransactInput,
-        TxExecutionResult,
-        transaction.validation.ValidationError,
-        TransactError,
-        Family,
-    );
-    const BlockExecutionType = ethereum_block_execution.ExecutionType(Program);
-
     return struct {
         const Self = @This();
-
-        pub const specification = spec;
+        pub const spec = specification;
         pub const compile_options = options_value;
-        pub const BlockState = BlockStateType;
+
+        const ExactEngine = EngineType(spec, StateDomainType.Execution, options_value);
+        const Family = ExactEngine.EthereumTransition(FamilyTransactInput);
+        const Program = ExactEngine.Program(
+            FamilyTransactInput,
+            TxExecutionResult,
+            transaction.validation.ValidationError,
+            TransactError,
+            Family,
+        );
+        const BlockExecutionType = ethereum_block_execution.ExecutionType(Program);
+        // pub const compile_options = options_value;
+        pub const StateDomain = StateDomainType;
         pub const Executor = ExactEngine.Executor;
         pub const Init = Executor.Init;
         pub const Interpreter = interpreter.Interpreter(spec);
@@ -189,22 +189,17 @@ pub fn VmType(
 /// from this root instead of accepting the same dependency in several forms.
 pub fn EngineType(
     comptime spec: engine_spec.Spec,
-    comptime BlockStateType: type,
-    comptime options_value: CompileOptions,
+    comptime ExecutionState: type,
+    comptime compile_options: CompileOptions,
 ) type {
-    comptime BlockStateType.checkSpec(spec);
-
     return struct {
-        pub const specification = spec;
-        pub const compile_options = options_value;
-        pub const BlockState = BlockStateType;
-        pub const Executor = executor_module.ExecutorType(spec, BlockState, compile_options);
+        pub const Executor = executor_module.ExecutorType(spec, ExecutionState, compile_options);
 
         pub fn Context(comptime Input: type) type {
-            return transaction.program.ContextTypeWithState(
+            return transaction.program.ContextType(
                 spec,
-                BlockStateType,
-                options_value,
+                ExecutionState,
+                compile_options,
                 Input,
             );
         }
@@ -212,8 +207,8 @@ pub fn EngineType(
         pub fn EthereumTransition(comptime Input: type) type {
             return transaction.transition.ImplType(
                 spec,
-                BlockStateType,
-                options_value,
+                ExecutionState,
+                compile_options,
                 Input,
             );
         }
@@ -227,8 +222,8 @@ pub fn EngineType(
         ) type {
             return transaction.program.ProgramType(
                 spec,
-                BlockStateType,
-                options_value,
+                ExecutionState,
+                compile_options,
                 Input,
                 Output,
                 Rejection,

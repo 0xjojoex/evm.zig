@@ -46,10 +46,10 @@ const SquareVm = evmz.Vm(square_cancun);
 const CancunVm = evmz.Vm(evmz.eth.cancun);
 
 comptime {
-    std.debug.assert(SquareVm.specification.instruction.entry(square_byte).active);
-    std.debug.assert(!SquareVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.SELFDESTRUCT)).active);
-    std.debug.assert(SquareVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 1_000);
-    std.debug.assert(CancunVm.specification.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 100);
+    std.debug.assert(SquareVm.spec.instruction.entry(square_byte).active);
+    std.debug.assert(!SquareVm.spec.instruction.entry(@intFromEnum(evmz.Opcode.SELFDESTRUCT)).active);
+    std.debug.assert(SquareVm.spec.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 1_000);
+    std.debug.assert(CancunVm.spec.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 100);
 }
 
 const sender = evmz.addr(0xaaaa);
@@ -86,7 +86,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     std.debug.print(
         "{f} (0x{x:0>2}) fork: {s}, storage[0] = {d}; stock cancun: {s}\n",
         .{
-            SquareVm.specification.instruction.fmt(square_byte),
+            SquareVm.spec.instruction.fmt(square_byte),
             square_byte,
             @tagName(squared.status),
             squared.storage,
@@ -118,7 +118,7 @@ test "custom opcode executes on the fork and stays invalid on stock Cancun" {
     const name = try std.fmt.bufPrint(
         &name_buffer,
         "{f}",
-        .{SquareVm.specification.instruction.fmt(square_byte)},
+        .{SquareVm.spec.instruction.fmt(square_byte)},
     );
     try std.testing.expectEqualStrings("SQUARE", name);
 }

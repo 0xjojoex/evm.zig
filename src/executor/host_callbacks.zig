@@ -8,10 +8,15 @@ const AddressWord = evmz.AddressWord;
 const Host = evmz.Host;
 const execution = evmz.execution;
 
-pub fn bind(comptime Executor: type) type {
+pub fn bind(
+    comptime spec: evmz.Spec,
+    comptime ExecutionState: type,
+    comptime options_value: evmz.executor.CompileOptions,
+) type {
     return struct {
-        const spec = Executor.specification;
-        const call_runtime = call_runtime_module.bind(Executor);
+        const Executor = evmz.executor.ExecutorType(spec, ExecutionState, options_value);
+        const call_runtime = Executor.Runtime;
+
         pub fn host(self: *Executor) Host {
             return Host{ .ptr = self, .vtable = &.{
                 .call = Callbacks().call,
@@ -85,7 +90,7 @@ pub fn bind(comptime Executor: type) type {
                     if (balance > 0) {
                         if (!same_address) {
                             try self.state.addBalance(state_beneficiary, balance);
-                            try evmz.executor.transfer_logs.emit(self, .{
+                            try self.emitTransferLog(.{
                                 .from = address,
                                 .to = beneficiary,
                                 .amount = balance,

@@ -85,17 +85,11 @@ pub const Init = struct {
 };
 
 pub fn Interpreter(comptime spec: Spec) type {
-    const StatusType = Status;
-    const OwnedCallFrameType = OwnedCallFrameFor(spec);
-
-    const TailDispatch = tail_dispatch.Dispatch(spec, .{ .traced = false });
-
     return struct {
         const Self = @This();
 
-        pub const specification = spec;
-        pub const Status = StatusType;
-        pub const OwnedCallFrame = OwnedCallFrameType;
+        pub const Status = evmz.execution.Status;
+        pub const OwnedCallFrame = OwnedCallFrameType(spec);
         pub const CapturedResult = struct {
             result: FrameResult,
             span: trace.TraceSpan,
@@ -197,7 +191,7 @@ pub fn Interpreter(comptime spec: Spec) type {
         fn executeUntraced(self: *Self) Error!void {
             var frame = self.call_frame;
             if (frame.isRunning()) {
-                try TailDispatch.execute(frame);
+                try tail_dispatch.Dispatch(spec, .{ .traced = false }).execute(frame);
             }
 
             if (frame.isRunning()) {
@@ -1265,7 +1259,7 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_from_gas_left);
 }
 
-fn OwnedCallFrameFor(comptime spec: Spec) type {
+fn OwnedCallFrameType(comptime spec: Spec) type {
     return struct {
         const Self = @This();
 
