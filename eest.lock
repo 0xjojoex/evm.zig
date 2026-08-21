@@ -15,6 +15,12 @@ benchmark_release=tests-benchmark@v0.0.9
 benchmark_artifact=fixtures_benchmark.tar.gz
 benchmark_sha256=5aee5d1bf7430d5b6ca5b48269dd2a1fb0f9df39ac1e980bac9fc56ad403b8c7
 
+# Stateless zkEVM benchmark fixtures for manual guest performance runs.
+zkevm_benchmark_repo=ethereum/execution-specs
+zkevm_benchmark_release=tests-zkevm-benchmark@v0.8.2
+zkevm_benchmark_artifact=fixtures_zkevm-benchmark.tar.gz
+zkevm_benchmark_sha256=c62fbb5ffa60eb1681f8dd900bcb98d6aea316548bd03d9027a178f0d11d94b4
+
 # Stateless zkEVM fixtures and their corpus-scoped extraction manifests.
 zkevm_repo=ethereum/execution-specs
 zkevm_release=tests-zkevm@v0.8.2

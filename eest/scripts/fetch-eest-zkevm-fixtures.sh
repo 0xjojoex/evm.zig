@@ -6,9 +6,10 @@ source "${script_dir}/eest-lock.sh"
 
 usage() {
   cat <<'USAGE'
-usage: scripts/fetch-eest-zkevm-fixtures.sh [--mutations | --steps | --manifest PATH] [--resolved-manifest PATH]
+usage: scripts/fetch-eest-zkevm-fixtures.sh [--benchmark] [--mutations | --steps | --manifest PATH] [--resolved-manifest PATH]
 
-Downloads EEST zkEVM blockchain fixtures into ../.eest/.
+Downloads EEST zkEVM conformance or benchmark blockchain fixtures into ../.eest/.
+With --benchmark, selects the locked tests-zkevm-benchmark release.
 With --manifest, extracts only the archive-relative paths listed in PATH.
 With --resolved-manifest, records the verified corpus identity, counts, and
 fixture roots.
@@ -24,6 +25,7 @@ Environment overrides:
 
 Example:
   scripts/fetch-eest-zkevm-fixtures.sh
+  scripts/fetch-eest-zkevm-fixtures.sh --benchmark
   scripts/fetch-eest-zkevm-fixtures.sh --mutations
   zig build zkevm
 USAGE
@@ -31,11 +33,17 @@ USAGE
 
 manifest=""
 resolved_manifest=""
+benchmark=false
+preset_manifest=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
       usage
       exit 0
+      ;;
+    --benchmark)
+      benchmark=true
+      shift
       ;;
     --manifest)
       [[ $# -ge 2 ]] || { printf 'error: --manifest needs a path\n' >&2; exit 2; }
@@ -49,10 +57,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mutations)
       manifest="$(eest_lock_path zkevm_mutations_manifest)"
+      preset_manifest=true
       shift
       ;;
     --steps)
       manifest="$(eest_lock_path zkevm_steps_manifest)"
+      preset_manifest=true
       shift
       ;;
     *)
@@ -63,18 +73,33 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-repo="${EEST_ZKEVM_REPO:-$(eest_lock_value zkevm_repo)}"
-release="${EEST_ZKEVM_RELEASE:-$(eest_lock_value zkevm_release)}"
-artifact="${EEST_ZKEVM_ARTIFACT:-$(eest_lock_value zkevm_artifact)}"
+if [[ "${benchmark}" == true && "${preset_manifest}" == true ]]; then
+  printf 'error: --benchmark cannot be combined with --mutations or --steps\n' >&2
+  exit 2
+fi
+
+if [[ "${benchmark}" == true ]]; then
+  lock_prefix="zkevm_benchmark"
+  dest_track="zkevm_benchmark"
+  manifest_mode="tests-zkevm-benchmark"
+else
+  lock_prefix="zkevm"
+  dest_track="zkevm"
+  manifest_mode="tests-zkevm"
+fi
+
+repo="${EEST_ZKEVM_REPO:-$(eest_lock_value "${lock_prefix}_repo")}"
+release="${EEST_ZKEVM_RELEASE:-$(eest_lock_value "${lock_prefix}_release")}"
+artifact="${EEST_ZKEVM_ARTIFACT:-$(eest_lock_value "${lock_prefix}_artifact")}"
 release_slug="$(eest_release_slug "${release}")"
-dest="${EEST_ZKEVM_DEST:-$(eest_release_path zkevm "${release}")}"
+dest="${EEST_ZKEVM_DEST:-$(eest_release_path "${dest_track}" "${release}")}"
 cache="${EEST_CACHE:-${EEST_LOCK_REPO_ROOT}/.eest/cache}"
 archive="${cache}/${release_slug}-${artifact}"
 
 if [[ -n "${EEST_ZKEVM_SHA256:-}" ]]; then
   sha256="${EEST_ZKEVM_SHA256}"
 elif [[ -z "${EEST_ZKEVM_REPO:-}" && -z "${EEST_ZKEVM_RELEASE:-}" && -z "${EEST_ZKEVM_ARTIFACT:-}" && -z "${EEST_ZKEVM_URL:-}" ]]; then
-  sha256="$(eest_lock_value zkevm_sha256)"
+  sha256="$(eest_lock_value "${lock_prefix}_sha256")"
 else
   sha256=""
 fi
@@ -149,18 +174,25 @@ if [[ -n "${resolved_manifest}" ]]; then
   command -v jq >/dev/null || { printf 'error: jq is required for --resolved-manifest\n' >&2; exit 1; }
   [[ -n "${sha256}" ]] || { printf 'error: resolved corpus requires a pinned SHA-256\n' >&2; exit 1; }
 
-  spec_version="$(eest_lock_value state_release)"
-  [[ "${spec_version}" =~ ^tests-[a-z0-9]+(-[a-z0-9]+)*@v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-    printf 'error: invalid specification fixture release: %s\n' "${spec_version}" >&2
+  if [[ "${benchmark}" == true ]]; then
+    fixture_release="$(eest_lock_value zkevm_release)"
+    network="Amsterdam"
+    validation_ref="${fixture_release}"
+  else
+    fixture_release="$(eest_lock_value state_release)"
+    spec_track="${fixture_release#tests-}"
+    spec_track="${spec_track%@v*}"
+    spec_release="${fixture_release##*@v}"
+    network="${spec_track}"
+    if [[ "${spec_track}" == *-devnet ]]; then
+      network="${spec_track}-${spec_release%%.*}"
+    fi
+    validation_ref="${release}"
+  fi
+  [[ "${fixture_release}" =~ ^tests-[a-z0-9]+(-[a-z0-9]+)*@v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    printf 'error: invalid specification fixture release: %s\n' "${fixture_release}" >&2
     exit 1
   }
-  spec_track="${spec_version#tests-}"
-  spec_track="${spec_track%@v*}"
-  spec_release="${spec_version##*@v}"
-  network="${spec_track}"
-  if [[ "${spec_track}" == *-devnet ]]; then
-    network="${spec_track}-${spec_release%%.*}"
-  fi
 
   blockchain_root="${dest}/fixtures/blockchain_tests"
   index="${dest}/fixtures/.meta/index.json"
@@ -182,16 +214,17 @@ if [[ -n "${resolved_manifest}" ]]; then
   jq -n \
     --arg id "${release}" \
     --arg digest "${sha256}" \
-    --arg fixture_release "${spec_version}" \
+    --arg mode "${manifest_mode}" \
+    --arg fixture_release "${fixture_release}" \
     --arg network "${network}" \
-    --arg validation_ref "${release}" \
+    --arg validation_ref "${validation_ref}" \
     --arg fixture_root "${fixture_root}" \
     --argjson fixture_files "${fixture_files}" \
     --argjson indexed_tests "${indexed_tests}" \
     --argjson fixture_count "${fixture_count}" \
     '{
       schema_version: 1,
-      mode: "tests-zkevm",
+      mode: $mode,
       id: $id,
       corpus_digest: $digest,
       fixture_release: $fixture_release,

@@ -10,9 +10,15 @@ const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;
 const jsonString = fixture_common.jsonString;
 const parseBytesFromValue = fixture_common.parseBytesFromValue;
+// The upstream 60M zkEVM benchmark contains a 550 MB JSON fixture file.
+const max_fixture_bytes = 1024 * 1024 * 1024;
 
 pub const Report = stateless_report.Report;
 pub const Target = stateless_executor.Target;
+
+test "fixture cap covers pinned zkEVM benchmark" {
+    try std.testing.expect(max_fixture_bytes > 549_941_169);
+}
 
 pub const Options = struct {
     test_filter: ?[]const u8 = null,
@@ -87,7 +93,7 @@ pub fn runFile(
     options: Options,
     context: *Context,
 ) !Summary {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(512 * 1024 * 1024));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_fixture_bytes));
     defer allocator.free(bytes);
     var summary = try runSlice(io, allocator, bytes, options, path, context);
     summary.files = 1;

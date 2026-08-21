@@ -48,6 +48,7 @@ on:
           - pinned
           - rolling
           - tests-zkevm
+          - tests-zkevm-benchmark
 
 permissions:
   contents: read
@@ -151,6 +152,17 @@ jobs:
         run: |
           trap 'rm -rf -- "${EEST_CACHE}"' EXIT
           scripts/fetch-eest-zkevm-fixtures.sh \
+            --resolved-manifest "${RESOLVED_MANIFEST}"
+
+      - name: Fetch tests-zkevm benchmark corpus
+        if: env.CORPUS_MODE == 'tests-zkevm-benchmark'
+        working-directory: eest
+        env:
+          EEST_CACHE: ${{ runner.temp }}/eest-download
+        run: |
+          trap 'rm -rf -- "${EEST_CACHE}"' EXIT
+          scripts/fetch-eest-zkevm-fixtures.sh \
+            --benchmark \
             --resolved-manifest "${RESOLVED_MANIFEST}"
 
       - name: Build pinned ZisK artifacts
