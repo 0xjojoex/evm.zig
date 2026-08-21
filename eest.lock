@@ -17,11 +17,11 @@ benchmark_sha256=5aee5d1bf7430d5b6ca5b48269dd2a1fb0f9df39ac1e980bac9fc56ad403b8c
 
 # Stateless zkEVM fixtures and their corpus-scoped extraction manifests.
 zkevm_repo=ethereum/execution-specs
-zkevm_release=tests-zkevm@v0.8.0
+zkevm_release=tests-zkevm@v0.8.2
 zkevm_artifact=fixtures_zkevm.tar.gz
-zkevm_sha256=f19f782fb5cefb7466e852e101d28883452221f03cfa1867eec5d520a3112c5c
-zkevm_mutations_manifest=eest/fixtures/stateless-mutations-tests-zkevm-v0.8.0.txt
-zkevm_steps_manifest=eest/fixtures/zisk-steps-tests-zkevm-v0.8.0.txt
+zkevm_sha256=c58fbe493c1c37ab8371fd0ebb4ded668c08daf774f7f2fb798f6e7939810155
+zkevm_mutations_manifest=eest/fixtures/stateless-mutations-tests-zkevm-v0.8.2.txt
+zkevm_steps_manifest=eest/fixtures/zisk-steps-tests-zkevm-v0.8.2.txt
 
 # Consensus-spec SSZ conformance fixtures.
 consensus_repo=ethereum/consensus-specs

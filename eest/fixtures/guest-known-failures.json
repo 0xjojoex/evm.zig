@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus": "tests-zkevm@v0.8.0",
+  "corpus": "tests-zkevm@v0.8.2",
   "comment": "Fixtures expected to fail on a pinned guest backend, with the upstream cause. Diagnostic and release runs may allow exact matches. The report fails on unexpected failures or if an entry passes or disappears from this corpus, forcing stale entries to be removed.",
   "zisk": {}
 }
