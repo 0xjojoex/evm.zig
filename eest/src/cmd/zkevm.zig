@@ -15,6 +15,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const arena = init.arena.allocator();
 
     var options = stateless.Options{};
+    var failure_log = stateless.FailureLog{};
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(allocator);
     var jobs: usize = default_jobs;
@@ -55,6 +56,8 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
             options.trace_mismatch = true;
         } else if (std.mem.eql(u8, arg, "--classify-failures")) {
             options.classify_failures = true;
+        } else if (std.mem.eql(u8, arg, "--log-failures")) {
+            options.failure_log = &failure_log;
         } else if (std.mem.eql(u8, arg, "--report-only")) {
             report_only = true;
         } else if (std.mem.eql(u8, arg, "--oracle-differential")) {
@@ -228,7 +231,7 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm -- [--executor native|zisk|sp1] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--evidence-dir PATH --corpus-manifest PATH --source-ref REF --stateless-schema ID --zig-version VERSION --backend-version VERSION --backend-commit SHA --backend-toolchain VERSION [--known-failures PATH] [--strict-evidence]] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
+        \\usage: zig build zkevm -- [--executor native|zisk|sp1] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--log-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--evidence-dir PATH --corpus-manifest PATH --source-ref REF --stateless-schema ID --zig-version VERSION --backend-version VERSION --backend-commit SHA --backend-toolchain VERSION [--known-failures PATH] [--strict-evidence]] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
         \\
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
         \\against the raw statelessOutputBytes public values.
@@ -236,6 +239,7 @@ fn printUsage() void {
         \\output options require --jobs 1.
         \\Use --trace-mismatch with --verbose to print selected gas/state trace events.
         \\Use --classify-failures to print one tab-separated record per failure.
+        \\Use --log-failures for up to 20 compact lines while keeping parallel execution.
         \\Use --oracle-differential to require dense/tracked consensus-result parity
         \\for blocks without expectException. Typed mutations own rejection-status parity.
         \\Use --report to write one deterministic JSON record per runnable block.
@@ -255,7 +259,9 @@ fn printUsage() void {
 }
 
 test "limited and diagnostic zkEVM runs stay sequential" {
+    var failure_log = stateless.FailureLog{};
     try std.testing.expect(!requiresSequential(.{}));
+    try std.testing.expect(!requiresSequential(.{ .failure_log = &failure_log }));
     try std.testing.expect(requiresSequential(.{ .limit = 1 }));
     try std.testing.expect(requiresSequential(.{ .verbose = true }));
     try std.testing.expect(requiresSequential(.{ .trace_mismatch = true }));

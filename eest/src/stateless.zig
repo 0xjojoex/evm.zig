@@ -26,6 +26,7 @@ pub const Options = struct {
     verbose: bool = false,
     trace_mismatch: bool = false,
     classify_failures: bool = false,
+    failure_log: ?*FailureLog = null,
     oracle_differential: bool = false,
     report: ?*Report = null,
     executor: stateless_executor.Options = .{},
@@ -34,6 +35,27 @@ pub const Options = struct {
     /// Corpus roots, so rows report a source path relative to the one that
     /// contains them.
     source_roots: []const []const u8 = &.{},
+};
+
+pub const FailureLog = struct {
+    count: std.atomic.Value(usize) = .init(0),
+
+    const limit = 20;
+
+    fn write(self: *FailureLog, reporter: Reporter, entry: Reporter.Entry) void {
+        const index = self.count.fetchAdd(1, .monotonic);
+        if (index < limit) {
+            std.debug.print("failure path={s} test={s} block={} category={s} status={s}\n", .{
+                reporter.source,
+                reporter.test_name,
+                reporter.block,
+                @tagName(entry.category),
+                entry.validation_status,
+            });
+        } else if (index == limit) {
+            std.debug.print("failure additional failures suppressed after {} entries\n", .{limit});
+        }
+    }
 };
 
 /// One executor per worker. A guest host is a child process behind a single
@@ -465,6 +487,7 @@ const Reporter = struct {
     };
 
     fn add(self: Reporter, entry: Entry) !void {
+        if (entry.category != .pass) if (self.options.failure_log) |log| log.write(self, entry);
         const report = self.options.report orelse return;
         try report.add(.{
             .source = self.source,

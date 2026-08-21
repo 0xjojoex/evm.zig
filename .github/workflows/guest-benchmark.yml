@@ -245,6 +245,7 @@ jobs:
           args=(
             --executor zisk
             --jobs "$(nproc)"
+            --log-failures
             --zisk-host "${GUEST_HOST}"
             --zisk-elf "${CANDIDATE_ELF}"
             --evidence-dir "${GITHUB_WORKSPACE}/guest-evidence"
@@ -260,7 +261,49 @@ jobs:
           if [[ "${RELEASE_GATE}" == true ]]; then
             args+=(--strict-evidence)
           fi
-          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}"
+
+          rows_dir="${GITHUB_WORKSPACE}/guest-evidence/rows"
+          expected="$(jq -r '.fixture_count' "${RESOLVED_MANIFEST}")"
+          started="$(date +%s)"
+          progress() {
+            local completed elapsed last
+            completed=0
+            last=none
+            if [[ -d "${rows_dir}" ]]; then
+              completed="$(find "${rows_dir}" -type f -name '*.json' -print | wc -l)"
+              completed="${completed//[[:space:]]/}"
+              last="$(
+                find "${rows_dir}" -type f -name '*.json' -printf '%T@ %f\n' \
+                  | awk '$1 > newest { newest = $1; $1 = ""; sub(/^ /, ""); last = $0 } END { print last }'
+              )"
+              last="${last:-none}"
+            fi
+            elapsed="$(($(date +%s) - started))"
+            printf 'progress completed=%s/%s elapsed=%dm%02ds last=%s\n' \
+              "${completed}" "${expected}" "$((elapsed / 60))" "$((elapsed % 60))" "${last}"
+          }
+          heartbeat() {
+            while sleep 60; do progress; done
+          }
+          progress_pid=""
+          stop_progress() {
+            if [[ -n "${progress_pid}" ]]; then
+              kill "${progress_pid}" 2>/dev/null || true
+              wait "${progress_pid}" 2>/dev/null || true
+              progress_pid=""
+            fi
+          }
+          trap stop_progress EXIT
+          printf 'progress expected=%s interval=60s\n' "${expected}"
+          heartbeat &
+          progress_pid="$!"
+
+          result=0
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}" || result="$?"
+          stop_progress
+          trap - EXIT
+          progress
+          exit "${result}"
 
       - name: Publish job summary
         if: always() && hashFiles('guest-evidence/report.md') != ''
