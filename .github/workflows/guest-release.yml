@@ -21,8 +21,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # ere-server-zisk:58ca85b, pinned by digest so the VK provenance is immutable.
-  ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:a21622ab8a9b2502f40307208b593f500a22373201e9ae37c2558a7eadb52e17
+  # ere-server-zisk:0.16.2, pinned by digest so the VK provenance is immutable.
+  ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:4d00a96890a26dc54b523e537e9c1b25a26cf18d166bd3614fc97bbd09317091
 
 jobs:
   qualify:
