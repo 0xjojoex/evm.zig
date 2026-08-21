@@ -73,7 +73,7 @@ pub const BlockEnvironment = struct {
 /// Spec `TransactionEnvironment`, narrowed to what opcodes read.
 ///
 /// The spec's `gas` field is the top frame's budget, carried here by
-/// `EvmExecutionRequest.gas`; access lists and authorizations are transaction
+/// `ExecutionRequest.gas`; access lists and authorizations are transaction
 /// accounting and live in `TransactionScope`.
 pub const TransactionEnvironment = struct {
     origin: Address,

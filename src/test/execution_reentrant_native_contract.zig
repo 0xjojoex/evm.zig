@@ -269,7 +269,7 @@ test "reentrant native contract preserves parent stack across arena growth" {
     try std.testing.expect(executor.frame_store.maxRowCount() > 8);
 }
 
-fn request(sender: evmz.Address, recipient: evmz.Address, input: []const u8) evmz.execution.EvmExecutionRequest {
+fn request(sender: evmz.Address, recipient: evmz.Address, input: []const u8) evmz.execution.ExecutionRequest {
     return .{
         .context = .{
             .chain = .{ .chain_id = 1 },

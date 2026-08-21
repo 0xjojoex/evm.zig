@@ -160,7 +160,7 @@ pub const OpInput = struct {
 const DepositPrepared = struct {
     gas_plan: evmz.transaction.GasPlan,
     execution_gas: ?evmz.execution.ExecutionGas,
-    request: evmz.execution.EvmExecutionRequest,
+    request: evmz.execution.ExecutionRequest,
     created_address: ?Address,
     deposit_nonce: u64,
 };

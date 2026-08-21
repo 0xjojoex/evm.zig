@@ -1,6 +1,5 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const call_runtime_module = @import("./call_runtime.zig");
 const eip7702 = @import("./eip7702.zig");
 
 const Address = evmz.Address;
@@ -15,8 +14,6 @@ pub fn bind(
 ) type {
     return struct {
         const Executor = evmz.executor.ExecutorType(spec, ExecutionState, options_value);
-        const call_runtime = Executor.Runtime;
-
         pub fn host(self: *Executor) Host {
             return Host{ .ptr = self, .vtable = &.{
                 .call = Callbacks().call,
@@ -45,7 +42,7 @@ pub fn bind(
             return struct {
                 fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
-                    return call_runtime.resolveHostCall(self, msg);
+                    return self.resolveHostCall(msg);
                 }
 
                 fn accessAccount(ptr: *anyopaque, address: AddressWord) !execution.AccessStatus {
@@ -73,8 +70,7 @@ pub fn bind(
                 fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
                     const self: *Executor = @ptrCast(@alignCast(ptr));
                     const balance = try getBalance(ptr, .fromAddress(address));
-                    const call_capture = try call_runtime.beginSelfDestructCapture(
-                        self,
+                    const call_capture = try self.beginSelfDestructCapture(
                         address,
                         beneficiary,
                         balance,
@@ -108,7 +104,7 @@ pub fn bind(
                     if (policy.mark_selfdestructed) {
                         try self.state.markSelfdestructed(state_address);
                     }
-                    if (call_capture) |token| try call_runtime.finishSelfDestructCapture(self, token);
+                    if (call_capture) |token| try self.finishSelfDestructCapture(token);
                     return should_refund;
                 }
             };

@@ -273,7 +273,7 @@ fn PreludeContextType(
             return runtime.executor.getCode(account_address) catch |err| return executor_errors.normalize(err);
         }
 
-        pub fn executeRequest(self: Self, request: execution.EvmExecutionRequest) ContextError!execution.ExecutionResult {
+        pub fn executeRequest(self: Self, request: execution.ExecutionRequest) ContextError!execution.ExecutionResult {
             const runtime = self.runtimeState();
             runtime.requireActive();
             return runtime_ops.runPrelude(runtime.executor, request) catch |err| return executor_errors.normalize(err);
@@ -396,7 +396,7 @@ pub fn ContextType(
         /// family effects such as nonce advancement.
         pub fn runPayload(
             self: *Self,
-            request: execution.EvmExecutionRequest,
+            request: execution.ExecutionRequest,
         ) ContextError!executor_engine.TransactionExecutionOutcome {
             return runtime_ops.runPayload(self.activeExecutor(), request) catch |err|
                 return executor_errors.normalize(err);
@@ -419,7 +419,7 @@ pub fn ContextType(
         /// root-context type.
         pub fn runRoot(
             self: *Self,
-            request: execution.EvmExecutionRequest,
+            request: execution.ExecutionRequest,
             init_value: execution.ExecutionScopeInit,
         ) ContextError!executor_engine.TransactionExecutionOutcome {
             return runtime_ops.runRoot(self.activeExecutor(), request, init_value) catch |err|
@@ -431,7 +431,7 @@ pub fn ContextType(
         /// Call exactly once before `runPayload`.
         pub fn beginExecution(
             self: *Self,
-            request: execution.EvmExecutionRequest,
+            request: execution.ExecutionRequest,
             init_value: execution.ExecutionScopeInit,
         ) ContextError!void {
             return runtime_ops.beginExecution(self.activeExecutor(), request, init_value) catch |err|

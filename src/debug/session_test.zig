@@ -31,7 +31,6 @@ fn expectCallParity(
     errdefer std.log.err("debug parity case failed: {s}", .{name});
 
     const Executor = Exact.Executor;
-    const runtime = Executor.Runtime;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
@@ -56,7 +55,7 @@ fn expectCallParity(
     defer normal_executor.endPreparedCodeExecution();
     var normal_code = try normal_executor.prepareBytecode(code);
     defer normal_code.deinit(std.testing.allocator);
-    const normal = try runtime.executePreparedCallMessage(&normal_executor, message, normal_code.view());
+    const normal = try Executor.executePreparedCallMessage(&normal_executor, message, normal_code.view());
 
     var controlled_executor = Executor.init(std.testing.allocator, .{});
     defer controlled_executor.deinit();
@@ -123,7 +122,6 @@ fn stepOut(controlled: anytype, current: session.Pause) !session.Pause {
 test "debug session matches uninterrupted execution" {
     const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const runtime = Executor.Runtime;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
@@ -160,7 +158,7 @@ test "debug session matches uninterrupted execution" {
     defer normal_executor.endPreparedCodeExecution();
     var normal_code = try normal_executor.prepareBytecode(&code);
     defer normal_code.deinit(std.testing.allocator);
-    const normal = (try runtime.executePreparedCallMessage(&normal_executor, message, normal_code.view()));
+    const normal = (try Executor.executePreparedCallMessage(&normal_executor, message, normal_code.view()));
 
     var controlled_executor = Executor.init(std.testing.allocator, .{});
     defer controlled_executor.deinit();
@@ -730,7 +728,6 @@ test "debug session resolves and executes a custom instruction" {
     };
     const Exact = evmz.t.CustomVm(.cancun, .{ .instruction = custom_instructions }) orelse return error.SkipZigTest;
     const Executor = Exact.Executor;
-    const runtime = Executor.Runtime;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
@@ -766,7 +763,7 @@ test "debug session resolves and executes a custom instruction" {
     defer normal_executor.endPreparedCodeExecution();
     var normal_code = try normal_executor.prepareBytecode(&code);
     defer normal_code.deinit(std.testing.allocator);
-    const normal = (try runtime.executePreparedCallMessage(&normal_executor, message, normal_code.view()));
+    const normal = (try Executor.executePreparedCallMessage(&normal_executor, message, normal_code.view()));
 
     var controlled_executor = Executor.init(std.testing.allocator, .{});
     defer controlled_executor.deinit();

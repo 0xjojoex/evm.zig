@@ -90,7 +90,7 @@ pub fn initializeMessageScope(
 
 pub fn beginExecution(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
     scope_init: execution.ExecutionScopeInit,
 ) !void {
     requireActive(executor);
@@ -126,7 +126,7 @@ pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) 
 /// rollback. Failed-root state, warmth, and logs roll back to the root boundary.
 pub fn runRoot(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
     scope_init: execution.ExecutionScopeInit,
 ) @TypeOf(executor.executeTransactionRequestPhased(request)) {
     requireActive(executor);
@@ -155,7 +155,7 @@ pub fn runRoot(
 
 pub fn runPayload(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
 ) @TypeOf(executor.executeTransactionRequestPhased(request)) {
     requireActive(executor);
     const runtime_state = &executor.transaction_runtime_state.?;
@@ -176,7 +176,7 @@ pub fn runPayload(
 
 pub fn runPrelude(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
 ) @TypeOf(executor.executeTransactionRequest(request)) {
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);

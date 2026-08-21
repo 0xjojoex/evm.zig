@@ -503,7 +503,7 @@ test "nested CREATE revert output survives child frame release" {
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);
 }
 
-fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.EvmExecutionRequest {
+fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.ExecutionRequest {
     return .{
         .context = evmz.t.defaultExecutionContext(sender, 30_000_000),
         .message = .{ .call = .{

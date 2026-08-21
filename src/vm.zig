@@ -57,7 +57,7 @@ pub const AccountView = struct {
 
 pub const Call = executor_module.Call;
 pub const Create = executor_module.Create;
-pub const EvmResult = executor_module.EvmResult;
+pub const Result = executor_module.Result;
 pub const CompileOptions = executor_module.CompileOptions;
 
 pub const AfterTransactionContext = block_program_module.AfterTransactionContext;

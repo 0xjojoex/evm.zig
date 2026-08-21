@@ -57,8 +57,8 @@ fn beginCreateScope(
     context: execution_values.ExecutionContext,
     create: execution_values.Create,
     gas: execution_values.ExecutionGas,
-) !execution_values.EvmExecutionRequest {
-    const request = execution_values.EvmExecutionRequest{
+) !execution_values.ExecutionRequest {
+    const request = execution_values.ExecutionRequest{
         .context = context,
         .message = .{ .create = create },
         .gas = gas,
@@ -441,7 +441,7 @@ test "executor uses caller-owned prepared artifacts through the supplied backend
 
     executor.beginPreparedCodeExecution();
     defer executor.endPreparedCodeExecution();
-    const resolved = try Osaka.Executor.Runtime.resolveExecutionCode(&executor, contract);
+    const resolved = try Osaka.Executor.resolveExecutionCode(&executor, contract);
 
     try std.testing.expectEqual(prepared.bytes.ptr, resolved.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
@@ -467,14 +467,14 @@ test "prepared execution follows current code hash without owning public code re
     executor.beginPreparedCodeExecution();
     var prepared_execution_open = true;
     errdefer if (prepared_execution_open) executor.endPreparedCodeExecution();
-    const original_execution = try Osaka.Executor.Runtime.resolveExecutionCode(&executor, contract);
+    const original_execution = try Osaka.Executor.resolveExecutionCode(&executor, contract);
     const original_prepared = original_execution;
     const public_original = try executor.getCode(contract);
     try std.testing.expect(original_prepared.bytes.ptr != public_original.ptr);
     try std.testing.expectEqualSlices(u8, &original_code, public_original);
 
     try executor.state.setCode(contract, &replacement_code);
-    const replacement_execution = try Osaka.Executor.Runtime.resolveExecutionCode(&executor, contract);
+    const replacement_execution = try Osaka.Executor.resolveExecutionCode(&executor, contract);
     try std.testing.expect(replacement_execution.bytes.ptr != original_prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &replacement_code, replacement_execution.bytes);
     const public_replacement = try executor.getCode(contract);
@@ -539,7 +539,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         _ = try pool.getOrPrepare(code_hash, &code);
         try std.testing.expectError(
             error.InvalidWitness,
-            Osaka.Executor.Runtime.resolveExecutionCode(&executor, target),
+            Osaka.Executor.resolveExecutionCode(&executor, target),
         );
     }
 
@@ -883,8 +883,8 @@ test "top-level empty call recipient follows EIP-161 fork boundary" {
     const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
     const SpuriousDragon = evmz.t.Vm(.spurious_dragon) orelse return error.SkipZigTest;
 
-    try std.testing.expect(try topLevelEmptyCallRecipientMaterialized(Frontier.specification));
-    try std.testing.expect(!try topLevelEmptyCallRecipientMaterialized(SpuriousDragon.specification));
+    try std.testing.expect(try topLevelEmptyCallRecipientMaterialized(Frontier.spec));
+    try std.testing.expect(!try topLevelEmptyCallRecipientMaterialized(SpuriousDragon.spec));
 }
 
 test "exact spec drives child call gas forwarding" {
@@ -1651,7 +1651,7 @@ test "captured span is inspectable before executed transaction resolution" {
     defer tape.deinit();
     var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape });
     defer capture.deinit();
-    const request_value = execution_values.EvmExecutionRequest{
+    const request_value = execution_values.ExecutionRequest{
         .context = execution_context,
         .message = .{ .call = .{
             .sender = sender,
@@ -1687,7 +1687,7 @@ test "active transaction owns rollback before pending state" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1723,7 +1723,7 @@ test "active transaction finishes into pending state" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1856,7 +1856,7 @@ test "transaction nonce advancement survives payload rollback" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1897,7 +1897,7 @@ test "transaction nonce advancement remains recorded for the runtime" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1931,7 +1931,7 @@ test "transaction nonce advancement selects the root create entry" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.address.create(sender, 7);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1974,7 +1974,7 @@ test "transaction nonce advancement leaves max-nonce acceptance to policy" {
     const sender = evmz.addr(0xaaaa);
     const max_nonce = std.math.maxInt(u64);
     const recipient = evmz.address.create(sender, max_nonce);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -2015,7 +2015,7 @@ test "transaction payload resolves only its inner checkpoint" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -3335,7 +3335,7 @@ test "EIP-7610 storage-only accounts collide even though EIP-161 calls them dead
         executor.state.discard(attempt);
     }
     // Dead for existence, code hash, and CALL gas; still present for the
-    // EIP-7610 creation predicate. `expectCreationCollision` in call_runtime
+    // EIP-7610 creation predicate. `expectCreationCollision` in executor.zig
     // covers the collision itself across every revision.
     try std.testing.expect(!try executor.state.accountExists(target));
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getCodeHash(target));
