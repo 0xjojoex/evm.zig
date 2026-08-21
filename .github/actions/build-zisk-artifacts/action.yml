@@ -20,8 +20,12 @@ inputs:
   artifacts-dir:
     description: Output directory for stable artifact paths
     required: true
+  build-provider:
+    description: Build the ZisK guest provider instead of using an existing artifact
+    required: false
+    default: "true"
   build-host:
-    description: Build the evmz ZisK host alongside the provider
+    description: Build the evmz ZisK host
     required: false
     default: "false"
   host-manifest:
@@ -58,6 +62,7 @@ runs:
           xz-utils
 
     - name: Install pinned ZisK toolchain
+      if: inputs.build-provider == 'true'
       shell: bash
       env:
         ZISK_VERSION: ${{ inputs.version }}
@@ -96,6 +101,7 @@ runs:
         echo "${ZISK_HOME}/bin" >> "${GITHUB_PATH}"
 
     - name: Checkout pinned ZisK source
+      if: inputs.build-provider == 'true'
       shell: bash
       env:
         ZISK_COMMIT: ${{ inputs.commit }}
@@ -110,9 +116,9 @@ runs:
     - name: Build pinned ZisK artifacts
       id: artifacts
       shell: bash
-      working-directory: ${{ inputs.source-dir }}
       env:
         ARTIFACTS_DIR: ${{ inputs.artifacts-dir }}
+        BUILD_PROVIDER: ${{ inputs.build-provider }}
         BUILD_HOST: ${{ inputs.build-host }}
         HOST_MANIFEST: ${{ inputs.host-manifest }}
         ZISK_HOME: ${{ inputs.zisk-home }}
@@ -120,13 +126,17 @@ runs:
         CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS: "-C target-feature=+unaligned-scalar-mem"
       run: |
         set -euo pipefail
-        "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
-        provider="$(find "${ZISK_SOURCE}/target/elf" -type f -name libziskos_staticlib.a -print -quit)"
-        test -s "${provider}"
-        install -D -m 0644 \
-          "${provider}" \
-          "${ARTIFACTS_DIR}/libziskos_staticlib.a"
-        echo "provider=${ARTIFACTS_DIR}/libziskos_staticlib.a" >> "${GITHUB_OUTPUT}"
+        provider="${ARTIFACTS_DIR}/libziskos_staticlib.a"
+        if [[ "${BUILD_PROVIDER}" == true ]]; then
+          cd "${ZISK_SOURCE}"
+          "${ZISK_HOME}/bin/cargo-zisk" build --release -p ziskos-staticlib
+          provider_source="$(find "${ZISK_SOURCE}/target/elf" -type f -name libziskos_staticlib.a -print -quit)"
+          test -s "${provider_source}"
+          install -D -m 0644 "${provider_source}" "${provider}"
+        else
+          test -s "${provider}"
+        fi
+        echo "provider=${provider}" >> "${GITHUB_OUTPUT}"
 
         host=""
         if [[ "${BUILD_HOST}" == true ]]; then

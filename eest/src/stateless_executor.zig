@@ -7,6 +7,7 @@
 //! semantics covers all three.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const evmz = @import("evmz");
 const ere_io = @import("stateless_ere_io.zig");
 
@@ -86,7 +87,8 @@ pub const Executor = struct {
     /// encoded `StatelessValidationResult` is variable-size, so the meaningful
     /// length cannot be recovered from the region alone. `canonical_len` is the
     /// fixture's own expected length; the executor requires the remainder of
-    /// the region to be zero. `label` disambiguates the SP1 work directory.
+    /// the region to be zero. `label` identifies per-fixture guest work and
+    /// failures.
     pub fn execute(
         self: *Executor,
         allocator: std.mem.Allocator,
@@ -96,7 +98,7 @@ pub const Executor = struct {
     ) !Outcome {
         return switch (self.options.target) {
             .native => executeNative(self.io, allocator, input),
-            .zisk => self.executeZisk(allocator, input, canonical_len),
+            .zisk => self.executeZisk(allocator, input, canonical_len, label),
             .sp1 => executeSp1(self.io, allocator, input, canonical_len, self.options, label),
         };
     }
@@ -106,8 +108,9 @@ pub const Executor = struct {
         allocator: std.mem.Allocator,
         input: []const u8,
         canonical_len: usize,
+        label: []const u8,
     ) !Outcome {
-        var response = try self.zisk_host.?.execute(self.io, allocator, input);
+        var response = try self.zisk_host.?.execute(self.io, allocator, input, label);
         defer response.deinit(allocator);
         if (response.status != 0) {
             return .{ .crashed = .{ .reason = try allocator.dupe(u8, response.payload) } };
@@ -231,12 +234,25 @@ const ZiskHost = struct {
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,
+            .request_resource_usage_statistics = true,
         });
         errdefer child.kill(io);
 
         var handshake: [ready.len]u8 = undefined;
-        try readPipeAll(child.stdout.?, io, &handshake);
-        if (!std.mem.eql(u8, &handshake, ready)) return error.InvalidZiskHostHandshake;
+        readPipeAll(child.stdout.?, io, &handshake) catch |cause| {
+            logZiskHostFailure(ziskHostFailureAfterExit(&child, io, .handshake, null, cause));
+            return error.ZiskHostStartupFailed;
+        };
+        if (!std.mem.eql(u8, &handshake, ready)) {
+            logZiskHostFailure(ziskHostFailureAfterKill(
+                &child,
+                io,
+                .handshake,
+                null,
+                error.InvalidZiskHostHandshake,
+            ));
+            return error.ZiskHostStartupFailed;
+        }
         return .{ .child = child };
     }
 
@@ -252,22 +268,62 @@ const ZiskHost = struct {
         };
     }
 
-    fn execute(self: *ZiskHost, io: std.Io, allocator: std.mem.Allocator, input: []const u8) !Response {
+    fn execute(
+        self: *ZiskHost,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        input: []const u8,
+        label: []const u8,
+    ) !Response {
+        if (self.child.id == null) return error.ZiskHostUnavailable;
+        const stdin = self.child.stdin orelse return error.ZiskHostUnavailable;
+        const stdout = self.child.stdout orelse return error.ZiskHostUnavailable;
+
         var length_bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &length_bytes, @intCast(input.len), .little);
-        try writePipeAll(self.child.stdin.?, io, &length_bytes);
-        try writePipeAll(self.child.stdin.?, io, input);
+        writePipeAll(stdin, io, &length_bytes) catch |cause| {
+            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .request_length, label, cause));
+            return error.ZiskHostProcessFailed;
+        };
+        writePipeAll(stdin, io, input) catch |cause| {
+            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .request_payload, label, cause));
+            return error.ZiskHostProcessFailed;
+        };
 
         var header: [response_header_bytes]u8 = undefined;
-        try readPipeAll(self.child.stdout.?, io, &header);
+        readPipeAll(stdout, io, &header) catch |cause| {
+            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .response_header, label, cause));
+            return error.ZiskHostProcessFailed;
+        };
         const status = header[0];
-        if (status > 1) return error.InvalidZiskHostStatus;
+        if (status > 1) {
+            logZiskHostFailure(ziskHostFailureAfterKill(
+                &self.child,
+                io,
+                .response_header,
+                label,
+                error.InvalidZiskHostStatus,
+            ));
+            return error.ZiskHostProtocolFailed;
+        }
         const payload_len = std.mem.readInt(u64, header[24..32], .little);
-        if (payload_len > max_response_payload_bytes) return error.ZiskHostResponseTooLarge;
+        if (payload_len > max_response_payload_bytes) {
+            logZiskHostFailure(ziskHostFailureAfterKill(
+                &self.child,
+                io,
+                .response_header,
+                label,
+                error.ZiskHostResponseTooLarge,
+            ));
+            return error.ZiskHostProtocolFailed;
+        }
 
         const payload = try allocator.alloc(u8, @intCast(payload_len));
         errdefer allocator.free(payload);
-        try readPipeAll(self.child.stdout.?, io, payload);
+        readPipeAll(stdout, io, payload) catch |cause| {
+            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .response_payload, label, cause));
+            return error.ZiskHostProcessFailed;
+        };
         return .{
             .status = status,
             .steps = std.mem.readInt(u64, header[8..16], .little),
@@ -287,6 +343,101 @@ const ZiskHost = struct {
         }
     };
 };
+
+const ZiskHostPhase = enum {
+    handshake,
+    request_length,
+    request_payload,
+    response_header,
+    response_payload,
+};
+
+const ZiskHostFailure = struct {
+    phase: ZiskHostPhase,
+    fixture: ?[]const u8,
+    pid: ?u64,
+    cause: anyerror,
+    term: ?std.process.Child.Term,
+    wait_error: ?anyerror = null,
+    max_rss_bytes: ?usize,
+
+    pub fn format(self: ZiskHostFailure, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("ZisK host failed phase={s}", .{@tagName(self.phase)});
+        if (self.fixture) |fixture| try writer.print(" fixture={s}", .{fixture});
+        if (self.pid) |pid| try writer.print(" pid={d}", .{pid});
+        try writer.print(" cause={s}", .{@errorName(self.cause)});
+        if (self.term) |term| {
+            try writer.print(" term={f}", .{fmtTerm(term)});
+        } else if (self.wait_error) |wait_error| {
+            try writer.print(" term=unavailable wait_error={s}", .{@errorName(wait_error)});
+        } else {
+            try writer.writeAll(" term=terminated-by-runner");
+        }
+        if (self.max_rss_bytes) |max_rss| try writer.print(" max_rss_bytes={d}", .{max_rss});
+    }
+};
+
+fn ziskHostFailureAfterExit(
+    child: *std.process.Child,
+    io: std.Io,
+    phase: ZiskHostPhase,
+    fixture: ?[]const u8,
+    cause: anyerror,
+) ZiskHostFailure {
+    const pid = childPid(child);
+    const term = child.wait(io) catch |wait_error| {
+        child.kill(io);
+        return .{
+            .phase = phase,
+            .fixture = fixture,
+            .pid = pid,
+            .cause = cause,
+            .term = null,
+            .wait_error = wait_error,
+            .max_rss_bytes = child.resource_usage_statistics.getMaxRss(),
+        };
+    };
+    return .{
+        .phase = phase,
+        .fixture = fixture,
+        .pid = pid,
+        .cause = cause,
+        .term = term,
+        .max_rss_bytes = child.resource_usage_statistics.getMaxRss(),
+    };
+}
+
+fn ziskHostFailureAfterKill(
+    child: *std.process.Child,
+    io: std.Io,
+    phase: ZiskHostPhase,
+    fixture: ?[]const u8,
+    cause: anyerror,
+) ZiskHostFailure {
+    const pid = childPid(child);
+    child.kill(io);
+    return .{
+        .phase = phase,
+        .fixture = fixture,
+        .pid = pid,
+        .cause = cause,
+        .term = null,
+        .max_rss_bytes = child.resource_usage_statistics.getMaxRss(),
+    };
+}
+
+fn childPid(child: *const std.process.Child) ?u64 {
+    const id = child.id orelse return null;
+    return switch (builtin.os.tag) {
+        .windows => @intFromPtr(id),
+        .wasi => null,
+        else => @intCast(id),
+    };
+}
+
+fn logZiskHostFailure(failure: ZiskHostFailure) void {
+    std.debug.print("{f}\n", .{failure});
+}
 
 fn readPipeAll(file: std.Io.File, io: std.Io, bytes: []u8) !void {
     var offset: usize = 0;
@@ -368,6 +519,51 @@ test "a guest public region shorter than the expected result is a crash" {
     var outcome = try canonicalOutcome(std.testing.allocator, &short, 69, 0, 0);
     defer outcome.deinit(std.testing.allocator);
     try std.testing.expect(outcome == .crashed);
+}
+
+test "ZisK host failure names the phase fixture cause and process outcome" {
+    const failure = ZiskHostFailure{
+        .phase = .response_header,
+        .fixture = "case-1",
+        .pid = 42,
+        .cause = error.UnexpectedEndOfStream,
+        .term = .{ .exited = 137 },
+        .max_rss_bytes = 4096,
+    };
+    const rendered = try std.fmt.allocPrint(std.testing.allocator, "{f}", .{failure});
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expectEqualStrings(
+        "ZisK host failed phase=response_header fixture=case-1 pid=42 " ++
+            "cause=UnexpectedEndOfStream term=exit code 137 max_rss_bytes=4096",
+        rendered,
+    );
+}
+
+test "ZisK host failure diagnosis preserves an early child exit" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    const argv = [_][]const u8{"/usr/bin/false"};
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .request_resource_usage_statistics = true,
+    });
+    errdefer child.kill(std.testing.io);
+
+    const failure = ziskHostFailureAfterExit(
+        &child,
+        std.testing.io,
+        .handshake,
+        null,
+        error.UnexpectedEndOfStream,
+    );
+    try std.testing.expectEqual(@as(?u8, 1), switch (failure.term.?) {
+        .exited => |code| code,
+        else => null,
+    });
+    try std.testing.expectEqual(@as(?std.process.Child.Id, null), child.id);
 }
 
 test "native execution returns the validator's own result bytes" {

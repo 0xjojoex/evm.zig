@@ -33,6 +33,7 @@ pub const TypedEnvelope = struct {
 
 pub const RawValidationError = enum {
     unsupported_transaction_type,
+    nonce_overflow,
     type_4_tx_pre_fork,
     type_4_empty_authorization_list,
     type_4_invalid_authorization_format,
@@ -62,7 +63,7 @@ pub fn Exact(comptime transaction_spec: anytype) type {
         pub fn classifyRawTransaction(bytes: []const u8) ?RawValidationError {
             const envelope = decodeEnvelope(bytes) catch return .type_4_invalid_authorization_format;
             return switch (envelope) {
-                .legacy => null,
+                .legacy => |legacy| validateLegacyTransaction(legacy),
                 .typed => |typed| Self.validateTypedTransaction(typed),
             };
         }
@@ -94,6 +95,13 @@ pub fn Exact(comptime transaction_spec: anytype) type {
             };
         }
     };
+}
+
+fn validateLegacyTransaction(payload: []const u8) ?RawValidationError {
+    var cursor = rlp.Cursor.init(payload);
+    var fields = cursor.nextList() catch return null;
+    const nonce = fields.nextInt(u256) catch return null;
+    return if (nonce > std.math.maxInt(u64)) .nonce_overflow else null;
 }
 
 const DecodeError = error{
@@ -182,6 +190,17 @@ test "EIP-2718 envelope keeps legacy transactions opaque" {
     const bytes = [_]u8{0xc0};
     const envelope = try decodeEnvelope(&bytes);
     try std.testing.expectEqualSlices(u8, &bytes, envelope.legacy);
+}
+
+test "raw transaction validation rejects legacy nonce overflow" {
+    const eth = @import("../eth.zig");
+    const hex = "f868890100000000000000000a823a9894c0f6dc9e5836f54caadbf59cc69346c508e1992b80801ba0bf2ba5dd0f68362bb6ea41d43637000b87d08e87dc3526f908cd1e29e4a8e4cea06ad6835e31dc175a93f661d9080a44ca82d0818277956c341d84a1dc3eeeb4e1";
+    var bytes: [hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, hex);
+    try std.testing.expectEqual(
+        RawValidationError.nonce_overflow,
+        Exact(eth.frontier.transaction).classifyRawTransaction(&bytes).?,
+    );
 }
 
 test "set-code transaction rejects empty authorization list" {

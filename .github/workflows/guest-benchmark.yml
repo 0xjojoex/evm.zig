@@ -95,14 +95,15 @@ jobs:
             echo "ZISK_HOME=${RUNNER_TEMP}/zisk-sdk"
             echo "ZISK_SOURCE=${RUNNER_TEMP}/zisk-source"
             echo "ZISK_ARTIFACTS=${RUNNER_TEMP}/zisk-artifacts"
-            echo "ZISK_CACHE_KEY=zisk-artifacts-v1-${RUNNER_OS}-${RUNNER_ARCH}-ubuntu-24.04-${ZISK_VERSION}-${ZISK_COMMIT}-${ZISK_RUST_TOOLCHAIN}-${{ hashFiles('.github/actions/build-zisk-artifacts/action.yml', 'guest/runtime/zisk/host/Cargo.toml', 'guest/runtime/zisk/host/Cargo.lock', 'guest/runtime/zisk/host/src/**') }}"
+            echo "ZISK_CACHE_KEY=zisk-provider-v1-${RUNNER_OS}-${RUNNER_ARCH}-ubuntu-24.04-${ZISK_VERSION}-${ZISK_COMMIT}-${ZISK_RUST_TOOLCHAIN}-${{ hashFiles('.github/actions/build-zisk-artifacts/action.yml') }}"
           } >> "${GITHUB_ENV}"
 
-      - name: Restore pinned ZisK artifacts
-        id: zisk-cache
+      # The provider is RISC-V guest code; rebuild the native host for each runner CPU.
+      - name: Restore pinned ZisK provider
+        id: zisk-provider-cache
         uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/zisk-artifacts
+          path: ${{ runner.temp }}/zisk-artifacts/libziskos_staticlib.a
           key: ${{ env.ZISK_CACHE_KEY }}
 
       - name: Install system dependencies
@@ -153,7 +154,6 @@ jobs:
             --resolved-manifest "${RESOLVED_MANIFEST}"
 
       - name: Build pinned ZisK artifacts
-        if: steps.zisk-cache.outputs.cache-hit != 'true'
         uses: ./.github/actions/build-zisk-artifacts
         with:
           version: ${{ env.ZISK_VERSION }}
@@ -162,6 +162,7 @@ jobs:
           zisk-home: ${{ env.ZISK_HOME }}
           source-dir: ${{ env.ZISK_SOURCE }}
           artifacts-dir: ${{ env.ZISK_ARTIFACTS }}
+          build-provider: ${{ steps.zisk-provider-cache.outputs.cache-hit != 'true' }}
           build-host: "true"
           host-manifest: ${{ github.workspace }}/guest/runtime/zisk/host/Cargo.toml
 
@@ -211,6 +212,18 @@ jobs:
               "${RUNNER_TEMP}/failure-probe/guest/zisk/evmz-guest-zisk.elf"
           fi
           echo "CANDIDATE_ELF=${candidate}" >> "${GITHUB_ENV}"
+
+      - name: Report ZisK runtime identity
+        env:
+          GUEST_HOST: ${{ steps.zisk.outputs.host }}
+          PROVIDER: ${{ steps.zisk.outputs.provider }}
+        run: |
+          mkdir -p guest-evidence
+          {
+            uname -a
+            lscpu | grep -E '^(Architecture|Model name|Vendor ID|CPU family|Model|Stepping|Flags):'
+            sha256sum "${GUEST_HOST}" "${PROVIDER}" "${CANDIDATE_ELF}"
+          } | tee guest-evidence/runtime.txt
 
       - name: Run corpus and produce evidence
         env:
@@ -267,12 +280,12 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Save pinned ZisK artifacts from main
+      - name: Save pinned ZisK provider from main
         if: >-
           always()
           && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-          && steps.zisk-cache.outputs.cache-hit != 'true'
+          && steps.zisk-provider-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: ${{ runner.temp }}/zisk-artifacts
+          path: ${{ runner.temp }}/zisk-artifacts/libziskos_staticlib.a
           key: ${{ env.ZISK_CACHE_KEY }}
