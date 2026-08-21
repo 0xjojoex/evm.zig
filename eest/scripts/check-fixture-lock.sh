@@ -7,6 +7,8 @@ source "${script_dir}/eest-lock.sh"
 required_keys=(
   state_repo state_release state_artifact state_sha256
   benchmark_repo benchmark_release benchmark_artifact benchmark_sha256
+  zkevm_benchmark_repo zkevm_benchmark_release
+  zkevm_benchmark_artifact zkevm_benchmark_sha256
   zkevm_repo zkevm_release zkevm_artifact zkevm_sha256
   zkevm_mutations_manifest zkevm_steps_manifest
   consensus_repo consensus_release
@@ -59,7 +61,7 @@ reject_pattern "execution-spec release" \
 reject_pattern "consensus-spec release" \
   '\.eest/consensus/v[[:digit:]][[:alnum:]._-]*|consensus-specs v[[:digit:]][[:alnum:]._-]*|--branch v[[:digit:]][[:alnum:]._-]*'
 
-for track in state benchmark zkevm consensus; do
+for track in state benchmark zkevm_benchmark zkevm consensus; do
   release="$(eest_lock_value "${track}_release")"
   release_slug="$(eest_release_slug "${release}")"
   for identity in "${release}" "${release_slug}"; do

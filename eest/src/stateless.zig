@@ -10,9 +10,15 @@ const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;
 const jsonString = fixture_common.jsonString;
 const parseBytesFromValue = fixture_common.parseBytesFromValue;
+// The upstream 60M zkEVM benchmark contains a 550 MB JSON fixture file.
+const max_fixture_bytes = 1024 * 1024 * 1024;
 
 pub const Report = stateless_report.Report;
 pub const Target = stateless_executor.Target;
+
+test "fixture cap covers pinned zkEVM benchmark" {
+    try std.testing.expect(max_fixture_bytes > 549_941_169);
+}
 
 pub const Options = struct {
     test_filter: ?[]const u8 = null,
@@ -20,6 +26,7 @@ pub const Options = struct {
     verbose: bool = false,
     trace_mismatch: bool = false,
     classify_failures: bool = false,
+    failure_log: ?*FailureLog = null,
     oracle_differential: bool = false,
     report: ?*Report = null,
     executor: stateless_executor.Options = .{},
@@ -28,6 +35,27 @@ pub const Options = struct {
     /// Corpus roots, so rows report a source path relative to the one that
     /// contains them.
     source_roots: []const []const u8 = &.{},
+};
+
+pub const FailureLog = struct {
+    count: std.atomic.Value(usize) = .init(0),
+
+    const limit = 20;
+
+    fn write(self: *FailureLog, reporter: Reporter, entry: Reporter.Entry) void {
+        const index = self.count.fetchAdd(1, .monotonic);
+        if (index < limit) {
+            std.debug.print("failure path={s} test={s} block={} category={s} status={s}\n", .{
+                reporter.source,
+                reporter.test_name,
+                reporter.block,
+                @tagName(entry.category),
+                entry.validation_status,
+            });
+        } else if (index == limit) {
+            std.debug.print("failure additional failures suppressed after {} entries\n", .{limit});
+        }
+    }
 };
 
 /// One executor per worker. A guest host is a child process behind a single
@@ -87,7 +115,7 @@ pub fn runFile(
     options: Options,
     context: *Context,
 ) !Summary {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(512 * 1024 * 1024));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_fixture_bytes));
     defer allocator.free(bytes);
     var summary = try runSlice(io, allocator, bytes, options, path, context);
     summary.files = 1;
@@ -459,6 +487,7 @@ const Reporter = struct {
     };
 
     fn add(self: Reporter, entry: Entry) !void {
+        if (entry.category != .pass) if (self.options.failure_log) |log| log.write(self, entry);
         const report = self.options.report orelse return;
         try report.add(.{
             .source = self.source,

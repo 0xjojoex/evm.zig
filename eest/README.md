@@ -118,6 +118,18 @@ zig build zkevm -- --oracle-differential
 zig build zkevm-mutations
 ```
 
+The zkEVM benchmark release uses the same runner and exact-output checks. It
+is a separate performance corpus available to the manual Guest benchmark
+workflow:
+
+```sh
+scripts/fetch-eest-zkevm-fixtures.sh --benchmark
+source scripts/eest-lock.sh
+BENCHMARK_RELEASE="$(eest_lock_value zkevm_benchmark_release)"
+BENCHMARK_FIXTURES="$(eest_release_path zkevm_benchmark "${BENCHMARK_RELEASE}")/fixtures/blockchain_tests"
+zig build zkevm -- "${BENCHMARK_FIXTURES}"
+```
+
 The ERE adapter uses the same raw SSZ output as the fixture and upstream guest
 programs. `zkevm-input` extracts raw input or ZisK-framed stdin together with
 the expected public output, and `zkevm-ere` runs the native adapter on one
