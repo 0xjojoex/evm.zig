@@ -37,7 +37,9 @@ SECTIONS
   } >rom AT>rom :rodata
 
   . = ALIGN(8);
-  .init_array : {
+  /* Keep an empty init array from anchoring the read-only PT_LOAD before the
+     standalone location-counter alignment above. */
+  .init_array ALIGN(8) : {
     PROVIDE(__init_array_start = .);
     KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
     KEEP(*(.init_array))
