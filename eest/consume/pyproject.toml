@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evmz-eest-consume"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "ethereum-execution",
+    "ethereum-execution-testing",
+]
+
+[tool.setuptools]
+py-modules = [
+    "evmz_consumer",
+    "evmz_consumer_common",
+    "evmz_zkevm_consumer",
+]
+
+[tool.uv.sources]
+ethereum-execution = { git = "https://github.com/ethereum/execution-specs", rev = "3d473e865a6ff78321e8b7b015b0e9a4bb8da892" }
+ethereum-execution-testing = { git = "https://github.com/ethereum/execution-specs", rev = "3d473e865a6ff78321e8b7b015b0e9a4bb8da892", subdirectory = "packages/testing" }

@@ -782,7 +782,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
         .block_access_list = &.{0xff},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
-    try std.testing.expectEqual(Status.invalid_block_access_list, malformed_claim.status);
+    try std.testing.expectEqual(Status.malformed_block_access_list, malformed_claim.status);
 
     const oversized_claim = try StfAmsterdam.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 1 },
@@ -792,6 +792,20 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
     });
     try std.testing.expectEqual(Status.block_access_list_too_large, oversized_claim.status);
+
+    const excessive_gas_transactions = [_]TransactionInput{.{
+        .tx = .{ .sender = .zero, .gas_limit = 2 },
+        .encoded = "tx0",
+    }};
+    const excessive_gas = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+        .env = .{ .gas_limit = 1 },
+        .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
+        .transactions = &excessive_gas_transactions,
+        .block_access_list = phantom_claim,
+        .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
+    });
+    try std.testing.expectEqual(Status.block_gas_exceeded, excessive_gas.status);
+    try std.testing.expectEqual(@as(?usize, 0), excessive_gas.tx_index);
 }
 
 test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
@@ -1161,6 +1175,10 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
     });
     try std.testing.expectEqual(Status.transaction_rejected, pre_cancun_result.status);
     try std.testing.expectEqual(@as(?usize, 0), pre_cancun_result.tx_index);
+    try std.testing.expectEqual(
+        transaction.validation.ValidationError.type_3_tx_pre_fork,
+        pre_cancun_result.transaction_rejection,
+    );
 
     const cancun_schedule = eth_spec.cancun.transaction.blob_schedule.?;
     const custom_blob_params = transaction.BlobParams{

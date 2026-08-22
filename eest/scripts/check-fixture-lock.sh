@@ -5,7 +5,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${script_dir}/eest-lock.sh"
 
 required_keys=(
-  state_repo state_release state_artifact state_sha256
+  state_release
   benchmark_repo benchmark_release benchmark_artifact benchmark_sha256
   zkevm_repo zkevm_release zkevm_artifact zkevm_sha256
   zkevm_mutations_manifest zkevm_steps_manifest

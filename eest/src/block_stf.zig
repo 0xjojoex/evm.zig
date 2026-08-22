@@ -1,6 +1,8 @@
 const std = @import("std");
 const evmz = @import("evmz");
+const bal_fixture = @import("block_access_list_fixture.zig");
 const fixture_common = @import("fixture.zig");
+const tx_validation = @import("tx_validation.zig");
 
 const JsonArray = std.json.Array;
 const JsonObject = std.json.ObjectMap;
@@ -19,13 +21,6 @@ const parseU256FromValue = fixture_common.parseU256FromValue;
 const parseU64FromValue = fixture_common.parseU64FromValue;
 const seedMemoryStore = fixture_common.seedMemoryStore;
 
-pub const Options = struct {
-    test_filter: ?[]const u8 = null,
-    limit: usize = 0,
-    verbose: bool = false,
-    bal_differential: bool = false,
-};
-
 pub const SkipReason = enum(u8) {
     expected_exception,
     unsupported_fork,
@@ -41,35 +36,16 @@ pub const FailReason = enum(u8) {
     block_number_mismatch,
     blob_versioned_hashes_mismatch,
     pre_state_root_mismatch,
-    bal_differential_mismatch,
-};
-
-pub const UncheckedReason = enum(u8) {
-    bal_differential_fallback,
+    expected_exception_mismatch,
 };
 
 pub const Summary = struct {
-    files: usize = 0,
     fixtures: usize = 0,
     passed: usize = 0,
     failed: usize = 0,
     skipped: usize = 0,
-    unchecked: usize = 0,
     skip_reasons: [std.meta.fields(SkipReason).len]usize = [_]usize{0} ** std.meta.fields(SkipReason).len,
     fail_reasons: [std.meta.fields(FailReason).len]usize = [_]usize{0} ** std.meta.fields(FailReason).len,
-    unchecked_reasons: [std.meta.fields(UncheckedReason).len]usize = [_]usize{0} ** std.meta.fields(UncheckedReason).len,
-
-    pub fn add(self: *Summary, other: Summary) void {
-        self.files += other.files;
-        self.fixtures += other.fixtures;
-        self.passed += other.passed;
-        self.failed += other.failed;
-        self.skipped += other.skipped;
-        self.unchecked += other.unchecked;
-        for (&self.skip_reasons, other.skip_reasons) |*target, value| target.* += value;
-        for (&self.fail_reasons, other.fail_reasons) |*target, value| target.* += value;
-        for (&self.unchecked_reasons, other.unchecked_reasons) |*target, value| target.* += value;
-    }
 
     fn countSkip(self: *Summary, reason: SkipReason) void {
         self.skipped += 1;
@@ -80,22 +56,9 @@ pub const Summary = struct {
         self.failed += 1;
         self.fail_reasons[@intFromEnum(reason)] += 1;
     }
-
-    fn countUnchecked(self: *Summary, reason: UncheckedReason) void {
-        self.unchecked += 1;
-        self.unchecked_reasons[@intFromEnum(reason)] += 1;
-    }
 };
 
-pub fn runFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: Options) !Summary {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(512 * 1024 * 1024));
-    defer allocator.free(bytes);
-    var summary = try runSlice(allocator, bytes, options, path);
-    summary.files = 1;
-    return summary;
-}
-
-pub fn runSlice(allocator: std.mem.Allocator, bytes: []const u8, options: Options, path: []const u8) !Summary {
+fn runSlice(allocator: std.mem.Allocator, bytes: []const u8) !Summary {
     var parsed = try std.json.parseFromSlice(JsonValue, allocator, bytes, .{ .parse_numbers = false });
     defer parsed.deinit();
 
@@ -103,22 +66,36 @@ pub fn runSlice(allocator: std.mem.Allocator, bytes: []const u8, options: Option
     var summary = Summary{};
     var it = root.iterator();
     while (it.next()) |entry| {
-        const test_name = entry.key_ptr.*;
-        if (options.test_filter) |needle| {
-            if (std.mem.indexOf(u8, test_name, needle) == null) continue;
-        }
-        try runFixture(allocator, path, test_name, entry.value_ptr.*, options, &summary);
-        if (options.limit > 0 and summary.fixtures >= options.limit) break;
+        try runFixture(allocator, entry.value_ptr.*, .all, &summary);
     }
     return summary;
 }
 
+/// Runs one top-level blockchain fixture selected by its exact EEST id.
+/// File discovery and selection belong to the caller.
+pub fn runCase(
+    allocator: std.mem.Allocator,
+    fixture: std.json.Value,
+) !Summary {
+    var summary = Summary{};
+    const fixture_object = asObject(fixture) orelse {
+        summary.countFail(.malformed_fixture);
+        return summary;
+    };
+    if (fixture_object.get("blocks") == null) {
+        summary.countFail(.malformed_fixture);
+        return summary;
+    }
+    try runFixture(allocator, fixture, .blocks_only, &summary);
+    return summary;
+}
+
+const FixtureMode = enum { all, blocks_only };
+
 fn runFixture(
     allocator: std.mem.Allocator,
-    path: []const u8,
-    test_name: []const u8,
     fixture: JsonValue,
-    options: Options,
+    mode: FixtureMode,
     summary: *Summary,
 ) !void {
     const fixture_object = asObject(fixture) orelse {
@@ -160,9 +137,6 @@ fn runFixture(
         return;
     };
     if (!std.mem.eql(u8, &expected_pre_state_root, &actual_pre_state_root)) {
-        if (options.verbose) {
-            std.debug.print("  {s} pre-state root mismatch expected={x} actual={x}\n", .{ test_name, expected_pre_state_root, actual_pre_state_root });
-        }
         summary.countFail(.pre_state_root_mismatch);
         return;
     }
@@ -178,20 +152,22 @@ fn runFixture(
         return;
     };
 
-    if (fixture_object.get("engineNewPayloads")) |payloads_value| {
-        const payloads = asArray(payloads_value) orelse {
-            summary.countFail(.malformed_fixture);
-            return;
-        };
-        for (payloads.items, 0..) |entry_value, block_index| {
-            if (options.limit > 0 and summary.fixtures >= options.limit) return;
-            try runBlockEntry(allocator, path, test_name, block_index, revision, .payload, &fixture_object, entry_value, options, summary, &store, &block_hashes, &parent);
+    if (mode == .all) {
+        if (fixture_object.get("engineNewPayloads")) |payloads_value| {
+            const payloads = asArray(payloads_value) orelse {
+                summary.countFail(.malformed_fixture);
+                return;
+            };
+            for (payloads.items) |entry_value| {
+                try runBlockEntry(allocator, revision, .payload, &fixture_object, entry_value, summary, &store, &block_hashes, &parent);
+            }
         }
     }
 
-    if (fixture_object.get("syncPayload")) |sync_value| {
-        if (options.limit > 0 and summary.fixtures >= options.limit) return;
-        try runBlockEntry(allocator, path, test_name, summary.fixtures, revision, .payload, &fixture_object, sync_value, options, summary, &store, &block_hashes, &parent);
+    if (mode == .all) {
+        if (fixture_object.get("syncPayload")) |sync_value| {
+            try runBlockEntry(allocator, revision, .payload, &fixture_object, sync_value, summary, &store, &block_hashes, &parent);
+        }
     }
 
     // Regular `blockchain_tests` carry consensus blocks rather than engine
@@ -202,9 +178,8 @@ fn runFixture(
             summary.countFail(.malformed_fixture);
             return;
         };
-        for (blocks.items, 0..) |entry_value, block_index| {
-            if (options.limit > 0 and summary.fixtures >= options.limit) return;
-            try runBlockEntry(allocator, path, test_name, block_index, revision, .block_body, &fixture_object, entry_value, options, summary, &store, &block_hashes, &parent);
+        for (blocks.items) |entry_value| {
+            try runBlockEntry(allocator, revision, .block_body, &fixture_object, entry_value, summary, &store, &block_hashes, &parent);
         }
     }
 }
@@ -222,14 +197,10 @@ const BlockSource = enum {
 
 fn runBlockEntry(
     allocator: std.mem.Allocator,
-    path: []const u8,
-    test_name: []const u8,
-    block_index: usize,
     revision: evmz.eth.Revision,
     source: BlockSource,
     fixture: *const JsonObject,
     entry_value: JsonValue,
-    options: Options,
     summary: *Summary,
     store: *evmz.state.MemoryStore,
     block_hashes: *FixtureBlockHashes,
@@ -239,17 +210,33 @@ fn runBlockEntry(
         summary.countFail(.malformed_fixture);
         return;
     };
-    if (entry.get("expectException") != null or entry.get("errorCode") != null or entry.get("validationError") != null) {
+    if (entry.get("errorCode") != null or entry.get("validationError") != null) {
+        summary.countSkip(.expected_exception);
+        return;
+    }
+    const expected_exception = if (entry.get("expectException")) |value|
+        jsonString(value) orelse {
+            summary.countFail(.malformed_fixture);
+            return;
+        }
+    else
+        null;
+    if (expected_exception != null and source != .block_body) {
         summary.countSkip(.expected_exception);
         return;
     }
 
     summary.fixtures += 1;
-    var bal_diff_buffer: [64 * 1024]u8 = undefined;
-    var bal_diff_writer: std.Io.Writer = .fixed(&bal_diff_buffer);
-    var bal_report = block_stf.BalDifferentialReport{
-        .mismatch_writer = if (options.bal_differential) &bal_diff_writer else null,
-    };
+    if (expected_exception) |expected| {
+        const serialized_match = blockBodySerializedExceptionMatches(allocator, &entry, expected) catch {
+            summary.countFail(.malformed_fixture);
+            return;
+        };
+        if (serialized_match) {
+            summary.passed += 1;
+            return;
+        }
+    }
     const result = runBlock(
         allocator,
         revision,
@@ -259,15 +246,19 @@ fn runBlockEntry(
         store,
         block_hashes,
         parent,
-        if (options.bal_differential) &bal_report else null,
+        null,
     ) catch |err| {
+        if (expected_exception) |expected| {
+            if (expectedAdapterErrorMatches(err, expected)) {
+                summary.passed += 1;
+                return;
+            }
+        }
         if (err == error.ParentHashMismatch) {
-            if (options.verbose) std.debug.print("  {s} block={} parent hash mismatch\n", .{ test_name, block_index });
             summary.countFail(.parent_hash_mismatch);
             return;
         }
         if (err == error.BlockNumberMismatch) {
-            if (options.verbose) std.debug.print("  {s} block={} block number mismatch\n", .{ test_name, block_index });
             summary.countFail(.block_number_mismatch);
             return;
         }
@@ -283,60 +274,117 @@ fn runBlockEntry(
             summary.countFail(.blob_versioned_hashes_mismatch);
             return;
         }
-        if (options.verbose) std.debug.print("  {s} block={} validation error: {s}\n", .{ test_name, block_index, @errorName(err) });
         summary.countFail(if (err == error.MalformedFixture) .malformed_fixture else .validation_error);
         return;
     };
-    if (bal_diff_writer.buffered().len != 0) {
-        std.debug.print("  {s} block={} BAL diff:\n{s}", .{ test_name, block_index, bal_diff_writer.buffered() });
-    }
-    if (bal_report.mismatch_write_failed) {
-        std.debug.print("  {s} block={} BAL diff truncated at 64 KiB\n", .{ test_name, block_index });
+    if (expected_exception) |expected| {
+        if (expectedExceptionMatches(result, expected)) {
+            summary.passed += 1;
+        } else {
+            summary.countFail(.expected_exception_mismatch);
+        }
+        return;
     }
     if (result.status != .valid) {
-        if (options.verbose) {
-            std.debug.print("  {s} block={} status={s}\n", .{ test_name, block_index, @tagName(result.status) });
-            std.debug.print("    state={x} receipts={x} requests={x} bal={x} block={x}\n", .{
-                result.state_root,
-                result.receipts_root,
-                result.requests_hash,
-                result.block_access_list_hash,
-                result.block_hash,
-            });
-            std.debug.print("    gas={} block_gas={} state_gas={}\n", .{ result.gas_used, result.block_gas_used, result.block_state_gas_used });
-        }
         summary.countFail(.unexpected_status);
         return;
     }
-
-    if (options.bal_differential and revision.isImpl(.amsterdam)) {
-        if (!bal_report.status.isFallback() and bal_report.status != .matched) {
-            std.debug.print("  {s} block={} BAL differential={s} tx={?}\n", .{
-                test_name,
-                block_index,
-                @tagName(bal_report.status),
-                bal_report.tx_index,
-            });
-            summary.countFail(.bal_differential_mismatch);
-            return;
-        }
-        if (bal_report.status.isFallback()) {
-            if (options.verbose) {
-                std.debug.print("  {s} block={} BAL differential fallback={s} tx={?} error={s}\n", .{
-                    test_name,
-                    block_index,
-                    @tagName(bal_report.status),
-                    bal_report.tx_index,
-                    if (bal_report.diagnostic_error) |err| @errorName(err) else "none",
-                });
-            }
-            summary.countUnchecked(.bal_differential_fallback);
-        }
-    }
-
-    if (options.verbose) std.debug.print("  pass {s} block={}\n", .{ test_name, block_index });
-    _ = path;
     summary.passed += 1;
+}
+
+fn expectedExceptionMatches(result: block_stf.Result, expected: []const u8) bool {
+    if (result.status == .transaction_rejected) {
+        const rejection = result.transaction_rejection orelse return false;
+        return tx_validation.validationErrorMatchesEest(rejection, expected);
+    }
+    if (result.status == .blob_gas_limit_exceeded and tx_validation.exceptionNameMatches(
+        "TransactionException.TYPE_3_TX_MAX_BLOB_GAS_ALLOWANCE_EXCEEDED",
+        expected,
+    )) return true;
+    if (result.status == .block_gas_exceeded and tx_validation.exceptionNameMatches(
+        "TransactionException.GAS_ALLOWANCE_EXCEEDED",
+        expected,
+    )) return true;
+    if (result.status == .malformed_block_access_list and tx_validation.exceptionNameMatches(
+        "BlockException.INVALID_BLOCK_ACCESS_LIST",
+        expected,
+    )) return true;
+    const name = switch (result.status) {
+        .invalid_block_body => "BlockException.INCORRECT_BLOCK_FORMAT",
+        .header_surface_mismatch => "BlockException.INCORRECT_BLOCK_FORMAT",
+        .invalid_deposit_event_layout => "BlockException.INVALID_DEPOSIT_EVENT_LAYOUT",
+        .invalid_requests, .requests_hash_mismatch => "BlockException.INVALID_REQUESTS",
+        .system_contract_failed => "BlockException.SYSTEM_CONTRACT_CALL_FAILED",
+        .block_gas_exceeded => "BlockException.GAS_USED_OVERFLOW",
+        .blob_gas_limit_exceeded => "BlockException.BLOB_GAS_USED_ABOVE_LIMIT",
+        .parent_hash_mismatch, .parent_header_mismatch => "BlockException.UNKNOWN_PARENT",
+        .block_number_mismatch => "BlockException.INVALID_BLOCK_NUMBER",
+        .timestamp_mismatch => "BlockException.INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT",
+        .gas_limit_mismatch => "BlockException.INVALID_GASLIMIT",
+        .base_fee_mismatch => "BlockException.INVALID_BASEFEE_PER_GAS",
+        .malformed_block_access_list => "BlockException.INCORRECT_BLOCK_FORMAT",
+        .invalid_block_access_list, .block_access_list_mismatch => "BlockException.INVALID_BLOCK_ACCESS_LIST",
+        .block_access_list_too_large => "BlockException.BLOCK_ACCESS_LIST_GAS_LIMIT_EXCEEDED",
+        .state_root_mismatch => "BlockException.INVALID_STATE_ROOT",
+        .transactions_root_mismatch => "BlockException.INVALID_TRANSACTIONS_ROOT",
+        .receipts_root_mismatch => "BlockException.INVALID_RECEIPTS_ROOT",
+        .withdrawals_root_mismatch => "BlockException.INVALID_WITHDRAWALS_ROOT",
+        .gas_used_mismatch, .block_gas_used_mismatch, .block_state_gas_used_mismatch => "BlockException.INVALID_GAS_USED",
+        .logs_bloom_mismatch => "BlockException.INVALID_LOG_BLOOM",
+        .blob_gas_used_mismatch => "BlockException.INCORRECT_BLOB_GAS_USED",
+        .excess_blob_gas_mismatch => "BlockException.INCORRECT_EXCESS_BLOB_GAS",
+        .block_access_list_hash_mismatch => "BlockException.INVALID_BAL_HASH",
+        .block_hash_mismatch => "BlockException.INVALID_BLOCK_HASH",
+        .valid, .invalid_witness, .transaction_rejected => return false,
+    };
+    return tx_validation.exceptionNameMatches(name, expected);
+}
+
+fn expectedAdapterErrorMatches(err: anyerror, expected: []const u8) bool {
+    const name = switch (err) {
+        error.BlobGasOverflow => "BlockException.INCORRECT_EXCESS_BLOB_GAS",
+        error.ExtraDataTooLong => "BlockException.EXTRA_DATA_TOO_BIG",
+        error.HeaderSurfaceMismatch => "BlockException.INCORRECT_BLOCK_FORMAT",
+        error.InputTooShort => "BlockException.RLP_STRUCTURES_ENCODING",
+        else => return false,
+    };
+    return tx_validation.exceptionNameMatches(name, expected);
+}
+
+fn blockBodySerializedExceptionMatches(
+    allocator: std.mem.Allocator,
+    entry: *const JsonObject,
+    expected: []const u8,
+) !bool {
+    const signature_expected = tx_validation.exceptionNameMatches("TransactionException.INVALID_SIGNATURE_VRS", expected);
+    const size_expected = tx_validation.exceptionNameMatches("BlockException.RLP_BLOCK_LIMIT_EXCEEDED", expected);
+    if (!signature_expected and !size_expected) return false;
+
+    const block_rlp = try parseBytesFromValue(allocator, entry.get("rlp") orelse return error.MalformedFixture);
+    defer allocator.free(block_rlp);
+    if (blockRlpSizeExceptionMatches(block_rlp.len, expected)) return true;
+    if (!signature_expected) return false;
+
+    var block_cursor = evmz.rlp.Cursor.init(block_rlp);
+    var body = try block_cursor.nextList();
+    try block_cursor.expectDone();
+    _ = try body.next();
+    var transactions = try body.nextList();
+    while (!transactions.isDone()) {
+        const item = try transactions.next();
+        const raw = switch (item.kind()) {
+            .list => item.encoded(),
+            .bytes => try item.asBytes(),
+        };
+        if (tx_validation.serializedSignatureExceptionMatches(allocator, raw, expected)) return true;
+    }
+    return false;
+}
+
+fn blockRlpSizeExceptionMatches(encoded_len: usize, expected: []const u8) bool {
+    const max_block_rlp_size = 1 << 23;
+    return encoded_len > max_block_rlp_size and
+        tx_validation.exceptionNameMatches("BlockException.RLP_BLOCK_LIMIT_EXCEEDED", expected);
 }
 
 fn runBlock(
@@ -478,10 +526,9 @@ fn runPayloadExact(
 
 /// Run one consensus block from a regular `blockchain_tests` fixture.
 ///
-/// Every header field is read from the fixture's decomposed `blockHeader`
-/// rather than re-derived, so this mirrors `runPayloadExact` field for field.
-/// Only the transactions come from the block's RLP, because that is the sole
-/// place a regular fixture carries them in canonical encoded form.
+/// The raw block RLP is the authority for the header, transactions, and
+/// withdrawals. This also lets invalid-block fixtures omit their convenience
+/// `blockHeader` projection without changing the execution path.
 fn runBlockBodyExact(
     comptime revision: evmz.eth.Revision,
     allocator: std.mem.Allocator,
@@ -496,50 +543,41 @@ fn runBlockBodyExact(
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const header = asObject(entry.get("blockHeader") orelse return error.UnsupportedPayloadShape) orelse
-        return error.MalformedFixture;
-    const header_parent_hash = try hashField(&header, "parentHash");
-    if (!std.mem.eql(u8, &header_parent_hash, &parent.hash)) return error.ParentHashMismatch;
-    const block_number = try u64Field(&header, "number");
-    try validateChildNumber(parent.number, block_number);
+    const block_rlp = try parseBytesFromValue(scratch, entry.get("rlp") orelse return error.MalformedFixture);
+    const body = try parseBlockBody(revision, scratch, block_rlp);
+    const header = &body.header;
+    if (!std.mem.eql(u8, &header.parent_hash, &parent.hash)) return error.ParentHashMismatch;
+    try validateChildNumber(parent.number, header.number);
 
     const fixture_config = try parseFixtureConfig(fixture, revision, fixture_common.fixtureForkName(fixture));
-    const block_rlp = try parseBytesFromValue(scratch, entry.get("rlp") orelse return error.MalformedFixture);
-    const transactions = try parseBlockBodyTransactions(scratch, block_rlp);
-    const withdrawals = if (revision.isImpl(.shanghai))
-        try parseWithdrawals(scratch, asArray(entry.get("withdrawals") orelse return error.MalformedFixture) orelse return error.MalformedFixture)
-    else
-        &.{};
-    // A regular fixture carries `blockAccessList` decomposed into JSON rather
-    // than as the encoded list an engine payload holds, and the consensus block
-    // body does not carry it either. Supplying no claim makes BlockSTF build
-    // the list itself and check it against the header commitment, so this track
-    // validates BAL construction by hash. Consuming a claimed list stays the
-    // sync track's job.
-    const excess_blob_gas = try optionalU256Field(&header, "excessBlobGas");
-    const parent_beacon_block_root = if (header.get("parentBeaconBlockRoot") != null)
-        try hashField(&header, "parentBeaconBlockRoot")
-    else
-        null;
+    const block_access_list = if (revision.isImpl(.amsterdam)) blk: {
+        if (entry.get("blockAccessList") != null) break :blk try bal_fixture.encodeClaim(scratch, entry);
+        if (entry.get("rlp_decoded")) |value| {
+            const decoded = asObject(value) orelse return error.MalformedFixture;
+            if (decoded.get("blockAccessList") != null) break :blk try bal_fixture.encodeClaim(scratch, &decoded);
+        }
+        break :blk null;
+    } else null;
+    const excess_blob_gas: ?u256 = if (header.excess_blob_gas) |value| value else null;
 
     const block_header = block_stf.BlockHeader{
-        .number = block_number,
-        .timestamp = try u64Field(&header, "timestamp"),
-        .parent_hash = header_parent_hash,
-        .parent_beacon_block_root = parent_beacon_block_root,
+        .number = header.number,
+        .timestamp = header.timestamp,
+        .parent_hash = header.parent_hash,
+        .parent_beacon_block_root = header.parent_beacon_block_root,
     };
 
     const block_hash_source = block_hashes.source();
     const result = try block_stf.Exact(revision).applyAssumeDecoded(scratch, .{
         .env = .{
             .chain_id = fixture_config.chain_id,
-            .coinbase = try addressField(&header, "coinbase"),
-            .number = block_number,
-            .slot_number = try optionalU64Field(&header, "slotNumber") orelse 0,
-            .timestamp = try u64Field(&header, "timestamp"),
-            .gas_limit = try u64Field(&header, "gasLimit"),
-            .prev_randao = try u256HashField(&header, "mixHash"),
-            .base_fee = try optionalU256Field(&header, "baseFeePerGas") orelse 0,
+            .coinbase = header.coinbase,
+            .number = header.number,
+            .slot_number = header.slot_number orelse 0,
+            .timestamp = header.timestamp,
+            .gas_limit = header.gas_limit,
+            .prev_randao = std.mem.readInt(u256, &header.prev_randao, .big),
+            .base_fee = header.base_fee_per_gas orelse 0,
             .blob_base_fee = fixture_common.blobBaseFee(
                 revision,
                 fixture_config.blob_params,
@@ -550,67 +588,77 @@ fn runBlockBodyExact(
         .block_hash_source = block_hash_source,
         .block_header = block_header,
         .state_backend = .fromMemoryStore(store),
-        .transactions = transactions,
-        .withdrawals = withdrawals,
+        .transactions = body.transactions,
+        .withdrawals = body.withdrawals,
         .parent_header = parent.headerContext(),
+        .block_access_list = block_access_list,
         .root_checks = .{
             .payload_header = .{
-                .state = try hashField(&header, "stateRoot"),
-                .receipts = try hashField(&header, "receiptTrie"),
+                .state = header.state_root,
+                .receipts = header.receipts_root,
+            },
+            .reconstructed_header = .{
+                .transactions = header.transactions_root,
+                .withdrawals = header.withdrawals_root,
             },
         },
         .header_claims = .{
-            .gas_used = if (revision.isImpl(.amsterdam)) null else try optionalU64Field(&header, "gasUsed"),
-            .block_gas_used = if (revision.isImpl(.amsterdam)) try optionalU64Field(&header, "gasUsed") else null,
-            .logs_bloom = try bloomField(scratch, &header, "bloom"),
-            .blob_gas_used = try optionalU64Field(&header, "blobGasUsed"),
+            .gas_used = if (revision.isImpl(.amsterdam)) null else header.gas_used,
+            .block_gas_used = if (revision.isImpl(.amsterdam)) header.gas_used else null,
+            .logs_bloom = header.logs_bloom,
+            .blob_gas_used = header.blob_gas_used,
             .excess_blob_gas = excess_blob_gas,
-            .requests_hash = if (header.get("requestsHash") != null)
-                try hashField(&header, "requestsHash")
-            else
-                null,
-            .block_access_list_hash = if (header.get("blockAccessListHash") != null)
-                try hashField(&header, "blockAccessListHash")
-            else
-                null,
+            .requests_hash = header.requests_hash,
+            .block_access_list_hash = header.block_access_list_hash,
         },
         .header_hash_claim = if (revision.isImpl(.merge)) .{
-            .block_hash = try hashField(&header, "hash"),
-            .parent_hash = header_parent_hash,
-            .parent_beacon_block_root = parent_beacon_block_root,
-            .extra_data = try parseBytesFromValue(scratch, header.get("extraData") orelse return error.MalformedFixture),
+            .block_hash = body.header_hash,
+            .parent_hash = header.parent_hash,
+            .parent_beacon_block_root = header.parent_beacon_block_root,
+            .extra_data = header.extra_data,
         } else null,
         .bal_differential = bal_report,
     });
 
     if (result.status == .valid) {
-        parent.* = try parentFromBlockHeader(&header);
-        parent.hash = result.block_hash;
+        parent.* = parentFromExecutionHeader(header.*, body.header_hash);
         try block_hashes.put(parent.number, parent.hash);
     }
 
     return result;
 }
 
-/// Slice the canonical transaction encodings out of a consensus block.
-///
-/// A block body is `[header, transactions, uncles, ...]`. Inside the
-/// transaction list a legacy transaction is itself a list, so its encoding is
-/// the item; an EIP-2718 typed transaction is a byte string whose contents are
-/// already `type || payload`.
-fn parseBlockBodyTransactions(
+const ParsedBlockBody = struct {
+    header: evmz.eth.ExecutionHeader,
+    header_hash: [32]u8,
+    transactions: []const block_stf.TransactionInput,
+    withdrawals: []const evmz.eth.Withdrawal,
+};
+
+/// Parse one canonical consensus block `[header, transactions, ommers, ...]`.
+/// Legacy transactions retain their list encoding; typed transactions retain
+/// the byte-string payload `type || transaction_payload`.
+fn parseBlockBody(
+    comptime revision: evmz.eth.Revision,
     allocator: std.mem.Allocator,
     block_rlp: []const u8,
-) ![]const block_stf.TransactionInput {
+) !ParsedBlockBody {
     var block_cursor = evmz.rlp.Cursor.init(block_rlp);
     var body = try block_cursor.nextList();
-    _ = try body.next(); // header
-    var list = try body.nextList();
+    try block_cursor.expectDone();
+
+    const header_item = try body.next();
+    const header = try parseExecutionHeader(revision, header_item);
+    const header_hash = evmz.crypto.keccak256(header_item.encoded());
+    const canonical_hash = try header.hash(allocator, revision);
+    if (!std.mem.eql(u8, &header_hash, &canonical_hash)) return error.MalformedFixture;
+
+    var transactions_list = try body.nextList();
 
     var out: std.ArrayList(block_stf.TransactionInput) = .empty;
     errdefer out.deinit(allocator);
-    while (!list.isDone()) {
-        const item = try list.next();
+    while (!transactions_list.isDone()) {
+        const item = try transactions_list.next();
         const raw = switch (item.kind()) {
             .list => item.encoded(),
             .bytes => try item.asBytes(),
@@ -623,19 +671,94 @@ fn parseBlockBodyTransactions(
             .encoded = raw,
         });
     }
+
+    var ommers = try body.nextList();
+    try ommers.expectDone();
+    const withdrawals = if (revision.isImpl(.shanghai))
+        try parseBlockBodyWithdrawals(allocator, &body)
+    else
+        &.{};
+    errdefer if (revision.isImpl(.shanghai)) allocator.free(withdrawals);
+    try body.expectDone();
+
+    return .{
+        .header = header,
+        .header_hash = header_hash,
+        .transactions = try out.toOwnedSlice(allocator),
+        .withdrawals = withdrawals,
+    };
+}
+
+fn parseExecutionHeader(
+    comptime revision: evmz.eth.Revision,
+    item: evmz.rlp.Item,
+) !evmz.eth.ExecutionHeader {
+    var fields = try item.listCursor();
+    const header = evmz.eth.ExecutionHeader{
+        .parent_hash = try nextFixed(&fields, 32),
+        .ommers_hash = try nextFixed(&fields, 32),
+        .coinbase = .fromBytes(try nextFixed(&fields, 20)),
+        .state_root = try nextFixed(&fields, 32),
+        .transactions_root = try nextFixed(&fields, 32),
+        .receipts_root = try nextFixed(&fields, 32),
+        .logs_bloom = try nextFixed(&fields, 256),
+        .difficulty = try fields.nextInt(u256),
+        .number = try fields.nextInt(u64),
+        .gas_limit = try fields.nextInt(u64),
+        .gas_used = try fields.nextInt(u64),
+        .timestamp = try fields.nextInt(u64),
+        .extra_data = try fields.nextBytes(),
+        .prev_randao = try nextFixed(&fields, 32),
+        .nonce = try nextFixed(&fields, 8),
+        .base_fee_per_gas = if (revision.isImpl(.london)) try fields.nextInt(u256) else null,
+        .withdrawals_root = if (revision.isImpl(.shanghai)) try nextFixed(&fields, 32) else null,
+        .blob_gas_used = if (revision.isImpl(.cancun)) try fields.nextInt(u64) else null,
+        .excess_blob_gas = if (revision.isImpl(.cancun)) try fields.nextInt(u64) else null,
+        .parent_beacon_block_root = if (revision.isImpl(.cancun)) try nextFixed(&fields, 32) else null,
+        .requests_hash = if (revision.isImpl(.prague)) try nextFixed(&fields, 32) else null,
+        .block_access_list_hash = if (revision.isImpl(.amsterdam)) try nextFixed(&fields, 32) else null,
+        .slot_number = if (revision.isImpl(.amsterdam)) try fields.nextInt(u64) else null,
+    };
+    try fields.expectDone();
+    try header.validate(revision);
+    return header;
+}
+
+fn nextFixed(cursor: *evmz.rlp.Cursor, comptime len: usize) ![len]u8 {
+    const bytes = try cursor.nextBytesExact(len);
+    return bytes[0..len].*;
+}
+
+fn parseBlockBodyWithdrawals(
+    allocator: std.mem.Allocator,
+    body: *evmz.rlp.Cursor,
+) ![]const evmz.eth.Withdrawal {
+    var list = try body.nextList();
+    var out: std.ArrayList(evmz.eth.Withdrawal) = .empty;
+    errdefer out.deinit(allocator);
+    while (!list.isDone()) {
+        var fields = try list.nextList();
+        try out.append(allocator, .{
+            .index = try fields.nextInt(u64),
+            .validator_index = try fields.nextInt(u64),
+            .address = .fromBytes(try nextFixed(&fields, 20)),
+            .amount = try fields.nextInt(u64),
+        });
+        try fields.expectDone();
+    }
     return out.toOwnedSlice(allocator);
 }
 
-fn parentFromBlockHeader(header: *const JsonObject) !ParentContext {
+fn parentFromExecutionHeader(header: evmz.eth.ExecutionHeader, hash: [32]u8) ParentContext {
     return .{
-        .number = try u64Field(header, "number"),
-        .hash = try hashField(header, "hash"),
-        .timestamp = try u64Field(header, "timestamp"),
-        .gas_limit = try u64Field(header, "gasLimit"),
-        .gas_used = try u64Field(header, "gasUsed"),
-        .excess_blob_gas = try optionalU64Field(header, "excessBlobGas") orelse 0,
-        .blob_gas_used = try optionalU64Field(header, "blobGasUsed") orelse 0,
-        .base_fee_per_gas = try optionalU256Field(header, "baseFeePerGas") orelse 0,
+        .number = header.number,
+        .hash = hash,
+        .timestamp = header.timestamp,
+        .gas_limit = header.gas_limit,
+        .gas_used = header.gas_used,
+        .excess_blob_gas = header.excess_blob_gas orelse 0,
+        .blob_gas_used = header.blob_gas_used orelse 0,
+        .base_fee_per_gas = header.base_fee_per_gas orelse 0,
     };
 }
 
@@ -902,11 +1025,115 @@ test "regular BlockSTF EEST runner skips pre-Merge engine payloads" {
     const fixture = try std.mem.replaceOwned(u8, std.testing.allocator, template, "$BLOOM", &zero_bloom);
     defer std.testing.allocator.free(fixture);
 
-    const summary = try runSlice(std.testing.allocator, fixture, .{}, "inline");
+    const summary = try runSlice(std.testing.allocator, fixture);
     try std.testing.expectEqual(@as(usize, 0), summary.fixtures);
     try std.testing.expectEqual(@as(usize, 0), summary.passed);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 1), summary.skipped);
+}
+
+test "direct blockchain case does not consume Engine fixture shapes" {
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        "{\"engineNewPayloads\":[]}",
+        .{},
+    );
+    defer parsed.deinit();
+
+    const summary = try runCase(std.testing.allocator, parsed.value);
+    try std.testing.expectEqual(@as(usize, 0), summary.fixtures);
+    try std.testing.expectEqual(@as(usize, 1), summary.failed);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.malformed_fixture)]);
+}
+
+test "regular block header parser round trips the Amsterdam RLP surface" {
+    const header = evmz.eth.ExecutionHeader{
+        .parent_hash = [_]u8{0x11} ** 32,
+        .coinbase = .zero,
+        .state_root = [_]u8{0x22} ** 32,
+        .transactions_root = [_]u8{0x33} ** 32,
+        .receipts_root = [_]u8{0x44} ** 32,
+        .logs_bloom = [_]u8{0x55} ** 256,
+        .number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 21_000,
+        .timestamp = 1_000,
+        .extra_data = &.{0xaa},
+        .prev_randao = [_]u8{0x66} ** 32,
+        .base_fee_per_gas = 7,
+        .withdrawals_root = [_]u8{0x77} ** 32,
+        .blob_gas_used = 0,
+        .excess_blob_gas = 0,
+        .parent_beacon_block_root = [_]u8{0x88} ** 32,
+        .requests_hash = [_]u8{0x99} ** 32,
+        .block_access_list_hash = [_]u8{0xaa} ** 32,
+        .slot_number = 3,
+    };
+    const encoded = try header.encodeAlloc(std.testing.allocator, .amsterdam);
+    defer std.testing.allocator.free(encoded);
+
+    const parsed = try parseExecutionHeader(.amsterdam, try evmz.rlp.parseExact(encoded));
+    try std.testing.expectEqualDeep(header, parsed);
+}
+
+test "expected block exception requires the matching typed status" {
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .transaction_rejected,
+        .transaction_rejection = .initcode_size_exceeded,
+    }, "TransactionException.INITCODE_SIZE_EXCEEDED"));
+    try std.testing.expect(!expectedExceptionMatches(.{
+        .status = .transaction_rejected,
+        .transaction_rejection = .nonce_too_high,
+    }, "TransactionException.INITCODE_SIZE_EXCEEDED"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .gas_limit_mismatch,
+    }, "BlockException.INVALID_GASLIMIT"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .excess_blob_gas_mismatch,
+    }, "BlockException.INCORRECT_EXCESS_BLOB_GAS"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .invalid_deposit_event_layout,
+    }, "BlockException.INVALID_DEPOSIT_EVENT_LAYOUT"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .malformed_block_access_list,
+    }, "BlockException.INCORRECT_BLOCK_FORMAT"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .malformed_block_access_list,
+    }, "BlockException.INVALID_BLOCK_ACCESS_LIST"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .block_access_list_mismatch,
+    }, "BlockException.INVALID_BLOCK_ACCESS_LIST"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .blob_gas_limit_exceeded,
+    }, "TransactionException.TYPE_3_TX_MAX_BLOB_GAS_ALLOWANCE_EXCEEDED|TransactionException.TYPE_3_TX_BLOB_COUNT_EXCEEDED"));
+    try std.testing.expect(expectedExceptionMatches(.{
+        .status = .block_gas_exceeded,
+    }, "TransactionException.GAS_ALLOWANCE_EXCEEDED"));
+    try std.testing.expect(!expectedExceptionMatches(.{
+        .status = .blob_gas_limit_exceeded,
+    }, "TransactionException.TYPE_3_TX_BLOB_COUNT_EXCEEDED"));
+    try std.testing.expect(!expectedExceptionMatches(.{
+        .status = .valid,
+    }, "TransactionException.INITCODE_SIZE_EXCEEDED"));
+    try std.testing.expect(expectedAdapterErrorMatches(
+        error.BlobGasOverflow,
+        "BlockException.INCORRECT_EXCESS_BLOB_GAS",
+    ));
+    try std.testing.expect(expectedAdapterErrorMatches(
+        error.InputTooShort,
+        "BlockException.RLP_STRUCTURES_ENCODING|TransactionException.TYPE_3_TX_WITH_FULL_BLOBS",
+    ));
+    try std.testing.expect(!expectedAdapterErrorMatches(
+        error.InputTooShort,
+        "BlockException.INCORRECT_BLOCK_FORMAT",
+    ));
+}
+
+test "serialized block size uses the EIP-7934 boundary" {
+    try std.testing.expect(!blockRlpSizeExceptionMatches(1 << 23, "BlockException.RLP_BLOCK_LIMIT_EXCEEDED"));
+    try std.testing.expect(blockRlpSizeExceptionMatches((1 << 23) + 1, "BlockException.RLP_BLOCK_LIMIT_EXCEEDED"));
+    try std.testing.expect(!blockRlpSizeExceptionMatches((1 << 23) + 1, "BlockException.INCORRECT_BLOCK_FORMAT"));
 }
 
 test "regular BlockSTF EEST runner requires consecutive child number" {

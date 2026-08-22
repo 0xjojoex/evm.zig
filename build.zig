@@ -402,16 +402,13 @@ pub fn build(b: *std.Build) void {
     if (pathExists(b, "eest/build.zig")) {
         addEestDelegate(b, "fixture-lock-check", "Verify fixture pins have one source of truth", "fixture-lock-check", optimize_name, null, evmz_build, ci_step);
         addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null, evmz_build, ci_step);
-        addEestDelegate(b, "eest", "Run EEST state-test fixtures", "eest", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "eest-classify", "Classify EEST state-test fixtures", "eest-classify", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "eest-scope", "Report downloaded EEST fixture scope and support status", "eest-scope", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "eest-tx", "Run EEST raw transaction-test fixtures", "eest-tx", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", "zkevm-mutations", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-input", "Extract one EEST zkEVM stateless input for a zkVM guest", "zkevm-input", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", "eest-block-stf", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "eest-stateless-block-stf", "Run witness-backed zkEVM blockchain_tests through stateless BlockSTF", "eest-stateless-block-stf", optimize_name, null, evmz_build, null);
+        addEestDelegate(b, "eest-consume", "Run execution-spec fixtures through consume direct", "consume", optimize_name, null, evmz_build, null);
+        addEestDelegate(b, "zkevm-consume", "Run tests-zkevm fixtures through consume direct", "consume-zkevm", optimize_name, null, evmz_build, null);
+        addEestDelegate(b, "zkevm-cache", "Cache tests-zkevm fixtures through execution-specs", "cache-zkevm", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "ssz-conformance", "Run consensus-spec generic SSZ fixtures", "ssz-conformance", optimize_name, null, evmz_build, null);
     }
     if (pathExists(b, "bench/build.zig")) {

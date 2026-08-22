@@ -3,6 +3,8 @@ zig-out
 zig-pkg/
 .DS_Store
 __pycache__/
+.venv/
+*.egg-info/
 .eest
 bench/revm/target/
 output/

@@ -1,42 +1,72 @@
-# evmz EEST sidecar
+# evmz EEST adapters
 
-This package owns the Ethereum Execution Spec Tests runners for `evmz`.
+Released `state_test` and `blockchain_test` conformance uses
+`ethereum/execution-specs` `consume direct`. That upstream runner owns fixture
+releases, discovery, pytest selection, caching, reporting, and parallelism.
+`evmz-eest` only owns the file-to-evmz process boundary:
 
 ```sh
-scripts/fetch-eest-fixtures.sh
-EEST_TRACKS="state_tests blockchain_tests_sync" scripts/fetch-eest-fixtures.sh
-zig build eest-scope
-zig build eest
-zig build eest-classify
-zig build eest-tx
+evmz-eest statetest [--run EXACT_ID] fixture.json
+evmz-eest blocktest [--run EXACT_ID] fixture.json
+evmz-eest zkevmtest [--run EXACT_ID] fixture.json
 ```
 
-Every runner is a subcommand of one `evmz-eest` binary (`src/main.zig`
-dispatching into `src/cmd/`), and each `zig build` step above is an alias for
-one of them — `zig build eest` runs `evmz-eest state`. Run `evmz-eest --help`
-for the command list. One runner stays a separate executable: `ssz-conformance`
-builds without evmz.
+These commands write a JSON list of `{name, pass, skip, error}` records to
+stdout. `--run` selects one top-level EEST id exactly. An unchecked or empty
+state/block execution is a failed record, not a successful compatibility
+result. A zkEVM blockchain fixture without `statelessInputBytes` is an explicit
+pytest skip because it has no input for that adapter. CLI, fixture parsing, and
+I/O failures exit nonzero instead of producing a semantic record.
 
-The default state-test corpus comes from the authoritative state track in
-`eest.lock`. Bare `zig build eest` derives its versioned cache destination and
-runs `fixtures/state_tests`.
+This seam does not turn legacy skips into passes. Regular `blockchain_test`
+entries with a transaction `expectException` are decoded from the canonical
+block RLP and pass only when BlockSTF returns the matching typed transaction
+rejection. An invalid-block expectation remains a failed result unless its
+block-level status has an equally precise mapping. State fixtures with no
+comparable post-state assertion likewise remain failed. Those are adapter
+coverage gaps for the upstream pytest report to expose.
 
-Every fixture consumer derives its release URL and cache path from that lock.
+The repo-owned stateful and stateless consumer plugins only translate selected
+fixtures to those process boundaries. Each plugin caches the complete result
+for one JSON file, so several indexed ids in that file do not restart evmz.
+`zig build` builds the binary, creates the pinned uv environment, and hands
+recursive discovery and execution to `consume direct`:
+
+```sh
+zig build -Doptimize=ReleaseFast eest-consume -- \
+  --no-html \
+  -n 4
+```
+
+The default input is the execution-specs release pinned by `eest.lock`; later
+`--input` and pytest arguments override the defaults for local files, exact-id
+selection, fork markers, and debugging. The default conformance selection is
+all `state_test` fixtures plus exact post-Merge `blockchain_test` forks through
+Amsterdam. Pre-Merge blocks require mining rewards and ommer/PoW consensus that
+do not belong in evmz BlockSTF, while transition-fork fixtures need a
+block-by-block revision adapter. They are excluded at the upstream pytest
+selection boundary instead of being reported as evmz passes.
+
+The execution-specs Python packages are pinned in `consume/uv.lock`. There is
+no repo-owned state/block/transaction corpus fetcher, recursive runner, worker
+pool, classifier, or scope reporter. `evmz-eest` contains only the direct
+adapters and the custom zkEVM guest commands. Run `evmz-eest --help` for the
+command list. `ssz-conformance` stays a separate executable and builds without
+evmz.
+
+Every direct fixture consumer derives its release from `eest.lock`.
 `zig build fixture-lock-check` rejects copied release tags and destinations.
 Corpus manifests, known-failure policy, and generated SSZ provenance stay
 explicit because each must be reviewed when its owning corpus changes.
 
-`EEST_TRACKS` limits extraction to named fixture directories. CI restores the
-pinned compressed archive from cache, verifies its lockfile SHA-256, and only
-materializes `state_tests` plus `blockchain_tests_sync`. Extracted fixtures are
-not cached because the state tree alone is roughly 1.5 GB.
-
 The `Execution spec tests` workflow has independent execution-fixture and
-consensus-SSZ jobs. The execution job runs the full sidecar tests, state corpus,
-and regular BlockSTF corpus with four workers. The SSZ job uses its separately
-pinned consensus-spec archives. A third job runs the complete pinned zkEVM
-native corpus, tracked-state differential, and mutation matrix. The guest
-workflow runs the same 27,184 fixtures on ZisK: 27,162 match,
+consensus-SSZ jobs. The execution job invokes consume-direct once with eight
+pytest workers; execution-specs owns state/block discovery, filtering,
+reporting, and release handling. The SSZ job uses its separately pinned
+consensus-spec archives. A third job uses the same consume cache and pytest
+machinery for the complete pinned zkEVM native corpus, then runs the custom
+mutation matrix. The guest workflow runs the same 27,184 fixtures on ZisK:
+27,162 match,
 while 22 pinned ZisK alpha BLS12-381 provider crashes remain explicitly tracked;
 the strict release gate does not waive them.
 
@@ -104,18 +134,35 @@ There is no active EEST benchmark runner. Routine engine comparisons live in
 `bench/` and use VM-loop fixtures; EEST benchmark cases should be adapted into
 that protocol or a separate fair block-verdict lane before being reported.
 
-## Stateless zkEVM Fixtures
+## Stateless zkEVM fixtures
 
-The `zkevm` runner checks the pinned `tests-zkevm` stateless SSZ contract
-directly. It executes each block carrying `statelessInputBytes` and compares the
-canonical result with `statelessOutputBytes`:
+Native conformance uses the pinned `tests-zkevm` release through
+execution-specs. `consume cache` owns release resolution and extraction, while
+`consume direct` owns indexing, selection, reporting, and parallelism. The
+small `zkevmtest` adapter executes each selected block carrying
+`statelessInputBytes` and compares the canonical result with
+`statelessOutputBytes`:
+
+```sh
+zig build zkevm-cache
+zig build -Doptimize=ReleaseFast zkevm-consume -- --no-html -n 4
+zig build zkevm-mutations
+```
+
+The direct adapter always runs the dense-versus-tracked oracle comparison for
+valid native blocks. It calls the same `stateless.runCase` implementation as
+the guest runner, so fixture semantics have one owner. The pinned release has
+25,100 indexed `blockchain_test` ids: 23,994 contain stateless inputs and 1,106
+ordinary blockchain fixtures are reported as upstream-visible skips. Those
+23,994 ids contain 27,184 stateless blocks in total.
+
+The custom `zkevm` command remains for zkVM process lifetime, diagnostic
+reports, and release evidence:
 
 ```sh
 scripts/fetch-eest-zkevm-fixtures.sh
-zig build zkevm
+zig build zkevm -- --executor zisk --zisk-host PATH --zisk-elf PATH
 zig build zkevm -- --report ../.eest/zkevm-report.json
-zig build zkevm -- --oracle-differential
-zig build zkevm-mutations
 ```
 
 The ERE adapter uses the same raw SSZ output as the fixture and upstream guest
@@ -161,7 +208,7 @@ exits nonzero for any mismatch; the report is diagnostic input for closing the
 baseline, not a waiver for known failures. Blocks without stateless input are
 reported as skips in the terminal summary and are not conformance records.
 
-`--oracle-differential` compares the dense production validator with the
+The direct native lane compares the dense production validator with the
 tracked-state oracle for every block without `expectException`. The comparison
 covers every consensus-derived `BlockSTF.Result` field, including status,
 roots, gas accounting, logs bloom, requests, and BAL hash. It excludes only
@@ -202,97 +249,15 @@ scripts/fetch-eest-zkevm-fixtures.sh \
 zig build zkevm-mutations
 ```
 
-## BlockSTF Fixtures
+## BlockSTF fixture boundaries
 
-There are two block fixture lanes:
+Regular `blockchain_test` conformance enters through `blocktest` under
+`consume direct`. The adapter decodes canonical block RLP, seeds EEST `pre`
+state, invokes `eth.BlockSTF`, and maps the resulting evmz status to the EEST
+exception taxonomy. It does not own discovery or corpus execution.
 
-- `eest-block-stf`: regular `blockchain_tests` through `eth.BlockSTF`. This is
-  the primary BlockSTF lane and uses regular EEST pre/genesis state through a
-  `MemoryStore` state backend.
-- `eest-stateless-block-stf`: witness-backed zkEVM `blockchain_tests` through
-  `eth.BlockSTF`. This validates the stateless/witness BlockSTF path, not the
-  general BlockSTF fixture path.
-
-The stateless adapter targets the `tests-zkevm` fixture track because those
-blockchain fixtures include `executionWitness` material. It currently supports
-positive genesis-child blocks with empty or legacy-signed payload transactions;
-unsupported typed transaction families are reported as explicit skips. With no
-explicit path, the CLI runs the supported EIP-7928 block access list directory
-from the locked zkEVM fixture cache.
-
-The regular adapter targets the locked Glamsterdam block corpus under
-`fixtures/blockchain_tests_sync`. It consumes Engine API `engineNewPayloads` and
-`syncPayload` entries in order, seeds fixture `pre` into `MemoryStore`, and only
-commits a block into that store after `eth.BlockSTF` validates it. Before
-Amsterdam, payload `gasUsed` is checked against cumulative receipt gas. From
-Amsterdam onward, it is checked against the execution-derived block/header gas
-scalar, which may differ from cumulative receipt gas after refunds and
-two-dimensional state-gas accounting.
-
-Transaction and withdrawal roots are currently recorded as local body
-recomputes, not standalone consensus claims. `eth.BlockSTF` now reconstructs the
-full post-Merge execution header from execution-derived roots and compares its
-canonical RLP hash with the fixture's `blockHash`. A valid block's reconstructed
-hash, rather than the unchecked payload value, becomes the next block's parent
-and `BLOCKHASH` source. Header `gasUsed` is execution-derived for every supported
-fork.
-
-Before execution, both fixture lanes also validate parent-derived child-header
-rules: consecutive number, strictly increasing timestamp, gas-limit adjustment
-bounds, and the EIP-1559 base fee. BlockSTF separately enforces the active
-schedule's cumulative blob-gas cap across all transactions in the block. Each
-adapter forwards the selected fork entry from `config.blobSchedule`, so both
-the cap and blob base fee use fixture chain parameters when supplied.
-
-The stateless adapter performs the same header-hash check from witness-backed
-execution outputs. For genesis-child fixtures it also checks parent continuity
-against `genesisBlockHeader` and exposes that parent through `BLOCKHASH`.
-
-Expected-invalid blocks remain separate from the positive lane. Audit them
-without assigning truth to the fixture exception label with:
-
-```sh
-zig build eest-stateless-block-stf -- --expected-exceptions-only path/to/blockchain_tests
-```
-
-The audit reports observed BlockSTF rejection statuses, accepted blocks,
-adapter errors, and unsupported skips independently. When an invalid fixture
-only carries raw `rlp`, the adapter uses its fixture-provided `rlp_decoded` view
-alongside the outer `executionWitness`; format-sensitive results from that view
-are diagnostic evidence, not a proof that either the fixture label or the
-normalized decoding is correct.
-
-```sh
-EEST_TRACKS=blockchain_tests_sync scripts/fetch-eest-fixtures.sh
-zig build eest-block-stf
-zig build eest-block-stf -- --bal-differential
-
-scripts/fetch-eest-zkevm-fixtures.sh
-scripts/fetch-eest-zkevm-fixtures.sh --steps
-zig build eest-stateless-block-stf
-```
-
-The manifest form verifies the same locked archive checksum but extracts only
-the representative files used by the manual ZisK execution-step report. That
-report is diagnostic: it records guest steps and public-output parity without a
-step-regression threshold or any proof-generation work.
-
-`--bal-differential` is a serial diagnostic lane. For each Amsterdam payload
-transaction it compares an isolated `BalClaimReader` execution with the
-authoritative `BlockSTF` fold. Coverage failures and unsupported transaction
-hooks stop the claim lane and leave the authoritative serial result untouched.
-Outcome or diagnostic infrastructure failures fail the differential gate. Final
-BAL parity promotes matched transaction outcomes to an outcome-and-BAL-evidence
-match; mismatches print a bounded, deterministic per-account diff.
-
-The broader Glamsterdam block corpus is still the golden regular source. In the
-locked fixture cache it is currently under `fixtures/blockchain_tests_sync`.
-Extract it alone with:
-
-```sh
-EEST_TRACKS=blockchain_tests_sync scripts/fetch-eest-fixtures.sh
-```
-
-Those non-zkEVM fixtures do not carry `executionWitness`, so the stateless
-adapter reports them as `missing_execution_witness` if pointed there. The
-regular BlockSTF adapter should consume EEST pre/genesis state directly.
+Native zkEVM conformance enters through `zkevmtest` under the same upstream
+runner. The custom `zkevm` command remains only for guest process lifetime,
+release evidence, and backend-specific diagnostics. `zkevm-mutations` owns the
+bounded adversarial status checks. There is no second general BlockSTF fixture
+runner.

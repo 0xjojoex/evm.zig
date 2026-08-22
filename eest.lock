@@ -1,12 +1,8 @@
-# Authoritative fixture release pins. URLs and cache destinations are derived
-# from each track's repository, release, and artifact by the shared lock
-# resolvers; do not copy release strings into scripts, source, or documentation.
+# Authoritative fixture release pins. Do not copy release strings into scripts,
+# source, or documentation.
 
-# Glamsterdam state, transaction, and regular BlockSTF fixtures.
-state_repo=ethereum/execution-specs
+# execution-specs consume direct owns this release and its cache.
 state_release=tests-glamsterdam-devnet@v8.1.1
-state_artifact=fixtures_glamsterdam-devnet.tar.gz
-state_sha256=0d15026bd1d9514b646eeb7bb13fe5bc3464ef3529de81ae4107e480254bcd67
 
 # Benchmark fixtures are cached for future adapters; bench/ remains the active
 # performance lane.

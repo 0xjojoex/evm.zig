@@ -241,6 +241,7 @@ pub const Status = enum {
     invalid_witness,
     invalid_block_body,
     header_surface_mismatch,
+    invalid_deposit_event_layout,
     invalid_requests,
     system_contract_failed,
     transaction_rejected,
@@ -252,6 +253,7 @@ pub const Status = enum {
     timestamp_mismatch,
     gas_limit_mismatch,
     base_fee_mismatch,
+    malformed_block_access_list,
     invalid_block_access_list,
     block_access_list_too_large,
     state_root_mismatch,
@@ -273,6 +275,7 @@ pub const Status = enum {
 pub const Result = struct {
     status: Status,
     tx_index: ?usize = null,
+    transaction_rejection: ?transaction.validation.ValidationError = null,
     gas_used: u64 = 0,
     block_gas_used: u64 = 0,
     block_state_gas_used: u64 = 0,
@@ -793,7 +796,7 @@ fn PayloadFold(
             };
             const included = switch (tx_result) {
                 .included => |value| value,
-                .rejected => {
+                .rejected => |reason| {
                     const progress = self.block.progress();
                     if (comptime @TypeOf(observer) != void) {
                         try observer.rejected(.{
@@ -804,7 +807,9 @@ fn PayloadFold(
                             .blob_gas_used_before = accumulated.blob_gas_used,
                         });
                     }
-                    return foldedResult(.transaction_rejected, tx_index, progress, requests_hash);
+                    var result = foldedResult(.transaction_rejected, tx_index, progress, requests_hash);
+                    result.transaction_rejection = reason;
+                    return result;
                 },
             };
             const receipt = included.receipt;
@@ -824,7 +829,7 @@ fn PayloadFold(
             eth_receipt.mergeLogsBloom(&accumulated.logs_bloom, receipt_logs_bloom);
             if (revision.isImpl(.prague)) {
                 eip6110.appendRequestDataFromLogs(allocator, &accumulated.deposit_request_data, receipt.logs) catch |err| switch (err) {
-                    error.InvalidRequest => return foldedResult(.invalid_requests, tx_index, self.block.progress(), requests_hash),
+                    error.InvalidRequest => return foldedResult(.invalid_deposit_event_layout, tx_index, self.block.progress(), requests_hash),
                     else => return err,
                 };
             }
@@ -1049,6 +1054,13 @@ fn executeBlock(
         false;
     if (block_rules.parentHeaderStatus(revision, input)) |status| return .{ .status = status };
     if (!block_rules.blockContextValid(revision, input)) return .{ .status = .header_surface_mismatch };
+    if (input.env.gas_limit != 0) {
+        for (input.transactions, 0..) |entry, tx_index| {
+            if (entry.tx.gas_limit > input.env.gas_limit) {
+                return .{ .status = .block_gas_exceeded, .tx_index = tx_index };
+            }
+        }
+    }
 
     var computed_requests_hash = empty_requests_hash;
     var computed_block_access_list_hash = eth_bal.empty_hash;
@@ -1063,6 +1075,7 @@ fn executeBlock(
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockAccessListTooLarge => return .{ .status = .block_access_list_too_large },
+        error.MalformedBlockAccessList => return .{ .status = .malformed_block_access_list },
         error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
     };
     defer bal_claim.deinit(allocator);

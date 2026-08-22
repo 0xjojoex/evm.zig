@@ -66,23 +66,124 @@ pub fn build(b: *std.Build) void {
         });
         b.installArtifact(eest_exe);
 
-        addStep(b, eest_exe, "eest", "Run EEST state-test fixtures", &.{"state"});
-        addStep(b, eest_exe, "eest-classify", "Classify EEST state-test fixtures in one runner process", &.{ "state", "--classify" });
-        addStep(b, eest_exe, "eest-scope", "Report downloaded EEST fixture scope and support status", &.{ "state", "--scope" });
-        addStep(b, eest_exe, "eest-tx", "Run EEST raw transaction-test fixtures", &.{"tx"});
         addStep(b, eest_exe, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", &.{"zkevm"});
         addStep(b, eest_exe, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", &.{"zkevm-mutations"});
         addStep(b, eest_exe, "zkevm-input", "Extract one EEST zkEVM stateless input for a zkVM guest", &.{"zkevm-input"});
         addStep(b, eest_exe, "zkevm-ere", "Run raw ERE stateless input through native adapter", &.{"zkevm-ere"});
-        addStep(b, eest_exe, "eest-block-stf", "Run regular EEST blockchain_tests through BlockSTF", &.{"block-stf"});
-        addStep(
+
+        addConsumeStep(
             b,
             eest_exe,
-            "eest-stateless-block-stf",
-            "Run witness-backed zkEVM blockchain fixtures through stateless BlockSTF",
-            &.{"stateless-block-stf"},
+            "consume",
+            "Run execution-spec fixtures through consume direct",
+            "state_release",
+            "evmz_consumer",
+            direct_selection,
+            ".zig-cache/eest-consume/logs",
+        );
+        addConsumeStep(
+            b,
+            eest_exe,
+            "consume-zkevm",
+            "Run tests-zkevm fixtures through consume direct",
+            "zkevm_release",
+            "evmz_zkevm_consumer",
+            "blockchain_test",
+            ".zig-cache/eest-consume/zkevm-logs",
+        );
+        addConsumeCacheStep(
+            b,
+            "cache-zkevm",
+            "Cache tests-zkevm fixtures through execution-specs",
+            "zkevm_release",
         );
     }
+}
+
+const direct_selection =
+    "state_test or (blockchain_test and " ++
+    "(Paris or Shanghai or Cancun or Prague or Osaka or Amsterdam) and not " ++
+    "(ParisToShanghaiAtTime15k or ShanghaiToCancunAtTime15k or " ++
+    "CancunToPragueAtTime15k or PragueToOsakaAtTime15k or " ++
+    "OsakaToBPO1AtTime15k or BPO1ToBPO2AtTime15k or " ++
+    "BPO2ToBPO3AtTime15k or BPO3ToBPO4AtTime15k or " ++
+    "BPO2ToAmsterdamAtTime15k))";
+
+fn fixtureLockValue(b: *std.Build, key: []const u8) []const u8 {
+    const contents = b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        "../eest.lock",
+        b.allocator,
+        .limited(64 * 1024),
+    ) catch |err| std.debug.panic("unable to read eest.lock: {s}", .{@errorName(err)});
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |line| {
+        const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        if (std.mem.eql(u8, line[0..separator], key)) {
+            return std.mem.trim(u8, line[separator + 1 ..], " \t\r");
+        }
+    }
+    std.debug.panic("eest.lock is missing {s}", .{key});
+}
+
+fn addConsumeStep(
+    b: *std.Build,
+    eest_exe: *std.Build.Step.Compile,
+    step_name: []const u8,
+    description: []const u8,
+    release_key: []const u8,
+    plugin: []const u8,
+    selection: []const u8,
+    log_dir: []const u8,
+) void {
+    const consume = consumeCommand(b);
+    consume.addArgs(&.{
+        "consume",
+        "direct",
+        "--input",
+        fixtureLockValue(b, release_key),
+        "--log-to",
+        log_dir,
+        "--bin",
+    });
+    consume.addFileArg(eest_exe.getEmittedBin());
+    consume.addArgs(&.{ "-p", plugin, "-m", selection });
+    if (b.args) |args| consume.addArgs(args);
+    b.step(step_name, description).dependOn(&consume.step);
+}
+
+fn addConsumeCacheStep(
+    b: *std.Build,
+    step_name: []const u8,
+    description: []const u8,
+    release_key: []const u8,
+) void {
+    const release = fixtureLockValue(b, release_key);
+    const slug = b.allocator.dupe(u8, release) catch @panic("out of memory");
+    for (slug) |*byte| {
+        if (byte.* == '@') byte.* = '-';
+    }
+
+    const consume = consumeCommand(b);
+    consume.addArgs(&.{
+        "consume",
+        "cache",
+        "--input",
+        release,
+        b.fmt("--extract-to=.eest/fixtures/{s}", .{slug}),
+    });
+    if (b.args) |args| consume.addArgs(args);
+    b.step(step_name, description).dependOn(&consume.step);
+}
+
+fn consumeCommand(b: *std.Build) *std.Build.Step.Run {
+    const consume = b.addSystemCommand(&.{ "uv", "run", "--frozen", "--project" });
+    consume.addDirectoryArg(b.path("consume"));
+    // uv may reuse a git checkout through a local file URL.
+    consume.setEnvironmentVariable("GIT_ALLOW_PROTOCOL", "file:https");
+    consume.setEnvironmentVariable("UV_CACHE_DIR", ".zig-cache/eest-consume/uv");
+    consume.setCwd(b.path(".."));
+    return consume;
 }
 
 /// Names a `zig build` step that runs `exe` with a fixed argument prefix,

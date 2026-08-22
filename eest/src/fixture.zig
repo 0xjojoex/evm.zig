@@ -39,26 +39,10 @@ pub const ParsedAuthorizationList = struct {
     }
 };
 
-pub fn lockedFixturePath(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    track: []const u8,
-) ![]u8 {
-    const dest = try lock.releasePath(io, allocator, .state);
-    defer allocator.free(dest);
-    return fixtureRoot(allocator, dest, track);
-}
-
 pub fn lockedZkevmFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     const dest = try lockedZkevmReleasePath(io, allocator);
     defer allocator.free(dest);
     return fixtureRoot(allocator, dest, "blockchain_tests");
-}
-
-pub fn lockedBenchmarkFixturePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
-    const dest = try lock.releasePath(io, allocator, .benchmark);
-    defer allocator.free(dest);
-    return fixtureRoot(allocator, dest, "");
 }
 
 pub fn lockedZkevmReleasePath(io: std.Io, allocator: std.mem.Allocator) ![]u8 {

@@ -54,7 +54,7 @@ eest_release_relative_dest() {
   local slug
   slug="$(eest_release_slug "${release}")"
   case "${track}" in
-    state|zkevm) printf '.eest/fixtures/%s\n' "${slug}" ;;
+    zkevm) printf '.eest/fixtures/%s\n' "${slug}" ;;
     benchmark) printf '.eest/benchmarks/%s\n' "${slug}" ;;
     consensus) printf '.eest/consensus/%s\n' "${slug}" ;;
     *)

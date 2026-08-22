@@ -57,6 +57,19 @@ pub fn rawValidationErrorMatchesEest(error_value: transaction_envelope.RawValida
     return exceptionNameMatches(rawEestExceptionName(error_value), expected);
 }
 
+pub fn serializedSignatureExceptionMatches(
+    allocator: std.mem.Allocator,
+    transaction_bytes: []const u8,
+    expected: []const u8,
+) bool {
+    if (!exceptionNameMatches("TransactionException.INVALID_SIGNATURE_VRS", expected)) return false;
+    _ = transaction.recoverSender(allocator, transaction_bytes) catch |err| return switch (err) {
+        error.InvalidSignature, error.UnsupportedLegacyV => true,
+        else => false,
+    };
+    return false;
+}
+
 pub fn exceptionNameMatches(name: []const u8, expected: []const u8) bool {
     var it = std.mem.splitScalar(u8, expected, '|');
     while (it.next()) |part| {
@@ -93,5 +106,16 @@ test "EEST tx validation matches pipe-separated expected exceptions" {
     try std.testing.expect(validationErrorMatchesEest(
         .nonce_too_high,
         "TransactionException.NONCE_MISMATCH_TOO_HIGH",
+    ));
+}
+
+test "EEST serialized signature validation matches invalid VRS" {
+    const hex = "f841800a840100000094f89a03b42ea1412874da2cf1ae48956f73d0603901801b01a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1";
+    var bytes: [hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, hex);
+    try std.testing.expect(serializedSignatureExceptionMatches(
+        std.testing.allocator,
+        &bytes,
+        "TransactionException.INVALID_SIGNATURE_VRS",
     ));
 }

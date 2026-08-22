@@ -11,8 +11,6 @@ pub const Value = struct {
 };
 
 pub const Track = enum {
-    state,
-    benchmark,
     zkevm,
     consensus,
 };
@@ -97,8 +95,7 @@ pub fn relativeReleasePath(
         if (byte.* == '@') byte.* = '-';
     }
     const category = switch (track) {
-        .state, .zkevm => "fixtures",
-        .benchmark => "benchmarks",
+        .zkevm => "fixtures",
         .consensus => "consensus",
     };
     return std.fs.path.join(allocator, &.{ ".eest", category, slug });
@@ -106,8 +103,6 @@ pub fn relativeReleasePath(
 
 fn releaseKey(track: Track) []const u8 {
     return switch (track) {
-        .state => "state_release",
-        .benchmark => "benchmark_release",
         .zkevm => "zkevm_release",
         .consensus => "consensus_release",
     };
@@ -127,25 +122,25 @@ fn resolvePath(
 test "EEST lock parser trims comments and values" {
     const bytes =
         \\# comment
-        \\ state_repo = example/specs
-        \\state_release=example@release
-        \\state_artifact = fixtures.tar.gz
+        \\ repository = example/specs
+        \\release=example@release
+        \\ artifact = fixtures.tar.gz
         \\
     ;
 
-    try std.testing.expectEqualStrings("example/specs", parseValue(bytes, "state_repo").?);
-    try std.testing.expectEqualStrings("example@release", parseValue(bytes, "state_release").?);
-    try std.testing.expectEqualStrings("fixtures.tar.gz", parseValue(bytes, "state_artifact").?);
+    try std.testing.expectEqualStrings("example/specs", parseValue(bytes, "repository").?);
+    try std.testing.expectEqualStrings("example@release", parseValue(bytes, "release").?);
+    try std.testing.expectEqualStrings("fixtures.tar.gz", parseValue(bytes, "artifact").?);
     try std.testing.expectEqual(@as(?[]const u8, null), parseValue(bytes, "missing"));
 }
 
 test "fixture release paths are derived from track and release" {
     const allocator = std.testing.allocator;
-    const state = try relativeReleasePath(allocator, .state, "example@release");
-    defer allocator.free(state);
+    const zkevm = try relativeReleasePath(allocator, .zkevm, "example@release");
+    defer allocator.free(zkevm);
     const consensus = try relativeReleasePath(allocator, .consensus, "release-alpha");
     defer allocator.free(consensus);
 
-    try std.testing.expectEqualStrings(".eest/fixtures/example-release", state);
+    try std.testing.expectEqualStrings(".eest/fixtures/example-release", zkevm);
     try std.testing.expectEqualStrings(".eest/consensus/release-alpha", consensus);
 }

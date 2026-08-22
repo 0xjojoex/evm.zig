@@ -8,14 +8,13 @@
 const std = @import("std");
 
 const commands = struct {
-    pub const state = @import("cmd/state.zig");
-    pub const tx = @import("cmd/tx.zig");
+    pub const statetest = @import("cmd/statetest.zig");
+    pub const blocktest = @import("cmd/blocktest.zig");
+    pub const zkevmtest = @import("cmd/zkevmtest.zig");
     pub const zkevm = @import("cmd/zkevm.zig");
     pub const @"zkevm-mutations" = @import("cmd/zkevm_mutations.zig");
     pub const @"zkevm-input" = @import("cmd/zkevm_input.zig");
     pub const @"zkevm-ere" = @import("cmd/zkevm_ere.zig");
-    pub const @"block-stf" = @import("cmd/block_stf.zig");
-    pub const @"stateless-block-stf" = @import("cmd/stateless_block_stf.zig");
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -30,6 +29,13 @@ pub fn main(init: std.process.Init) !void {
     const name = name_z[0..name_z.len];
     if (std.mem.eql(u8, name, "--help") or std.mem.eql(u8, name, "-h")) {
         printUsage();
+        return;
+    }
+    if (std.mem.eql(u8, name, "--version")) {
+        var buffer: [128]u8 = undefined;
+        var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+        try stdout.interface.print("evmz-eest 0.0.0 (zig {s})\n", .{@import("builtin").zig_version_string});
+        try stdout.interface.flush();
         return;
     }
 

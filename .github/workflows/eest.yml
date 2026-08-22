@@ -18,7 +18,7 @@ jobs:
   stateless-trust:
     name: Pinned stateless corpus and mutations
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -31,22 +31,27 @@ jobs:
           use-cache: ${{ github.event_name != 'pull_request' }}
           cache-size-limit: 512
 
-      - name: Fetch pinned tests-zkevm fixtures
-        working-directory: eest
-        env:
-          EEST_CACHE: ${{ runner.temp }}/eest-download
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: eest/consume/uv.lock
+
+      - name: Cache pinned tests-zkevm fixtures
         run: |
-          trap 'rm -rf -- "${EEST_CACHE}"' EXIT
-          scripts/fetch-eest-zkevm-fixtures.sh
+          zig build zkevm-cache --summary all -- \
+            --cache-folder=${{ runner.temp }}/execution-spec-tests
 
       - name: Run full stateless corpus
         id: corpus
         continue-on-error: true
         run: |
           set -o pipefail
-          zig build -Doptimize=ReleaseFast zkevm --summary all -- \
-            --jobs 8 \
-            --oracle-differential \
+          zig build -Doptimize=ReleaseFast zkevm-consume --summary all -- \
+            --cache-folder=${{ runner.temp }}/execution-spec-tests \
+            --no-html \
+            -n 8 \
+            -q \
             2>&1 | tee eest-zkevm.log
 
       - name: Run typed mutation rejection matrix
@@ -74,13 +79,14 @@ jobs:
           path: |
             eest-zkevm.log
             eest-zkevm-mutations.log
+            .zig-cache/eest-consume/zkevm-logs/
           if-no-files-found: ignore
           retention-days: 7
 
   execution-fixtures:
-    name: State tests and regular BlockSTF
+    name: execution-specs direct conformance
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -93,37 +99,21 @@ jobs:
           use-cache: ${{ github.event_name != 'pull_request' }}
           cache-size-limit: 512
 
-      - name: Fetch execution fixtures
-        working-directory: eest
-        env:
-          EEST_CACHE: ${{ runner.temp }}/eest-download
-          EEST_TRACKS: state_tests blockchain_tests_sync
-        run: |
-          trap 'rm -rf -- "${EEST_CACHE}"' EXIT
-          scripts/fetch-eest-fixtures.sh
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: eest/consume/uv.lock
 
-      - name: Run state-test corpus
-        id: state_tests
-        continue-on-error: true
+      - name: Run state and BlockSTF fixtures through consume direct
         run: |
           set -o pipefail
-          zig build -Doptimize=ReleaseFast eest --summary all -- --jobs 4 2>&1 | tee eest-state.log
-
-      - name: Run regular BlockSTF corpus
-        id: block_stf
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          zig build -Doptimize=ReleaseFast eest-block-stf --summary all -- --jobs 4 2>&1 | tee eest-block-stf.log
-
-      - name: Require execution fixture lanes
-        if: always()
-        env:
-          STATE_TESTS_OUTCOME: ${{ steps.state_tests.outcome }}
-          BLOCK_STF_OUTCOME: ${{ steps.block_stf.outcome }}
-        run: |
-          test "${STATE_TESTS_OUTCOME}" = success
-          test "${BLOCK_STF_OUTCOME}" = success
+          zig build -Doptimize=ReleaseFast eest-consume --summary all -- \
+            --cache-folder=${{ runner.temp }}/execution-spec-tests \
+            --no-html \
+            -n 8 \
+            -q \
+            2>&1 | tee eest-consume.log
 
       - name: Upload failure logs
         if: failure()
@@ -131,8 +121,8 @@ jobs:
         with:
           name: eest-execution-logs
           path: |
-            eest-state.log
-            eest-block-stf.log
+            eest-consume.log
+            .zig-cache/eest-consume/logs/
           if-no-files-found: ignore
           retention-days: 7
 
