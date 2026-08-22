@@ -1704,7 +1704,7 @@ test "active transaction owns rollback before pending state" {
     try transaction_runtime.begin(&executor, .normal);
     errdefer transaction_runtime.discard(&executor);
     try transaction_runtime.beginExecution(&executor, request, .{});
-    const first_generation = executor.transaction_runtime_state.?.generation;
+    const first_generation = executor.attempt.?.owner.transaction.generation;
     try executor.state.addBalance(sender, 9);
     try std.testing.expectEqual(@as(u256, 9), try executor.getBalance(sender));
 
@@ -1716,7 +1716,7 @@ test "active transaction owns rollback before pending state" {
     errdefer transaction_runtime.discard(&executor);
     try transaction_runtime.beginExecution(&executor, request, .{});
     defer transaction_runtime.discard(&executor);
-    try std.testing.expect(first_generation != executor.transaction_runtime_state.?.generation);
+    try std.testing.expect(first_generation != executor.attempt.?.owner.transaction.generation);
 }
 
 test "active transaction finishes into pending state" {
@@ -1916,7 +1916,7 @@ test "transaction nonce advancement remains recorded for the runtime" {
     try transaction_runtime.begin(&executor, .normal);
     try transaction_runtime.beginExecution(&executor, request, .{});
     try executor.advanceTransactionNonce(request.message);
-    try std.testing.expect(executor.transaction_runtime_state.?.nonce_advanced);
+    try std.testing.expect(executor.attempt.?.owner.transaction.nonce_advanced);
     try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
     transaction_runtime.discard(&executor);
 

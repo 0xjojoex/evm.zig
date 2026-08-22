@@ -183,8 +183,7 @@ pub fn ExecutorType(
         prepared_code_scratch: call_scratch_storage.Slot,
         execution_context: ?ExecutionContext = null,
         scope_root: ?ScopeRoot = null,
-        manual_state_attempt: ?ManualStateAttempt = null,
-        transaction_runtime_state: ?TransactionRuntimeState = null,
+        attempt: ?Attempt = null,
         next_transaction_generation: u64 = 0,
         active_block_execution_generation: ?u64 = null,
         next_block_execution_generation: u64 = 0,
@@ -220,7 +219,7 @@ pub fn ExecutorType(
             std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.frame_store.len() == 0);
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.hasCurrentTransaction());
             std.debug.assert(self.prepared_code_execution_depth == 0);
             std.debug.assert(self.prepared_code_execution == null);
             self.state.deinit();
@@ -235,21 +234,39 @@ pub fn ExecutorType(
         }
 
         // Transaction scope: at most one attempt is live between open and close.
-        // `manual_state_attempt` and `transaction_runtime_state` are mutually exclusive.
 
-        const ManualStateAttempt = struct {
+        /// The one live state attempt. `owner` records which lifecycle opened
+        /// it and therefore who may resolve it: scope methods resolve `manual`
+        /// attempts, `transaction/runtime.zig` resolves `transaction` ones
+        /// through an `Executed` handle.
+        const Attempt = struct {
             id: State.AttemptId,
             mode: InstrumentationMode,
+            owner: Owner,
+
+            const Owner = union(enum) {
+                manual,
+                transaction: Transaction,
+            };
+
+            /// Family-transaction bookkeeping that a manual attempt has no use for.
+            const Transaction = struct {
+                generation: u64,
+                phase: enum { active, pending } = .active,
+                nonce_advanced: bool = false,
+                payload_started: bool = false,
+            };
         };
 
-        const TransactionRuntimeState = struct {
-            state_attempt_id: State.AttemptId,
-            generation: u64,
-            mode: InstrumentationMode,
-            phase: enum { active, pending } = .active,
-            nonce_advanced: bool = false,
-            payload_started: bool = false,
-        };
+        /// The family row inside the live attempt. Callers that may run under a
+        /// manual attempt must test `hasCurrentTransaction` first.
+        fn transactionAttempt(self: *Executor) *Attempt.Transaction {
+            const attempt = if (self.attempt) |*value| value else unreachable;
+            return switch (attempt.owner) {
+                .manual => unreachable,
+                .transaction => |*value| value,
+            };
+        }
 
         /// Callback-scoped semantic view of one sealed transition.
         /// State attempt identity and resolution remain private to Executor.
@@ -278,15 +295,14 @@ pub fn ExecutorType(
         ) !void {
             std.debug.assert(self.execution_context == null);
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
-            std.debug.assert(self.manual_state_attempt == null);
+            std.debug.assert(self.attempt == null);
             assertExecutionMode(mode);
             const state_attempt_id = if (mode.observesState())
                 self.state.beginObservedTransaction()
             else
                 self.state.beginTransaction();
             self.state.beginScope();
-            self.manual_state_attempt = .{ .id = state_attempt_id, .mode = mode };
+            self.attempt = .{ .id = state_attempt_id, .mode = mode, .owner = .manual };
             self.execution_context = context;
             self.scope_root = null;
         }
@@ -385,7 +401,7 @@ pub fn ExecutorType(
         }
 
         pub fn advanceTransactionNonce(self: *Executor, message: Message) !void {
-            const runtime_state = if (self.transaction_runtime_state) |*value| value else unreachable;
+            const runtime_state = self.transactionAttempt();
             std.debug.assert(runtime_state.phase == .active);
             std.debug.assert(!runtime_state.nonce_advanced);
             std.debug.assert(!runtime_state.payload_started);
@@ -405,7 +421,11 @@ pub fn ExecutorType(
         /// This is diagnostic state only; it does not grant resolution
         /// authority or expose the active transaction.
         pub fn hasCurrentTransaction(self: *const Executor) bool {
-            return self.transaction_runtime_state != null;
+            const attempt = self.attempt orelse return false;
+            return switch (attempt.owner) {
+                .manual => false,
+                .transaction => true,
+            };
         }
 
         fn hasActiveBlockExecution(self: *const Executor) bool {
@@ -439,7 +459,7 @@ pub fn ExecutorType(
 
         fn commitTransactionWithObserver(self: *Executor, observer: anytype) !void {
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.hasCurrentTransaction());
             try self.finalizeTransactionState();
             try self.resolveManualTransaction(observer);
         }
@@ -456,7 +476,7 @@ pub fn ExecutorType(
 
         fn retainStateTransitionWithObserver(self: *Executor, observer: anytype) !void {
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.hasCurrentTransaction());
             if (self.execution_context == null) return;
             try self.resolveManualTransaction(observer);
         }
@@ -464,7 +484,7 @@ pub fn ExecutorType(
         /// Restore a caller-owned branch checkpoint and discard the transition.
         pub fn rollbackTransaction(self: *Executor, checkpoint_state: *BranchCheckpoint) void {
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.hasCurrentTransaction());
             self.restoreBranch(checkpoint_state);
             self.discardStateTransition();
         }
@@ -476,13 +496,13 @@ pub fn ExecutorType(
         /// discarded.
         pub fn discardStateTransition(self: *Executor) void {
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.hasCurrentTransaction());
             if (self.execution_context == null) {
-                std.debug.assert(self.manual_state_attempt == null);
+                std.debug.assert(self.attempt == null);
                 return;
             }
             std.debug.assert(self.state.scopeActive());
-            const state_attempt_id = (self.manual_state_attempt orelse unreachable).id;
+            const state_attempt_id = (self.attempt orelse unreachable).id;
             self.state.closeScope();
             self.state.discard(state_attempt_id);
             self.closeManualTransactionLifetime();
@@ -490,7 +510,7 @@ pub fn ExecutorType(
 
         fn resolveManualTransaction(self: *Executor, observer: anytype) !void {
             std.debug.assert(self.state.scopeActive());
-            const state_attempt_id = (self.manual_state_attempt orelse unreachable).id;
+            const state_attempt_id = (self.attempt orelse unreachable).id;
             self.state.closeScope();
             self.state.seal(state_attempt_id);
             if (comptime @TypeOf(observer) != void)
@@ -504,7 +524,7 @@ pub fn ExecutorType(
         }
 
         fn closeManualTransactionLifetime(self: *Executor) void {
-            self.manual_state_attempt = null;
+            self.attempt = null;
             self.execution_context = null;
             self.scope_root = null;
         }
@@ -513,23 +533,23 @@ pub fn ExecutorType(
         /// attempt, or clear an execution-less attempt's retained journal.
         fn closeTransactionLifetime(self: *Executor) void {
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state != null);
+            std.debug.assert(self.hasCurrentTransaction());
             std.debug.assert(!self.state.scopeActive());
             self.execution_context = null;
             self.scope_root = null;
         }
 
         fn discardCurrentTransaction(self: *Executor) void {
-            std.debug.assert(self.transaction_runtime_state != null);
+            std.debug.assert(self.hasCurrentTransaction());
             defer self.finishCurrentTransaction(true);
-            self.state.discard(self.transaction_runtime_state.?.state_attempt_id);
+            self.state.discard(self.attempt.?.id);
         }
 
         fn finishCurrentTransaction(self: *Executor, clear_output: bool) void {
-            std.debug.assert(self.transaction_runtime_state != null);
+            std.debug.assert(self.hasCurrentTransaction());
             if (clear_output) self.clearLastOutput();
             self.closeTransactionLifetime();
-            self.transaction_runtime_state = null;
+            self.attempt = null;
         }
 
         /// The exclusive externally copyable owner of one completed but
@@ -590,8 +610,8 @@ pub fn ExecutorType(
                 ///
                 /// The value and all copies become stale after this call.
                 pub fn retain(self: Execution) void {
-                    const state_value = self.state();
-                    self.executor.state.retain(state_value.state_attempt_id);
+                    _ = self.state();
+                    self.executor.state.retain(self.executor.attempt.?.id);
                     self.executor.finishCurrentTransaction(false);
                 }
 
@@ -613,13 +633,14 @@ pub fn ExecutorType(
                 ///
                 /// This is the idempotent cleanup operation for `defer`.
                 pub fn discardIfCurrent(self: Execution) void {
-                    const current = if (self.executor.transaction_runtime_state) |*value| value else return;
+                    if (!self.executor.hasCurrentTransaction()) return;
+                    const current = self.executor.transactionAttempt();
                     if (current.generation != self.generation or current.phase != .pending) return;
                     self.discard();
                 }
 
-                fn state(self: Execution) *TransactionRuntimeState {
-                    const state_value = if (self.executor.transaction_runtime_state) |*value| value else unreachable;
+                fn state(self: Execution) *Attempt.Transaction {
+                    const state_value = self.executor.transactionAttempt();
                     std.debug.assert(state_value.generation == self.generation);
                     std.debug.assert(state_value.phase == .pending);
                     return state_value;
@@ -751,11 +772,8 @@ pub fn ExecutorType(
         }
 
         pub fn currentCaptureContext(self: *Executor) ?*CaptureContext {
-            if (self.transaction_runtime_state) |attempt|
-                return attempt.mode.captureContext();
-            if (self.manual_state_attempt) |attempt|
-                return attempt.mode.captureContext();
-            return null;
+            const attempt = self.attempt orelse return null;
+            return attempt.mode.captureContext();
         }
 
         fn assertExecutionMode(mode: InstrumentationMode) void {
@@ -956,14 +974,14 @@ pub fn ExecutorType(
 
         /// Borrow the cumulative accepted changes relative to the state reader.
         pub fn acceptedChanges(self: *const Executor) State.ChangesView {
-            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.hasCurrentTransaction());
             return self.acceptedView().changes();
         }
 
         /// Drop the cumulative accepted branch and clear any open context.
         pub fn discardAccepted(self: *Executor) void {
             std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(self.transaction_runtime_state == null);
+            std.debug.assert(!self.hasCurrentTransaction());
             self.state.discardAccepted();
             self.execution_context = null;
             self.scope_root = null;
