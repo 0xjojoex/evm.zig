@@ -37,9 +37,8 @@ evmz-eest zkevmtest [--run EXACT_ID] fixture.json
 ```
 
 Each command emits a JSON list of `{name, pass, skip, error}` records. `--run`
-selects one top-level fixture id exactly. The plugins cache one complete
-file-level result so multiple indexed ids in the same JSON file do not restart
-evmz.
+selects one top-level fixture id exactly. Each pytest worker caches one complete
+file-level result, so indexed ids assigned to that worker do not restart evmz.
 
 The adapter does not turn missing semantics into success. A state fixture with
 no comparable post-state assertion fails. A regular block transaction carrying
@@ -105,10 +104,9 @@ so every executor is judged against the same `statelessOutputBytes`. Use
 `BenchmarkRun` rows. `zkevm-input` extracts raw input or guest-framed stdin;
 `zkevm-ere` runs the native ERE adapter on one raw input.
 
-`fixtures/guest-known-failures.json` is corpus-scoped. Strict evidence requires
-an exact release and index hash, accepts only exact known failures, and fails
-when a known failure disappears. Unexpected failures, empty runs, I/O errors,
-and guest startup failures always fail.
+CI has no known-failure waiver. Unexpected failures, empty runs, I/O errors,
+and guest startup failures always fail. Strict evidence also requires an exact
+release and index hash.
 
 `zkevm-mutations` starts from the bounded paths in
 `fixtures/stateless-mutations-tests-zkevm-v0.8.2.txt`, applies structured

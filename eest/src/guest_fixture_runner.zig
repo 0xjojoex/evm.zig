@@ -1,18 +1,11 @@
-//! Shared fixture-tree driver for the EEST commands.
+//! Fixture-tree driver for the persistent zkVM guest command.
 //!
-//! Every fixture command walks a path, feeds each `.json` file to its runner
-//! module, and folds the per-file summaries. Only the module types differ, so
-//! the walk, the bounded worker pool, and the deterministic error report live
-//! here once.
+//! The native state, block, and zkEVM adapters run under execution-specs. This
+//! driver remains because each guest worker must retain its host process and
+//! compiled ROM while it consumes many fixture files.
 
 const std = @import("std");
 const fixture_pool = @import("fixture_pool.zig");
-
-pub fn parseJobs(value: []const u8, max: usize) !usize {
-    const jobs = try std.fmt.parseInt(usize, value, 10);
-    if (jobs == 0 or jobs > max) return error.InvalidJobs;
-    return jobs;
-}
 
 /// `module` must expose `Options`, a default-constructible `Summary` with
 /// `add`, and `runFile(io, allocator, path, options) !Summary`. A `limit`
@@ -210,13 +203,4 @@ pub fn Runner(comptime module: type) type {
             }
         };
     };
-}
-
-test "jobs parser enforces the caller's memory bound" {
-    try std.testing.expectEqual(@as(usize, 1), try parseJobs("1", 16));
-    try std.testing.expectEqual(@as(usize, 16), try parseJobs("16", 16));
-    try std.testing.expectError(error.InvalidJobs, parseJobs("0", 16));
-    try std.testing.expectError(error.InvalidJobs, parseJobs("17", 16));
-    try std.testing.expectEqual(@as(usize, 64), try parseJobs("64", 64));
-    try std.testing.expectError(error.InvalidJobs, parseJobs("65", 64));
 }

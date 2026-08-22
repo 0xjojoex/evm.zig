@@ -1,12 +1,11 @@
 //! The `evmz-ssz-conformance` CLI. Separate from `main.zig` because this
 //! runner builds without evmz, and because a consensus fixture reports a
-//! `failed` case rather than an error, so it cannot reuse `runner.Runner`.
+//! `failed` case rather than an error, so it cannot reuse the guest runner.
 
 const std = @import("std");
 const conformance = @import("ssz_conformance.zig");
 const fixture_pool = @import("fixture_pool.zig");
 const consensus_lock = @import("consensus_lock.zig");
-const runner = @import("runner.zig");
 
 const default_jobs = 4;
 const max_jobs = 64;
@@ -29,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const value = args.next() orelse return error.MissingJobs;
-            jobs = try runner.parseJobs(value, max_jobs);
+            jobs = try fixture_pool.parseJobs(value, max_jobs);
         } else try paths.append(allocator, try arena.dupe(u8, arg));
     }
 

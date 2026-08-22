@@ -2,6 +2,12 @@ const std = @import("std");
 
 const queue_capacity = 64;
 
+pub fn parseJobs(value: []const u8, max: usize) !usize {
+    const jobs = try std.fmt.parseInt(usize, value, 10);
+    if (jobs == 0 or jobs > max) return error.InvalidJobs;
+    return jobs;
+}
+
 pub const FileMatch = union(enum) {
     basename: []const u8,
     suffix: []const u8,
@@ -123,4 +129,13 @@ test "fixture file matching supports exact names and suffixes" {
     try std.testing.expect(!(FileMatch{ .basename = "serialized.ssz_snappy" }).matches("other.ssz_snappy"));
     try std.testing.expect((FileMatch{ .suffix = ".json" }).matches("fixture.json"));
     try std.testing.expect(!(FileMatch{ .suffix = ".json" }).matches("fixture.yaml"));
+}
+
+test "jobs parser enforces the caller's memory bound" {
+    try std.testing.expectEqual(@as(usize, 1), try parseJobs("1", 16));
+    try std.testing.expectEqual(@as(usize, 16), try parseJobs("16", 16));
+    try std.testing.expectError(error.InvalidJobs, parseJobs("0", 16));
+    try std.testing.expectError(error.InvalidJobs, parseJobs("17", 16));
+    try std.testing.expectEqual(@as(usize, 64), try parseJobs("64", 64));
+    try std.testing.expectError(error.InvalidJobs, parseJobs("65", 64));
 }

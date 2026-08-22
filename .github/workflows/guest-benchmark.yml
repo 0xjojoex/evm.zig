@@ -199,7 +199,6 @@ jobs:
             --zisk-elf "${CANDIDATE_ELF}"
             --evidence-dir "${GITHUB_WORKSPACE}/guest-evidence"
             --corpus-manifest "${RESOLVED_MANIFEST}"
-            --known-failures "${GITHUB_WORKSPACE}/eest/fixtures/guest-known-failures.json"
             --source-ref "${SOURCE_COMMIT}"
             --stateless-schema "${STATELESS_SCHEMA}"
             --zig-version "${ZIG_VERSION}"
