@@ -55,8 +55,8 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const check = b.addSystemCommand(&.{ "bash", "scripts/check-fixture-lock.sh" });
-        b.step("fixture-lock-check", "Verify fixture pins have one source of truth").dependOn(&check.step);
+        const check = b.addSystemCommand(&.{ "bash", "scripts/check-consensus-lock.sh" });
+        b.step("consensus-lock-check", "Verify consensus fixture pins").dependOn(&check.step);
     }
 
     {
@@ -67,7 +67,11 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(eest_exe);
 
         addStep(b, eest_exe, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", &.{"zkevm"});
-        addStep(b, eest_exe, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", &.{"zkevm-mutations"});
+        addStep(b, eest_exe, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", &.{
+            "zkevm-mutations",
+            "--manifest",
+            "fixtures/stateless-mutations-tests-zkevm-v0.8.2.txt",
+        });
         addStep(b, eest_exe, "zkevm-input", "Extract one EEST zkEVM stateless input for a zkVM guest", &.{"zkevm-input"});
         addStep(b, eest_exe, "zkevm-ere", "Run raw ERE stateless input through native adapter", &.{"zkevm-ere"});
 
@@ -76,7 +80,7 @@ pub fn build(b: *std.Build) void {
             eest_exe,
             "consume",
             "Run execution-spec fixtures through consume direct",
-            "state_release",
+            default_execution_input,
             "evmz_consumer",
             direct_selection,
             ".zig-cache/eest-consume/logs",
@@ -86,19 +90,17 @@ pub fn build(b: *std.Build) void {
             eest_exe,
             "consume-zkevm",
             "Run tests-zkevm fixtures through consume direct",
-            "zkevm_release",
+            default_zkevm_input,
             "evmz_zkevm_consumer",
             "blockchain_test",
             ".zig-cache/eest-consume/zkevm-logs",
         );
-        addConsumeCacheStep(
-            b,
-            "cache-zkevm",
-            "Cache tests-zkevm fixtures through execution-specs",
-            "zkevm_release",
-        );
+        addResolveZkevmStep(b);
     }
 }
+
+const default_execution_input = "tests-glamsterdam-devnet@latest";
+const default_zkevm_input = "tests-zkevm@latest";
 
 const direct_selection =
     "state_test or (blockchain_test and " ++
@@ -109,29 +111,12 @@ const direct_selection =
     "BPO2ToBPO3AtTime15k or BPO3ToBPO4AtTime15k or " ++
     "BPO2ToAmsterdamAtTime15k))";
 
-fn fixtureLockValue(b: *std.Build, key: []const u8) []const u8 {
-    const contents = b.build_root.handle.readFileAlloc(
-        b.graph.io,
-        "../eest.lock",
-        b.allocator,
-        .limited(64 * 1024),
-    ) catch |err| std.debug.panic("unable to read eest.lock: {s}", .{@errorName(err)});
-    var lines = std.mem.splitScalar(u8, contents, '\n');
-    while (lines.next()) |line| {
-        const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        if (std.mem.eql(u8, line[0..separator], key)) {
-            return std.mem.trim(u8, line[separator + 1 ..], " \t\r");
-        }
-    }
-    std.debug.panic("eest.lock is missing {s}", .{key});
-}
-
 fn addConsumeStep(
     b: *std.Build,
     eest_exe: *std.Build.Step.Compile,
     step_name: []const u8,
     description: []const u8,
-    release_key: []const u8,
+    input: []const u8,
     plugin: []const u8,
     selection: []const u8,
     log_dir: []const u8,
@@ -141,7 +126,7 @@ fn addConsumeStep(
         "consume",
         "direct",
         "--input",
-        fixtureLockValue(b, release_key),
+        input,
         "--log-to",
         log_dir,
         "--bin",
@@ -152,28 +137,19 @@ fn addConsumeStep(
     b.step(step_name, description).dependOn(&consume.step);
 }
 
-fn addConsumeCacheStep(
-    b: *std.Build,
-    step_name: []const u8,
-    description: []const u8,
-    release_key: []const u8,
-) void {
-    const release = fixtureLockValue(b, release_key);
-    const slug = b.allocator.dupe(u8, release) catch @panic("out of memory");
-    for (slug) |*byte| {
-        if (byte.* == '@') byte.* = '-';
-    }
-
-    const consume = consumeCommand(b);
-    consume.addArgs(&.{
-        "consume",
-        "cache",
+fn addResolveZkevmStep(b: *std.Build) void {
+    const resolve = consumeCommand(b);
+    resolve.addArgs(&.{
+        "python",
+        "-m",
+        "evmz_fixture_source",
         "--input",
-        release,
-        b.fmt("--extract-to=.eest/fixtures/{s}", .{slug}),
+        default_zkevm_input,
+        "--manifest",
+        ".zig-cache/eest-consume/zkevm-corpus.json",
     });
-    if (b.args) |args| consume.addArgs(args);
-    b.step(step_name, description).dependOn(&consume.step);
+    if (b.args) |args| resolve.addArgs(args);
+    b.step("resolve-zkevm", "Resolve tests-zkevm through execution-specs").dependOn(&resolve.step);
 }
 
 fn consumeCommand(b: *std.Build) *std.Build.Step.Run {

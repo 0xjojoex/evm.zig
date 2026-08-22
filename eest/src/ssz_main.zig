@@ -5,7 +5,7 @@
 const std = @import("std");
 const conformance = @import("ssz_conformance.zig");
 const fixture_pool = @import("fixture_pool.zig");
-const lock = @import("lock.zig");
+const consensus_lock = @import("consensus_lock.zig");
 const runner = @import("runner.zig");
 
 const default_jobs = 4;
@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (paths.items.len == 0) {
-        try paths.append(allocator, try defaultFixturePath(init.io, arena, init.environ_map.get("EVMZ_EEST_ROOT")));
+        try paths.append(allocator, try defaultFixturePath(init.io, arena, init.environ_map.get("EVMZ_CONSENSUS_ROOT")));
     }
 
     var total = Summary{};
@@ -207,19 +207,16 @@ fn failureLessThan(_: void, lhs: Failure, rhs: Failure) bool {
 }
 
 fn defaultFixturePath(io: std.Io, allocator: std.mem.Allocator, shared_root: ?[]const u8) ![]u8 {
-    var value = lock.readValue(io, allocator, "consensus_release") catch |err| switch (err) {
-        error.MissingEestLockKey => return error.MissingConsensusLockKey,
-        else => return err,
-    };
+    var value = try consensus_lock.readValue(io, allocator, "release");
     defer value.deinit(allocator);
-    const relative = try lock.relativeReleasePath(allocator, .consensus, value.bytes);
+    const relative = try consensus_lock.relativeReleasePath(allocator, value.bytes);
     defer allocator.free(relative);
     if (shared_root) |root| {
-        const suffix = if (std.mem.startsWith(u8, relative, ".eest/")) relative[6..] else relative;
+        const suffix = if (std.mem.startsWith(u8, relative, ".consensus/")) relative[11..] else relative;
         return std.fs.path.join(allocator, &.{ root, suffix });
     }
     if (try mainWorktreePath(io, allocator)) |worktree| {
-        return std.fs.path.join(allocator, &.{ worktree, relative });
+        return std.fs.path.join(allocator, &.{ worktree, "eest", relative });
     }
     return if (std.fs.path.isAbsolute(relative))
         allocator.dupe(u8, relative)
@@ -264,7 +261,8 @@ fn printUsage() void {
         \\
         \\Runs consensus-spec General, Mainnet, and Minimal SSZ fixtures.
         \\Uses {d} workers by default; --jobs 1 runs sequentially (maximum {d}).
-        \\EVMZ_EEST_ROOT can point at a shared .eest directory. With no path,
+        \\EVMZ_CONSENSUS_ROOT can point at a shared consensus fixture directory.
+        \\With no path,
         \\the runner uses the complete pinned consensus fixture destination.
         \\
     , .{ default_jobs, max_jobs });

@@ -2,17 +2,17 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-source "${script_dir}/eest-lock.sh"
+source "${script_dir}/consensus-lock.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'USAGE'
 usage: scripts/fetch-consensus-ssz-fixtures.sh
 
 Downloads the pinned consensus-spec General, Mainnet, and Minimal archives and
-extracts only generic and static SSZ fixtures into the shared .eest cache.
+extracts only generic and static SSZ fixtures into the consensus cache.
 
 Environment overrides:
-  EVMZ_EEST_ROOT, CONSENSUS_REPO, CONSENSUS_RELEASE, CONSENSUS_CACHE,
+  EVMZ_CONSENSUS_ROOT, CONSENSUS_REPO, CONSENSUS_RELEASE, CONSENSUS_CACHE,
   CONSENSUS_DEST
   CONSENSUS_{GENERAL,MAINNET,MINIMAL}_{ARTIFACT,URL,SHA256}
 USAGE
@@ -26,16 +26,15 @@ main_worktree() {
   '
 }
 
-repo="${CONSENSUS_REPO:-$(eest_lock_value consensus_repo)}"
-release="${CONSENSUS_RELEASE:-$(eest_lock_value consensus_release)}"
-relative_dest="$(eest_release_relative_dest consensus "${release}")"
+repo="${CONSENSUS_REPO:-$(consensus_lock_value repo)}"
+release="${CONSENSUS_RELEASE:-$(consensus_lock_value release)}"
 default_worktree="$(main_worktree)"
 if [[ -z "${default_worktree}" ]]; then
   default_worktree="$(git rev-parse --show-toplevel)"
 fi
-shared_root="${EVMZ_EEST_ROOT:-${default_worktree}/.eest}"
+shared_root="${EVMZ_CONSENSUS_ROOT:-${default_worktree}/eest/.consensus}"
 cache="${CONSENSUS_CACHE:-${shared_root}/cache}"
-dest="${CONSENSUS_DEST:-${shared_root}/${relative_dest#.eest/}}"
+dest="${CONSENSUS_DEST:-${shared_root}/${release}}"
 mkdir -p "${cache}" "${dest}" "${dest}/ssz_generic"
 tar_supports_wildcards=false
 if tar --help 2>&1 | grep -q -- '--wildcards'; then
@@ -78,9 +77,9 @@ verify_archive() {
   fi
 }
 
-general_artifact="${CONSENSUS_GENERAL_ARTIFACT:-$(eest_lock_value consensus_general_artifact)}"
-general_url="${CONSENSUS_GENERAL_URL:-$(eest_release_url "${repo}" "${release}" "${general_artifact}")}"
-general_sha256="${CONSENSUS_GENERAL_SHA256:-$(eest_lock_value consensus_general_sha256)}"
+general_artifact="${CONSENSUS_GENERAL_ARTIFACT:-$(consensus_lock_value general_artifact)}"
+general_url="${CONSENSUS_GENERAL_URL:-$(consensus_release_url "${repo}" "${release}" "${general_artifact}")}"
+general_sha256="${CONSENSUS_GENERAL_SHA256:-$(consensus_lock_value general_sha256)}"
 general_archive="$(fetch_archive "${general_artifact}" "${general_url}" "${general_sha256}")"
 printf 'Extracting General SSZ fixtures to %s\n' "${dest}/ssz_generic"
 tar -xzf "${general_archive}" \
@@ -93,9 +92,9 @@ for preset in mainnet minimal; do
   artifact_variable="CONSENSUS_${uppercase_preset}_ARTIFACT"
   url_variable="CONSENSUS_${uppercase_preset}_URL"
   sha256_variable="CONSENSUS_${uppercase_preset}_SHA256"
-  artifact="${!artifact_variable:-$(eest_lock_value "consensus_${preset}_artifact")}"
-  url="${!url_variable:-$(eest_release_url "${repo}" "${release}" "${artifact}")}"
-  sha256="${!sha256_variable:-$(eest_lock_value "consensus_${preset}_sha256")}"
+  artifact="${!artifact_variable:-$(consensus_lock_value "${preset}_artifact")}"
+  url="${!url_variable:-$(consensus_release_url "${repo}" "${release}" "${artifact}")}"
+  sha256="${!sha256_variable:-$(consensus_lock_value "${preset}_sha256")}"
   archive="$(fetch_archive "${artifact}" "${url}" "${sha256}")"
   printf 'Extracting %s static SSZ fixtures to %s\n' "${preset}" "${dest}/${preset}"
   if [[ "${tar_supports_wildcards}" == true ]]; then
@@ -113,4 +112,4 @@ for preset in mainnet minimal; do
 done
 
 printf 'Done. Run:\n'
-printf '  EVMZ_EEST_ROOT=%q zig build ssz-conformance\n' "${shared_root}"
+printf '  EVMZ_CONSENSUS_ROOT=%q zig build ssz-conformance\n' "${shared_root}"

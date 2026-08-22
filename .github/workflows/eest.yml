@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   stateless-trust:
-    name: Pinned stateless corpus and mutations
+    name: Resolved stateless corpus and mutations
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -37,18 +37,27 @@ jobs:
           enable-cache: true
           cache-dependency-glob: eest/consume/uv.lock
 
-      - name: Cache pinned tests-zkevm fixtures
+      - name: Resolve tests-zkevm through execution-specs
+        env:
+          FIXTURE_CACHE: ${{ runner.temp }}/execution-spec-tests
+          RESOLVED_MANIFEST: ${{ runner.temp }}/tests-zkevm.json
         run: |
-          zig build zkevm-cache --summary all -- \
-            --cache-folder=${{ runner.temp }}/execution-spec-tests
+          zig build zkevm-resolve --summary all -- \
+            --cache-folder="${FIXTURE_CACHE}" \
+            --manifest="${RESOLVED_MANIFEST}"
 
       - name: Run full stateless corpus
         id: corpus
         continue-on-error: true
+        env:
+          FIXTURE_CACHE: ${{ runner.temp }}/execution-spec-tests
+          RESOLVED_MANIFEST: ${{ runner.temp }}/tests-zkevm.json
         run: |
           set -o pipefail
+          input="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "${RESOLVED_MANIFEST}")"
           zig build -Doptimize=ReleaseFast zkevm-consume --summary all -- \
-            --cache-folder=${{ runner.temp }}/execution-spec-tests \
+            --input="${input}" \
+            --cache-folder="${FIXTURE_CACHE}" \
             --no-html \
             -n 8 \
             -q \
@@ -57,9 +66,12 @@ jobs:
       - name: Run typed mutation rejection matrix
         id: mutations
         continue-on-error: true
+        env:
+          RESOLVED_MANIFEST: ${{ runner.temp }}/tests-zkevm.json
         run: |
           set -o pipefail
-          zig build -Doptimize=ReleaseFast zkevm-mutations --summary all \
+          zig build -Doptimize=ReleaseFast zkevm-mutations --summary all -- \
+            --corpus-manifest "${RESOLVED_MANIFEST}" \
             2>&1 | tee eest-zkevm-mutations.log
 
       - name: Require stateless trust lanes
@@ -131,7 +143,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      EVMZ_EEST_ROOT: ${{ github.workspace }}/.eest
+      EVMZ_CONSENSUS_ROOT: ${{ github.workspace }}/eest/.consensus
 
     steps:
       - name: Checkout

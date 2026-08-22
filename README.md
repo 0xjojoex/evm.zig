@@ -10,9 +10,9 @@ RV64 guest on SP1 and ZisK.
 
 evmz is pre-release. The version is `0.0.0`, the public API may change between
 commits, and the project has not been audited. `main` tracks the latest
-supported execution-spec prereleases. Dedicated fixture-pin branches preserve
-older devnet lines such as Glamsterdam devnet-7; the branch-local `eest.lock`
-is authoritative for every exact fixture release.
+supported execution-spec prereleases. EEST conformance resolves fixture
+releases through execution-specs itself; release evidence records the exact
+resolved corpus and index hash.
 
 Implemented:
 

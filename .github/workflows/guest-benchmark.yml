@@ -4,10 +4,6 @@ name: Guest benchmark
 on:
   workflow_call:
     inputs:
-      corpus:
-        description: Corpus selection
-        required: true
-        type: string
       release_gate:
         description: Produce release-qualified evidence
         required: true
@@ -38,36 +34,22 @@ on:
   schedule:
     - cron: "23 2 * * *"
   workflow_dispatch:
-    inputs:
-      corpus:
-        description: Corpus selection
-        required: true
-        default: pinned
-        type: choice
-        options:
-          - pinned
-          - rolling
-          - tests-zkevm
 
 permissions:
   contents: read
 
 concurrency:
-  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-${{ inputs.corpus || (github.event_name == 'schedule' && 'rolling') || 'tests-zkevm' }}
+  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-tests-zkevm
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   measure:
-    name: zisk ${{ inputs.corpus || (github.event_name == 'schedule' && 'rolling') || 'tests-zkevm' }}
+    name: zisk tests-zkevm
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
       release_artifact_name: ${{ steps.release-artifact.outputs.name }}
     env:
-      CORPUS_MODE: ${{ inputs.corpus || (github.event_name == 'schedule' && 'rolling') || 'tests-zkevm' }}
-      CATALOG_URL: https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7
-      PINNED_MANIFEST: eest/fixtures/devnet-glamsterdam-7-pinned.json
-      CORPUS_ROOT: ${{ github.workspace }}/devnet-corpus
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
@@ -85,7 +67,6 @@ jobs:
       - name: Require release qualification inputs
         if: inputs.release_gate
         run: |
-          test "${CORPUS_MODE}" = tests-zkevm
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
 
@@ -110,48 +91,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            jq \
             libgmp10 \
             libomp5-18 \
             libopenmpi3t64 \
-            libsodium23 \
-            zstd
+            libsodium23
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
           use-cache: ${{ github.event_name != 'pull_request' }}
-          cache-key: guest-benchmark-${{ github.event_name }}-${{ env.CORPUS_MODE }}
+          cache-key: guest-benchmark-${{ github.event_name }}-tests-zkevm
 
-      - name: Resolve pinned corpus
-        if: env.CORPUS_MODE == 'pinned'
-        run: |
-          python3 eest/scripts/fetch-devnet-batches.py \
-            --manifest "${PINNED_MANIFEST}" \
-            --network glamsterdam-devnet-7 \
-            --output-root "${CORPUS_ROOT}" \
-            --resolved-manifest "${RESOLVED_MANIFEST}"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: eest/consume/uv.lock
 
-      - name: Resolve rolling corpus
-        if: env.CORPUS_MODE == 'rolling'
+      - name: Resolve tests-zkevm through execution-specs
         run: |
-          python3 eest/scripts/fetch-devnet-batches.py \
-            --catalog-url "${CATALOG_URL}" \
-            --latest-batches 10 \
-            --network glamsterdam-devnet-7 \
-            --output-root "${CORPUS_ROOT}" \
-            --resolved-manifest "${RESOLVED_MANIFEST}"
-
-      - name: Fetch tests-zkevm corpus
-        if: env.CORPUS_MODE == 'tests-zkevm'
-        working-directory: eest
-        env:
-          EEST_CACHE: ${{ runner.temp }}/eest-download
-        run: |
-          trap 'rm -rf -- "${EEST_CACHE}"' EXIT
-          scripts/fetch-eest-zkevm-fixtures.sh \
-            --resolved-manifest "${RESOLVED_MANIFEST}"
+          zig build zkevm-resolve --summary all -- \
+            --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
+            --manifest="${RESOLVED_MANIFEST}"
 
       - name: Build pinned ZisK artifacts
         uses: ./.github/actions/build-zisk-artifacts
@@ -258,7 +220,7 @@ jobs:
         if: always() && !inputs.release_gate
         uses: actions/upload-artifact@v7
         with:
-          name: guest-zisk-${{ env.CORPUS_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: guest-zisk-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
           path: guest-evidence
           if-no-files-found: warn
           retention-days: 14

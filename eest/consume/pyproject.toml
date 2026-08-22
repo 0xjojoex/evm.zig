@@ -15,6 +15,7 @@ dependencies = [
 py-modules = [
     "evmz_consumer",
     "evmz_consumer_common",
+    "evmz_fixture_source",
     "evmz_zkevm_consumer",
 ]
 

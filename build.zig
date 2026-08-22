@@ -400,7 +400,7 @@ pub fn build(b: *std.Build) void {
     const optimize_name = @tagName(optimize);
     const bench_optimize_name = @tagName(bench_optimize);
     if (pathExists(b, "eest/build.zig")) {
-        addEestDelegate(b, "fixture-lock-check", "Verify fixture pins have one source of truth", "fixture-lock-check", optimize_name, null, evmz_build, ci_step);
+        addEestDelegate(b, "consensus-lock-check", "Verify consensus fixture pins", "consensus-lock-check", optimize_name, null, evmz_build, ci_step);
         addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null, evmz_build, ci_step);
         addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", "zkevm-mutations", optimize_name, null, evmz_build, null);
@@ -408,7 +408,7 @@ pub fn build(b: *std.Build) void {
         addEestDelegate(b, "zkevm-ere", "Run raw ERE stateless input through native adapter", "zkevm-ere", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "eest-consume", "Run execution-spec fixtures through consume direct", "consume", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-consume", "Run tests-zkevm fixtures through consume direct", "consume-zkevm", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "zkevm-cache", "Cache tests-zkevm fixtures through execution-specs", "cache-zkevm", optimize_name, null, evmz_build, null);
+        addEestDelegate(b, "zkevm-resolve", "Resolve tests-zkevm through execution-specs", "resolve-zkevm", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "ssz-conformance", "Run consensus-spec generic SSZ fixtures", "ssz-conformance", optimize_name, null, evmz_build, null);
     }
     if (pathExists(b, "bench/build.zig")) {

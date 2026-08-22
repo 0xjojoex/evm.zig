@@ -1,7 +1,6 @@
 const std = @import("std");
 const stateless = @import("../stateless.zig");
 const guest_evidence = @import("../guest_evidence.zig");
-const fixture_common = @import("../fixture.zig");
 const runner = @import("../runner.zig");
 
 pub const about = "Run EEST zkEVM stateless SSZ fixtures";
@@ -129,7 +128,8 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         if (corpus_manifest) |manifest_path| {
             try paths.appendSlice(allocator, try manifestFixtureRoots(init.io, arena, manifest_path));
         } else {
-            try paths.append(allocator, try fixture_common.lockedZkevmFixturePath(init.io, arena));
+            printUsage();
+            return error.MissingFixturePath;
         }
     }
 

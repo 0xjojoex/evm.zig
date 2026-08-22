@@ -1,0 +1,10 @@
+# Consensus-spec SSZ fixture pins. This file is separate from the
+# execution-specs Python consumer and its fixture cache.
+repo=ethereum/consensus-specs
+release=v1.7.0-alpha.13
+general_artifact=general.tar.gz
+general_sha256=b98e5328037a84993254085700b8d9eae304beca81d0944fe05274ca3523ed8b
+mainnet_artifact=mainnet.tar.gz
+mainnet_sha256=bf69706c9cc2c423e3bbaeb5ae7eb53a9e5adfdef84e3731296bb646fe2e8149
+minimal_artifact=minimal.tar.gz
+minimal_sha256=94bafd73514385645404007e6ec8b47aed13ca443b8e75621f40fce5ce1f47a2
