@@ -23,13 +23,14 @@ const std = @import("std");
 
 const evmz = @import("./evm.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
+const checkpoint_guard = @import("./executor/checkpoint.zig");
 const frame_io = @import("./frame_io.zig");
-const FrameStore = @import("./executor/frame_store.zig");
-const host_callbacks = @import("./executor/host_callbacks.zig");
+const FrameStore = @import("./executor/FrameStore.zig");
+const HostCallbacks = @import("./executor/host.zig").Callbacks;
 const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
-const trace = @import("./trace.zig");
+const top_frame_gas = @import("./executor/top_frame_gas.zig");
+const trace_capture = @import("./executor/trace_capture.zig");
 const transaction_runtime = @import("./transaction/runtime.zig");
-const uint256 = @import("./uint256.zig");
 pub const capture_context = @import("./executor/capture_context.zig");
 pub const eip7702 = @import("./executor/eip7702.zig");
 pub const errors = @import("./executor/error.zig");
@@ -150,21 +151,17 @@ pub fn ExecutorType(
     comptime ExecutionState.checkSpec(spec);
 
     return struct {
-        // Compiled identity: the exact types this executor was specialized to.
-
         const Executor = @This();
 
         const BoundInterpreter = Interpreter.Interpreter(spec);
 
-        const callbacks = host_callbacks.bind(spec, ExecutionState, options_value);
-
-        pub const compile_options = options_value;
+        const callbacks = HostCallbacks(spec, ExecutionState, options_value);
 
         pub const State = ExecutionState.State;
 
         pub const StateAddress = ExecutionState.StateAddress;
 
-        pub const BranchCheckpoint = State.BranchCheckpoint;
+        const BranchCheckpoint = State.BranchCheckpoint;
 
         pub const Init = ExecutorInitType(ExecutionState);
 
@@ -196,8 +193,6 @@ pub fn ExecutorType(
         prepared_code_execution_depth: usize = 0,
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
-
-        // Construction and teardown. Every assert in `deinit` names a lifecycle that must already be closed.
 
         /// Construct and take exclusive ownership of domain state.
         pub fn init(allocator: std.mem.Allocator, options: Init) Executor {
@@ -724,45 +719,7 @@ pub fn ExecutorType(
             self.state.restoreBranch(checkpoint_state);
         }
 
-        /// Owns one interior call/create checkpoint until it is resolved or
-        /// transferred to a store row. Any early error restores it.
-        const CheckpointGuard = struct {
-            state: *State,
-            checkpoint_state: State.Checkpoint,
-            open: bool = true,
-
-            fn init(state: *State, checkpoint_state: State.Checkpoint) CheckpointGuard {
-                return .{ .state = state, .checkpoint_state = checkpoint_state };
-            }
-
-            fn deinit(self: *CheckpointGuard) void {
-                if (self.open) self.state.revertToCheckpoint(self.checkpoint_state);
-                self.* = undefined;
-            }
-
-            fn begin(state: *State) CheckpointGuard {
-                return .{ .state = state, .checkpoint_state = state.checkpoint() };
-            }
-
-            fn commit(self: *CheckpointGuard) void {
-                self.state.commitCheckpoint(self.checkpoint_state);
-                self.open = false;
-            }
-
-            fn restore(self: *CheckpointGuard) void {
-                self.state.revertToCheckpoint(self.checkpoint_state);
-                self.open = false;
-            }
-
-            fn finish(self: *CheckpointGuard, status: Interpreter.Status) void {
-                if (status == .success) self.commit() else self.restore();
-            }
-
-            fn disarm(self: *CheckpointGuard) void {
-                std.debug.assert(self.open);
-                self.open = false;
-            }
-        };
+        const CheckpointGuard = checkpoint_guard.Guard(State);
 
         // Ambient per-execution state. Each of these is saved and restored by hand at
         // every entrypoint that owns it, rather than inherited from a scope value.
@@ -1098,170 +1055,33 @@ pub fn ExecutorType(
                 spec.reentrant_native_contract.active(address);
         }
 
-        // Capture mapping. Nothing here needs `*Executor` except to reach the borrowed
-        // context and the current frame depth.
-
-        inline fn beginCallCapture(context: ?*CaptureContext, msg: *const Host.Message) !?evmz.trace.CallToken {
-            const capture_value = context orelse return null;
-            if (!capture_value.capturesCalls()) return null;
-
-            const Endpoints = struct { from: Address, to: Address };
-            const endpoints: Endpoints = switch (msg.kind) {
-                .call, .staticcall => .{ .from = msg.sender, .to = msg.recipient },
-                .delegatecall, .callcode => .{ .from = msg.recipient, .to = msg.code_address },
-                .create, .create2 => .{ .from = msg.sender, .to = msg.recipient },
-            };
-            return capture_value.beginCall(.{
-                .depth = msg.depth,
-                .kind = callCaptureKind(msg.kind),
-                .from = endpoints.from,
-                .to = endpoints.to,
-                .code_address = msg.code_address,
-                .value = msg.value,
-                .gas = msg.gas,
-                .input = msg.input_data,
-            });
-        }
-
-        fn finishCallCapture(context: ?*CaptureContext, token: evmz.trace.CallToken, result: Result) !void {
-            try context.?.finishCall(token, callCaptureFinish(result));
-        }
-
-        fn finishCallCaptureReserved(context: *CaptureContext, token: evmz.trace.CallToken, result: Result) void {
-            context.finishCallReserved(token, callCaptureFinish(result));
-        }
-
-        fn callCaptureKind(kind: Host.CallKind) evmz.trace.CallKind {
-            return switch (kind) {
-                .call => .call,
-                .staticcall => .staticcall,
-                .delegatecall => .delegatecall,
-                .callcode => .callcode,
-                .create => .create,
-                .create2 => .create2,
-            };
-        }
-
-        fn callCaptureStatus(status: Interpreter.Status, cause: evmz.execution.TerminalCause) evmz.trace.CallStatus {
-            return switch (cause) {
-                .call_depth_exceeded => .call_depth_exceeded,
-                .insufficient_balance => .insufficient_balance,
-                .nonce_overflow => .nonce_overflow,
-                .invalid_opcode => .invalid_opcode,
-                .stack_underflow => .stack_underflow,
-                .stack_overflow => .stack_overflow,
-                .invalid_jump => .invalid_jump,
-                .write_protection => .write_protection,
-                .return_data_out_of_bounds => .return_data_out_of_bounds,
-                .contract_address_collision => .contract_address_collision,
-                .max_code_size_exceeded => .max_code_size_exceeded,
-                .invalid_code => .invalid_code,
-                .code_store_out_of_gas => if (status == .success)
-                    .code_store_out_of_gas_committed
-                else
-                    .code_store_out_of_gas,
-                .none => .success,
-                .revert => .revert,
-                .out_of_gas => .out_of_gas,
-                .invalid => switch (status) {
-                    .success => .success,
-                    .revert => .revert,
-                    .out_of_gas => .out_of_gas,
-                    .invalid => .invalid,
-                },
-            };
-        }
-
-        fn callCaptureFinish(result: Host.Result) evmz.trace.CallFinish {
-            return .{
-                .status = callCaptureStatus(result.status(), result.terminalCause()),
-                .gas_left = result.gas_left,
-                .output = result.output_data,
-                .checkpoint_reverted = result.checkpoint_reverted,
-            };
-        }
+        // Capture wrappers. The mapping itself lives in `executor/trace_capture.zig`;
+        // these only supply the borrowed context and the executing frame depth.
 
         pub fn beginRootCapture(self: *Executor, message: evmz.Message, gas: ExecutionGas) !?evmz.trace.CallToken {
-            const context = self.currentCaptureContext() orelse return null;
-            if (!context.capturesCalls()) return null;
-
-            return context.beginCall(switch (message) {
-                .call => |call| .{
-                    .depth = 0,
-                    .kind = .call,
-                    .from = call.sender,
-                    .to = call.recipient,
-                    .code_address = call.recipient,
-                    .value = call.value,
-                    .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                    .input = call.input,
-                },
-                .create => |create| .{
-                    .depth = 0,
-                    .kind = if (create.salt == null) .create else .create2,
-                    .from = create.sender,
-                    .to = create.recipient,
-                    .code_address = create.recipient,
-                    .value = create.value,
-                    .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                    .input = create.init_code,
-                },
-            });
+            return trace_capture.beginRoot(self.currentCaptureContext(), message, gas);
         }
 
         pub fn finishRootCapture(self: *Executor, token: evmz.trace.CallToken, result: ExecutionResult) !void {
-            try self.currentCaptureContext().?.finishCall(token, .{
-                .status = callCaptureStatus(result.outcome.status, result.outcome.cause),
-                .gas_left = result.gas_left,
-                .output = result.output_data,
-                // Root execution has no frame-local checkpoint in CallRuntime.
-                .checkpoint_reverted = false,
-            });
+            try trace_capture.finishRoot(self.currentCaptureContext().?, token, result);
         }
 
         pub fn finishRootHostCapture(self: *Executor, token: evmz.trace.CallToken, result: Host.Result) !void {
-            try finishCallCapture(self.currentCaptureContext(), token, result);
+            try trace_capture.finishCall(self.currentCaptureContext(), token, result);
         }
 
         pub fn beginSelfDestructCapture(self: *Executor, address: Address, beneficiary: Address, balance: u256) !?evmz.trace.CallToken {
-            const context = self.currentCaptureContext() orelse return null;
-            if (!context.capturesCalls()) return null;
-            const depth = std.math.add(u16, self.trace_depth, 1) catch
-                std.math.maxInt(u16);
-            return context.beginCall(.{
-                .depth = depth,
-                .kind = .selfdestruct,
-                .from = address,
-                .to = beneficiary,
-                .code_address = address,
-                .value = balance,
-            });
+            return trace_capture.beginSelfDestruct(
+                self.currentCaptureContext(),
+                self.trace_depth,
+                address,
+                beneficiary,
+                balance,
+            );
         }
 
         pub fn finishSelfDestructCapture(self: *Executor, token: evmz.trace.CallToken) !void {
-            try self.currentCaptureContext().?.finishCall(token, .{
-                .status = .success,
-                .gas_left = 0,
-            });
-        }
-
-        fn traceFrameKind(frames: *FrameStore, index: usize) evmz.trace.TraceFrameKind {
-            return switch (frames.control(index).kind) {
-                .root_call => .root,
-                .call => switch (frames.frame(index).msg.kind) {
-                    .call => .call,
-                    .staticcall => .staticcall,
-                    .callcode => .callcode,
-                    .delegatecall => .delegatecall,
-                    .create => .create,
-                    .create2 => .create2,
-                },
-                .create => |child| switch (child.kind) {
-                    .create => .create,
-                    .create2 => .create2,
-                    else => unreachable,
-                },
-            };
+            try trace_capture.finishSelfDestruct(self.currentCaptureContext().?, token);
         }
 
         // Frame execution: one root message driven as a LIFO frame stack, plus the
@@ -1426,7 +1246,7 @@ pub fn ExecutorType(
                         0;
                     try context.pushFrame(
                         call_frame.msg.depth,
-                        traceFrameKind(self.frames, index),
+                        trace_capture.frameKind(self.frames, index),
                         call_frame.stack.asSlice(),
                         call_frame.memory.len(),
                         call_frame.return_data,
@@ -1557,14 +1377,14 @@ pub fn ExecutorType(
                 self.executor.trace_depth = msg.depth;
                 defer self.executor.trace_depth = previous_depth;
 
-                const call_capture = try beginCallCapture(self.capture_context, msg);
+                const call_capture = try trace_capture.beginCall(self.capture_context, msg);
                 if (Host.precheckResult(msg.*)) |result| {
-                    if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                    if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                     return result;
                 }
                 switch (try self.executor.beginCall(msg)) {
                     .immediate => |result| {
-                        if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                        if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                         return result;
                     },
                     .child => |child| {
@@ -1583,20 +1403,20 @@ pub fn ExecutorType(
                 self.executor.trace_depth = msg.depth;
                 defer self.executor.trace_depth = previous_depth;
 
-                const call_capture = try beginCallCapture(self.capture_context, msg);
+                const call_capture = try trace_capture.beginCall(self.capture_context, msg);
                 if (Host.precheckResult(msg.*)) |result| {
-                    if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                    if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                     return result;
                 }
                 if (msg.depth > Host.max_call_depth) {
                     const result = self.executor.createFailureWithCause(msg.gas, msg.gas_reservoir, .invalid, .call_depth_exceeded);
-                    if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                    if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                     return result;
                 }
 
                 switch (try self.executor.beginCreate(msg)) {
                     .immediate => |result| {
-                        if (call_capture) |token| try finishCallCapture(self.capture_context, token, result);
+                        if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                         return result;
                     },
                     .child => |child| {
@@ -1654,7 +1474,7 @@ pub fn ExecutorType(
                     },
                 };
                 if (call_capture) |token| {
-                    finishCallCaptureReserved(self.catpreContext(.call).?, token, host_result);
+                    trace_capture.finishCallReserved(self.catpreContext(.call).?, token, host_result);
                 }
                 self.top_frame_resolved = true;
                 return host_result;
@@ -2027,7 +1847,7 @@ pub fn ExecutorType(
             defer self.trace_depth = previous_depth;
 
             const capture_value = self.currentCaptureContext();
-            const call_capture = try beginCallCapture(capture_value, &msg);
+            const call_capture = try trace_capture.beginCall(capture_value, &msg);
             const result = Host.precheckResult(msg) orelse if (msg.kind == .create or msg.kind == .create2) result: {
                 // Direct Host callers may still submit an over-depth message.
                 // Opcode-generated terminal attempts were resolved above.
@@ -2050,17 +1870,11 @@ pub fn ExecutorType(
                     break :blk result;
                 },
             };
-            if (call_capture) |token| try finishCallCapture(capture_value, token, result);
+            if (call_capture) |token| try trace_capture.finishCall(capture_value, token, result);
             return result;
         }
 
         // Top-frame state gas. Charged before dispatch, reconciled into the result after.
-
-        const TopFrameStateGasCharge = struct {
-            spent: i64 = 0,
-            from_regular: i64 = 0,
-            out_of_gas: bool = false,
-        };
 
         fn topLevelDelegatedAccountAccess(self: *Executor, target: Address) !?evmz.execution.DelegatedAccountAccess {
             const state_target = stateAddress(target);
@@ -2081,7 +1895,7 @@ pub fn ExecutorType(
             recipient: Address,
             value: u256,
             gas: *ExecutionGas,
-        ) !TopFrameStateGasCharge {
+        ) !top_frame_gas.Charge {
             const same_address = Address.eql(sender, recipient);
             const creates_account = if (value == 0 or same_address)
                 false
@@ -2092,14 +1906,14 @@ pub fn ExecutorType(
                 .same_address = same_address,
                 .creates_account = creates_account,
             });
-            return chargeTopFrameStateGas(gas, charge_i64);
+            return top_frame_gas.charge(gas, charge_i64);
         }
 
         fn chargeTopFrameCreateStateGas(
             self: *Executor,
             options: Create,
             gas: *ExecutionGas,
-        ) !TopFrameStateGasCharge {
+        ) !top_frame_gas.Charge {
             // The integrated rule compares the pre-transaction account to the
             // empty account value. Storage does not make an account alive.
             const target_alive = if (try self.state.getAccountOrLoad(stateAddress(options.recipient))) |account|
@@ -2109,47 +1923,10 @@ pub fn ExecutorType(
             else
                 false;
 
-            return chargeTopFrameStateGas(
+            return top_frame_gas.charge(
                 gas,
                 spec.create.accountStateGas(.{ .target_alive = target_alive }),
             );
-        }
-
-        fn chargeTopFrameStateGas(
-            gas: *ExecutionGas,
-            charge_i64: i64,
-        ) TopFrameStateGasCharge {
-            if (charge_i64 <= 0) return .{};
-
-            const charge = std.math.cast(u64, charge_i64) orelse std.math.maxInt(u64);
-            const from_reservoir = @min(gas.reservoir, charge);
-            const from_regular = charge - from_reservoir;
-            if (from_regular > gas.regular_left) return .{ .out_of_gas = true };
-
-            gas.reservoir -= from_reservoir;
-            gas.regular_left -= from_regular;
-            return .{
-                .spent = charge_i64,
-                .from_regular = std.math.cast(i64, from_regular) orelse std.math.maxInt(i64),
-            };
-        }
-
-        fn finishTopFrameStateGas(result: *ExecutionResult, charge: TopFrameStateGasCharge) void {
-            if (charge.spent == 0) return;
-            const from_reservoir = std.math.sub(i64, charge.spent, charge.from_regular) catch 0;
-            switch (result.outcome.status) {
-                .success => {
-                    result.state_gas_spent = std.math.add(i64, result.state_gas_spent, charge.spent) catch std.math.maxInt(i64);
-                    result.state_gas_from_gas_left = std.math.add(i64, result.state_gas_from_gas_left, charge.from_regular) catch std.math.maxInt(i64);
-                },
-                .revert => {
-                    result.gas_reservoir = std.math.add(i64, result.gas_reservoir, from_reservoir) catch std.math.maxInt(i64);
-                    result.gas_left = std.math.add(i64, result.gas_left, charge.from_regular) catch std.math.maxInt(i64);
-                },
-                .invalid, .out_of_gas => {
-                    result.gas_reservoir = std.math.add(i64, result.gas_reservoir, from_reservoir) catch std.math.maxInt(i64);
-                },
-            }
         }
 
         // Entrypoints. The whole public execution surface, ordered outermost first.
@@ -2322,7 +2099,7 @@ pub fn ExecutorType(
             const resolved = try self.resolveCode(recipient);
             if (!resolved.delegated and nativeContractActive(recipient)) {
                 var result = try self.runNativeCallTransaction(sender, recipient, input, execution_gas, value);
-                finishTopFrameStateGas(&result, top_frame_state_gas);
+                top_frame_gas.finish(&result, top_frame_state_gas);
                 return .{ .stage = .payload, .result = result };
             }
             if (resolved.delegated) {
@@ -2339,7 +2116,7 @@ pub fn ExecutorType(
                         .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
                         .output_data = &.{},
                     };
-                    finishTopFrameStateGas(&result, top_frame_state_gas);
+                    top_frame_gas.finish(&result, top_frame_state_gas);
                     return .{ .stage = .preparation, .result = result };
                 }
                 execution_gas.regular_left -= access_cost;
@@ -2356,7 +2133,7 @@ pub fn ExecutorType(
                 .gas_reservoir = execution_gas.reservoir,
                 .value = value,
             });
-            finishTopFrameStateGas(&result, top_frame_state_gas);
+            top_frame_gas.finish(&result, top_frame_state_gas);
             return .{ .stage = .payload, .result = result };
         }
 
@@ -2513,7 +2290,7 @@ pub fn ExecutorType(
                 .value = options.value,
             });
             var result = host_result.executionResult(self.lastOutputData());
-            finishTopFrameStateGas(&result, top_frame_state_gas);
+            top_frame_gas.finish(&result, top_frame_state_gas);
             return .{ .stage = .payload, .result = result };
         }
 

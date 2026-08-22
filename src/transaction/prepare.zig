@@ -11,8 +11,6 @@ const validation = @import("validation.zig");
 /// Ordered Ethereum preparation closed over one exact VM specification.
 pub fn Runtime(comptime spec: ExactSpec) type {
     return struct {
-        pub const specification = spec;
-
         const Settlement = settlement.Runtime(spec);
         const Validation = validation.Runtime(spec);
         const transaction = spec.transaction;

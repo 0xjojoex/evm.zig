@@ -342,6 +342,7 @@ pub const ExecutionPayloadV4 = struct {
     pub fn deinit(self: *ExecutionPayloadV4, allocator: std.mem.Allocator) void {
         self.v3.deinit(allocator);
         BlockAccessListSsz.deinit(allocator, &self.block_access_list);
+        self.* = undefined;
     }
 
     pub fn hashTreeRoot(self: ExecutionPayloadV4, allocator: std.mem.Allocator) Error![32]u8 {

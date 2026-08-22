@@ -22,7 +22,6 @@ pub fn Instruction(comptime spec: ExactSpec) type {
     return struct {
         const dispatch_table = exact_instructions.table;
 
-        pub const specification = spec;
         pub const table = dispatch_table;
 
         pub fn entry(comptime opcode_byte: u8) instruction_table.Entry {

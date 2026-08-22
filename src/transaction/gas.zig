@@ -67,7 +67,6 @@ pub const GasPlan = struct {
 /// Stateless gas planner closed over one exact VM specification.
 pub fn Runtime(comptime spec: ExactSpec) type {
     return struct {
-        pub const specification = spec;
         const Self = @This();
         const transaction = spec.transaction;
 
