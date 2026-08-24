@@ -1,6 +1,10 @@
-//! Small procedural kernel for chain-owned block folds.
+//! Chain-agnostic block kernel: the ownership token, the block-history port,
+//! and the hook vocabulary that a concrete chain's block fold is built from.
 
 const std = @import("std");
+
+pub const lifecycle = @import("./block/lifecycle.zig");
+pub const HashSource = @import("./block/HashSource.zig");
 
 /// Copyable token proving that one concrete block fold owns an Executor's
 /// accepted branch. The fold keeps the Executor pointer; the token keeps only

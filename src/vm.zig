@@ -5,8 +5,8 @@
 
 const std = @import("std");
 
-const block_hash_source = @import("./BlockHashSource.zig");
-const block_program_module = @import("./block_program.zig");
+const block_hash_source = @import("./block/HashSource.zig");
+const block_lifecycle = @import("./block/lifecycle.zig");
 const engine_spec = @import("./spec.zig");
 const ethereum_block_execution = @import("./vm/block_execution.zig");
 const executor_module = @import("./executor.zig");
@@ -60,8 +60,8 @@ pub const Create = executor_module.Create;
 pub const Result = executor_module.Result;
 pub const CompileOptions = executor_module.CompileOptions;
 
-pub const AfterTransactionContext = block_program_module.AfterTransactionContext;
-pub const FinalizeBlockContext = block_program_module.FinalizeBlockContext;
+pub const AfterTransactionContext = block_lifecycle.AfterTransactionContext;
+pub const FinalizeBlockContext = block_lifecycle.FinalizeBlockContext;
 
 /// Compile one complete exact specification into its concrete VM type.
 /// Runtime fork selection belongs outside this boundary.

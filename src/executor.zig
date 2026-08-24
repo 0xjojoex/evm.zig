@@ -161,7 +161,7 @@ pub fn ExecutorType(
 
         pub const StateAddress = ExecutionState.StateAddress;
 
-        const BranchCheckpoint = State.BranchCheckpoint;
+        pub const BranchCheckpoint = State.BranchCheckpoint;
 
         pub const Init = ExecutorInitType(ExecutionState);
 

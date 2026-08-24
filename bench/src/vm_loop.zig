@@ -126,7 +126,7 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
             const result = try self.executor.executePreparedCallTransaction(call_options);
             const end_ns = try common.monotonicNowNs();
 
-            if (Executor.executionRolledBack(result.status())) {
+            if (result.status() != .success) {
                 self.executor.restoreBranch(&pre_execution);
             } else {
                 try self.executor.commitTransaction();

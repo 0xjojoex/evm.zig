@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const block_program = @import("../block_program.zig");
+const block_lifecycle = @import("../block/lifecycle.zig");
 const system_prepared_code = @import("../eth/system_prepared_code.zig");
 
 const Address = evmz.Address;
@@ -8,9 +8,9 @@ const ExecutionContext = evmz.execution.ExecutionContext;
 const Interpreter = evmz.interpreter;
 const InstrumentationMode = @import("instrumentation.zig").Mode;
 
-pub const BeforeBlockContext = block_program.BeforeBlockContext;
-pub const AfterTransactionContext = block_program.AfterTransactionContext;
-pub const FinalizeBlockContext = block_program.FinalizeBlockContext;
+pub const BeforeBlockContext = block_lifecycle.BeforeBlockContext;
+pub const AfterTransactionContext = block_lifecycle.AfterTransactionContext;
+pub const FinalizeBlockContext = block_lifecycle.FinalizeBlockContext;
 
 /// Applies before-block system contract calls:
 /// - EIP-4788 stores the parent beacon block root from Cancun onward.
@@ -18,7 +18,7 @@ pub const FinalizeBlockContext = block_program.FinalizeBlockContext;
 pub fn applyBeforeBlock(
     executor: anytype,
     execution_context: ExecutionContext,
-    calls: []const block_program.BlockSystemCall,
+    calls: []const block_lifecycle.BlockSystemCall,
 ) !void {
     try applySystemCalls(executor, execution_context, calls, .normal, {});
 }
@@ -26,7 +26,7 @@ pub fn applyBeforeBlock(
 pub fn applyBeforeBlockObserved(
     executor: anytype,
     execution_context: ExecutionContext,
-    calls: []const block_program.BlockSystemCall,
+    calls: []const block_lifecycle.BlockSystemCall,
     observer: anytype,
 ) !void {
     try applySystemCalls(executor, execution_context, calls, .observed, observer);
@@ -38,7 +38,7 @@ pub fn applyBeforeBlockObserved(
 pub fn applyPreludeSystemCalls(
     prelude: anytype,
     execution_context: ExecutionContext,
-    calls: []const block_program.BlockSystemCall,
+    calls: []const block_lifecycle.BlockSystemCall,
 ) @TypeOf(prelude).Error!void {
     for (calls) |call| {
         try callSystemContractInPrelude(
@@ -57,7 +57,7 @@ pub fn applyPreludeSystemCalls(
 pub fn applyAfterTransaction(
     executor: anytype,
     execution_context: ExecutionContext,
-    calls: []const block_program.BlockSystemCall,
+    calls: []const block_lifecycle.BlockSystemCall,
 ) !void {
     try applySystemCalls(executor, execution_context, calls, .normal, {});
 }
@@ -65,7 +65,7 @@ pub fn applyAfterTransaction(
 pub fn applyAfterTransactionObserved(
     executor: anytype,
     execution_context: ExecutionContext,
-    calls: []const block_program.BlockSystemCall,
+    calls: []const block_lifecycle.BlockSystemCall,
     observer: anytype,
 ) !void {
     try applySystemCalls(executor, execution_context, calls, .observed, observer);
@@ -74,7 +74,7 @@ pub fn applyAfterTransactionObserved(
 pub fn applyAfterTransactionCaptured(
     executor: anytype,
     execution_context: ExecutionContext,
-    calls: []const block_program.BlockSystemCall,
+    calls: []const block_lifecycle.BlockSystemCall,
     capture: *evmz.executor.CaptureContext,
     observer: anytype,
 ) !void {
@@ -85,7 +85,7 @@ pub fn applyFinalizeBlock(
     executor: anytype,
     execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
-    calls: []const block_program.FinalizeSystemCall,
+    calls: []const block_lifecycle.FinalizeSystemCall,
 ) ![]const []const u8 {
     return applyFinalizeBlockMode(
         executor,
@@ -101,7 +101,7 @@ pub fn applyFinalizeBlockObserved(
     executor: anytype,
     execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
-    calls: []const block_program.FinalizeSystemCall,
+    calls: []const block_lifecycle.FinalizeSystemCall,
     observer: anytype,
 ) ![]const []const u8 {
     return applyFinalizeBlockMode(
@@ -118,7 +118,7 @@ fn applyFinalizeBlockMode(
     executor: anytype,
     execution_context: ExecutionContext,
     allocator: std.mem.Allocator,
-    calls: []const block_program.FinalizeSystemCall,
+    calls: []const block_lifecycle.FinalizeSystemCall,
     mode: InstrumentationMode,
     observer: anytype,
 ) ![]const []const u8 {
@@ -167,7 +167,7 @@ fn applyFinalizeBlockMode(
 fn applySystemCalls(
     executor: anytype,
     execution_context: ExecutionContext,
-    calls: []const block_program.BlockSystemCall,
+    calls: []const block_lifecycle.BlockSystemCall,
     mode: InstrumentationMode,
     observer: anytype,
 ) !void {
@@ -385,8 +385,8 @@ test "Amsterdam block hook executes state growth from the system-call reservoir"
     const ReservoirBlock = struct {
         const recipient = evmz.addr(0x8037);
 
-        fn beforeBlock(_: BeforeBlockContext) block_program.BlockSystemCalls {
-            var calls = block_program.BlockSystemCalls{};
+        fn beforeBlock(_: BeforeBlockContext) block_lifecycle.BlockSystemCalls {
+            var calls = block_lifecycle.BlockSystemCalls{};
             calls.append(.{
                 .sender = ethereum.system_address,
                 .recipient = recipient,
@@ -426,8 +426,8 @@ test "finalize block copies successful system contract output into typed request
     const RequestBlock = struct {
         const recipient = evmz.addr(0x7002);
 
-        pub fn finalizeBlock(_: FinalizeBlockContext) block_program.FinalizeSystemCalls {
-            var calls = block_program.FinalizeSystemCalls{};
+        pub fn finalizeBlock(_: FinalizeBlockContext) block_lifecycle.FinalizeSystemCalls {
+            var calls = block_lifecycle.FinalizeSystemCalls{};
             calls.append(.{
                 .call = .{
                     .sender = ethereum.system_address,
@@ -485,8 +485,8 @@ test "finalize block rejects missing required system contract code" {
     const ethereum = evmz.eth;
 
     const RequiredBlock = struct {
-        pub fn finalizeBlock(_: FinalizeBlockContext) block_program.FinalizeSystemCalls {
-            var calls = block_program.FinalizeSystemCalls{};
+        pub fn finalizeBlock(_: FinalizeBlockContext) block_lifecycle.FinalizeSystemCalls {
+            var calls = block_lifecycle.FinalizeSystemCalls{};
             calls.append(.{
                 .call = .{
                     .sender = ethereum.system_address,

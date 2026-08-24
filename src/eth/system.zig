@@ -1,20 +1,20 @@
 const address = @import("../address.zig");
-const block_program = @import("../block_program.zig");
+const block_lifecycle = @import("../block/lifecycle.zig");
 const eip6110 = @import("eip/6110.zig");
 const eip7002 = @import("eip/7002.zig");
 const eip7251 = @import("eip/7251.zig");
 const eip8037 = @import("eip/8037.zig");
 const eip8282 = @import("eip/8282.zig");
 
-pub const BeforeBlockContext = block_program.BeforeBlockContext;
-pub const BlockHookInput = block_program.BlockHookInput;
-pub const BlockSystemCall = block_program.BlockSystemCall;
-pub const BlockSystemCalls = block_program.BlockSystemCalls;
-pub const BeforeTransactionContext = block_program.BeforeTransactionContext;
-pub const AfterTransactionContext = block_program.AfterTransactionContext;
-pub const FinalizeBlockContext = block_program.FinalizeBlockContext;
-pub const FinalizeSystemCall = block_program.FinalizeSystemCall;
-pub const FinalizeSystemCalls = block_program.FinalizeSystemCalls;
+pub const BeforeBlockContext = block_lifecycle.BeforeBlockContext;
+pub const BlockHookInput = block_lifecycle.BlockHookInput;
+pub const BlockSystemCall = block_lifecycle.BlockSystemCall;
+pub const BlockSystemCalls = block_lifecycle.BlockSystemCalls;
+pub const BeforeTransactionContext = block_lifecycle.BeforeTransactionContext;
+pub const AfterTransactionContext = block_lifecycle.AfterTransactionContext;
+pub const FinalizeBlockContext = block_lifecycle.FinalizeBlockContext;
+pub const FinalizeSystemCall = block_lifecycle.FinalizeSystemCall;
+pub const FinalizeSystemCalls = block_lifecycle.FinalizeSystemCalls;
 
 pub const system_address = address.addr(0xfffffffffffffffffffffffffffffffffffffffe);
 pub const beacon_roots_address = address.addr(0x000f3df6d732807ef1319fb7b8bb8522d0beac02);

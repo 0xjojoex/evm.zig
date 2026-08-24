@@ -24,7 +24,7 @@ const std = @import("std");
 
 pub const address = @import("./address.zig");
 pub const block = @import("./block.zig");
-pub const BlockHashSource = @import("./BlockHashSource.zig");
+pub const BlockHashSource = block.HashSource;
 pub const code = @import("./code.zig");
 pub const crypto = @import("./crypto.zig");
 pub const eth = @import("./eth.zig");

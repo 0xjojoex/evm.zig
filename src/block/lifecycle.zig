@@ -1,14 +1,13 @@
-//! Ethereum block-system-call value types.
+//! Block-lifecycle hook vocabulary.
 //!
-//! Concrete chain folds live with their chain code. This module contains only
-//! the bounded values shared by Ethereum specifications and BlockSTF.
-
-// TODO: rename files
+//! The contexts a spec is handed at each block hook point, and the bounded
+//! system-call lists it returns. Concrete chain folds live with their chain
+//! code; this module holds only the values they exchange with BlockSTF.
 
 const std = @import("std");
 
-const Address = @import("./address.zig").Address;
-const execution = @import("./execution.zig");
+const Address = @import("../address.zig").Address;
+const execution = @import("../execution.zig");
 
 pub const BeforeBlockContext = struct {
     number: u64,

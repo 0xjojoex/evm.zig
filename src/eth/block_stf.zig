@@ -10,7 +10,7 @@ const std = @import("std");
 
 const Executor = @import("../executor.zig");
 const address = @import("../address.zig");
-const block_program = @import("../block_program.zig");
+const block_lifecycle = @import("../block/lifecycle.zig");
 const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const bal_differential = @import("bal/differential.zig");
@@ -1482,7 +1482,7 @@ pub fn deriveRequests(
     executor: anytype,
     execution_context: execution.ExecutionContext,
     deposit_request_data: []const u8,
-    finalize_calls: []const block_program.FinalizeSystemCall,
+    finalize_calls: []const block_lifecycle.FinalizeSystemCall,
     observer: anytype,
 ) ![]const []const u8 {
     var requests: std.ArrayList([]const u8) = .empty;
