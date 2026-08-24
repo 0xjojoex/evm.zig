@@ -15,6 +15,9 @@ const rlp = evmz.rlp;
 
 const Address = address.Address;
 
+pub const OpEnv = evmz.Env;
+pub const EthereumTransaction = evmz.Transaction;
+
 /// Small OP revision window for the composition spike. The runtime caller may
 /// select one of these, but each selected VM is compiled from one exact spec.
 pub const OpRevision = enum {
@@ -32,11 +35,12 @@ const ecotone_transaction_kinds = kinds: {
 };
 
 /// Resolve family-owned environment facts once, before transaction-variant
-/// dispatch. OP serves no blobs, so Ecotone pins the opcode-visible
-/// BLOBBASEFEE at one for Ethereum transactions and deposits alike.
-fn executionEnv(revision: OpRevision, inherited: evmz.Env) evmz.Env {
+/// dispatch. OP serves no blobs, so an exact spec with BLOBBASEFEE active pins
+/// its opcode-visible value at one for Ethereum transactions and deposits.
+fn executionEnv(comptime spec: evmz.Spec, inherited: evmz.Env) evmz.Env {
     var resolved = inherited;
-    if (revision == .ecotone or revision == .fjord) resolved.blob_base_fee = 1;
+    if (spec.instruction.entry(@intFromEnum(evmz.Opcode.BLOBBASEFEE)).active)
+        resolved.blob_base_fee = 1;
     return resolved;
 }
 
@@ -57,15 +61,6 @@ pub const ecotone_spec = evmz.eth.cancun.extend(.{
 pub const fjord_spec = ecotone_spec.extend(.{
     .precompile = FjordPrecompile,
 });
-
-pub fn opSpec(comptime revision: OpRevision) evmz.eth.Spec {
-    return switch (revision) {
-        .canyon => canyon_spec,
-        .delta => delta_spec,
-        .ecotone => ecotone_spec,
-        .fjord => fjord_spec,
-    };
-}
 
 /// Borrowed decoded deposited transaction.
 ///
@@ -131,7 +126,7 @@ pub const DepositOutput = struct {
 /// deposits remain distinct while sharing one statically bound transaction
 /// program and Executor.
 pub const OpTransaction = union(enum) {
-    ethereum: evmz.Transaction,
+    ethereum: EthereumTransaction,
     deposit: DepositTransaction,
 };
 
@@ -147,40 +142,43 @@ pub const OpRejection = union(enum) {
     deposit: DepositRejection,
 };
 
-/// Resolved family input consumed by `OpVm`; direct callers construct it with
-/// `init`, while block execution constructs it from an `OpBlockEnv`.
+/// Shared input for direct and block family execution. The environment may be
+/// inherited verbatim: every public OP entry resolves family-owned
+/// environment facts at ingress before dispatch.
 pub const OpInput = struct {
     env: evmz.Env,
     tx: OpTransaction,
     progress: evmz.transaction.PreparationBlockProgress = .{},
 
-    pub fn init(comptime revision: OpRevision, env: evmz.Env, tx: OpTransaction) OpInput {
-        return .{
-            .env = executionEnv(revision, env),
-            .tx = tx,
-        };
+    fn normalize(self: OpInput, comptime spec: evmz.Spec) OpInput {
+        var normalized = self;
+        normalized.env = executionEnv(spec, self.env);
+        return normalized;
     }
 };
 
 const DepositPrepared = struct {
     gas_plan: evmz.transaction.GasPlan,
     execution_gas: ?evmz.execution.ExecutionGas,
-    request: evmz.execution.EvmExecutionRequest,
+    request: evmz.execution.ExecutionRequest,
     created_address: ?Address,
     deposit_nonce: u64,
 };
 
 /// OP owns deposit policy; the shared transaction program owns active and
 /// pending state plus the caller resolution contract.
-fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
-    return struct {
-        const Gas = EthereumVm.Gas;
-        const Settlement = EthereumVm.Settlement;
+fn DepositTransition(comptime spec: evmz.Spec) type {
+    const Vm = OpVm(spec);
 
-        pub const Error = OpContext.Error || error{ Overflow, MissingCreateRecipient };
+    return struct {
+        const Context = Vm.Context;
+        const Error = Context.Error || error{ MissingCreateRecipient, Overflow };
+
+        const Gas = Context.Gas;
+        const Settlement = Context.Settlement;
 
         pub fn transact(
-            context: *OpContext,
+            context: *Context,
             tx: DepositTransaction,
         ) Error!evmz.transaction.TransitionOutcomeType(DepositOutput, DepositRejection) {
             if (tx.is_system_transaction) {
@@ -227,7 +225,7 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
             } };
         }
 
-        fn prepare(context: *OpContext, tx: DepositTransaction) Error!DepositPrepared {
+        fn prepare(context: *Context, tx: DepositTransaction) Error!DepositPrepared {
             const gas_planner = Gas{};
             const gas_plan = gas_planner.gasPlan(tx.input, tx.gas_limit, .{
                 .is_create = tx.to == null,
@@ -268,7 +266,7 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
         /// Deposits are prepaid on L1: the zero-price settlement plan transfers
         /// nothing and only shapes the receipt gas.
         fn depositGas(
-            context: *const OpContext,
+            context: *const Context,
             tx: DepositTransaction,
             gas_plan: evmz.transaction.GasPlan,
             result: evmz.transaction.ExecutionGasResult,
@@ -291,47 +289,17 @@ fn DepositTransition(comptime OpContext: type, comptime EthereumVm: type) type {
         /// Regolith includes the deposit as a failed transaction that burns its
         /// full gas limit. Returning null selects that inclusion path.
         fn resolveExecutionGas(
-            _: *const OpContext,
+            _: *const Context,
             gas_planner: Gas,
             tx: DepositTransaction,
             gas_plan: evmz.transaction.GasPlan,
         ) ?evmz.execution.ExecutionGas {
             const execution_gas = gas_plan.execution orelse return null;
             if (tx.to == null and tx.input.len > gas_planner.maxInitcodeSize()) return null;
-            if (EthereumVm.specification.transaction.total_gas_limit) |limit| {
+            if (spec.transaction.total_gas_limit) |limit| {
                 if (tx.gas_limit > limit) return null;
             }
             return execution_gas;
-        }
-    };
-}
-
-fn OpTransition(
-    comptime OpContext: type,
-    comptime EthereumTransition: type,
-    comptime DepositImplementation: type,
-) type {
-    return struct {
-        pub const Context = OpContext;
-        pub const Transaction = OpTransaction;
-        pub const Output = OpOutput;
-        pub const Rejection = OpRejection;
-        pub const Error = EthereumTransition.Error || DepositImplementation.Error;
-
-        pub fn transact(
-            context: *OpContext,
-            tx: OpTransaction,
-        ) Error!evmz.transaction.TransitionOutcomeType(OpOutput, OpRejection) {
-            return switch (tx) {
-                .ethereum => |ethereum| switch (try EthereumTransition.transact(context, ethereum)) {
-                    .rejected => |reason| .{ .rejected = .{ .ethereum = reason } },
-                    .completed => |output| .{ .completed = .{ .ethereum = output } },
-                },
-                .deposit => |deposit| switch (try DepositImplementation.transact(context, deposit)) {
-                    .rejected => |reason| .{ .rejected = .{ .deposit = reason } },
-                    .completed => |output| .{ .completed = .{ .deposit = output } },
-                },
-            };
         }
     };
 }
@@ -345,180 +313,263 @@ pub const OpIncludedTransaction = struct {
     cumulative_transactions: u64,
 };
 
-/// OP block ingress owns environment normalization before any transaction
-/// variant is formed. The transaction program receives only the resolved EVM
-/// environment stored here.
-pub const OpBlockEnv = struct {
-    execution: evmz.Env,
-
-    pub fn init(comptime revision: OpRevision, inherited: evmz.Env) OpBlockEnv {
-        return .{ .execution = executionEnv(revision, inherited) };
-    }
+pub const OpBlockOutcome = union(enum) {
+    rejected: OpRejection,
+    included: OpIncludedTransaction,
 };
 
-/// Structural implementation of the `OpVm.Block` fold, kept to the smallest
-/// legal state: a transaction count. The seam it demonstrates is the split
-/// between `planInclude`, which may still fail while the output is only
-/// borrowed, and `applyInclude`, which commits once the transaction retains.
-const OpBlockProgram = struct {
-    pub const Env = OpBlockEnv;
-    pub const Included = OpIncludedTransaction;
-    pub const Result = u64;
+pub const OpExecutorError = evmz.executor.errors.Error;
 
-    pub const State = u64;
-    pub const Error = error{TransactionCountOverflow};
-    pub const PreludeError = error{};
-    pub const InclusionPlan = u64;
-
-    pub fn init(_: OpBlockEnv) State {
-        return 0;
-    }
-
-    pub fn transactInput(
-        env: *const OpBlockEnv,
-        _: *const State,
-        tx: *const OpTransaction,
-    ) OpInput {
-        return .{ .env = env.execution, .tx = tx.* };
-    }
-
-    pub fn planInclude(
-        _: *const OpBlockEnv,
-        state: *const State,
-        _: *const OpTransaction,
-        _: *const OpOutput,
-        _: evmz.state.LogBuffer.View,
-    ) Error!InclusionPlan {
-        return std.math.add(u64, state.*, 1) catch error.TransactionCountOverflow;
-    }
-
-    pub fn included(
-        _: *const OpTransaction,
-        output: *const OpOutput,
-        _: evmz.state.LogBuffer.View,
-        plan: InclusionPlan,
-    ) OpIncludedTransaction {
-        return .{
-            .output = output.*,
-            .cumulative_transactions = plan,
-        };
-    }
-
-    pub fn applyInclude(state: *State, plan: InclusionPlan) void {
-        state.* = plan;
-    }
-
-    pub fn finish(_: *const OpBlockEnv, state: *const State) u64 {
-        return state.*;
-    }
+pub const OpBlockError = OpExecutorError || error{
+    MissingCreateRecipient,
+    Overflow,
+    TransactionCountOverflow,
 };
 
-/// Compile one complete OP fork. Ethereum values are fixed before the generic
-/// deposit program is bound, so no revision or runtime policy enters execution.
-pub fn OpFamily(comptime revision: OpRevision) type {
-    return OpFamilyFromSpec(revision, opSpec(revision));
-}
+pub const OpTransactError = OpExecutorError || error{
+    MissingCreateRecipient,
+    Overflow,
+};
 
-fn OpFamilyFromSpec(comptime revision: OpRevision, comptime spec_value: evmz.eth.Spec) type {
-    const EthereumVm = evmz.Vm(spec_value);
-    const Context = EthereumVm.Context(OpInput);
-    const EthereumTransition = EthereumVm.Transition(OpInput);
-    const DepositImplementation = DepositTransition(Context, EthereumVm);
-    const CombinedTransition = OpTransition(Context, EthereumTransition, DepositImplementation);
-    const TransactionVm = EthereumVm.Program(CombinedTransition);
-    const BlockExecution = TransactionVm.Block(OpBlockProgram);
+pub const DepositResult = union(enum) {
+    rejected: DepositRejection,
+    completed: DepositOutput,
+};
 
+pub const EthereumResult = union(enum) {
+    rejected: evmz.Evm.Rejection,
+    completed: evmz.TxExecutionResult,
+};
+
+/// Compile one concrete OP transaction family and its chain-owned block fold.
+pub fn OpVm(comptime spec: evmz.Spec) type {
     return struct {
-        pub const specification = spec_value;
-        pub const op_revision = revision;
-        pub const Evm = EthereumVm;
-        pub const Vm = TransactionVm;
-        pub const Block = BlockExecution;
+        const Self = @This();
+        const Engine = evmz.Engine(spec);
 
-        pub fn input(env: evmz.Env, tx: OpTransaction) OpInput {
-            return OpInput.init(revision, env, tx);
+        pub const Executor = Engine.Executor;
+        pub const Init = struct {
+            state_reader: ?evmz.StateReader = null,
+            prepared_code_backend: ?evmz.PreparedCodeBackend = null,
+            block_hash_source: ?evmz.BlockHashSource = null,
+            reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+        };
+        pub const Transaction = OpTransaction;
+        pub const TransactInput = OpInput;
+        pub const Output = OpOutput;
+        pub const Rejection = OpRejection;
+        pub const Error = OpTransactError;
+        pub const Executed = Executor.Executed(OpOutput);
+        pub const Outcome = evmz.transaction.TransactOutcomeType(Executed, OpRejection);
+
+        const Context = Engine.Context(OpInput);
+        const EthereumTransition = Engine.EthereumTransition(OpInput);
+        const Deposit = DepositTransition(spec);
+
+        const Family = struct {
+            pub fn transact(
+                context: *Context,
+                transaction_value: OpTransaction,
+            ) OpTransactError!evmz.transaction.TransitionOutcomeType(OpOutput, OpRejection) {
+                return switch (transaction_value) {
+                    .ethereum => |tx| switch (try EthereumTransition.transact(context, tx)) {
+                        .rejected => |reason| .{ .rejected = .{ .ethereum = reason } },
+                        .completed => |output| .{ .completed = .{ .ethereum = output } },
+                    },
+                    .deposit => |tx| switch (try Deposit.transact(context, tx)) {
+                        .rejected => |reason| .{ .rejected = .{ .deposit = reason } },
+                        .completed => |output| .{ .completed = .{ .deposit = output } },
+                    },
+                };
+            }
+        };
+
+        const Program = Engine.Program(
+            OpInput,
+            OpOutput,
+            OpRejection,
+            OpTransactError,
+            Family,
+        );
+
+        pub const BlockExecution = struct {
+            executor: *Executor,
+            claim: evmz.block.Claim,
+            env: evmz.Env,
+            transaction_count: u64 = 0,
+
+            pub fn init(
+                vm: *Self,
+                env: OpEnv,
+            ) error{UncommittedChanges}!BlockExecution {
+                const executor = &vm.executor;
+                return .{
+                    .executor = executor,
+                    .claim = try evmz.block.Claim.begin(executor),
+                    .env = executionEnv(spec, env),
+                };
+            }
+
+            pub fn transact(self: *BlockExecution, tx: OpTransaction) OpBlockError!OpBlockOutcome {
+                const outcome =
+                    try Program.transactInBlock(self.executor, self.claim, .{
+                        .env = self.env,
+                        .tx = tx,
+                    }, .normal);
+
+                return switch (outcome) {
+                    .rejected => |reason| .{ .rejected = reason },
+                    .executed => |executed_value| blk: {
+                        var executed = executed_value;
+                        defer executed.discardIfCurrent();
+                        const view = executed.view();
+                        const transaction_count =
+                            std.math.add(u64, self.transaction_count, 1) catch
+                                return error.TransactionCountOverflow;
+                        const included: OpIncludedTransaction = .{
+                            .output = view.output.*,
+                            .cumulative_transactions = transaction_count,
+                        };
+                        executed.retain();
+                        self.transaction_count = transaction_count;
+                        break :blk .{ .included = included };
+                    },
+                };
+            }
+
+            pub fn progress(self: *const BlockExecution) u64 {
+                self.claim.requireActive(self.executor);
+                return self.transaction_count;
+            }
+
+            pub fn finish(self: *BlockExecution) u64 {
+                self.claim.requireActive(self.executor);
+                const result = self.transaction_count;
+                self.claim.release(self.executor);
+                return result;
+            }
+
+            pub fn discardIfUnfinished(self: *BlockExecution) void {
+                self.claim.discardIfUnfinished(self.executor);
+            }
+        };
+
+        executor: Executor,
+
+        pub fn init(allocator: std.mem.Allocator, options: Init) Self {
+            return .{ .executor = Executor.init(allocator, .{
+                .state = .{ .reader = options.state_reader },
+                .prepared_code_backend = options.prepared_code_backend,
+                .block_hash_source = options.block_hash_source,
+                .reentrant_native_contract_runtime = options.reentrant_native_contract_runtime,
+            }) };
         }
 
-        pub fn blockEnv(env: evmz.Env) OpBlockEnv {
-            return OpBlockEnv.init(revision, env);
+        pub fn deinit(self: *Self) void {
+            self.executor.deinit();
+        }
+
+        /// Generic OP ingress. Resolves family-owned env facts before
+        /// transaction-variant dispatch, so callers pass the inherited
+        /// env verbatim.
+        pub fn transact(self: *Self, input: OpInput) Error!Outcome {
+            return Program.transact(&self.executor, input.normalize(spec));
+        }
+
+        pub fn transactDeposit(
+            self: *Self,
+            env: OpEnv,
+            transaction_value: DepositTransaction,
+        ) OpTransactError!DepositResult {
+            return switch (try self.transact(.{
+                .env = env,
+                .tx = .{ .deposit = transaction_value },
+            })) {
+                .rejected => |reason| switch (reason) {
+                    .deposit => |deposit| .{ .rejected = deposit },
+                    .ethereum => unreachable,
+                },
+                .executed => |executed| switch (executed.retainResult()) {
+                    .deposit => |deposit| .{ .completed = deposit },
+                    .ethereum => unreachable,
+                },
+            };
+        }
+
+        pub fn transactEthereum(
+            self: *Self,
+            env: OpEnv,
+            transaction_value: EthereumTransaction,
+        ) OpTransactError!EthereumResult {
+            return switch (try self.transact(.{
+                .env = env,
+                .tx = .{ .ethereum = transaction_value },
+            })) {
+                .rejected => |reason| switch (reason) {
+                    .ethereum => |ethereum| .{ .rejected = ethereum },
+                    .deposit => unreachable,
+                },
+                .executed => |executed| switch (executed.retainResult()) {
+                    .ethereum => |ethereum| .{ .completed = ethereum },
+                    .deposit => unreachable,
+                },
+            };
         }
     };
 }
 
-pub const Canyon = OpFamily(.canyon);
-pub const Delta = OpFamily(.delta);
-pub const Ecotone = OpFamily(.ecotone);
-pub const Fjord = OpFamily(.fjord);
-
-fn retainOutput(outcome: anytype) !OpOutput {
-    return switch (outcome) {
-        .executed => |executed| executed.retainResult(),
-        .rejected => error.UnexpectedRejection,
-    };
-}
-
-fn retainDeposit(outcome: anytype) !DepositOutput {
-    return switch (try retainOutput(outcome)) {
-        .deposit => |output| output,
-        .ethereum => error.UnexpectedEthereumOutput,
-    };
-}
-
-fn retainEthereum(outcome: anytype) !evmz.TxExecutionResult {
-    return switch (try retainOutput(outcome)) {
-        .ethereum => |output| output,
-        .deposit => error.UnexpectedDepositOutput,
-    };
-}
-
-fn seedTestAccount(executor: anytype, account_address: Address, balance: u256, code: []const u8) !void {
-    var account = evmz.state.MemoryAccount.init(std.testing.allocator);
-    account.account.balance = balance;
-    if (code.len != 0) try account.setCode(code);
-    try executor.state.seedAccount(account_address, account);
-}
+pub const Canyon = OpVm(canyon_spec);
+pub const Delta = OpVm(delta_spec);
+pub const Ecotone = OpVm(ecotone_spec);
+pub const Fjord = OpVm(fjord_spec);
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    const revision = if (args.next()) |arg| try parseOpRevision(arg) else OpRevision.canyon;
+    const revision: OpRevision = if (args.next()) |arg| try parseOpRevision(arg) else OpRevision.canyon;
     if (args.next() != null) return error.UnexpectedArgument;
 
     return switch (revision) {
-        .canyon => runExample(Canyon, init.gpa),
-        .delta => runExample(Delta, init.gpa),
-        .ecotone => runExample(Ecotone, init.gpa),
-        .fjord => runExample(Fjord, init.gpa),
+        inline else => |rev| runExample(rev, init.gpa),
     };
 }
 
-fn runExample(comptime Family: type, allocator: std.mem.Allocator) !void {
+fn runExample(comptime revision: OpRevision, allocator: std.mem.Allocator) !void {
+    const spec = switch (revision) {
+        .canyon => canyon_spec,
+        .delta => delta_spec,
+        .ecotone => ecotone_spec,
+        .fjord => fjord_spec,
+    };
+    const Vm = OpVm(spec);
+    var vm = Vm.init(allocator, .{});
+    defer vm.deinit();
+
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Family.Evm.Executor.init(allocator, .{});
-    defer executor.deinit();
-    var vm = Family.Vm.init(&executor);
-
-    const executed = try retainDeposit(try vm.transact(Family.input(
+    const executed = switch (try vm.transactDeposit(
         .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{ .deposit = .{
+        .{
             .source_hash = [_]u8{0x11} ** 32,
             .from = sender,
             .to = recipient,
             .mint = 10,
             .value = 3,
             .gas_limit = 100_000,
-        } },
-    )));
+        },
+    )) {
+        .completed => |output| output,
+        .rejected => return error.UnexpectedRejection,
+    };
 
     if (executed.status != .success) return error.DepositExecutionFailed;
-    if (try executor.getBalance(sender) != 7) return error.MintLifecycleMismatch;
-    if (try executor.getBalance(recipient) != 3) return error.ValueTransferMismatch;
+    if (try vm.executor.getBalance(sender) != 7) return error.MintLifecycleMismatch;
+    if (try vm.executor.getBalance(recipient) != 3) return error.ValueTransferMismatch;
 
-    std.debug.print("{s} deposit status: {s}, nonce: {d}, gas used: {d}\n", .{
-        @tagName(Family.op_revision),
-        @tagName(executed.status),
+    std.debug.print("{t} deposit status: {t}, nonce: {d}, gas used: {d}\n", .{
+        revision,
+        executed.status,
         executed.deposit_nonce,
         executed.gas.used,
     });
@@ -529,6 +580,13 @@ fn parseOpRevision(value: []const u8) !OpRevision {
         if (std.mem.eql(u8, value, @tagName(revision))) return revision;
     }
     return error.UnknownOpRevision;
+}
+
+fn seedTestAccount(executor: anytype, account_address: Address, balance: u256, code: []const u8) !void {
+    var account = evmz.state.MemoryAccount.init(std.testing.allocator);
+    account.account.balance = balance;
+    if (code.len != 0) try account.setCode(code);
+    try executor.state.seedAccount(account_address, account);
 }
 
 test "deposit codec preserves the exact typed envelope" {
@@ -560,13 +618,11 @@ test "deposit codec preserves the exact typed envelope" {
 test "successful deposit preserves mint and advances nonce" {
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-
-    const executed = try retainDeposit(try vm.transact(Canyon.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{ .deposit = .{
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const outcome = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+        .tx = .{ .deposit = .{
             .source_hash = [_]u8{0x22} ** 32,
             .from = sender,
             .to = recipient,
@@ -574,26 +630,30 @@ test "successful deposit preserves mint and advances nonce" {
             .value = 3,
             .gas_limit = 100_000,
         } },
-    )));
+    });
+    const executed = switch (outcome) {
+        .executed => |result| result,
+        .rejected => unreachable,
+    };
+    const result = executed.retainResult().deposit;
 
-    try std.testing.expectEqual(evmz.TxStatus.success, executed.status);
-    try std.testing.expectEqual(@as(u64, 0), executed.deposit_nonce);
-    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
-    try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(recipient));
+    try std.testing.expectEqual(evmz.TxStatus.success, result.status);
+    try std.testing.expectEqual(@as(u64, 0), result.deposit_nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u256, 7), try vm.executor.getBalance(sender));
+    try std.testing.expectEqual(@as(u256, 3), try vm.executor.getBalance(recipient));
 }
 
 test "reverted deposit keeps mint and nonce but rolls back EVM writes" {
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-    try seedTestAccount(&executor, recipient, 0, &.{ 0x5f, 0x5f, 0xfd });
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    try seedTestAccount(&vm.executor, recipient, 0, &.{ 0x5f, 0x5f, 0xfd });
 
-    const executed = try retainDeposit(try vm.transact(Canyon.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{ .deposit = .{
+    const outcome = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+        .tx = .{ .deposit = .{
             .source_hash = [_]u8{0x33} ** 32,
             .from = sender,
             .to = recipient,
@@ -601,24 +661,24 @@ test "reverted deposit keeps mint and nonce but rolls back EVM writes" {
             .value = 3,
             .gas_limit = 100_000,
         } },
-    )));
+    });
 
-    try std.testing.expectEqual(evmz.TxStatus.revert, executed.status);
-    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expectEqual(@as(u256, 10), try executor.getBalance(sender));
-    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(recipient));
+    const result = outcome.executed.retainResult().deposit;
+
+    try std.testing.expectEqual(evmz.TxStatus.revert, result.status);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u256, 10), try vm.executor.getBalance(sender));
+    try std.testing.expectEqual(@as(u256, 0), try vm.executor.getBalance(recipient));
 }
 
 test "insufficient-value deposit becomes an included failure after mint" {
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-
-    const executed = try retainDeposit(try vm.transact(Canyon.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{ .deposit = .{
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const outcome = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+        .tx = .{ .deposit = .{
             .source_hash = [_]u8{0x34} ** 32,
             .from = sender,
             .to = recipient,
@@ -626,46 +686,46 @@ test "insufficient-value deposit becomes an included failure after mint" {
             .value = 3,
             .gas_limit = 100_000,
         } },
-    )));
+    });
 
-    try std.testing.expectEqual(evmz.TxStatus.invalid, executed.status);
-    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expectEqual(@as(u256, 2), try executor.getBalance(sender));
-    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(recipient));
+    const result = outcome.executed.retainResult().deposit;
+
+    try std.testing.expectEqual(evmz.TxStatus.invalid, result.status);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u256, 2), try vm.executor.getBalance(sender));
+    try std.testing.expectEqual(@as(u256, 0), try vm.executor.getBalance(recipient));
 }
 
 test "intrinsic-gas failure is included after mint with one nonce increment" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-
-    const executed = try retainDeposit(try vm.transact(Canyon.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{ .deposit = .{
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const outcome = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+        .tx = .{ .deposit = .{
             .source_hash = [_]u8{0x44} ** 32,
             .from = sender,
             .to = address.addr(0xbbbb),
             .mint = 5,
             .gas_limit = 20_000,
         } },
-    )));
+    });
 
-    try std.testing.expectEqual(evmz.TxStatus.invalid, executed.status);
-    try std.testing.expectEqual(@as(u64, 20_000), executed.gas.used);
-    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccountOrLoad(sender)).?.nonce);
-    try std.testing.expectEqual(@as(u256, 5), try executor.getBalance(sender));
+    const result = outcome.executed.retainResult().deposit;
+
+    try std.testing.expectEqual(evmz.TxStatus.invalid, result.status);
+    try std.testing.expectEqual(@as(u64, 20_000), result.gas.used);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u256, 5), try vm.executor.getBalance(sender));
 }
 
 test "create deposit derives address from the pre-execution deposit nonce" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-
-    const executed = try retainDeposit(try vm.transact(Canyon.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const outcome = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+        .tx = .{
             .deposit = .{
                 .source_hash = [_]u8{0x45} ** 32,
                 .from = sender,
@@ -675,23 +735,23 @@ test "create deposit derives address from the pre-execution deposit nonce" {
                 .input = &.{ 0x5f, 0x5f, 0xf3 },
             },
         },
-    )));
+    });
 
-    try std.testing.expectEqual(evmz.TxStatus.success, executed.status);
-    try std.testing.expectEqual(address.create(sender, 0), executed.created_address.?);
-    try std.testing.expectEqual(@as(u64, 0), executed.deposit_nonce);
-    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccountOrLoad(sender)).?.nonce);
+    const result = outcome.executed.retainResult().deposit;
+
+    try std.testing.expectEqual(evmz.TxStatus.success, result.status);
+    try std.testing.expectEqual(address.create(sender, 0), result.created_address.?);
+    try std.testing.expectEqual(@as(u64, 0), result.deposit_nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
 }
 
 test "legacy system deposit is rejected before lifecycle writes" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-
-    const result = try vm.transact(Canyon.input(
-        .{ .chain_id = 10 },
-        .{ .deposit = .{
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const result = try vm.transact(.{
+        .env = .{ .chain_id = 10 },
+        .tx = .{ .deposit = .{
             .source_hash = [_]u8{0x55} ** 32,
             .from = sender,
             .to = address.addr(0xbbbb),
@@ -699,34 +759,78 @@ test "legacy system deposit is rejected before lifecycle writes" {
             .gas_limit = 100_000,
             .is_system_transaction = true,
         } },
-    ));
+    });
 
     try std.testing.expectEqual(
         DepositRejection.system_transaction_after_regolith,
         result.rejected.deposit,
     );
-    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(sender));
+    try std.testing.expectEqual(@as(u256, 0), try vm.executor.getBalance(sender));
+}
+
+test "typed block prelude propagates its non-empty error and rolls back" {
+    const PreludeError = error{SyntheticPreludeFailure};
+    const PreludeContext = Canyon.Program.PreludeContextFor(PreludeError);
+    const Prelude = Canyon.Program.PreludeFor(PreludeError);
+    const OtherPrelude = Canyon.Program.PreludeFor(error{OtherPreludeFailure});
+    comptime std.debug.assert(Prelude.Binding != OtherPrelude.Binding);
+
+    const Probe = struct {
+        pub fn run(_: *@This(), _: PreludeContext) PreludeContext.Error!void {
+            return error.SyntheticPreludeFailure;
+        }
+    };
+
+    const sender = address.addr(0xaaaa);
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const claim = try evmz.block.Claim.begin(&vm.executor);
+    defer claim.discardIfUnfinished(&vm.executor);
+    var probe: Probe = .{};
+
+    try std.testing.expectError(
+        error.SyntheticPreludeFailure,
+        Canyon.Program.transactInBlockWithPrelude(
+            PreludeError,
+            &vm.executor,
+            claim,
+            .{
+                .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+                .tx = .{ .deposit = .{
+                    .source_hash = [_]u8{0x56} ** 32,
+                    .from = sender,
+                    .to = address.addr(0xbbbb),
+                    .mint = 5,
+                    .gas_limit = 100_000,
+                } },
+            },
+            Prelude.init(&probe),
+            .normal,
+        ),
+    );
+    claim.requireActive(&vm.executor);
+    try std.testing.expect(!vm.executor.hasCurrentTransaction());
+    try std.testing.expectEqual(@as(u256, 0), try vm.executor.getBalance(sender));
 }
 
 test "Ethereum rejection remains tagged through the OP transaction program" {
     const sender = address.addr(0xaaaa);
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-    try seedTestAccount(&executor, sender, 100, &.{});
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    try seedTestAccount(&vm.executor, sender, 100, &.{});
 
-    const result = try vm.transact(Canyon.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{ .ethereum = .{
+    const result = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+        .tx = .{ .ethereum = .{
             .sender = sender,
             .nonce = 1,
             .gas_limit = 100_000,
             .to = address.addr(0xbbbb),
         } },
-    ));
+    });
 
-    try std.testing.expectEqual(Canyon.Evm.Rejection.nonce_too_high, result.rejected.ethereum);
-    try std.testing.expectEqual(@as(u64, 0), (try executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@FieldType(Canyon.Rejection, "ethereum").nonce_too_high, result.rejected.ethereum);
+    try std.testing.expectEqual(@as(u64, 0), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
 }
 
 test "OP block execution normalizes and folds Ethereum and deposit transactions" {
@@ -749,18 +853,15 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     var recipient_account = try memory.getOrCreateAccount(recipient);
     try recipient_account.setCode(&runtime_code);
 
-    var executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{
-        .state = .{ .reader = memory.reader() },
+    var vm = Ecotone.init(std.testing.allocator, .{
+        .state_reader = memory.reader(),
     });
-    defer executor.deinit();
-    var block = try Ecotone.Block.init(
-        &executor,
-        Ecotone.blockEnv(.{
-            .chain_id = 10,
-            .gas_limit = 30_000_000,
-            .blob_base_fee = 99,
-        }),
-    );
+    defer vm.deinit();
+    var block = try Ecotone.BlockExecution.init(&vm, .{
+        .chain_id = 10,
+        .gas_limit = 30_000_000,
+        .blob_base_fee = 99,
+    });
     defer block.discardIfUnfinished();
 
     const ethereum = switch (try block.transact(.{ .ethereum = .{
@@ -810,13 +911,13 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
         .rejected => |reason| reason,
         .included => return error.UnexpectedBlobInclusion,
     };
-    try std.testing.expectEqual(Ecotone.Evm.Rejection.type_3_tx_pre_fork, rejected.ethereum);
+    try std.testing.expectEqual(@FieldType(Ecotone.Rejection, "ethereum").type_3_tx_pre_fork, rejected.ethereum);
     try std.testing.expectEqual(@as(u64, 2), block.progress());
-    try std.testing.expectEqual(@as(u64, 2), (try executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 2), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
     try std.testing.expectEqual(@as(u64, 2), block.finish());
 }
 
-test "OP input assembly owns execution environment normalization" {
+test "OP family ingress owns execution environment normalization" {
     const inherited = evmz.Env{ .blob_base_fee = 99 };
     const tx: OpTransaction = .{ .deposit = .{
         .source_hash = [_]u8{0x01} ** 32,
@@ -825,30 +926,41 @@ test "OP input assembly owns execution environment normalization" {
         .gas_limit = 100_000,
     } };
 
-    try std.testing.expectEqual(@as(u256, 99), Delta.input(inherited, tx).env.blob_base_fee);
-    try std.testing.expectEqual(@as(u256, 1), Ecotone.input(inherited, tx).env.blob_base_fee);
-    try std.testing.expectEqual(@as(u256, 1), Ecotone.blockEnv(inherited).execution.blob_base_fee);
+    var delta = Delta.init(std.testing.allocator, .{});
+    defer delta.deinit();
+    const delta_outcome = try delta.transact(
+        .{ .env = inherited, .tx = tx },
+    );
+    delta_outcome.executed.retain();
+
+    var ecotone = Ecotone.init(std.testing.allocator, .{});
+    defer ecotone.deinit();
+    const ecotone_outcome = try ecotone.transact(
+        .{ .env = inherited, .tx = tx },
+    );
+    ecotone_outcome.executed.retain();
+
+    try std.testing.expectEqual(@as(u256, 99), executionEnv(delta_spec, inherited).blob_base_fee);
+    try std.testing.expectEqual(@as(u256, 1), executionEnv(ecotone_spec, inherited).blob_base_fee);
 }
 
 test "Ecotone rejects blob transactions while retaining Cancun execution" {
     const sender = address.addr(0xaaaa);
-    var executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Ecotone.Vm.init(&executor);
-
-    const outcome = try vm.transact(Ecotone.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000, .blob_base_fee = 99 },
-        .{ .ethereum = .{
+    var vm = Ecotone.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const outcome = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000, .blob_base_fee = 99 },
+        .tx = .{ .ethereum = .{
             .kind = .blob,
             .sender = sender,
             .gas_limit = 100_000,
             .to = address.addr(0xbbbb),
         } },
-    ));
+    });
 
-    try std.testing.expectEqual(Ecotone.Evm.Rejection.type_3_tx_pre_fork, outcome.rejected.ethereum);
-    try std.testing.expect(Ecotone.specification.transaction.active_kinds.contains(.dynamic_fee));
-    try std.testing.expect(!Ecotone.specification.transaction.active_kinds.contains(.blob));
+    try std.testing.expectEqual(@FieldType(Ecotone.Rejection, "ethereum").type_3_tx_pre_fork, outcome.rejected.ethereum);
+    try std.testing.expect(ecotone_spec.transaction.active_kinds.contains(.dynamic_fee));
+    try std.testing.expect(!ecotone_spec.transaction.active_kinds.contains(.blob));
 }
 
 test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions" {
@@ -870,49 +982,52 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
         .blob_base_fee = 99,
     };
 
-    var ethereum_executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{});
-    defer ethereum_executor.deinit();
-    var ethereum_vm = Ecotone.Vm.init(&ethereum_executor);
-    try seedTestAccount(&ethereum_executor, sender, 1, &.{});
-    try seedTestAccount(&ethereum_executor, recipient, 0, &runtime_code);
+    var ethereum_vm = Ecotone.init(std.testing.allocator, .{});
+    defer ethereum_vm.deinit();
+    try seedTestAccount(&ethereum_vm.executor, sender, 1, &.{});
+    try seedTestAccount(&ethereum_vm.executor, recipient, 0, &runtime_code);
 
-    const ethereum_output = try retainEthereum(try ethereum_vm.transact(Ecotone.input(
-        env,
-        .{ .ethereum = .{
-            .sender = sender,
-            .gas_limit = 100_000,
-            .to = recipient,
-        } },
-    )));
-    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_output.status);
-    try expectWordOne(ethereum_output.output);
+    {
+        const outcome = try ethereum_vm.transact(.{
+            .env = env,
+            .tx = .{ .ethereum = .{
+                .sender = sender,
+                .gas_limit = 100_000,
+                .to = recipient,
+            } },
+        });
+        const ethereum_output = outcome.executed.retainResult().ethereum;
+        try std.testing.expectEqual(evmz.TxStatus.success, ethereum_output.status);
+        try expectWordOne(ethereum_output.output);
+    }
 
-    var deposit_executor = Ecotone.Evm.Executor.init(std.testing.allocator, .{});
-    defer deposit_executor.deinit();
-    var deposit_vm = Ecotone.Vm.init(&deposit_executor);
-    try seedTestAccount(&deposit_executor, recipient, 0, &runtime_code);
-
-    const deposit_output = try retainDeposit(try deposit_vm.transact(Ecotone.input(
-        env,
-        .{ .deposit = .{
-            .source_hash = [_]u8{0x88} ** 32,
-            .from = sender,
-            .to = recipient,
-            .gas_limit = 100_000,
-        } },
-    )));
-    try std.testing.expectEqual(evmz.TxStatus.success, deposit_output.status);
-    try expectWordOne(deposit_output.output);
+    {
+        var deposit_vm = Ecotone.init(std.testing.allocator, .{});
+        defer deposit_vm.deinit();
+        try seedTestAccount(&deposit_vm.executor, recipient, 0, &runtime_code);
+        const outcome = try deposit_vm.transact(.{
+            .env = env,
+            .tx = .{ .deposit = .{
+                .source_hash = [_]u8{0x88} ** 32,
+                .from = sender,
+                .to = recipient,
+                .gas_limit = 100_000,
+            } },
+        });
+        const deposit_output = outcome.executed.retainResult().deposit;
+        try std.testing.expectEqual(evmz.TxStatus.success, deposit_output.status);
+        try expectWordOne(deposit_output.output);
+    }
 }
 
 test "Fjord activates RIP-7212 P256VERIFY at 3450 gas" {
     const p256_address = evmz.precompile.Contract.p256verify.toAddress();
-    try std.testing.expect(!Ecotone.Evm.specification.precompile.active(p256_address));
-    try std.testing.expect(Fjord.Evm.specification.precompile.active(p256_address));
+    try std.testing.expect(!ecotone_spec.precompile.active(p256_address));
+    try std.testing.expect(fjord_spec.precompile.active(p256_address));
 
     const gas = fjord_precompile_config.gas.get(.p256verify) + 1;
-    const precompile = Fjord.Evm.specification.precompile.resolve(p256_address).?;
-    const result = try Fjord.Evm.specification.precompile.execute(precompile, .{
+    const precompile = fjord_spec.precompile.resolve(p256_address).?;
+    const result = try fjord_spec.precompile.execute(precompile, .{
         .allocator = std.testing.allocator,
         .input_data = &.{},
         .gas = gas,
@@ -931,24 +1046,24 @@ fn expectWordOne(output: []const u8) !void {
 
 test "deposit transition uses its exact spec value" {
     const sender = address.addr(0xaaaa);
-    const Limited = OpFamilyFromSpec(.canyon, canyon_spec.extend(.{
+    const Limited = OpVm(canyon_spec.extend(.{
         .transaction = .{ .total_gas_limit = .{ .replace = 1 } },
     }));
 
-    var executor = Limited.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Limited.Vm.init(&executor);
-    const result = try retainDeposit(try vm.transact(Limited.input(
-        .{ .chain_id = 10, .gas_limit = 30_000_000 },
-        .{ .deposit = .{
+    var vm = Limited.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    const result = try vm.transact(.{
+        .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
+        .tx = .{ .deposit = .{
             .source_hash = [_]u8{0x77} ** 32,
             .from = sender,
             .to = address.addr(0xbbbb),
             .mint = 1,
             .gas_limit = 100_000,
         } },
-    )));
-    try std.testing.expectEqual(evmz.TxStatus.invalid, result.status);
+    });
+
+    try std.testing.expectEqual(evmz.TxStatus.invalid, result.executed.retainResult().deposit.status);
 }
 
 test "unresolved Ethereum transaction keeps exclusive state ownership" {
@@ -957,33 +1072,32 @@ test "unresolved Ethereum transaction keeps exclusive state ownership" {
     const deposit_recipient = address.addr(0xcccc);
     const env = evmz.Env{ .chain_id = 10, .gas_limit = 30_000_000 };
 
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-    try seedTestAccount(&executor, sender, 100, &.{});
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    try seedTestAccount(&vm.executor, sender, 100, &.{});
 
-    const outcome = try vm.transact(Canyon.input(
-        env,
-        .{ .ethereum = .{
+    const outcome = try vm.transact(.{
+        .env = env,
+        .tx = .{ .ethereum = .{
             .sender = sender,
             .nonce = 0,
             .gas_limit = 100_000,
             .to = ethereum_recipient,
             .value = 10,
         } },
-    ));
+    });
     const execution = switch (outcome) {
         .executed => |value| value,
         .rejected => return error.UnexpectedEthereumRejection,
     };
     defer execution.discardIfCurrent();
 
-    try std.testing.expect(executor.hasCurrentTransaction());
+    try std.testing.expect(vm.executor.hasCurrentTransaction());
     _ = execution.result();
     _ = execution.changes();
-    try std.testing.expectEqual(@as(u256, 90), (try executor.getAccountOrLoad(sender)).?.balance);
-    try std.testing.expectEqual(@as(u256, 10), (try executor.getAccountOrLoad(ethereum_recipient)).?.balance);
-    try std.testing.expect((try executor.getAccountOrLoad(deposit_recipient)) == null);
+    try std.testing.expectEqual(@as(u256, 90), (try vm.executor.getAccountOrLoad(sender)).?.balance);
+    try std.testing.expectEqual(@as(u256, 10), (try vm.executor.getAccountOrLoad(ethereum_recipient)).?.balance);
+    try std.testing.expect((try vm.executor.getAccountOrLoad(deposit_recipient)) == null);
 }
 
 test "one OP transaction program alternates Ethereum and deposit variants on one overlay" {
@@ -992,26 +1106,25 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
     const deposit_recipient = address.addr(0xcccc);
     const env = evmz.Env{ .chain_id = 10, .gas_limit = 30_000_000 };
 
-    var executor = Canyon.Evm.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-    var vm = Canyon.Vm.init(&executor);
-    try seedTestAccount(&executor, sender, 100, &.{});
+    var vm = Canyon.init(std.testing.allocator, .{});
+    defer vm.deinit();
+    try seedTestAccount(&vm.executor, sender, 100, &.{});
 
-    const ethereum_1 = try retainEthereum(try vm.transact(Canyon.input(
-        env,
-        .{ .ethereum = .{
+    const ethereum_1 = try vm.transact(.{
+        .env = env,
+        .tx = .{ .ethereum = .{
             .sender = sender,
             .nonce = 0,
             .gas_limit = 100_000,
             .to = ethereum_recipient,
             .value = 10,
         } },
-    )));
-    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_1.status);
+    });
+    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_1.executed.retainResult().ethereum.status);
 
-    const deposit = try retainDeposit(try vm.transact(Canyon.input(
-        env,
-        .{ .deposit = .{
+    const deposit = try vm.transact(.{
+        .env = env,
+        .tx = .{ .deposit = .{
             .source_hash = [_]u8{0x66} ** 32,
             .from = sender,
             .to = deposit_recipient,
@@ -1019,13 +1132,14 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
             .value = 3,
             .gas_limit = 100_000,
         } },
-    )));
-    try std.testing.expectEqual(evmz.TxStatus.success, deposit.status);
-    try std.testing.expectEqual(@as(u64, 1), deposit.deposit_nonce);
+    });
+    const deposit_result = deposit.executed.retainResult().deposit;
+    try std.testing.expectEqual(evmz.TxStatus.success, deposit_result.status);
+    try std.testing.expectEqual(@as(u64, 1), deposit_result.deposit_nonce);
 
-    const reverted_deposit = try retainDeposit(try vm.transact(Canyon.input(
-        env,
-        .{
+    const reverted_deposit = try vm.transact(.{
+        .env = env,
+        .tx = .{
             .deposit = .{
                 .source_hash = [_]u8{0x77} ** 32,
                 .from = sender,
@@ -1036,25 +1150,26 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
                 .input = &.{ 0x5f, 0x5f, 0xfd },
             },
         },
-    )));
-    try std.testing.expectEqual(evmz.TxStatus.revert, reverted_deposit.status);
-    try std.testing.expectEqual(@as(u64, 2), reverted_deposit.deposit_nonce);
+    });
+    const reverted_deposit_result = reverted_deposit.executed.retainResult().deposit;
+    try std.testing.expectEqual(evmz.TxStatus.revert, reverted_deposit_result.status);
+    try std.testing.expectEqual(@as(u64, 2), reverted_deposit_result.deposit_nonce);
 
-    const ethereum_2 = try retainEthereum(try vm.transact(Canyon.input(
-        env,
-        .{ .ethereum = .{
+    const ethereum_2 = try vm.transact(.{
+        .env = env,
+        .tx = .{ .ethereum = .{
             .sender = sender,
             .nonce = 3,
             .gas_limit = 100_000,
             .to = ethereum_recipient,
             .value = 4,
         } },
-    )));
-    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_2.status);
+    });
+    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_2.executed.retainResult().ethereum.status);
 
-    const sender_account = (try executor.getAccountOrLoad(sender)).?;
+    const sender_account = (try vm.executor.getAccountOrLoad(sender)).?;
     try std.testing.expectEqual(@as(u64, 4), sender_account.nonce);
     try std.testing.expectEqual(@as(u256, 95), sender_account.balance);
-    try std.testing.expectEqual(@as(u256, 14), (try executor.getAccountOrLoad(ethereum_recipient)).?.balance);
-    try std.testing.expectEqual(@as(u256, 3), (try executor.getAccountOrLoad(deposit_recipient)).?.balance);
+    try std.testing.expectEqual(@as(u256, 14), (try vm.executor.getAccountOrLoad(ethereum_recipient)).?.balance);
+    try std.testing.expectEqual(@as(u256, 3), (try vm.executor.getAccountOrLoad(deposit_recipient)).?.balance);
 }

@@ -130,7 +130,6 @@ pub const Default = struct {
 /// Stateless settlement planner closed over one exact VM specification.
 pub fn Runtime(comptime spec: ExactSpec) type {
     return struct {
-        pub const specification = spec;
         const Self = @This();
         const settlement = spec.settlement;
         const transaction = spec.transaction;

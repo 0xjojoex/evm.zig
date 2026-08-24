@@ -14,7 +14,7 @@ test "execution resource interfaces omit legacy prefetch and verify hooks" {
     try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
 }
 
-test "Executor observation boundary hides StateModel pending views" {
+test "Executor observation boundary hides pending state views" {
     const Executor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const Executed = Executor.Executed(void);
 
@@ -503,7 +503,7 @@ test "nested CREATE revert output survives child frame release" {
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);
 }
 
-fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.EvmExecutionRequest {
+fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.ExecutionRequest {
     return .{
         .context = evmz.t.defaultExecutionContext(sender, 30_000_000),
         .message = .{ .call = .{

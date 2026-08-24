@@ -38,15 +38,15 @@ const CancunVm = evmz.Vm(evmz.eth.cancun);
 
 comptime {
     // Every knob stays introspectable on the compiled VM.
-    std.debug.assert(CustomVm.specification.create.code_size_limit == 0x8000);
-    std.debug.assert(CustomVm.specification.create.initcode_size_limit == 0x10000);
-    std.debug.assert(CustomVm.specification.transaction.max_initcode_size == 0x10000);
-    std.debug.assert(CustomVm.specification.settlement.gas_refund_cap_divisor == 4);
-    std.debug.assert(CustomVm.specification.authorization.warms_delegated_target);
-    std.debug.assert(CustomVm.specification.transaction.warms_coinbase);
-    std.debug.assert(evmz.Vm(unlimited_cancun).specification.create.code_size_limit == null);
+    std.debug.assert(CustomVm.spec.create.code_size_limit == 0x8000);
+    std.debug.assert(CustomVm.spec.create.initcode_size_limit == 0x10000);
+    std.debug.assert(CustomVm.spec.transaction.max_initcode_size == 0x10000);
+    std.debug.assert(CustomVm.spec.settlement.gas_refund_cap_divisor == 4);
+    std.debug.assert(CustomVm.spec.authorization.warms_delegated_target);
+    std.debug.assert(CustomVm.spec.transaction.warms_coinbase);
+    std.debug.assert(evmz.Vm(unlimited_cancun).spec.create.code_size_limit == null);
     // Unpatched sections inherit the stock Cancun values.
-    std.debug.assert(CustomVm.specification.call.base_gas == CancunVm.specification.call.base_gas);
+    std.debug.assert(CustomVm.spec.call.base_gas == CancunVm.spec.call.base_gas);
 }
 
 /// PUSH2 0x7000; PUSH1 0x00; RETURN — deposits 0x7000 zero bytes as runtime
@@ -76,7 +76,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     std.debug.print(
         "custom-cancun (code size limit {d}): {s}, gas {d}, deployed {d} bytes\n",
         .{
-            CustomVm.specification.create.code_size_limit.?,
+            CustomVm.spec.create.code_size_limit.?,
             @tagName(custom.status),
             custom.gas_used,
             custom.deployed_code_len,
@@ -85,7 +85,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     std.debug.print(
         "stock cancun (code size limit {d}): {s}, gas {d}, deployed {d} bytes\n",
         .{
-            CancunVm.specification.create.code_size_limit.?,
+            CancunVm.spec.create.code_size_limit.?,
             @tagName(stock.status),
             stock.gas_used,
             stock.deployed_code_len,

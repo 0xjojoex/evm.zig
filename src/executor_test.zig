@@ -6,13 +6,12 @@ const std = @import("std");
 
 const evmz = @import("./evm.zig");
 const executor_module = @import("./executor.zig");
-const call_runtime = @import("./executor/call_runtime.zig");
 const execution_values = @import("./execution.zig");
 const trace = @import("./trace.zig");
 const transaction_runtime = @import("./transaction/runtime.zig");
 const uint256 = @import("./uint256.zig");
 const ExactSpec = @import("./spec.zig").Spec;
-const block_state = @import("./vm/block_state.zig");
+const state_domain = @import("./eth/state_domain.zig");
 
 const CaptureContext = executor_module.CaptureContext;
 const TransactionExecutionStage = executor_module.TransactionExecutionStage;
@@ -58,8 +57,8 @@ fn beginCreateScope(
     context: execution_values.ExecutionContext,
     create: execution_values.Create,
     gas: execution_values.ExecutionGas,
-) !execution_values.EvmExecutionRequest {
-    const request = execution_values.EvmExecutionRequest{
+) !execution_values.ExecutionRequest {
+    const request = execution_values.ExecutionRequest{
         .context = context,
         .message = .{ .create = create },
         .gas = gas,
@@ -442,7 +441,7 @@ test "executor uses caller-owned prepared artifacts through the supplied backend
 
     executor.beginPreparedCodeExecution();
     defer executor.endPreparedCodeExecution();
-    const resolved = try call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, contract);
+    const resolved = try Osaka.Executor.resolveExecutionCode(&executor, contract);
 
     try std.testing.expectEqual(prepared.bytes.ptr, resolved.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
@@ -468,14 +467,14 @@ test "prepared execution follows current code hash without owning public code re
     executor.beginPreparedCodeExecution();
     var prepared_execution_open = true;
     errdefer if (prepared_execution_open) executor.endPreparedCodeExecution();
-    const original_execution = try call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, contract);
+    const original_execution = try Osaka.Executor.resolveExecutionCode(&executor, contract);
     const original_prepared = original_execution;
     const public_original = try executor.getCode(contract);
     try std.testing.expect(original_prepared.bytes.ptr != public_original.ptr);
     try std.testing.expectEqualSlices(u8, &original_code, public_original);
 
     try executor.state.setCode(contract, &replacement_code);
-    const replacement_execution = try call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, contract);
+    const replacement_execution = try Osaka.Executor.resolveExecutionCode(&executor, contract);
     try std.testing.expect(replacement_execution.bytes.ptr != original_prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &replacement_code, replacement_execution.bytes);
     const public_replacement = try executor.getCode(contract);
@@ -540,7 +539,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         _ = try pool.getOrPrepare(code_hash, &code);
         try std.testing.expectError(
             error.InvalidWitness,
-            call_runtime.bind(Osaka.Executor).resolveExecutionCode(&executor, target),
+            Osaka.Executor.resolveExecutionCode(&executor, target),
         );
     }
 
@@ -649,8 +648,8 @@ test "exact spec drives call base gas" {
         .call = .{ .base_gas = evmz.eth.frontier.call.base_gas + 5 },
     }) orelse return error.SkipZigTest;
 
-    const default_gas_left = try executeNestedBalanceCall(Frontier.specification);
-    const custom_gas_left = try executeNestedBalanceCall(ExpensiveCall.specification);
+    const default_gas_left = try executeNestedBalanceCall(Frontier.spec);
+    const custom_gas_left = try executeNestedBalanceCall(ExpensiveCall.spec);
 
     try std.testing.expectEqual(default_gas_left - 5, custom_gas_left);
 }
@@ -669,8 +668,8 @@ test "exact spec drives top-level delegated account access" {
         .call = .{ .topLevelDelegatedAccountAccess = overrides.topLevelDelegatedAccountAccess },
     }) orelse return error.SkipZigTest;
 
-    const default_gas_left = try executeTopLevelDelegatedCall(Prague.specification);
-    const custom_gas_left = try executeTopLevelDelegatedCall(ExpensiveTopLevelDelegatedAccess.specification);
+    const default_gas_left = try executeTopLevelDelegatedCall(Prague.spec);
+    const custom_gas_left = try executeTopLevelDelegatedCall(ExpensiveTopLevelDelegatedAccess.spec);
 
     try std.testing.expectEqual(default_gas_left - 7, custom_gas_left);
 }
@@ -862,8 +861,8 @@ test "exact spec drives top-frame value transfer state gas" {
         .call = .{ .topFrameValueTransferStateGas = overrides.topFrameValueTransferStateGas },
     }) orelse return error.SkipZigTest;
 
-    const default_result = try executeTopFrameValueTransfer(Prague.specification);
-    const custom_result = try executeTopFrameValueTransfer(ExpensiveTopFrameValueTransfer.specification);
+    const default_result = try executeTopFrameValueTransfer(Prague.spec);
+    const custom_result = try executeTopFrameValueTransfer(ExpensiveTopFrameValueTransfer.spec);
 
     try std.testing.expectEqual(default_result.gas_left - 9, custom_result.gas_left);
     try std.testing.expectEqual(@as(i64, 9), custom_result.state_gas_spent);
@@ -876,16 +875,16 @@ test "exact spec drives empty call recipient touching" {
         .call = .{ .touches_empty_recipient = true },
     }) orelse return error.SkipZigTest;
 
-    try std.testing.expect(!try emptyCallRecipientMaterialized(SpuriousDragon.specification));
-    try std.testing.expect(try emptyCallRecipientMaterialized(TouchEmptyCallRecipient.specification));
+    try std.testing.expect(!try emptyCallRecipientMaterialized(SpuriousDragon.spec));
+    try std.testing.expect(try emptyCallRecipientMaterialized(TouchEmptyCallRecipient.spec));
 }
 
 test "top-level empty call recipient follows EIP-161 fork boundary" {
     const Frontier = evmz.t.Vm(.frontier) orelse return error.SkipZigTest;
     const SpuriousDragon = evmz.t.Vm(.spurious_dragon) orelse return error.SkipZigTest;
 
-    try std.testing.expect(try topLevelEmptyCallRecipientMaterialized(Frontier.specification));
-    try std.testing.expect(!try topLevelEmptyCallRecipientMaterialized(SpuriousDragon.specification));
+    try std.testing.expect(try topLevelEmptyCallRecipientMaterialized(Frontier.spec));
+    try std.testing.expect(!try topLevelEmptyCallRecipientMaterialized(SpuriousDragon.spec));
 }
 
 test "exact spec drives child call gas forwarding" {
@@ -900,8 +899,8 @@ test "exact spec drives child call gas forwarding" {
         .call = .{ .childGas = overrides.childGas },
     }) orelse return error.SkipZigTest;
 
-    try std.testing.expectEqual(@as(u256, 1), try executeCallResultStore(Frontier.specification));
-    try std.testing.expectEqual(@as(u256, 0), try executeCallResultStore(ZeroChildGas.specification));
+    try std.testing.expectEqual(@as(u256, 1), try executeCallResultStore(Frontier.spec));
+    try std.testing.expectEqual(@as(u256, 0), try executeCallResultStore(ZeroChildGas.spec));
 }
 
 test "exact spec drives create initcode word gas" {
@@ -916,8 +915,8 @@ test "exact spec drives create initcode word gas" {
         .create = .{ .initcodeWordGas = overrides.createInitCodeWordGas },
     }) orelse return error.SkipZigTest;
 
-    try std.testing.expectEqual(Interpreter.Status.success, try executeCreateOpcodeStatus(Cancun.specification));
-    try std.testing.expectEqual(Interpreter.Status.out_of_gas, try executeCreateOpcodeStatus(ExpensiveCreateInitCode.specification));
+    try std.testing.expectEqual(Interpreter.Status.success, try executeCreateOpcodeStatus(Cancun.spec));
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, try executeCreateOpcodeStatus(ExpensiveCreateInitCode.spec));
 }
 
 fn executeCreateOpcodeStatus(comptime spec: ExactSpec) !Interpreter.Status {
@@ -929,7 +928,7 @@ fn executeCreateOpcodeStatus(comptime spec: ExactSpec) !Interpreter.Status {
         .STOP,
     });
 
-    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -946,7 +945,7 @@ fn executeCallResultStore(comptime spec: ExactSpec) !u256 {
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
-    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -976,7 +975,7 @@ fn executeTopLevelDelegatedCall(comptime spec: ExactSpec) !i64 {
     const target = evmz.addr(0x3333);
     const execution_context = testExecutionContext(sender, 100_000);
 
-    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1039,7 +1038,7 @@ fn executeTopFrameValueTransfer(comptime spec: ExactSpec) !TopFrameValueTransfer
     const recipient = evmz.addr(0x2222);
     const execution_context = testExecutionContext(sender, 100_000);
 
-    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1076,7 +1075,7 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
         .STOP,
     });
 
-    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1095,7 +1094,7 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
 fn topLevelEmptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x3333);
-    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1112,7 +1111,7 @@ fn topLevelEmptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
 }
 
 fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
-    const Exec = executor_module.ExecutorType(spec, block_state.Tracked(spec), .{});
+    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
@@ -1652,7 +1651,7 @@ test "captured span is inspectable before executed transaction resolution" {
     defer tape.deinit();
     var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape });
     defer capture.deinit();
-    const request_value = execution_values.EvmExecutionRequest{
+    const request_value = execution_values.ExecutionRequest{
         .context = execution_context,
         .message = .{ .call = .{
             .sender = sender,
@@ -1688,7 +1687,7 @@ test "active transaction owns rollback before pending state" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1705,7 +1704,7 @@ test "active transaction owns rollback before pending state" {
     try transaction_runtime.begin(&executor, .normal);
     errdefer transaction_runtime.discard(&executor);
     try transaction_runtime.beginExecution(&executor, request, .{});
-    const first_generation = executor.transaction_runtime_state.?.generation;
+    const first_generation = executor.attempt.?.owner.transaction.generation;
     try executor.state.addBalance(sender, 9);
     try std.testing.expectEqual(@as(u256, 9), try executor.getBalance(sender));
 
@@ -1717,14 +1716,14 @@ test "active transaction owns rollback before pending state" {
     errdefer transaction_runtime.discard(&executor);
     try transaction_runtime.beginExecution(&executor, request, .{});
     defer transaction_runtime.discard(&executor);
-    try std.testing.expect(first_generation != executor.transaction_runtime_state.?.generation);
+    try std.testing.expect(first_generation != executor.attempt.?.owner.transaction.generation);
 }
 
 test "active transaction finishes into pending state" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1857,7 +1856,7 @@ test "transaction nonce advancement survives payload rollback" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1898,7 +1897,7 @@ test "transaction nonce advancement remains recorded for the runtime" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1917,7 +1916,7 @@ test "transaction nonce advancement remains recorded for the runtime" {
     try transaction_runtime.begin(&executor, .normal);
     try transaction_runtime.beginExecution(&executor, request, .{});
     try executor.advanceTransactionNonce(request.message);
-    try std.testing.expect(executor.transaction_runtime_state.?.nonce_advanced);
+    try std.testing.expect(executor.attempt.?.owner.transaction.nonce_advanced);
     try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
     transaction_runtime.discard(&executor);
 
@@ -1932,7 +1931,7 @@ test "transaction nonce advancement selects the root create entry" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.address.create(sender, 7);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -1975,7 +1974,7 @@ test "transaction nonce advancement leaves max-nonce acceptance to policy" {
     const sender = evmz.addr(0xaaaa);
     const max_nonce = std.math.maxInt(u64);
     const recipient = evmz.address.create(sender, max_nonce);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -2016,7 +2015,7 @@ test "transaction payload resolves only its inner checkpoint" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    const request = execution_values.EvmExecutionRequest{
+    const request = execution_values.ExecutionRequest{
         .context = .{
             .chain = .{ .chain_id = 1 },
             .transaction = .{ .origin = sender },
@@ -3336,7 +3335,7 @@ test "EIP-7610 storage-only accounts collide even though EIP-161 calls them dead
         executor.state.discard(attempt);
     }
     // Dead for existence, code hash, and CALL gas; still present for the
-    // EIP-7610 creation predicate. `expectCreationCollision` in call_runtime
+    // EIP-7610 creation predicate. `expectCreationCollision` in executor.zig
     // covers the collision itself across every revision.
     try std.testing.expect(!try executor.state.accountExists(target));
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getCodeHash(target));

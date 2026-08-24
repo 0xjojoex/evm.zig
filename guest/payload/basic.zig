@@ -116,12 +116,11 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
     const contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(&bytecode);
 
-    var executor = evmz.Evm.Executor.init(allocator, .{
+    var vm = evmz.Evm.init(allocator, .{
         .state = .{ .reader = memory.reader() },
     });
-    defer executor.deinit();
+    defer vm.deinit();
 
-    var vm = evmz.Evm.init(&executor);
     const outcome = try vm.transact(.{
         .env = .{ .gas_limit = gas_limit },
         .tx = .{

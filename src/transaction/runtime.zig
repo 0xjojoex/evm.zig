@@ -11,8 +11,11 @@ const execution = @import("../execution.zig");
 pub const Mode = @import("../executor/instrumentation.zig").Mode;
 
 pub fn hasActive(executor: anytype) bool {
-    const state = executor.transaction_runtime_state orelse return false;
-    return state.phase == .active;
+    const attempt = executor.attempt orelse return false;
+    return switch (attempt.owner) {
+        .manual => false,
+        .transaction => |transaction| transaction.phase == .active,
+    };
 }
 
 pub inline fn requireActive(executor: anytype) void {
@@ -22,7 +25,7 @@ pub inline fn requireActive(executor: anytype) void {
 pub const RootAccessReservation = enum { none, reserve };
 
 pub fn begin(executor: anytype, mode: Mode) !void {
-    std.debug.assert(executor.transaction_runtime_state == null);
+    std.debug.assert(executor.attempt == null);
     std.debug.assert(executor.execution_context == null);
     std.debug.assert(executor.checkpoint_top == 0);
     std.debug.assert(!executor.state.scopeActive());
@@ -34,10 +37,10 @@ pub fn begin(executor: anytype, mode: Mode) !void {
         executor.state.beginTransaction();
     std.debug.assert(executor.next_transaction_generation != std.math.maxInt(u64));
     executor.next_transaction_generation += 1;
-    executor.transaction_runtime_state = .{
-        .state_attempt_id = state_attempt_id,
-        .generation = executor.next_transaction_generation,
+    executor.attempt = .{
+        .id = state_attempt_id,
         .mode = mode,
+        .owner = .{ .transaction = .{ .generation = executor.next_transaction_generation } },
     };
 }
 
@@ -90,7 +93,7 @@ pub fn initializeMessageScope(
 
 pub fn beginExecution(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
     scope_init: execution.ExecutionScopeInit,
 ) !void {
     requireActive(executor);
@@ -126,11 +129,11 @@ pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) 
 /// rollback. Failed-root state, warmth, and logs roll back to the root boundary.
 pub fn runRoot(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
     scope_init: execution.ExecutionScopeInit,
 ) @TypeOf(executor.executeTransactionRequestPhased(request)) {
     requireActive(executor);
-    const runtime_state = &executor.transaction_runtime_state.?;
+    const runtime_state = &executor.attempt.?.owner.transaction;
     runtime_state.payload_started = true;
     std.debug.assert(executor.execution_context != null);
     std.debug.assert(executor.state.scopeActive());
@@ -155,10 +158,10 @@ pub fn runRoot(
 
 pub fn runPayload(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
 ) @TypeOf(executor.executeTransactionRequestPhased(request)) {
     requireActive(executor);
-    const runtime_state = &executor.transaction_runtime_state.?;
+    const runtime_state = &executor.attempt.?.owner.transaction;
     std.debug.assert(!runtime_state.payload_started);
     runtime_state.payload_started = true;
 
@@ -176,7 +179,7 @@ pub fn runPayload(
 
 pub fn runPrelude(
     executor: anytype,
-    request: execution.EvmExecutionRequest,
+    request: execution.ExecutionRequest,
 ) @TypeOf(executor.executeTransactionRequest(request)) {
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
@@ -212,21 +215,21 @@ pub fn runPrelude(
 
 pub fn finish(executor: anytype) u64 {
     requireActive(executor);
-    const state_attempt_id = executor.transaction_runtime_state.?.state_attempt_id;
-    const generation = executor.transaction_runtime_state.?.generation;
+    const state_attempt_id = executor.attempt.?.id;
+    const generation = executor.attempt.?.owner.transaction.generation;
     closeExecutionScope(executor);
     executor.state.seal(state_attempt_id);
-    executor.transaction_runtime_state.?.phase = .pending;
+    executor.attempt.?.owner.transaction.phase = .pending;
     return generation;
 }
 
 pub fn discard(executor: anytype) void {
     requireActive(executor);
-    const state_attempt_id = executor.transaction_runtime_state.?.state_attempt_id;
+    const state_attempt_id = executor.attempt.?.id;
     closeExecutionScope(executor);
     executor.state.discard(state_attempt_id);
     executor.clearLastOutput();
-    executor.transaction_runtime_state = null;
+    executor.attempt = null;
 }
 
 fn executionRolledBack(status: anytype) bool {

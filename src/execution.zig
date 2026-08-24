@@ -321,7 +321,7 @@ pub const Create = struct {
 
 /// The root call/create identity consumed by the execution engine.
 ///
-/// The resolved execution budget lives on `EvmExecutionRequest`: it changes
+/// The resolved execution budget lives on `ExecutionRequest`: it changes
 /// during transaction preparation while the message itself does not.
 pub const Message = union(enum) {
     call: Call,
@@ -407,14 +407,14 @@ pub const ExecutionScopeInit = struct {
 ///
 /// Slices are borrowed data, not a serialization format. Durable replay needs
 /// a versioned codec that copies their contents.
-pub const EvmExecutionRequest = struct {
+pub const ExecutionRequest = struct {
     context: ExecutionContext,
     message: Message,
     gas: ExecutionGas,
 };
 
 test "execution request and scope initialization contain no family policy" {
-    const request_fields = std.meta.fields(EvmExecutionRequest);
+    const request_fields = std.meta.fields(ExecutionRequest);
     try std.testing.expectEqual(@as(usize, 3), request_fields.len);
     try std.testing.expectEqualStrings("context", request_fields[0].name);
     try std.testing.expect(request_fields[0].type == ExecutionContext);
@@ -428,11 +428,11 @@ test "execution request and scope initialization contain no family policy" {
     try std.testing.expectEqualStrings("initial_warm_set", scope_fields[0].name);
     try std.testing.expect(scope_fields[0].type == InitialWarmSet);
 
-    try std.testing.expect(!@hasField(EvmExecutionRequest, "transaction"));
-    try std.testing.expect(!@hasField(EvmExecutionRequest, "access_list"));
-    try std.testing.expect(!@hasField(EvmExecutionRequest, "authorization_list"));
-    try std.testing.expect(!@hasField(EvmExecutionRequest, "settlement"));
-    try std.testing.expect(!@hasField(EvmExecutionRequest, "checkpoint"));
+    try std.testing.expect(!@hasField(ExecutionRequest, "transaction"));
+    try std.testing.expect(!@hasField(ExecutionRequest, "access_list"));
+    try std.testing.expect(!@hasField(ExecutionRequest, "authorization_list"));
+    try std.testing.expect(!@hasField(ExecutionRequest, "settlement"));
+    try std.testing.expect(!@hasField(ExecutionRequest, "checkpoint"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "access_list"));
     try std.testing.expect(!@hasField(ExecutionScopeInit, "authorization_list"));
 }

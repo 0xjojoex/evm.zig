@@ -14,7 +14,6 @@
 
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const call_runtime = @import("../executor/call_runtime.zig");
 const tail_dispatch = @import("../interpreter/tail_dispatch.zig");
 
 const Host = evmz.Host;
@@ -57,15 +56,15 @@ pub const Pause = union(enum) {
     finished: Completion,
 };
 
-pub fn SessionType(comptime Executor: type) type {
-    const runtime = call_runtime.bind(Executor);
-    const StepDispatch = tail_dispatch.Dispatch(Executor.specification, .{
+pub fn SessionType(comptime Vm: type) type {
+    const Executor = Vm.Executor;
+    const StepDispatch = tail_dispatch.Dispatch(Vm.spec, .{
         .traced = false,
         .continuation = .step,
     });
 
     return struct {
-        call_runtime: runtime.CallRuntime,
+        call_runtime: Executor.CallRuntime,
         open: bool,
         intervened: bool,
 
@@ -82,7 +81,7 @@ pub fn SessionType(comptime Executor: type) type {
         pub fn init(self: *Session, executor: *Executor, msg: Host.Message, bytecode: evmz.Bytecode.View) !void {
             // Establish a deinit-safe closed value here before any fallible steps
             self.* = .{
-                .call_runtime = runtime.CallRuntime.init(executor),
+                .call_runtime = Executor.CallRuntime.init(executor),
                 .open = false,
                 .intervened = false,
             };
@@ -142,7 +141,7 @@ pub fn SessionType(comptime Executor: type) type {
 
                 const host_result = try self.call_runtime.finishFrame(index, frame.result());
                 if (self.call_runtime.frames.len() == self.call_runtime.frame_base + 1) {
-                    const stable = try runtime.stabilizeFinalResult(self.call_runtime.executor, host_result);
+                    const stable = try Executor.stabilizeFinalResult(self.call_runtime.executor, host_result);
                     const completion: Completion = if (self.intervened)
                         .{ .intervened = stable }
                     else

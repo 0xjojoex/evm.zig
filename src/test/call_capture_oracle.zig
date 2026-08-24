@@ -72,8 +72,7 @@ test "transaction validation rejection produces no call frame" {
     try capture.context.begin();
     errdefer capture.context.abort() catch {};
 
-    var vm = Cancun.init(&executor);
-    const outcome = try vm.capture(&capture.context).transact(.{
+    const outcome = try Cancun.Advanced.capture(&executor, &capture.context).transact(.{
         .env = .{ .gas_limit = 1_000_000 },
         .tx = .{
             .sender = sender,

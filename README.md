@@ -64,12 +64,11 @@ const evmz = @import("evmz");
 var memory = evmz.state.MemoryStore.init(allocator);
 defer memory.deinit();
 
-var executor = evmz.Evm.Executor.init(allocator, .{
+var vm = evmz.Evm.init(allocator, .{
     .state = .{ .reader = memory.reader() },
 });
-defer executor.deinit();
+defer vm.deinit();
 
-var vm = evmz.Evm.init(&executor);
 const execution = switch (try vm.transact(.{
     .env = .{ .gas_limit = 100_000 },
     .tx = .{
@@ -93,8 +92,8 @@ std.debug.print("status: {any}, gas: {}\n", .{
 execution.retain();
 ```
 
-`retain()` accepts the execution into the executor's pending branch. Block-level
-code can consume `executor.acceptedChanges()` and persist it. See
+`retain()` accepts the execution into the VM's pending branch. Advanced
+block-level code can consume `vm.executor.acceptedChanges()` and persist it. See
 [`examples/basic.zig`](https://github.com/0xjojoex/evm.zig/blob/main/examples/basic.zig)
 for runnable transaction execution
 and provisional storage-change inspection.

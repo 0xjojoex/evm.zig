@@ -23,7 +23,8 @@
 const std = @import("std");
 
 pub const address = @import("./address.zig");
-pub const BlockHashSource = @import("./BlockHashSource.zig");
+pub const block = @import("./block.zig");
+pub const BlockHashSource = block.HashSource;
 pub const code = @import("./code.zig");
 pub const crypto = @import("./crypto.zig");
 pub const eth = @import("./eth.zig");
@@ -41,8 +42,9 @@ pub const prepared_code = @import("./prepared_code.zig");
 pub const rlp = @import("rlp");
 pub const spec = @import("./spec.zig");
 pub const state = @import("./state.zig");
+/// Coherent Ethereum execution-state and block-lifecycle choices.
+pub const state_domain = @import("./eth/state_domain.zig");
 pub const stateless = @import("./stateless.zig");
-/// Block-lifetime state capability selecting the tracked or stateless lane.
 pub const Backend = @import("./backend.zig").Backend;
 pub const t = @import("./t.zig");
 pub const trace = @import("./trace.zig");
@@ -54,6 +56,11 @@ const vm = @import("./vm.zig");
 pub const Vm = vm.Vm;
 pub const VmWithOptions = vm.VmWithOptions;
 pub const VmType = vm.VmType;
+pub const Engine = vm.Engine;
+pub const EngineWithOptions = vm.EngineWithOptions;
+pub const EngineType = vm.EngineType;
+pub const BalStatelessEngine = vm.BalStatelessEngine;
+pub const BalStatelessEngineWithOptions = vm.BalStatelessEngineWithOptions;
 pub const BalStatelessVm = vm.BalStatelessVm;
 pub const BalStatelessVmWithOptions = vm.BalStatelessVmWithOptions;
 
@@ -65,6 +72,7 @@ pub const addr = address.addr;
 pub const Address = address.Address;
 pub const AddressWord = address.AddressWord;
 pub const Bytecode = code.Bytecode;
+pub const Spec = spec.Spec;
 pub const Committer = vm.Committer;
 pub const eip7702 = executor.eip7702;
 pub const Env = vm.Env;
@@ -80,8 +88,6 @@ pub const ExecutionResourcePlan = execution_resources.Plan;
 pub const ExecutionResourcePreparer = execution_resources.Preparer;
 pub const RootProvider = state.RootProvider;
 pub const StateReader = vm.StateReader;
-pub const ConcurrentStateReader = state.ConcurrentReader;
-pub const ConcurrentBlockHashSource = BlockHashSource.Concurrent;
 pub const Transaction = Evm.Transaction;
 pub const Executed = Evm.Executed;
 pub const Outcome = Evm.Outcome;

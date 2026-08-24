@@ -90,7 +90,6 @@ pub fn Runtime(comptime spec: ExactSpec) type {
         const transaction = spec.transaction;
         const settlement = spec.settlement;
 
-        pub const specification = spec;
         pub const Input = ValidationInput;
 
         fn gasPlanner(_: Self) Gas {

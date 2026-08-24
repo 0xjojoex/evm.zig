@@ -152,10 +152,11 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .block_access_index = 0,
             };
             if (header) |context| {
+                const before_calls = Engine.spec.block.beforeBlock(context);
                 try Executor.system_contracts.applyBeforeBlockObserved(
                     &execution.executor,
                     self.lifecycle_execution_context,
-                    context,
+                    before_calls.slice(),
                     &observation_collector,
                 );
             }
@@ -206,7 +207,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 self.stop(.candidate_artifact_mismatch, included.tx_index, null);
                 return false;
             }
-            const before_calls = Engine.specification.block.beforeTransaction(.{
+            const before_calls = Engine.spec.block.beforeTransaction(.{
                 .number = self.env.number,
                 .timestamp = self.env.timestamp,
                 .transaction_index = expected_progress.tx_count,
@@ -314,7 +315,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 return;
             }
 
-            const before_calls = Engine.specification.block.beforeTransaction(.{
+            const before_calls = Engine.spec.block.beforeTransaction(.{
                 .number = self.env.number,
                 .timestamp = self.env.timestamp,
                 .transaction_index = progress.tx_count,
@@ -349,8 +350,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             defer executor.deinit();
 
             const progress = self.accumulator.progress;
-            var runtime = Engine.init(&executor);
-            const outcome = try runtime.transact(.{
+            const outcome = try Engine.Advanced.transact(&executor, .{
                 .env = self.env,
                 .tx = rejected.transaction,
                 .progress = .{

@@ -1,6 +1,5 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const call_runtime_module = @import("./call_runtime.zig");
 const eip7702 = @import("./eip7702.zig");
 
 const Address = evmz.Address;
@@ -8,13 +7,17 @@ const AddressWord = evmz.AddressWord;
 const Host = evmz.Host;
 const execution = evmz.execution;
 
-pub fn bind(comptime Executor: type) type {
+pub fn Callbacks(
+    comptime spec: evmz.Spec,
+    comptime ExecutionState: type,
+    comptime options_value: evmz.executor.CompileOptions,
+) type {
+    const Executor = evmz.executor.ExecutorType(spec, ExecutionState, options_value);
+
     return struct {
-        const spec = Executor.specification;
-        const call_runtime = call_runtime_module.bind(Executor);
         pub fn host(self: *Executor) Host {
             return Host{ .ptr = self, .vtable = &.{
-                .call = Callbacks().call,
+                .call = call,
                 .accountExists = accountExists,
                 .getBalance = getBalance,
                 .getNonce = getNonce,
@@ -26,87 +29,82 @@ pub fn bind(comptime Executor: type) type {
                 .storeStorage = storeStorage,
                 .emitLog = emitLog,
                 .getBlockHash = getBlockHash,
-                .selfDestruct = Callbacks().selfDestruct,
+                .selfDestruct = selfDestruct,
                 .accessStorage = accessStorage,
-                .accessDelegatedAccount = Callbacks().accessDelegatedAccount,
-                .accessAccount = Callbacks().accessAccount,
+                .accessDelegatedAccount = accessDelegatedAccount,
+                .accessAccount = accessAccount,
                 .observeAccountAccess = observeAccountAccess,
                 .getTransientStorage = getTransientStorage,
                 .setTransientStorage = setTransientStorage,
             } };
         }
 
-        fn Callbacks() type {
-            return struct {
-                fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
-                    const self: *Executor = @ptrCast(@alignCast(ptr));
-                    return call_runtime.resolveHostCall(self, msg);
-                }
+        fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            return self.resolveHostCall(msg);
+        }
 
-                fn accessAccount(ptr: *anyopaque, address: AddressWord) !execution.AccessStatus {
-                    const self: *Executor = @ptrCast(@alignCast(ptr));
-                    if (nativeContractActive(address)) return .warm;
-                    const target = Executor.executionAddress(address);
-                    if (self.state.isAccountWarm(target)) return .warm;
-                    try self.state.warmAccount(target);
-                    return .cold;
-                }
+        fn accessAccount(ptr: *anyopaque, address: AddressWord) !execution.AccessStatus {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            if (nativeContractActive(address)) return .warm;
+            const target = Executor.executionAddress(address);
+            if (self.state.isAccountWarm(target)) return .warm;
+            try self.state.warmAccount(target);
+            return .cold;
+        }
 
-                fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?execution.AccessStatus {
-                    const self: *Executor = @ptrCast(@alignCast(ptr));
-                    const target = eip7702.delegationTarget(
-                        try self.state.getCode(Executor.executionAddress(address)),
-                    ) orelse return null;
-                    const target_word: AddressWord = .fromAddress(target);
-                    if (nativeContractActive(target_word)) return .warm;
-                    const state_target = Executor.executionAddress(target_word);
-                    if (self.state.isAccountWarm(state_target)) return .warm;
-                    try self.state.warmAccount(state_target);
-                    return .cold;
-                }
+        fn accessDelegatedAccount(ptr: *anyopaque, address: AddressWord) !?execution.AccessStatus {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            const target = eip7702.delegationTarget(
+                try self.state.getCode(Executor.executionAddress(address)),
+            ) orelse return null;
+            const target_word: AddressWord = .fromAddress(target);
+            if (nativeContractActive(target_word)) return .warm;
+            const state_target = Executor.executionAddress(target_word);
+            if (self.state.isAccountWarm(state_target)) return .warm;
+            try self.state.warmAccount(state_target);
+            return .cold;
+        }
 
-                fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
-                    const self: *Executor = @ptrCast(@alignCast(ptr));
-                    const balance = try getBalance(ptr, .fromAddress(address));
-                    const call_capture = try call_runtime.beginSelfDestructCapture(
-                        self,
-                        address,
-                        beneficiary,
-                        balance,
-                    );
-                    const same_address = Address.eql(address, beneficiary);
-                    const state_address = Executor.stateAddress(address);
-                    const state_beneficiary = Executor.stateAddress(beneficiary);
-                    const should_refund = !self.state.wasSelfdestructed(state_address);
-                    const policy = spec.self_destruct.policy(.{
-                        .same_address = same_address,
-                        .created_in_transaction = self.state.createdInTransaction(state_address),
+        fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
+            const self: *Executor = @ptrCast(@alignCast(ptr));
+            const balance = try getBalance(ptr, .fromAddress(address));
+            const call_capture = try self.beginSelfDestructCapture(
+                address,
+                beneficiary,
+                balance,
+            );
+            const same_address = Address.eql(address, beneficiary);
+            const state_address = Executor.stateAddress(address);
+            const state_beneficiary = Executor.stateAddress(beneficiary);
+            const should_refund = !self.state.wasSelfdestructed(state_address);
+            const policy = spec.self_destruct.policy(.{
+                .same_address = same_address,
+                .created_in_transaction = self.state.createdInTransaction(state_address),
+            });
+            if (balance > 0) {
+                if (!same_address) {
+                    try self.state.addBalance(state_beneficiary, balance);
+                    try self.emitTransferLog(.{
+                        .from = address,
+                        .to = beneficiary,
+                        .amount = balance,
                     });
-                    if (balance > 0) {
-                        if (!same_address) {
-                            try self.state.addBalance(state_beneficiary, balance);
-                            try evmz.executor.transfer_logs.emit(self, .{
-                                .from = address,
-                                .to = beneficiary,
-                                .amount = balance,
-                            });
-                        }
-                        if (policy.clear_balance) {
-                            try self.state.setBalance(state_address, 0);
-                        }
-                    } else if (!same_address and spec.self_destruct.touches_beneficiary_on_zero_transfer) {
-                        try self.state.touchAccount(state_beneficiary);
-                    }
-                    if (policy.reset_nonce) {
-                        try self.state.setNonce(state_address, 0);
-                    }
-                    if (policy.mark_selfdestructed) {
-                        try self.state.markSelfdestructed(state_address);
-                    }
-                    if (call_capture) |token| try call_runtime.finishSelfDestructCapture(self, token);
-                    return should_refund;
                 }
-            };
+                if (policy.clear_balance) {
+                    try self.state.setBalance(state_address, 0);
+                }
+            } else if (!same_address and spec.self_destruct.touches_beneficiary_on_zero_transfer) {
+                try self.state.touchAccount(state_beneficiary);
+            }
+            if (policy.reset_nonce) {
+                try self.state.setNonce(state_address, 0);
+            }
+            if (policy.mark_selfdestructed) {
+                try self.state.markSelfdestructed(state_address);
+            }
+            if (call_capture) |token| try self.finishSelfDestructCapture(token);
+            return should_refund;
         }
 
         inline fn nativeContractActive(address: AddressWord) bool {

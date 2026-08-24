@@ -94,7 +94,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     );
     std.debug.print(
         "P256VERIFY active: custom {}, stock cancun {}\n",
-        .{ CustomVm.specification.precompile.active(p256), CancunVm.specification.precompile.active(p256) },
+        .{ CustomVm.spec.precompile.active(p256), CancunVm.spec.precompile.active(p256) },
     );
 
     if (reversed.status != .success) return error.ExampleReverseFailed;
@@ -117,7 +117,7 @@ test "custom precompile type serves its own address through the VM" {
 
 test "derived config activates P256VERIFY ahead of the Ethereum catalog" {
     const p256 = evmz.precompile.Contract.p256verify.toAddress();
-    try std.testing.expect(CustomVm.specification.precompile.active(p256));
-    try std.testing.expect(!CancunVm.specification.precompile.active(p256));
-    try std.testing.expect(evmz.Vm(evmz.eth.osaka).specification.precompile.active(p256));
+    try std.testing.expect(CustomVm.spec.precompile.active(p256));
+    try std.testing.expect(!CancunVm.spec.precompile.active(p256));
+    try std.testing.expect(evmz.Vm(evmz.eth.osaka).spec.precompile.active(p256));
 }

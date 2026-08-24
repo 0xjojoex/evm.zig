@@ -808,7 +808,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
     };
     const withdrawals = [_]Withdrawal{withdrawal};
     const missing_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
-        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
             scratch,
             trie.empty_root_hash,
             &.{},
@@ -852,7 +852,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
     }};
     const missing_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
             scratch,
             state_root,
             &.{account_node},
@@ -872,7 +872,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         .address = address.addr(0x3000),
     }});
     const spurious_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
-        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
             scratch,
             trie.empty_root_hash,
             &.{},
@@ -890,7 +890,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         .storage_reads = &spurious_slot,
     }});
     const spurious_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
-        .state_backend = try DenseAmsterdam.Vm.BlockState.witnessBackend(
+        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
             scratch,
             trie.empty_root_hash,
             &.{},
@@ -982,7 +982,7 @@ test "BlockSTF validates blob gas header fields" {
         .parent_blob_gas_used = 786_432,
         .parent_base_fee_per_gas = 1_000_000,
     };
-    const blob_schedule = vm.Vm(eth_spec.prague).specification.transaction.blob_schedule.?;
+    const blob_schedule = vm.Vm(eth_spec.prague).spec.transaction.blob_schedule.?;
     const expected_excess_blob_gas = blob_schedule.calcExcessBlobGasForSchedule(parent_blob_gas).?;
     const custom_blob_params = transaction.BlobParams{
         .target = 10,

@@ -212,7 +212,7 @@ fn prepareFor(
     value: transaction.Transaction,
     env_overrides: EnvOverrides,
 ) !PrepareResult {
-    const Runtime = evmz.eth.transaction_prepare.Runtime(ExactVm.specification);
+    const Runtime = evmz.eth.transaction_prepare.Runtime(ExactVm.spec);
     return (Runtime{}).prepare(.{
         .tx = value,
         .env = .{

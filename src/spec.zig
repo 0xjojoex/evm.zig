@@ -13,7 +13,7 @@
 
 const std = @import("std");
 
-const block_program = @import("block_program.zig");
+const block_lifecycle = @import("block/lifecycle.zig");
 const execution = @import("execution.zig");
 const instruction_table = @import("instruction/table.zig");
 const authorization = @import("transaction/authorization.zig");
@@ -152,14 +152,14 @@ pub const AuthorizationSpec = struct {
 pub const BlockSpec = struct {
     /// System calls before the first transaction (EIP-4788 beacon root,
     /// EIP-2935 history).
-    beforeBlock: *const fn (block_program.BeforeBlockContext) block_program.BlockSystemCalls,
+    beforeBlock: *const fn (block_lifecycle.BeforeBlockContext) block_lifecycle.BlockSystemCalls,
     /// System calls before each transaction.
-    beforeTransaction: *const fn (block_program.BeforeTransactionContext) block_program.BlockSystemCalls,
+    beforeTransaction: *const fn (block_lifecycle.BeforeTransactionContext) block_lifecycle.BlockSystemCalls,
     /// System calls after each transaction.
-    afterTransaction: *const fn (block_program.AfterTransactionContext) block_program.BlockSystemCalls,
+    afterTransaction: *const fn (block_lifecycle.AfterTransactionContext) block_lifecycle.BlockSystemCalls,
     /// End-of-block system calls (EIP-7002 withdrawal and EIP-7251
     /// consolidation requests).
-    finalizeBlock: *const fn (block_program.FinalizeBlockContext) block_program.FinalizeSystemCalls,
+    finalizeBlock: *const fn (block_lifecycle.FinalizeBlockContext) block_lifecycle.FinalizeSystemCalls,
     /// Execution builds and verifies an EIP-7928 block-level access list.
     /// This gates the execution-side surfaces: observation recording, claim
     /// verification, and the candidate lane. The matching header field stays

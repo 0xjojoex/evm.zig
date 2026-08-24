@@ -11,7 +11,7 @@ const eip8037 = evmz.eth.eip8037;
 const eip8038 = evmz.eth.eip8038;
 
 test "Amsterdam authorization policy charges the first authority write" {
-    const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
+    const adjustment = evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = true,
         .account_already_written = false,
         .clears_delegation = false,
@@ -26,7 +26,7 @@ test "Amsterdam authorization policy charges the first authority write" {
 }
 
 test "Amsterdam authorization policy charges a newly-created authority leaf" {
-    const adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
+    const adjustment = evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = false,
         .account_already_written = false,
         .clears_delegation = true,
@@ -40,14 +40,14 @@ test "Amsterdam authorization policy charges a newly-created authority leaf" {
 }
 
 test "Amsterdam authorization policy charges create then clear only once" {
-    var adjustment = evmz.Evm.specification.authorization.successGasAdjustment(.{
+    var adjustment = evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = false,
         .account_already_written = false,
         .clears_delegation = false,
         .delegated_before_transaction = false,
         .delegation_set_before = false,
     });
-    adjustment.add(evmz.Evm.specification.authorization.successGasAdjustment(.{
+    adjustment.add(evmz.Evm.spec.authorization.successGasAdjustment(.{
         .account_exists = true,
         .account_already_written = true,
         .clears_delegation = true,
@@ -61,7 +61,7 @@ test "Amsterdam authorization policy charges create then clear only once" {
 }
 
 test "Amsterdam invalid authorization policy has no runtime charge" {
-    const adjustment = evmz.Evm.specification.authorization.invalid_gas_adjustment;
+    const adjustment = evmz.Evm.spec.authorization.invalid_gas_adjustment;
 
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_state_charge);
     try std.testing.expectEqual(@as(u64, 0), adjustment.account_write_charge);
@@ -83,8 +83,7 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     try evmz.t.seedExecutorAccount(&executor, authority, .{});
 
     const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
-    var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecuted(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.transact(&executor, .{
         .env = .{ .gas_limit = 300_000, .coinbase = execution_context.block.coinbase },
         .tx = .{
             .kind = .set_code,
@@ -119,8 +118,7 @@ test "Amsterdam repeated authorizations share authority history" {
         evmz.t.testAuthorization(authority, first_target),
         second,
     };
-    var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecuted(try vm.transact(.{
+    const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.transact(&executor, .{
         .env = .{ .gas_limit = 600_000 },
         .tx = .{
             .kind = .set_code,
@@ -155,8 +153,7 @@ test "Amsterdam invalid loaded authorization authority is a semantic access" {
     try evmz.t.seedExecutorAccount(&executor, authority, .{ .nonce = 1 });
 
     const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
-    var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecuted(try vm.observe().transact(.{
+    const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.observe(&executor).transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{
             .kind = .set_code,
@@ -201,8 +198,7 @@ test "Amsterdam wrong-chain authorization authority is never accessed" {
     var wrong_chain = evmz.t.testAuthorization(authority, target);
     wrong_chain.chain_id = 0xdead;
     const authorization_list = [_]transaction.AuthorizationTuple{wrong_chain};
-    var vm = evmz.Evm.init(&executor);
-    const executed = try evmz.t.expectExecuted(try vm.observe().transact(.{
+    const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.observe(&executor).transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{
             .kind = .set_code,

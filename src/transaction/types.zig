@@ -3,7 +3,7 @@
 //! One transaction flows through several representations. Keep them distinct:
 //!
 //!   raw bytes ─(transaction/envelope.zig)-> Transaction ─(prepare)->
-//!     TransactionView ─> Prepared{scope, message} ─> EvmExecutionRequest
+//!     TransactionView ─> Prepared{scope, message} ─> ExecutionRequest
 
 const std = @import("std");
 
@@ -133,7 +133,7 @@ pub const Env = struct {
     ///
     /// The block gas limit comes from `self`. The transaction's own gas limit is
     /// not part of the context at all: it is the execution budget carried by
-    /// `EvmExecutionRequest.gas`.
+    /// `ExecutionRequest.gas`.
     pub fn executionContext(
         self: Env,
         transaction: execution.TransactionEnvironment,
@@ -260,7 +260,7 @@ pub fn effectiveGasPrice(env: Env, view: TransactionView) u256 {
 
 /// Build the immutable EVM request after family lifecycle has resolved the
 /// message gas budget.
-pub fn executionRequest(context: execution.ExecutionContext, message: execution.Message, gas: ExecutionGas) execution.EvmExecutionRequest {
+pub fn executionRequest(context: execution.ExecutionContext, message: execution.Message, gas: ExecutionGas) execution.ExecutionRequest {
     return .{
         .context = context,
         .message = message,

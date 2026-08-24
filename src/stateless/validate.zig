@@ -169,7 +169,7 @@ fn validateExact(
             .base_fee = block.base_fee_per_gas,
             .blob_base_fee = try currentBlobBaseFeeExact(
                 revision,
-                ExactBlockStf.specification,
+                ExactBlockStf.spec,
                 input.blob_params,
                 block,
             ),
@@ -182,7 +182,7 @@ fn validateExact(
             .parent_hash = block.parent_hash,
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
-        .state_backend = try ExactBlockStf.Vm.BlockState.witnessBackend(
+        .state_backend = try ExactBlockStf.Vm.StateDomain.Lifecycle.witnessBackend(
             allocator,
             parent_header.state_root,
             input.witness.state,
@@ -568,10 +568,10 @@ test "stateless validator is specialized by the complete spec" {
     const Oracle = TrackedValidator(custom);
 
     comptime {
-        std.debug.assert(ExactValidator.BlockStf.specification.call.base_gas == custom.call.base_gas);
-        std.debug.assert(ExactValidator.BlockStf.Vm.specification.call.base_gas == custom.call.base_gas);
-        std.debug.assert(ExactValidator.BlockStf.Vm.BlockState.State == @import("BlockState.zig"));
-        std.debug.assert(Oracle.BlockStf.Vm.BlockState.State == state.TrackedState);
+        std.debug.assert(ExactValidator.BlockStf.spec.call.base_gas == custom.call.base_gas);
+        std.debug.assert(ExactValidator.BlockStf.Vm.spec.call.base_gas == custom.call.base_gas);
+        std.debug.assert(ExactValidator.BlockStf.Vm.Executor.State == @import("BlockState.zig"));
+        std.debug.assert(Oracle.BlockStf.Vm.Executor.State == state.TrackedState);
     }
 }
 

@@ -43,7 +43,7 @@ pub const BlobSchedule = struct {
         if (total_blob_gas < target_blob_gas) return 0;
 
         if (self.reserve_price_active) {
-            const parent_blob_base_fee = blobBaseFeeForSchedule(self, input.parent_excess_blob_gas) orelse return null;
+            const parent_blob_base_fee = self.blobBaseFeeForSchedule(input.parent_excess_blob_gas) orelse return null;
             const execution_reserve_price = uint256.checkedMul(@as(u256, self.execution_base_cost), input.parent_base_fee_per_gas) orelse return null;
             const blob_price = uint256.checkedMul(per_blob_gas_u256, parent_blob_base_fee) orelse return null;
             if (execution_reserve_price > blob_price) {

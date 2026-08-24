@@ -115,6 +115,10 @@ pub const Result = struct {
         };
     }
 
+    pub fn isSuccess(self: Result) bool {
+        return self.status() == .success;
+    }
+
     pub fn status(self: Result) Status {
         return self.outcome.status;
     }

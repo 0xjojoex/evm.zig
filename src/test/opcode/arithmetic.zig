@@ -44,7 +44,7 @@ test "EXP byte gas comes from the exact spec" {
 
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(
-        msg.gas - Exact.specification.instruction.entry(@intFromEnum(evmz.Opcode.EXP)).info.static_gas - 2,
+        msg.gas - Exact.spec.instruction.entry(@intFromEnum(evmz.Opcode.EXP)).info.static_gas - 2,
         frame.frame.gas_left,
     );
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());
