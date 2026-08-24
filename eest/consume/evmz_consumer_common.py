@@ -1,5 +1,6 @@
 """Shared subprocess boundary for evmz consume-direct adapters."""
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -9,8 +10,28 @@ import pytest
 from execution_testing.client_clis.transition_tool import (
     dump_files_to_directory,
 )
+from execution_testing.fixtures.consume import TestCaseIndexFile
 
 CachedRun = tuple[list[str], int, str, str, list[object]]
+
+
+def group_fixture_files(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Keep every indexed fixture file on one xdist worker."""
+    args = config.invocation_params.args
+    if not any(arg == "-n" or arg.startswith("-n") for arg in args):
+        return
+
+    for item in items:
+        callspec = getattr(item, "callspec", None)
+        if callspec is None:
+            continue
+        test_case = callspec.params.get("test_case")
+        if not isinstance(test_case, TestCaseIndexFile):
+            continue
+        digest = hashlib.blake2s(
+            test_case.json_path.as_posix().encode(), digest_size=8
+        ).hexdigest()
+        item.add_marker(pytest.mark.xdist_group(name=f"evmz-file-{digest}"))
 
 
 def consume_fixture(

@@ -3,7 +3,9 @@
 import re
 from pathlib import Path
 
-from evmz_consumer_common import CachedRun, consume_fixture
+import pytest
+
+from evmz_consumer_common import CachedRun, consume_fixture, group_fixture_files
 from execution_testing.client_clis.ethereum_cli import EthereumCLI
 from execution_testing.client_clis.fixture_consumer_tool import (
     FixtureConsumerTool,
@@ -60,3 +62,10 @@ class EvmzFixtureConsumer(
             debug_output_path=debug_output_path,
             cache=self.cache,
         )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    group_fixture_files(config, items)

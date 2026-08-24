@@ -168,7 +168,7 @@ fn addConsumeStep(
         "--bin",
     });
     consume.addFileArg(eest_exe.getEmittedBin());
-    consume.addArgs(&.{ "-p", plugin, "-m", selection });
+    consume.addArgs(&.{ "-p", plugin, "-m", selection, "--dist=loadgroup" });
     if (b.args) |args| consume.addArgs(args);
     b.step(step_name, description).dependOn(&consume.step);
 }
