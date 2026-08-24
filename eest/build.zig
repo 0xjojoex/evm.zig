@@ -193,7 +193,6 @@ fn consumeCommand(b: *std.Build) *std.Build.Step.Run {
     consume.addDirectoryArg(b.path("consume"));
     // uv may reuse a git checkout through a local file URL.
     consume.setEnvironmentVariable("GIT_ALLOW_PROTOCOL", "file:https");
-    consume.setEnvironmentVariable("UV_CACHE_DIR", ".zig-cache/eest-consume/uv");
     consume.setCwd(b.path(".."));
     return consume;
 }
