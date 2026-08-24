@@ -33,7 +33,7 @@ def count_stateless_blocks(root: Path, test_cases: list[dict]) -> tuple[int, int
         for fixture in document.values():
             for block in fixture.get("blocks", []):
                 value = block.get("statelessInputBytes")
-                if isinstance(value, str) and value != "0x":
+                if isinstance(value, str):
                     blocks += 1
     return len(paths), blocks
 
