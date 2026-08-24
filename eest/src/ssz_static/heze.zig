@@ -1,4 +1,4 @@
-//! Generated from the consensus-specs resolved pyspec pinned by eest.lock.
+//! Generated from the consensus-specs resolved pyspec pinned by eest/build.zig.zon.
 //! Unique named schema shapes first required at heze.
 //! Regenerate with scripts/generate-consensus-ssz-schemas.py.
 

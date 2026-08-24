@@ -26,7 +26,6 @@ const strip0x = fixture_common.strip0x;
 
 pub const Options = struct {
     fork_filter: ?[]const u8 = null,
-    test_filter: ?[]const u8 = null,
 };
 
 pub const FailReason = enum(u8) {
@@ -87,33 +86,7 @@ pub const Summary = struct {
     }
 };
 
-pub fn runFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: Options) !Summary {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024 * 1024));
-    defer allocator.free(bytes);
-    return runSlice(allocator, bytes, options);
-}
-
-pub fn runSlice(allocator: std.mem.Allocator, bytes: []const u8, options: Options) !Summary {
-    var runner = Runner{};
-    defer runner.deinit();
-    return runner.runSlice(allocator, bytes, options);
-}
-
-pub const Runner = struct {
-    pub fn deinit(_: *Runner) void {}
-
-    pub fn runFile(self: *Runner, io: std.Io, allocator: std.mem.Allocator, path: []const u8, options: Options) !Summary {
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024 * 1024));
-        defer allocator.free(bytes);
-        return self.runSlice(allocator, bytes, options);
-    }
-
-    pub fn runSlice(_: *Runner, allocator: std.mem.Allocator, bytes: []const u8, options: Options) !Summary {
-        return runSliceImpl(allocator, bytes, options);
-    }
-};
-
-fn runSliceImpl(
+fn runSlice(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     options: Options,
@@ -127,21 +100,28 @@ fn runSliceImpl(
     var summary = Summary{};
     var it = root.iterator();
     while (it.next()) |entry| {
-        const test_name = entry.key_ptr.*;
-        if (options.test_filter) |needle| {
-            if (std.mem.indexOf(u8, test_name, needle) == null) continue;
-        }
-
-        summary.fixtures += 1;
-        runFixture(allocator, test_name, entry.value_ptr.*, options, &summary) catch |err| {
-            summary.vectors += 1;
-            summary.countFail(switch (err) {
-                error.UnsupportedFixtureKey => .unsupported_fixture_key,
-                else => .malformed_fixture,
-            });
-        };
+        summary.add(runCase(allocator, entry.key_ptr.*, entry.value_ptr.*, options));
     }
 
+    return summary;
+}
+
+/// Runs one top-level state fixture selected by its exact EEST id.
+/// File discovery and selection belong to the caller.
+pub fn runCase(
+    allocator: std.mem.Allocator,
+    test_name: []const u8,
+    fixture: std.json.Value,
+    options: Options,
+) Summary {
+    var summary = Summary{ .fixtures = 1 };
+    runFixture(allocator, test_name, fixture, options, &summary) catch |err| {
+        summary.vectors += 1;
+        summary.countFail(switch (err) {
+            error.UnsupportedFixtureKey => .unsupported_fixture_key,
+            else => .malformed_fixture,
+        });
+    };
     return summary;
 }
 
@@ -347,11 +327,7 @@ fn serializedTransactionExceptionMatches(
     const tx_bytes = try parseBytesFromValue(allocator, value);
     defer allocator.free(tx_bytes);
 
-    _ = evmz.transaction.recoverSender(allocator, tx_bytes) catch |err| return switch (err) {
-        error.InvalidSignature, error.UnsupportedLegacyV => true,
-        else => false,
-    };
-    return false;
+    return tx_validation.serializedSignatureExceptionMatches(allocator, tx_bytes, expected);
 }
 
 fn finishVectorResult(

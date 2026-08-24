@@ -122,6 +122,23 @@ pub fn runSlice(
     return summary;
 }
 
+/// Runs one top-level stateless fixture selected by its exact EEST id.
+pub fn runCase(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    test_name: []const u8,
+    fixture: JsonValue,
+    options: Options,
+    context: *Context,
+) !Summary {
+    var summary = Summary{};
+    var names = stateless_metrics.Names.init(allocator);
+    defer names.deinit();
+    try runFixture(io, allocator, path, test_name, fixture, options, context, &names, &summary);
+    return summary;
+}
+
 fn runFixture(
     io: std.Io,
     allocator: std.mem.Allocator,

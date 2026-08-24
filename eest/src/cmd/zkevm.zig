@@ -1,14 +1,14 @@
 const std = @import("std");
 const stateless = @import("../stateless.zig");
 const guest_evidence = @import("../guest_evidence.zig");
-const fixture_common = @import("../fixture.zig");
-const runner = @import("../runner.zig");
+const fixture_pool = @import("../fixture_pool.zig");
+const guest_runner = @import("../guest_fixture_runner.zig");
 
 pub const about = "Run EEST zkEVM stateless SSZ fixtures";
 
 const default_jobs = 2;
 const max_jobs = 16;
-const Fixtures = runner.Runner(stateless);
+const Fixtures = guest_runner.Runner(stateless);
 
 pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
@@ -47,7 +47,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
             options.limit = try std.fmt.parseInt(usize, value, 10);
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const value = args.next() orelse return error.MissingJobs;
-            jobs = try runner.parseJobs(value, max_jobs);
+            jobs = try fixture_pool.parseJobs(value, max_jobs);
             jobs_explicit = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             options.verbose = true;
@@ -129,7 +129,8 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         if (corpus_manifest) |manifest_path| {
             try paths.appendSlice(allocator, try manifestFixtureRoots(init.io, arena, manifest_path));
         } else {
-            try paths.append(allocator, try fixture_common.lockedZkevmFixturePath(init.io, arena));
+            printUsage();
+            return error.MissingFixturePath;
         }
     }
 

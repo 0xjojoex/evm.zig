@@ -328,6 +328,10 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
     });
     try std.testing.expectEqual(block_stf.Status.transaction_rejected, rejected.status);
     try std.testing.expectEqual(@as(?usize, 1), rejected.tx_index);
+    try std.testing.expectEqual(
+        evmz.transaction.validation.ValidationError.nonce_too_high,
+        rejected.transaction_rejection,
+    );
     try std.testing.expectEqual(bal.DifferentialStatus.rejection_matched, rejected_report.status);
     try std.testing.expectEqual(@as(?usize, 1), rejected_report.tx_index);
     try std.testing.expectEqual(@as(usize, 1), rejected_report.folded_transactions);
@@ -361,6 +365,10 @@ test "BlockSTF BAL differential matches first rejected transaction and blob cap"
         },
     );
     try std.testing.expectEqual(block_stf.Status.transaction_rejected, parallel_rejected.status);
+    try std.testing.expectEqual(
+        evmz.transaction.validation.ValidationError.nonce_too_high,
+        parallel_rejected.transaction_rejection,
+    );
     try std.testing.expectEqual(
         bal.DifferentialStatus.rejection_matched,
         parallel_rejected_report.status,

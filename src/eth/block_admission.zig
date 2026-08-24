@@ -14,7 +14,7 @@ pub const Claim = struct {
     decoded: ?bal.Decoded = null,
     counts: ?bal.Counts = null,
 
-    pub const DecodeError = error{ OutOfMemory, BlockAccessListTooLarge, InvalidBlockAccessList };
+    pub const DecodeError = error{ OutOfMemory, BlockAccessListTooLarge, MalformedBlockAccessList, InvalidBlockAccessList };
 
     pub fn decode(
         allocator: std.mem.Allocator,
@@ -33,11 +33,12 @@ pub const Claim = struct {
             error.DecodeAllocationLimitExceeded,
             error.DecodeItemLimitExceeded,
             => return error.BlockAccessListTooLarge,
-            else => return error.InvalidBlockAccessList,
+            else => return error.MalformedBlockAccessList,
         };
         errdefer decoded.deinit(allocator);
         const counts = validate(decoded.accounts, transaction_count, gas_limit) catch |err| switch (err) {
             error.BlockAccessListGasLimitExceeded => return error.BlockAccessListTooLarge,
+            error.AccountsOutOfOrder, error.DuplicateAccount => return error.MalformedBlockAccessList,
             else => return error.InvalidBlockAccessList,
         };
         return .{ .decoded = decoded, .counts = counts };

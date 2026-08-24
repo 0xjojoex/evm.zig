@@ -405,7 +405,7 @@ def emit_fork_module(
         if shape_for(dependency, shapes).declaration_fork != fork
     }
     lines = [
-        "//! Generated from the consensus-specs resolved pyspec pinned by eest.lock.",
+        "//! Generated from the consensus-specs resolved pyspec pinned by eest/build.zig.zon.",
         f"//! Unique named schema shapes first required at {fork}.",
         "//! Regenerate with scripts/generate-consensus-ssz-schemas.py.",
         "",
@@ -427,7 +427,7 @@ def emit_index(
 ) -> str:
     by_context = {(context.preset, context.fork): context for context in contexts}
     lines = [
-        "//! Generated from the consensus-specs resolved pyspec pinned by eest.lock.",
+        "//! Generated from the consensus-specs resolved pyspec pinned by eest/build.zig.zon.",
         "//! Maps preset/fork fixture names to deduplicated schema codecs.",
         "//! Regenerate with scripts/generate-consensus-ssz-schemas.py.",
         "",

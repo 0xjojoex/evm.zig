@@ -29,7 +29,6 @@ jobs:
     name: Qualify ${{ inputs.tag }}
     uses: ./.github/workflows/guest-benchmark.yml
     with:
-      corpus: tests-zkevm
       release_gate: true
     permissions:
       contents: read
