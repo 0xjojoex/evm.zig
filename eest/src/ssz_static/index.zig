@@ -1,4 +1,4 @@
-//! Generated from the consensus-specs resolved pyspec pinned by consensus.lock.
+//! Generated from the consensus-specs resolved pyspec pinned by eest/build.zig.zon.
 //! Maps preset/fork fixture names to deduplicated schema codecs.
 //! Regenerate with scripts/generate-consensus-ssz-schemas.py.
 

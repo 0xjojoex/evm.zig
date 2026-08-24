@@ -400,7 +400,6 @@ pub fn build(b: *std.Build) void {
     const optimize_name = @tagName(optimize);
     const bench_optimize_name = @tagName(bench_optimize);
     if (pathExists(b, "eest/build.zig")) {
-        addEestDelegate(b, "consensus-lock-check", "Verify consensus fixture pins", "consensus-lock-check", optimize_name, null, evmz_build, ci_step);
         addEestDelegate(b, "eest-test", "Run sidecar EEST runner tests", "test", optimize_name, null, evmz_build, ci_step);
         addEestDelegate(b, "zkevm", "Run EEST zkEVM stateless SSZ fixtures", "zkevm", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", "zkevm-mutations", optimize_name, null, evmz_build, null);
@@ -409,7 +408,15 @@ pub fn build(b: *std.Build) void {
         addEestDelegate(b, "eest-consume", "Run execution-spec fixtures through consume direct", "consume", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-consume", "Run tests-zkevm fixtures through consume direct", "consume-zkevm", optimize_name, null, evmz_build, null);
         addEestDelegate(b, "zkevm-resolve", "Resolve tests-zkevm through execution-specs", "resolve-zkevm", optimize_name, null, evmz_build, null);
-        addEestDelegate(b, "ssz-conformance", "Run consensus-spec generic SSZ fixtures", "ssz-conformance", optimize_name, null, evmz_build, null);
+        addChildBuild(b, .{
+            .directory = "eest",
+            .step_name = "ssz-conformance",
+            .description = "Run consensus-spec generic SSZ fixtures",
+            .child_step = "ssz-conformance",
+            .build_args = &.{"-Dpinned-consensus-fixtures=true"},
+            .optimize = optimize_name,
+            .evmz = evmz_build,
+        });
     }
     if (pathExists(b, "bench/build.zig")) {
         addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null, evmz_build, null);
@@ -1340,6 +1347,7 @@ const ChildBuildConfig = struct {
     support_min: ?[]const u8 = null,
     support_max: ?[]const u8 = null,
     micro_filter: ?[]const u8 = null,
+    build_args: []const []const u8 = &.{},
     evmz: EvmzBuildConfig,
     aggregate: ?*std.Build.Step = null,
     forward_args: bool = true,
@@ -1360,6 +1368,7 @@ fn addChildBuild(b: *std.Build, config: ChildBuildConfig) void {
     if (config.support_min) |revision| run.addArg(b.fmt("-Dbench-support-min={s}", .{revision}));
     if (config.support_max) |revision| run.addArg(b.fmt("-Dbench-support-max={s}", .{revision}));
     if (config.micro_filter) |filter| run.addArg(b.fmt("-Dmicro-filter={s}", .{filter}));
+    run.addArgs(config.build_args);
     addEvmzBuildArgs(run, b, config.evmz);
     run.addArg(config.child_step);
     if (config.forward_args) if (b.args) |args| {

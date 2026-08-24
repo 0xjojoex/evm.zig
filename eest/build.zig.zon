@@ -11,6 +11,21 @@
             .url = "https://github.com/blockblaz/zig-snappy/archive/050f529bc5fa11242140312ecf550c186f05af1e.tar.gz",
             .hash = "zig_snappy-0.0.5-bDFzXlh4AADPRkDi2swDMAf8shH39Fc1g5oYRAhFQfTt",
         },
+        .consensus_general = .{
+            .url = "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/general.tar.gz",
+            .hash = "N-V-__8AAAh02Q_AEV27HvU0UEh6vLPZL8pyBOJg4tSeFHjA",
+            .lazy = true,
+        },
+        .consensus_mainnet = .{
+            .url = "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/mainnet.tar.gz",
+            .hash = "N-V-__8AAOoTQKarh26RvesLPlYYWb1BoVor67JUOSHWCymK",
+            .lazy = true,
+        },
+        .consensus_minimal = .{
+            .url = "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/minimal.tar.gz",
+            .hash = "N-V-__8AAMAcXCwz8BarazhC9QdenPB_b0B6mlZ3CrFO6a7P",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

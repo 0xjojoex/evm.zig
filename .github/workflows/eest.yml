@@ -142,8 +142,6 @@ jobs:
     name: Consensus SSZ conformance and sidecar tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      EVMZ_CONSENSUS_ROOT: ${{ github.workspace }}/eest/.consensus
 
     steps:
       - name: Checkout
@@ -155,14 +153,6 @@ jobs:
           version: 0.16.0
           use-cache: ${{ github.event_name != 'pull_request' }}
           cache-size-limit: 512
-
-      - name: Fetch consensus SSZ fixtures
-        working-directory: eest
-        env:
-          CONSENSUS_CACHE: ${{ runner.temp }}/eest-download
-        run: |
-          trap 'rm -rf -- "${CONSENSUS_CACHE}"' EXIT
-          scripts/fetch-consensus-ssz-fixtures.sh
 
       - name: Run consensus SSZ corpus
         run: |

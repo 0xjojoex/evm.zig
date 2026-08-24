@@ -10,6 +10,11 @@ const Secp256k1Backend = enum { std, libsecp256k1 };
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const pinned_consensus_fixtures = b.option(
+        bool,
+        "pinned-consensus-fixtures",
+        "Use consensus fixtures pinned in build.zig.zon when no path is given",
+    ) orelse false;
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
     const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
     const native_secp256k1 = b.option(Secp256k1Backend, "native-secp256k1", "Native secp256k1 backend") orelse .std;
@@ -51,12 +56,26 @@ pub fn build(b: *std.Build) void {
             .root_module = sszConformanceModule(b, "src/ssz_main.zig", target, optimize, ssz_mod, snappy_mod),
         });
         b.installArtifact(ssz_conformance_exe);
-        addStep(b, ssz_conformance_exe, "ssz-conformance", "Run consensus-spec General, Mainnet, and Minimal SSZ fixtures", &.{});
-    }
-
-    {
-        const check = b.addSystemCommand(&.{ "bash", "scripts/check-consensus-lock.sh" });
-        b.step("consensus-lock-check", "Verify consensus fixture pins").dependOn(&check.step);
+        const run = b.addRunArtifact(ssz_conformance_exe);
+        run.setCwd(b.path(".."));
+        if (hasFixturePath(b.args)) {
+            run.addArgs(b.args.?);
+        } else if (pinned_consensus_fixtures) {
+            const general = b.lazyDependency("consensus_general", .{});
+            const mainnet = b.lazyDependency("consensus_mainnet", .{});
+            const minimal = b.lazyDependency("consensus_minimal", .{});
+            if (general == null or mainnet == null or minimal == null) return;
+            run.addDirectoryArg(general.?.path("general/phase0/ssz_generic"));
+            run.addDirectoryArg(mainnet.?.path("mainnet"));
+            run.addDirectoryArg(minimal.?.path("minimal"));
+            if (b.args) |args| run.addArgs(args);
+        } else if (b.args) |args| {
+            run.addArgs(args);
+        }
+        b.step(
+            "ssz-conformance",
+            "Run consensus-spec General, Mainnet, and Minimal SSZ fixtures",
+        ).dependOn(&run.step);
     }
 
     {
@@ -97,6 +116,23 @@ pub fn build(b: *std.Build) void {
         );
         addResolveZkevmStep(b);
     }
+}
+
+fn hasFixturePath(args: ?[]const []const u8) bool {
+    const values = args orelse return false;
+    var skip_next = false;
+    for (values) |value| {
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
+        if (std.mem.eql(u8, value, "--jobs")) {
+            skip_next = true;
+            continue;
+        }
+        if (!std.mem.startsWith(u8, value, "-")) return true;
+    }
+    return false;
 }
 
 const default_execution_input = "tests-glamsterdam-devnet@latest";

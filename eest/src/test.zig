@@ -3,7 +3,6 @@ test {
     _ = @import("fixture_pool.zig");
     _ = @import("guest_fixture_runner.zig");
     _ = @import("guest_evidence.zig");
-    _ = @import("consensus_lock.zig");
     _ = @import("state.zig");
     _ = @import("stateless.zig");
     _ = @import("stateless_mutation.zig");

@@ -116,20 +116,18 @@ general fixture consumer or a coverage proof.
 
 ## Consensus SSZ fixtures
 
-Consensus SSZ is not an execution-spec fixture format. It retains a separate,
-checksum-bearing pin in `consensus.lock` and a consensus-owned cache:
+Consensus SSZ is not an execution-spec fixture format. The EEST Zig package
+pins the General, Mainnet, and Minimal archives as lazy data dependencies in
+`build.zig.zon`:
 
 ```sh
-eest/scripts/fetch-consensus-ssz-fixtures.sh
 zig build ssz-conformance
-zig build consensus-lock-check
 ```
 
-The fetcher extracts only the General, Mainnet, and Minimal SSZ subtrees from
-the pinned consensus-spec release. By default the cache lives in the main
-worktree at `eest/.consensus`; `EVMZ_CONSENSUS_ROOT` overrides it. A bare
+Zig downloads, verifies, extracts, and caches those packages. A bare
 conformance run covers all three presets and fails on an empty, skipped, or
-failed case.
+failed case. Passing a fixture path after `--` runs only that local subtree or
+file and does not resolve the pinned archives.
 
 General fixtures validate generic serialization types. Mainnet and Minimal
 fixtures validate typed consensus objects from Phase0 through Heze. Valid
@@ -137,8 +135,9 @@ fixtures must decode, re-encode byte-for-byte, and match their expected root;
 invalid generic fixtures must reject.
 
 Static preset/fork schemas are generated into `src/ssz_static/` from the
-matching resolved consensus-spec pyspec. Their source release is checked
-against `consensus.lock`; this lock has no role in execution fixtures.
+matching resolved consensus-spec pyspec. The generated index records their
+source release, which must match the archive release in
+`build.zig.zon`.
 
 ## Ownership summary
 

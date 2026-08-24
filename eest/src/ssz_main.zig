@@ -5,7 +5,6 @@
 const std = @import("std");
 const conformance = @import("ssz_conformance.zig");
 const fixture_pool = @import("fixture_pool.zig");
-const consensus_lock = @import("consensus_lock.zig");
 
 const default_jobs = 4;
 const max_jobs = 64;
@@ -32,9 +31,7 @@ pub fn main(init: std.process.Init) !void {
         } else try paths.append(allocator, try arena.dupe(u8, arg));
     }
 
-    if (paths.items.len == 0) {
-        try paths.append(allocator, try defaultFixturePath(init.io, arena, init.environ_map.get("EVMZ_CONSENSUS_ROOT")));
-    }
+    if (paths.items.len == 0) return error.MissingFixturePath;
 
     var total = Summary{};
     for (paths.items) |path| {
@@ -205,64 +202,14 @@ fn failureLessThan(_: void, lhs: Failure, rhs: Failure) bool {
     return std.mem.order(u8, lhs.path, rhs.path) == .lt;
 }
 
-fn defaultFixturePath(io: std.Io, allocator: std.mem.Allocator, shared_root: ?[]const u8) ![]u8 {
-    var value = try consensus_lock.readValue(io, allocator, "release");
-    defer value.deinit(allocator);
-    const relative = try consensus_lock.relativeReleasePath(allocator, value.bytes);
-    defer allocator.free(relative);
-    if (shared_root) |root| {
-        const suffix = if (std.mem.startsWith(u8, relative, ".consensus/")) relative[11..] else relative;
-        return std.fs.path.join(allocator, &.{ root, suffix });
-    }
-    if (try mainWorktreePath(io, allocator)) |worktree| {
-        return std.fs.path.join(allocator, &.{ worktree, "eest", relative });
-    }
-    return if (std.fs.path.isAbsolute(relative))
-        allocator.dupe(u8, relative)
-    else if (value.relative_prefix.len == 0)
-        allocator.dupe(u8, relative)
-    else
-        std.fs.path.join(allocator, &.{ value.relative_prefix, relative });
-}
-
-fn mainWorktreePath(io: std.Io, allocator: std.mem.Allocator) !?[]u8 {
-    const result = std.process.run(allocator, io, .{
-        .argv = &.{ "git", "worktree", "list", "--porcelain" },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(16 * 1024),
-    }) catch return null;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    switch (result.term) {
-        .exited => |code| if (code != 0) return null,
-        else => return null,
-    }
-    const path = parseMainWorktree(result.stdout) orelse return null;
-    return @as(?[]u8, try allocator.dupe(u8, path));
-}
-
-fn parseMainWorktree(output: []const u8) ?[]const u8 {
-    var current: ?[]const u8 = null;
-    var lines = std.mem.splitScalar(u8, output, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "worktree ")) {
-            current = line["worktree ".len..];
-        } else if (std.mem.eql(u8, line, "branch refs/heads/main")) {
-            return current;
-        }
-    }
-    return null;
-}
-
 fn printUsage() void {
     std.debug.print(
         \\usage: zig build ssz-conformance -- [--jobs N] [consensus_ssz_dir_or_serialized_file...]
         \\
         \\Runs consensus-spec General, Mainnet, and Minimal SSZ fixtures.
         \\Uses {d} workers by default; --jobs 1 runs sequentially (maximum {d}).
-        \\EVMZ_CONSENSUS_ROOT can point at a shared consensus fixture directory.
-        \\With no path,
-        \\the runner uses the complete pinned consensus fixture destination.
+        \\zig build ssz-conformance supplies the pinned fixture directories.
+        \\The installed executable requires at least one fixture path.
         \\
     , .{ default_jobs, max_jobs });
 }
@@ -279,15 +226,4 @@ test "conformance success requires exercised cases without skips" {
     try std.testing.expect(!successful(.{}));
     try std.testing.expect(!successful(.{ .cases = 1, .skipped = 1 }));
     try std.testing.expect(!successful(.{ .cases = 1, .failed = 1 }));
-}
-
-test "main worktree parser selects the main branch path" {
-    const output =
-        \\worktree /tmp/feature
-        \\branch refs/heads/feature
-        \\
-        \\worktree /tmp/main repo
-        \\branch refs/heads/main
-    ;
-    try std.testing.expectEqualStrings("/tmp/main repo", parseMainWorktree(output).?);
 }
