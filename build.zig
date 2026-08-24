@@ -469,6 +469,7 @@ pub fn build(b: *std.Build) void {
     const guest_payload = b.option(GuestPayload, "guest-payload", "Guest payload") orelse .@"stateless-ere";
     const guest_zisk_strip = b.option(bool, "guest-zisk-strip", "Strip symbols from the ZisK guest ELF") orelse false;
     const guest_sp1_strip = b.option(bool, "guest-sp1-strip", "Strip symbols from the SP1 guest ELF") orelse true;
+    const guest_openvm_strip = b.option(bool, "guest-openvm-strip", "Strip symbols from the OpenVM guest ELF") orelse true;
     const guest_zisk_profile_tags = b.option(bool, "guest-zisk-profile-tags", "Instrument ZisK stateless validation phases") orelse false;
     const guest_heap_metrics = b.option(bool, "guest-heap-metrics", "Meter guest fixed-heap usage") orelse false;
     addGuest(
@@ -496,6 +497,22 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_sp1_strip,
+        omit_frame_pointer,
+        false,
+        guest_heap_metrics,
+        guest_heap_bytes,
+        null,
+        zkvm_build_options,
+    );
+    addGuest(
+        b,
+        .openvm,
+        optimize,
+        null,
+        guest_payload,
+        guest_input_path,
+        guest_output_path,
+        guest_openvm_strip,
         omit_frame_pointer,
         false,
         guest_heap_metrics,
@@ -849,11 +866,13 @@ const GuestBackend = enum {
     native,
     zisk,
     sp1,
+    openvm,
 
     fn config(self: GuestBackend) GuestBackendConfig {
         return switch (self) {
             .native => unreachable,
             .zisk => .{
+                .target = "riscv64-freestanding",
                 .target_features = "generic_rv64+m+zicclsm+relax",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
@@ -861,11 +880,14 @@ const GuestBackend = enum {
                 .install_dir = "guest/zisk",
                 .build_step = "guest-zisk",
                 .build_description = "Build the ZisK rv64 guest ELF",
-                .run_step = "guest-zisk-run",
-                .run_description = "Run the ZisK guest ELF with ziskemu",
+                .runner = .{
+                    .step = "guest-zisk-run",
+                    .description = "Run the ZisK guest ELF with ziskemu",
+                },
                 .missing_provider = "guest-zisk requires -Dziskos-staticlib=<path>/libziskos_staticlib.a",
             },
             .sp1 => .{
+                .target = "riscv64-freestanding",
                 .target_features = "generic_rv64+m+relax",
                 .runtime_root = "guest/runtime/sp1/root.zig",
                 .linker_script = "guest/runtime/sp1/sp1-rv64.ld",
@@ -873,15 +895,34 @@ const GuestBackend = enum {
                 .install_dir = "guest/sp1",
                 .build_step = "guest-sp1",
                 .build_description = "Build the SP1 rv64 guest ELF",
-                .run_step = "guest-sp1-run",
-                .run_description = "Run the SP1 guest ELF",
+                .runner = .{
+                    .step = "guest-sp1-run",
+                    .description = "Run the SP1 guest ELF",
+                },
                 .missing_provider = "guest-sp1 requires -Dsp1-staticlib=<path>/libzkevm.a",
+            },
+            .openvm => .{
+                .target = "riscv64-freestanding",
+                .target_features = "generic_rv64+m+relax",
+                .runtime_root = "guest/runtime/openvm/root.zig",
+                .linker_script = "guest/runtime/openvm/openvm-rv64.ld",
+                .artifact_name = "evmz-guest-openvm",
+                .install_dir = "guest/openvm",
+                .build_step = "guest-openvm",
+                .build_description = "Build the OpenVM rv64 guest ELF",
+                .missing_provider = null,
             },
         };
     }
 };
 
+const GuestRunnerConfig = struct {
+    step: []const u8,
+    description: []const u8,
+};
+
 const GuestBackendConfig = struct {
+    target: []const u8,
     target_features: []const u8,
     runtime_root: []const u8,
     linker_script: []const u8,
@@ -889,9 +930,8 @@ const GuestBackendConfig = struct {
     install_dir: []const u8,
     build_step: []const u8,
     build_description: []const u8,
-    run_step: []const u8,
-    run_description: []const u8,
-    missing_provider: []const u8,
+    runner: ?GuestRunnerConfig = null,
+    missing_provider: ?[]const u8,
 };
 
 const GuestCompilePolicy = struct {
@@ -1046,8 +1086,8 @@ fn addGuest(
     // A zero heap_bytes collapses _heap_start onto _heap_end, which the guest
     // allocator reads as unreachable. Every other memory bound is left to the linker
     // script, which unlike this function knows the guest's own data and bss sizes.
-    const unbuildable: ?[]const u8 = if (provider_path_option == null)
-        config.missing_provider
+    const unbuildable: ?[]const u8 = if (provider_path_option == null and config.missing_provider != null)
+        config.missing_provider.?
     else if (heap_bytes == 0)
         "guest-heap-bytes must be greater than zero"
     else
@@ -1056,14 +1096,14 @@ fn addGuest(
         const fail = b.addFail(message);
         const guest_step = b.step(config.build_step, config.build_description);
         guest_step.dependOn(&fail.step);
-        const run_step = b.step(config.run_step, config.run_description);
-        run_step.dependOn(&fail.step);
+        if (config.runner) |runner| {
+            const run_step = b.step(runner.step, runner.description);
+            run_step.dependOn(&fail.step);
+        }
         return;
     }
-    const provider_path = provider_path_option.?;
-
     const target = b.resolveTargetQuery(std.Target.Query.parse(.{
-        .arch_os_abi = "riscv64-freestanding",
+        .arch_os_abi = config.target,
         .cpu_features = config.target_features,
     }) catch @panic("invalid guest target"));
     const policy = GuestCompilePolicy{
@@ -1124,6 +1164,11 @@ fn addGuest(
         config.runtime_root,
         &.{.{ .name = "guest_payload", .module = payload_mod }},
     );
+    if (backend == .openvm) {
+        root_mod.addObjectFile(buildOpenVmProvider(b));
+    } else {
+        root_mod.addObjectFile(.{ .cwd_relative = provider_path_option.? });
+    }
     const memory_symbols_source = if (ram_bytes) |bytes|
         b.fmt(
             \\.global _evmz_payload_heap_size
@@ -1143,8 +1188,6 @@ fn addGuest(
         memory_symbols_source,
     );
     root_mod.addAssemblyFile(memory_symbols);
-    root_mod.addObjectFile(.{ .cwd_relative = provider_path });
-
     const guest = b.addExecutable(.{
         .name = config.artifact_name,
         .root_module = root_mod,
@@ -1161,18 +1204,37 @@ fn addGuest(
     const guest_step = b.step(config.build_step, config.build_description);
     guest_step.dependOn(&install_guest.step);
 
-    addGuestRunner(b, backend, guest, guest_input_path, guest_output_path);
+    if (config.runner) |runner| {
+        addGuestRunner(b, backend, runner, guest, guest_input_path, guest_output_path);
+    }
+}
+
+fn buildOpenVmProvider(b: *std.Build) std.Build.LazyPath {
+    const manifest = b.path("guest/runtime/openvm/provider/Cargo.toml");
+    const target_dir = b.cache_root.join(b.allocator, &.{"openvm-provider"}) catch @panic("OOM");
+    const build_provider = b.addSystemCommand(&.{"sh"});
+    build_provider.addFileArg(b.path("guest/runtime/openvm/provider/build.sh"));
+    const archive = build_provider.addOutputFileArg("libevmz_openvm_crypto_provider.a");
+    build_provider.addFileArg(manifest);
+    build_provider.addArg(b.pathFromRoot(target_dir));
+    for ([_][]const u8{
+        "guest/runtime/openvm/provider/Cargo.lock",
+        "guest/runtime/openvm/provider/.cargo/config.toml",
+        "guest/runtime/openvm/provider/src/lib.rs",
+    }) |path| build_provider.addFileInput(b.path(path));
+    return archive;
 }
 
 fn addGuestRunner(
     b: *std.Build,
     backend: GuestBackend,
+    config: GuestRunnerConfig,
     guest: *std.Build.Step.Compile,
     guest_input_path: ?[]const u8,
     guest_output_path: ?[]const u8,
 ) void {
     switch (backend) {
-        .native => unreachable,
+        .native, .openvm => unreachable,
         .zisk => {
             const ziskemu = b.option([]const u8, "ziskemu", "Path to ziskemu for guest-zisk-run") orelse "ziskemu";
             const ziskemu_steps = b.option([]const u8, "ziskemu-steps", "Maximum ziskemu steps for guest-zisk-run") orelse "5000000";
@@ -1183,12 +1245,10 @@ fn addGuestRunner(
             run.addArgs(&.{ "-n", ziskemu_steps, "-m", "--steps", "-c" });
             run.has_side_effects = true;
 
-            const config = backend.config();
-            const run_step = b.step(config.run_step, config.run_description);
+            const run_step = b.step(config.step, config.description);
             run_step.dependOn(&run.step);
         },
         .sp1 => {
-            const config = backend.config();
             const host_manifest = b.pathFromRoot("guest/runtime/sp1/host/Cargo.toml");
             const host_target = b.cache_root.join(b.allocator, &.{"sp1-host"}) catch @panic("OOM");
             const build_host = b.addSystemCommand(&.{
@@ -1212,7 +1272,7 @@ fn addGuestRunner(
             if (guest_output_path) |path| run.addArgs(&.{ "--output", path });
             run.has_side_effects = true;
 
-            const run_step = b.step(config.run_step, config.run_description);
+            const run_step = b.step(config.step, config.description);
             run_step.dependOn(&run.step);
         },
     }

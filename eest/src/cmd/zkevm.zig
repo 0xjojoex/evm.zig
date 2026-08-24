@@ -113,6 +113,15 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         } else if (std.mem.eql(u8, arg, "--sp1-work-dir")) {
             const value = args.next() orelse return error.MissingSp1WorkDir;
             options.executor.sp1_work_dir = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--openvm-host")) {
+            const value = args.next() orelse return error.MissingOpenVmHostPath;
+            options.executor.openvm_host_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--openvm-config")) {
+            const value = args.next() orelse return error.MissingOpenVmConfigPath;
+            options.executor.openvm_config_path = try arena.dupe(u8, value);
+        } else if (std.mem.eql(u8, arg, "--openvm-elf")) {
+            const value = args.next() orelse return error.MissingOpenVmElfPath;
+            options.executor.openvm_elf_path = try arena.dupe(u8, value);
         } else if (isOption(arg)) {
             return error.UnknownOption;
         } else {
@@ -142,6 +151,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         const elf_path = switch (options.executor.target) {
             .zisk => options.executor.zisk_elf_path,
             .sp1 => options.executor.sp1_elf_path,
+            .openvm => options.executor.openvm_elf_path,
             .native => null,
         } orelse return error.MissingEvidenceElf;
         break :evidence .{
@@ -229,7 +239,7 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm -- [--executor native|zisk|sp1] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--evidence-dir PATH --corpus-manifest PATH --source-ref REF --stateless-schema ID --zig-version VERSION --backend-version VERSION --backend-commit SHA --backend-toolchain VERSION [--known-failures PATH] [--strict-evidence]] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [path ...]
+        \\usage: zig build zkevm -- [--executor native|zisk|sp1|openvm] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--evidence-dir PATH --corpus-manifest PATH --source-ref REF --stateless-schema ID --zig-version VERSION --backend-version VERSION --backend-commit SHA --backend-toolchain VERSION [--known-failures PATH] [--strict-evidence]] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [--openvm-host PATH] [--openvm-config PATH] [--openvm-elf PATH] [path ...]
         \\
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
         \\against the raw statelessOutputBytes public values.
@@ -245,7 +255,7 @@ fn printUsage() void {
         \\Use --executor to run each block on a zkVM guest instead of natively.
         \\Guest framing is stripped before comparison, so every executor is judged
         \\against the same statelessOutputBytes. Each worker owns one guest host
-        \\child, which converts the ELF to a ZisK ROM once at startup.
+        \\child, which converts the ELF once at startup.
         \\Use --output-folder to also write one ERE BenchmarkRun row per block.
         \\Use --evidence-dir to aggregate those rows into evidence.json and
         \\report.md. Evidence mode owns its rows subdirectory and applies the

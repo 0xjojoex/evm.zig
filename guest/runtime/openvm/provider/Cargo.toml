@@ -1,0 +1,16 @@
+[package]
+name = "evmz-openvm-crypto-provider"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.15.0", default-features = false, features = ["zkvm-accelerator"] }
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = true
+codegen-units = 1

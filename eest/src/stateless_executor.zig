@@ -3,8 +3,8 @@
 //!
 //! Each target frames its input and public output differently. That framing is
 //! private to the executor, so `stateless.zig` compares the same canonical bytes
-//! for a native run, a ZisK guest, and an SP1 guest, and one set of fixture
-//! semantics covers all three.
+//! for a native run or any guest backend, and one set of fixture semantics
+//! covers every target.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,12 +15,14 @@ pub const Target = enum {
     native,
     zisk,
     sp1,
+    openvm,
 
     pub fn label(self: Target) []const u8 {
         return switch (self) {
             .native => "evmz-native",
             .zisk => "zisk-ziskemu",
             .sp1 => "sp1-executor",
+            .openvm => "openvm-executor",
         };
     }
 
@@ -36,13 +38,18 @@ pub const Options = struct {
     sp1_host_path: ?[]const u8 = null,
     sp1_elf_path: ?[]const u8 = null,
     sp1_work_dir: []const u8 = "zig-out/zkevm-sp1",
+    openvm_host_path: ?[]const u8 = null,
+    openvm_config_path: ?[]const u8 = null,
+    openvm_elf_path: ?[]const u8 = null,
 };
 
 pub const Completed = struct {
     /// Canonical SSZ `StatelessValidationResult` bytes, owned by the caller.
     output: []u8,
-    /// Executed steps for ZisK, cycles for SP1, zero for native.
+    /// Executed steps for ZisK, cycles for SP1, retired instructions for
+    /// OpenVM, zero for native.
     cycles: u64,
+    trace_cells: u64 = 0,
     duration_nanos: u64,
 };
 
@@ -63,24 +70,26 @@ pub const Outcome = union(enum) {
     }
 };
 
-/// One executor per worker. The ZisK host is a persistent child process that
-/// caches the ELF's ROM across fixtures, so it must not be shared across
-/// threads.
+/// One executor per worker. Persistent guest hosts cache their compiled ELF
+/// across fixtures, so they must not be shared across threads.
 pub const Executor = struct {
     io: std.Io,
     options: Options,
     zisk_host: ?ZiskHost = null,
+    openvm_host: ?OpenVmHost = null,
 
     pub fn init(io: std.Io, options: Options) !Executor {
         return .{
             .io = io,
             .options = options,
             .zisk_host = if (options.target == .zisk) try ZiskHost.init(io, options) else null,
+            .openvm_host = if (options.target == .openvm) try OpenVmHost.init(io, options) else null,
         };
     }
 
     pub fn deinit(self: *Executor) void {
         if (self.zisk_host) |*host| host.deinit(self.io);
+        if (self.openvm_host) |*host| host.deinit(self.io);
     }
 
     /// A guest writes its result into a fixed-width public region, and an
@@ -100,6 +109,7 @@ pub const Executor = struct {
             .native => executeNative(self.io, allocator, input),
             .zisk => self.executeZisk(allocator, input, canonical_len, label),
             .sp1 => executeSp1(self.io, allocator, input, canonical_len, self.options, label),
+            .openvm => self.executeOpenVm(allocator, input, canonical_len),
         };
     }
 
@@ -120,6 +130,28 @@ pub const Executor = struct {
             response.payload,
             canonical_len,
             response.steps,
+            0,
+            response.duration_nanos,
+        );
+    }
+
+    fn executeOpenVm(
+        self: *Executor,
+        allocator: std.mem.Allocator,
+        input: []const u8,
+        canonical_len: usize,
+    ) !Outcome {
+        var response = try self.openvm_host.?.execute(self.io, allocator, input);
+        defer response.deinit(allocator);
+        if (response.status != 0) {
+            return .{ .crashed = .{ .reason = try allocator.dupe(u8, response.payload) } };
+        }
+        return canonicalOutcome(
+            allocator,
+            response.payload,
+            canonical_len,
+            response.instret,
+            response.trace_cells,
             response.duration_nanos,
         );
     }
@@ -131,6 +163,7 @@ fn executeNative(io: std.Io, allocator: std.mem.Allocator, input: []const u8) !O
     return .{ .completed = .{
         .output = output,
         .cycles = 0,
+        .trace_cells = 0,
         .duration_nanos = monotonicNanos(io) - start,
     } };
 }
@@ -190,7 +223,7 @@ fn executeSp1(
 
     const public = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(4 * 1024));
     defer allocator.free(public);
-    return canonicalOutcome(allocator, public, canonical_len, cycles, elapsed_ns);
+    return canonicalOutcome(allocator, public, canonical_len, cycles, 0, elapsed_ns);
 }
 
 /// Strips guest framing after the host has confirmed a successful guest exit.
@@ -199,6 +232,7 @@ fn canonicalOutcome(
     payload: []const u8,
     canonical_len: usize,
     cycles: u64,
+    trace_cells: u64,
     duration_nanos: u64,
 ) !Outcome {
     if (payload.len < canonical_len) return .{ .crashed = .{
@@ -214,6 +248,7 @@ fn canonicalOutcome(
     return .{ .completed = .{
         .output = try allocator.dupe(u8, payload[0..canonical_len]),
         .cycles = cycles,
+        .trace_cells = trace_cells,
         .duration_nanos = duration_nanos,
     } };
 }
@@ -335,6 +370,82 @@ const ZiskHost = struct {
     const Response = struct {
         status: u8,
         steps: u64,
+        duration_nanos: u64,
+        payload: []u8,
+
+        fn deinit(self: *Response, allocator: std.mem.Allocator) void {
+            allocator.free(self.payload);
+        }
+    };
+};
+
+const OpenVmHost = struct {
+    child: std.process.Child,
+
+    const ready = "EVOMH001";
+    const response_header_bytes = 40;
+    const max_response_payload_bytes = 4 * 1024 * 1024;
+
+    fn init(io: std.Io, options: Options) !OpenVmHost {
+        const host_path = options.openvm_host_path orelse return error.MissingOpenVmHostPath;
+        const config_path = options.openvm_config_path orelse return error.MissingOpenVmConfigPath;
+        const elf_path = options.openvm_elf_path orelse return error.MissingOpenVmElfPath;
+        const argv = [_][]const u8{ host_path, "--server", config_path, elf_path };
+        var child = try std.process.spawn(io, .{
+            .argv = &argv,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .inherit,
+        });
+        errdefer child.kill(io);
+
+        var handshake: [ready.len]u8 = undefined;
+        try readPipeAll(child.stdout.?, io, &handshake);
+        if (!std.mem.eql(u8, &handshake, ready)) return error.InvalidOpenVmHostHandshake;
+        return .{ .child = child };
+    }
+
+    fn deinit(self: *OpenVmHost, io: std.Io) void {
+        if (self.child.id == null) return;
+        if (self.child.stdin) |stdin| {
+            stdin.close(io);
+            self.child.stdin = null;
+        }
+        _ = self.child.wait(io) catch {
+            self.child.kill(io);
+            return;
+        };
+    }
+
+    fn execute(self: *OpenVmHost, io: std.Io, allocator: std.mem.Allocator, input: []const u8) !Response {
+        var length_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length_bytes, @intCast(input.len), .little);
+        try writePipeAll(self.child.stdin.?, io, &length_bytes);
+        try writePipeAll(self.child.stdin.?, io, input);
+
+        var header: [response_header_bytes]u8 = undefined;
+        try readPipeAll(self.child.stdout.?, io, &header);
+        const status = header[0];
+        if (status > 1) return error.InvalidOpenVmHostStatus;
+        const payload_len = std.mem.readInt(u64, header[32..40], .little);
+        if (payload_len > max_response_payload_bytes) return error.OpenVmHostResponseTooLarge;
+
+        const payload = try allocator.alloc(u8, @intCast(payload_len));
+        errdefer allocator.free(payload);
+        try readPipeAll(self.child.stdout.?, io, payload);
+        return .{
+            .status = status,
+            .instret = std.mem.readInt(u64, header[8..16], .little),
+            .trace_cells = std.mem.readInt(u64, header[16..24], .little),
+            .duration_nanos = std.mem.readInt(u64, header[24..32], .little),
+            .payload = payload,
+        };
+    }
+
+    const Response = struct {
+        status: u8,
+        instret: u64,
+        trace_cells: u64,
         duration_nanos: u64,
         payload: []u8,
 
@@ -496,11 +607,12 @@ test "canonical outcome strips the guest public region's zero padding" {
     @memset(padded, 0);
     for (padded[0..canonical_len], 0..) |*byte, i| byte.* = @truncate(i + 1);
 
-    var outcome = try canonicalOutcome(std.testing.allocator, padded, canonical_len, 42, 7);
+    var outcome = try canonicalOutcome(std.testing.allocator, padded, canonical_len, 42, 84, 7);
     defer outcome.deinit(std.testing.allocator);
 
     try std.testing.expectEqualSlices(u8, padded[0..canonical_len], outcome.completed.output);
     try std.testing.expectEqual(@as(u64, 42), outcome.completed.cycles);
+    try std.testing.expectEqual(@as(u64, 84), outcome.completed.trace_cells);
 }
 
 test "canonical outcome rejects non-zero padding" {
@@ -509,14 +621,14 @@ test "canonical outcome rejects non-zero padding" {
     @memset(padded, 0);
     padded[69] = 1;
 
-    var outcome = try canonicalOutcome(std.testing.allocator, padded, 69, 0, 0);
+    var outcome = try canonicalOutcome(std.testing.allocator, padded, 69, 0, 0, 0);
     defer outcome.deinit(std.testing.allocator);
     try std.testing.expect(outcome == .crashed);
 }
 
 test "a guest public region shorter than the expected result is a crash" {
     const short = [_]u8{1} ** 8;
-    var outcome = try canonicalOutcome(std.testing.allocator, &short, 69, 0, 0);
+    var outcome = try canonicalOutcome(std.testing.allocator, &short, 69, 0, 0, 0);
     defer outcome.deinit(std.testing.allocator);
     try std.testing.expect(outcome == .crashed);
 }

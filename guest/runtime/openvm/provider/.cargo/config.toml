@@ -1,0 +1,9 @@
+[build]
+target = "riscv64im-unknown-openvm-elf"
+rustflags = [
+    "-C", "passes=lower-atomic",
+    "-C", "panic=abort",
+    "--cfg", 'getrandom_backend="custom"',
+    "--cfg", "openvm_intrinsics",
+    "--check-cfg=cfg(openvm_intrinsics)",
+]

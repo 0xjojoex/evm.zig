@@ -9,10 +9,15 @@ comptime {
     if (!builtin.is_test) @export(&evmz_guest_entry, .{ .name = "evmz_guest_entry" });
     switch (guest_options.backend) {
         .native => {},
+        .openvm => @export(&openvmMain, .{ .name = "main" }),
         .zisk, .sp1 => @export(&guestMain, .{ .name = "main" }),
     }
 }
 
 fn guestMain() callconv(.c) c_int {
     return evmz_guest_entry();
+}
+
+fn openvmMain() callconv(.c) void {
+    _ = evmz_guest_entry();
 }

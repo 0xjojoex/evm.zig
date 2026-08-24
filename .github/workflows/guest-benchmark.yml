@@ -1,4 +1,4 @@
-# ZisK guest correctness, execution-step evidence, and strict release qualification.
+# Guest correctness and execute-only metrics. Release qualification remains ZisK-only.
 name: Guest benchmark
 
 on:
@@ -34,6 +34,15 @@ on:
   schedule:
     - cron: "23 2 * * *"
   workflow_dispatch:
+    inputs:
+      backend:
+        description: Guest backend
+        required: true
+        default: zisk
+        type: choice
+        options:
+          - zisk
+          - openvm
 
 permissions:
   contents: read
@@ -45,6 +54,7 @@ concurrency:
 jobs:
   measure:
     name: zisk tests-zkevm
+    if: github.event_name != 'workflow_dispatch' || inputs.backend == 'zisk'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -250,3 +260,103 @@ jobs:
         with:
           path: ${{ runner.temp }}/zisk-artifacts/libziskos_staticlib.a
           key: ${{ env.ZISK_CACHE_KEY }}
+
+  openvm:
+    name: openvm tests-zkevm
+    if: github.event_name == 'workflow_dispatch' && inputs.backend == 'openvm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
+      STATELESS_SCHEMA: "0x1501"
+      ZIG_VERSION: 0.16.0
+      OPENVM_VERSION: v2.1.0-preview
+      OPENVM_COMMIT: 538c5488130da56c8442d33445efe3c1fe5ea8b8
+      OPENVM_RUST_TOOLCHAIN: openvm-1.94.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: eest/consume/uv.lock
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Install pinned OpenVM toolchain
+        run: |
+          cargo install --locked \
+            --git https://github.com/openvm-org/openvm.git \
+            --tag "${OPENVM_VERSION}" \
+            cargo-openvm
+          cargo openvm toolchain install
+          rustup run "${OPENVM_RUST_TOOLCHAIN}" rustc -vV
+
+      - name: Resolve tests-zkevm through execution-specs
+        run: |
+          zig build zkevm-resolve --summary all -- \
+            --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
+            --manifest="${RESOLVED_MANIFEST}"
+
+      - name: Build OpenVM host and guest
+        run: |
+          cargo build \
+            --quiet \
+            --release \
+            --locked \
+            --manifest-path guest/runtime/openvm/host/Cargo.toml \
+            --target-dir "${RUNNER_TEMP}/openvm-host-target"
+          zig build guest-openvm \
+            -Dguest-payload=stateless-ere \
+            "-Dstateless-schema=${STATELESS_SCHEMA}" \
+            -Doptimize=ReleaseFast \
+            --prefix "${RUNNER_TEMP}/guest" \
+            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
+            --summary all
+          elf="${RUNNER_TEMP}/guest/guest/openvm/evmz-guest-openvm.elf"
+          zig build check-guest-elf -- "${elf}"
+          {
+            echo "OPENVM_ELF=${elf}"
+            echo "OPENVM_HOST=${RUNNER_TEMP}/openvm-host-target/release/evmz-openvm-host"
+          } >> "${GITHUB_ENV}"
+
+      - name: Run corpus
+        run: |
+          mapfile -t fixture_roots < <(jq -r '.fixture_roots[]' "${RESOLVED_MANIFEST}")
+          test "${#fixture_roots[@]}" -gt 0
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- \
+            --executor openvm \
+            --jobs 1 \
+            --openvm-host "${OPENVM_HOST}" \
+            --openvm-config "${GITHUB_WORKSPACE}/guest/runtime/openvm/openvm.toml" \
+            --openvm-elf "${OPENVM_ELF}" \
+            --output-folder "${GITHUB_WORKSPACE}/guest-evidence/rows" \
+            "${fixture_roots[@]}"
+
+      - name: Write runtime identity
+        run: |
+          mkdir -p guest-evidence
+          {
+            echo "OpenVM ${OPENVM_VERSION} (${OPENVM_COMMIT})"
+            echo "Rust ${OPENVM_RUST_TOOLCHAIN}"
+            sha256sum "${OPENVM_HOST}" "${OPENVM_ELF}"
+          } | tee guest-evidence/runtime.txt
+
+      - name: Upload OpenVM benchmark rows
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-openvm-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: guest-evidence
+          if-no-files-found: warn
+          retention-days: 14

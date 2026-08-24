@@ -1,9 +1,8 @@
 # zkVM guests
 
-The stateless validator compiles to an RV64 ELF for ZisK and SP1. Both
-backends share the `zkvm_accelerators.h` ABI and the same shape: the vendor
-static library owns `_start`, Zig exports `main`, and no Rust guest wrapper is
-involved.
+The stateless validator compiles to RV64 ELFs for ZisK, SP1, and OpenVM. All
+three backends share the `zkvm_accelerators.h` ABI and let the linked zkVM
+runtime own `_start`; Zig exports `main` and the validator payload.
 
 A guest ELF validates exactly one specification, so devnet releases use the
 compatibility coordinate `guest-<track>@vX.Y.Z[-rc.N]`. The version mirrors the
@@ -58,6 +57,30 @@ The SP1 host driver is locked to `sp1-core-executor` 6.3.1 and built on
 demand. It reports deterministic execute-only instruction cycles — not proof
 cycles or proving time.
 
+OpenVM `v2.1.0-preview` requires its `openvm-1.94.1` Rust toolchain. Install it
+with the matching `cargo-openvm`, then build the RV64 guest:
+
+```sh
+cargo install --locked \
+  --git https://github.com/openvm-org/openvm.git \
+  --tag v2.1.0-preview cargo-openvm
+cargo openvm toolchain install
+
+zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+  -Dstateless-schema=0x1501
+```
+
+The build links OpenVM's official startup and ERE v0.15.0's
+`ere-platform-openvm` implementation of the accelerator ABI. The repo-owned
+Rust crate only bridges Zig input and output to that platform. Its build checks
+the startup, I/O, and accelerator symbols before linking.
+
+OpenVM's startup calls a void `main`. Guest validation failures therefore
+appear as missing or mismatched public output rather than a process exit status.
+EEST remains the correctness check for every fixture. Direct fixture and A/B
+runs live in the `openvm-guest-screen` skill, outside the guest build graph.
+OpenVM metrics are not numerically comparable with ZisK steps or SP1 cycles.
+
 ## Input schema
 
 The `stateless-ere` payload decodes `schema_id || payload` input, where the
@@ -98,13 +121,12 @@ model; `guest-zisk` still requires the real `libziskos_staticlib.a`.
 
 ## Guest benchmark CI
 
-The `Guest benchmark` workflow is the single execute-only guest performance
-surface; ZisK is currently the only enabled backend. Every trigger resolves
-`tests-zkevm@latest` through execution-specs and records the exact release and
-fixture-index hash in its evidence. Correctness is the gate — every execution
-and public output must match — while cycle changes never fail the workflow.
-ZisK steps and SP1 cycles stay separate metrics, and emulator execution
-duration is never treated as proving time.
+The `Guest benchmark` workflow is the execute-only guest performance path.
+Automatic and release-qualified runs remain ZisK-only. A manual dispatch can
+run OpenVM against the same `tests-zkevm@latest` corpus and retain ERE
+`BenchmarkRun` rows with retired instructions and trace-cell cost. Correctness
+still gates the run: every public output must match. Metrics from different
+zkVMs are kept separate, and emulator execution duration is not proving time.
 
 Reports are absolute: the workflow measures the candidate ELF and does not
 compare against a release. The existing `zkevm` command writes the ERE rows,
@@ -115,11 +137,12 @@ A strict `tests-zkevm` dispatch produces the only artifact eligible for guest
 release. `Guest release` accepts that run id, verifies the evidence, tag, source
 commit, and ELF hash, then promotes the tested bytes without rebuilding them.
 
-`zig build zkevm -- --executor zisk|sp1` runs the same ERE-shaped
+`zig build zkevm -- --executor zisk|sp1|openvm` runs the same ERE-shaped
 measurements locally; pass `--zisk-host`/`--zisk-elf` or
-`--sp1-host`/`--sp1-elf` and fixture paths. `--evidence-dir` enables the
-checkout-owned evidence path used by CI; ZisK is the only evidence backend
-until the SP1 provider is operational.
+`--sp1-host`/`--sp1-elf` and fixture paths. OpenVM uses `--openvm-host`,
+`--openvm-config`, and `--openvm-elf`; use `--jobs 1` so the host converts the
+ELF only once. `--evidence-dir` enables the release evidence path used by CI;
+ZisK remains the only release evidence backend.
 
 ## Real proof gate
 

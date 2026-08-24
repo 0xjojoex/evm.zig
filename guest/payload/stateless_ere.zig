@@ -42,17 +42,17 @@ comptime {
     }
     switch (guest_options.backend) {
         .native => {},
-        .zisk => @export(&ziskMain, .{ .name = "main" }),
-        .sp1 => @export(&sp1Main, .{ .name = "main" }),
+        .openvm => @export(&openvmMain, .{ .name = "main" }),
+        .sp1, .zisk => @export(&zkVmMain, .{ .name = "main" }),
     }
 }
 
-fn ziskMain() callconv(.c) c_int {
+fn zkVmMain() callconv(.c) c_int {
     return evmz_guest_entry();
 }
 
-fn sp1Main() callconv(.c) c_int {
-    return evmz_guest_entry();
+fn openvmMain() callconv(.c) void {
+    _ = evmz_guest_entry();
 }
 
 pub fn runStatelessEreInput(allocator: std.mem.Allocator, input: []const u8) evmz.stateless.wire.Error![]u8 {
