@@ -25,6 +25,219 @@ const eip7702 = executor_module.eip7702;
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
 const ParentFacts = @import("./stateless/ParentFacts.zig");
 
+const CheckpointProbeRuntime = struct {
+    value: u64 = 0,
+    undo: [64]u64 = undefined,
+    undo_len: usize = 0,
+    checkpoint_count: usize = 0,
+    commit_count: usize = 0,
+    restore_count: usize = 0,
+
+    fn write(self: *CheckpointProbeRuntime, value: u64) void {
+        std.debug.assert(self.undo_len < self.undo.len);
+        self.undo[self.undo_len] = self.value;
+        self.undo_len += 1;
+        self.value = value;
+    }
+
+    pub fn checkpoint(self: *CheckpointProbeRuntime) usize {
+        self.checkpoint_count += 1;
+        return self.undo_len;
+    }
+
+    pub fn commitCheckpoint(self: *CheckpointProbeRuntime, cursor: usize) void {
+        std.debug.assert(cursor <= self.undo_len);
+        self.commit_count += 1;
+    }
+
+    pub fn restoreCheckpoint(self: *CheckpointProbeRuntime, cursor: usize) void {
+        std.debug.assert(cursor <= self.undo_len);
+        while (self.undo_len > cursor) {
+            self.undo_len -= 1;
+            self.value = self.undo[self.undo_len];
+        }
+        self.restore_count += 1;
+    }
+};
+
+const CheckpointProbeInstruction = struct {
+    const write_byte: u8 = 0xb0;
+    const error_byte: u8 = 0xb1;
+    const out_of_gas_byte: u8 = 0xb2;
+
+    fn runtime(frame: *Interpreter.CallFrame) !*CheckpointProbeRuntime {
+        return frame.execution_context.transaction.extension.get(CheckpointProbeRuntime) orelse
+            error.MissingCheckpointProbeRuntime;
+    }
+
+    const Write = struct {
+        pub inline fn execute(comptime _: evmz.spec.Spec, frame: *Interpreter.CallFrame) anyerror!void {
+            const sidecar = try runtime(frame);
+            sidecar.write(sidecar.value + 1);
+        }
+    };
+
+    const Error = struct {
+        pub inline fn execute(comptime _: evmz.spec.Spec, frame: *Interpreter.CallFrame) anyerror!void {
+            const sidecar = try runtime(frame);
+            sidecar.write(sidecar.value + 1);
+            return error.ForcedCheckpointProbeFailure;
+        }
+    };
+
+    const OutOfGas = struct {
+        pub inline fn execute(comptime _: evmz.spec.Spec, frame: *Interpreter.CallFrame) anyerror!void {
+            const sidecar = try runtime(frame);
+            sidecar.write(sidecar.value + 1);
+            frame.halt(.out_of_gas);
+        }
+    };
+
+    fn instructions() evmz.instruction.Spec {
+        return comptime instructions: {
+            var result = evmz.eth.cancun.instruction;
+            result.install(.SIDECAR_WRITE, write_byte, .{ .static_gas = 0, .stack_in = 0 }, .{ .custom = Write });
+            result.install(.SIDECAR_ERROR, error_byte, .{ .static_gas = 0, .stack_in = 0 }, .{ .custom = Error });
+            result.install(.SIDECAR_OOG, out_of_gas_byte, .{ .static_gas = 0, .stack_in = 0 }, .{ .custom = OutOfGas });
+            break :instructions result;
+        };
+    }
+};
+
+const StateGasProbeRuntime = struct {
+    const Root = struct {
+        remaining: i64 = 0,
+        used: i64 = 0,
+    };
+
+    const Resource = struct {
+        value: execution_values.StateGasResource = undefined,
+        owner: usize = 0,
+        amount: i64 = 0,
+        occupied: bool = false,
+    };
+
+    const Undo = struct {
+        root_index: usize,
+        root: Root,
+        resource_index: usize,
+        resource: Resource,
+    };
+
+    roots: [4]Root = [_]Root{.{}} ** 4,
+    resources: [8]Resource = [_]Resource{.{}} ** 8,
+    undo: [64]Undo = undefined,
+    undo_len: usize = 0,
+    current_root: usize = 0,
+
+    fn beginRoot(self: *StateGasProbeRuntime, root: usize, limit: i64) void {
+        std.debug.assert(root < self.roots.len);
+        std.debug.assert(limit >= 0);
+        std.debug.assert(self.roots[root].used == 0);
+        self.current_root = root;
+        self.roots[root].remaining = limit;
+    }
+
+    fn used(self: *const StateGasProbeRuntime, root: usize) i64 {
+        return self.roots[root].used;
+    }
+
+    fn remaining(self: *const StateGasProbeRuntime, root: usize) i64 {
+        return self.roots[root].remaining;
+    }
+
+    pub fn applyStateGas(
+        self: *StateGasProbeRuntime,
+        event: execution_values.StateGasEvent,
+    ) execution_values.StateGasMeterResult {
+        std.debug.assert(event.charge == 0 or event.refill == 0);
+        const resource_index = self.findResource(event.resource) orelse self.emptyResource();
+
+        if (event.charge > self.roots[self.current_root].remaining) return .exhausted;
+        if (event.charge > 0) {
+            std.debug.assert(!self.resources[resource_index].occupied);
+            const token = self.undo_len;
+            self.recordUndo(self.current_root, resource_index);
+            self.roots[self.current_root].remaining -= event.charge;
+            self.roots[self.current_root].used += event.charge;
+            self.resources[resource_index] = .{
+                .value = event.resource,
+                .owner = self.current_root,
+                .amount = event.charge,
+                .occupied = true,
+            };
+            return .{ .applied = token };
+        }
+
+        if (event.refill > 0) {
+            const resource = &self.resources[resource_index];
+            std.debug.assert(resource.occupied);
+            std.debug.assert(event.refill <= resource.amount);
+            const owner = resource.owner;
+            self.recordUndo(owner, resource_index);
+            self.roots[owner].remaining += event.refill;
+            self.roots[owner].used -= event.refill;
+            resource.amount -= event.refill;
+            if (resource.amount == 0) resource.occupied = false;
+        }
+        return .{ .applied = null };
+    }
+
+    pub fn reverseStateGasCharge(self: *StateGasProbeRuntime, token: usize) void {
+        self.restoreTo(token);
+    }
+
+    pub fn checkpoint(self: *StateGasProbeRuntime) usize {
+        return self.undo_len;
+    }
+
+    pub fn commitCheckpoint(self: *StateGasProbeRuntime, cursor: usize) void {
+        std.debug.assert(cursor <= self.undo_len);
+    }
+
+    pub fn restoreCheckpoint(self: *StateGasProbeRuntime, cursor: usize) void {
+        self.restoreTo(cursor);
+    }
+
+    fn findResource(
+        self: *const StateGasProbeRuntime,
+        value: execution_values.StateGasResource,
+    ) ?usize {
+        for (self.resources, 0..) |resource, index| {
+            if (resource.occupied and std.meta.eql(resource.value, value)) return index;
+        }
+        return null;
+    }
+
+    fn emptyResource(self: *const StateGasProbeRuntime) usize {
+        for (self.resources, 0..) |resource, index| {
+            if (!resource.occupied) return index;
+        }
+        unreachable;
+    }
+
+    fn recordUndo(self: *StateGasProbeRuntime, root: usize, resource: usize) void {
+        std.debug.assert(self.undo_len < self.undo.len);
+        self.undo[self.undo_len] = .{
+            .root_index = root,
+            .root = self.roots[root],
+            .resource_index = resource,
+            .resource = self.resources[resource],
+        };
+        self.undo_len += 1;
+    }
+
+    fn restoreTo(self: *StateGasProbeRuntime, cursor: usize) void {
+        std.debug.assert(cursor <= self.undo_len);
+        while (self.undo_len > cursor) {
+            self.undo_len -= 1;
+            const entry = self.undo[self.undo_len];
+            self.roots[entry.root_index] = entry.root;
+            self.resources[entry.resource_index] = entry.resource;
+        }
+    }
+};
+
 /// Standalone-message conveniences mirroring the executor's private
 /// `runStandalone*` forms: explicit (context, message, gas) with default scope.
 fn runStandalone(
@@ -1796,7 +2009,7 @@ test "multi-root transaction preserves committed roots and isolates failed roots
     };
     try transaction_runtime.begin(&executor, .normal);
     defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
-    try transaction_runtime.beginRootSession(&executor, session_context);
+    try transaction_runtime.beginRootSession(&executor, session_context, .{});
 
     const first = try transaction_runtime.runRoot(&executor, .{
         .context = session_context,
@@ -1809,6 +2022,7 @@ test "multi-root transaction preserves committed roots and isolates failed roots
     try std.testing.expectEqual(Interpreter.Status.success, first.result.status());
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(first_contract, 0));
     try std.testing.expectEqual(@as(u256, 1), try executor.state.getTransientStorage(first_contract, 0));
+    try std.testing.expect(executor.state.isAccountWarm(sender));
     try std.testing.expect(executor.state.isAccountWarm(first_contract));
     try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
 
@@ -1850,6 +2064,815 @@ test "multi-root transaction preserves committed roots and isolates failed roots
     try std.testing.expect(executor.state.isAccountWarm(first_contract));
     try std.testing.expect(executor.state.isAccountWarm(second_contract));
     try std.testing.expectEqual(@as(usize, 2), executor.logView().len());
+}
+
+test "root observations survive family-owned atomic rollback" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const FrameObservation = struct {
+        attempted: bool = false,
+        status: ?execution_values.Status = null,
+        execution_gas_used: u64 = 0,
+        log_range: TrackedState.LogBuffer.LogRange = .empty,
+
+        fn fromRoot(outcome: transaction_runtime.RootExecutionOutcome) @This() {
+            return .{
+                .attempted = true,
+                .status = outcome.attemptedStatus(),
+                .execution_gas_used = outcome.execution_gas_used,
+                .log_range = outcome.log_range,
+            };
+        }
+
+        fn clearLogs(self: *@This()) void {
+            self.log_range = .empty;
+        }
+    };
+    const sender = evmz.addr(0xaaaa);
+    const before_group = evmz.addr(0x1111);
+    const group_success = evmz.addr(0x2222);
+    const group_failure = evmz.addr(0x3333);
+    const skipped = evmz.addr(0x4444);
+    const context = testExecutionContext(sender, 100_000);
+    const success_code = evmz.t.bytecode(.{
+        .PUSH1, 1,     .PUSH0, .SSTORE,
+        .PUSH1, 0x10,  .PUSH0, .PUSH0,
+        .LOG1,  .STOP,
+    });
+    const group_success_code = evmz.t.bytecode(.{
+        .PUSH1, 1,     .PUSH0, .SSTORE,
+        .PUSH1, 0x20,  .PUSH0, .PUSH0,
+        .LOG1,  .STOP,
+    });
+    const group_failure_code = evmz.t.bytecode(.{
+        .PUSH1, 1,      .PUSH0, .SSTORE,
+        .PUSH1, 0x30,   .PUSH0, .PUSH0,
+        .LOG1,  .PUSH0, .PUSH0, .REVERT,
+    });
+
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, before_group, .{ .code = &success_code });
+    try evmz.t.seedExecutorAccount(&executor, group_success, .{ .code = &group_success_code });
+    try evmz.t.seedExecutorAccount(&executor, group_failure, .{ .code = &group_failure_code });
+    try evmz.t.seedExecutorAccount(&executor, skipped, .{ .code = &success_code });
+
+    try transaction_runtime.begin(&executor, .normal);
+    errdefer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    var frames = [_]FrameObservation{.{}} ** 4;
+    const first = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = before_group } },
+        .gas = .legacy(100_000),
+    }, .{});
+    frames[0] = .fromRoot(first);
+    try std.testing.expectEqual(execution_values.Status.success, frames[0].status.?);
+    try std.testing.expectEqual(@as(u64, 100_000 - @as(u64, @intCast(first.result.gas_left))), first.execution_gas_used);
+    try std.testing.expectEqual(@as(usize, 1), first.logs(executor.logView()).len());
+    try std.testing.expectEqual(@as(u256, 0x10), first.logs(executor.logView()).get(0).topics[0]);
+
+    var atomic_group = executor.checkpoint();
+    defer atomic_group.deinit();
+    const successful_attempt = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = group_success } },
+        .gas = .legacy(100_000),
+    }, .{});
+    frames[1] = .fromRoot(successful_attempt);
+    const failed_attempt = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = group_failure } },
+        .gas = .legacy(100_000),
+    }, .{});
+    frames[2] = .fromRoot(failed_attempt);
+
+    try std.testing.expectEqual(execution_values.Status.success, frames[1].status.?);
+    try std.testing.expectEqual(execution_values.Status.revert, frames[2].status.?);
+    try std.testing.expect(frames[1].execution_gas_used > 0);
+    try std.testing.expect(frames[2].execution_gas_used > 0);
+    try std.testing.expect(frames[1].log_range.isValid(executor.logView()));
+    try std.testing.expect(frames[2].log_range.isValid(executor.logView()));
+
+    const stale_success_range = frames[1].log_range;
+    const stale_failure_range = frames[2].log_range;
+    atomic_group.restore();
+    try std.testing.expect(!stale_success_range.isValid(executor.logView()));
+    try std.testing.expect(!stale_failure_range.isValid(executor.logView()));
+    frames[1].clearLogs();
+    frames[2].clearLogs();
+    frames[3] = .{};
+
+    try std.testing.expect(frames[1].attempted);
+    try std.testing.expect(frames[2].attempted);
+    try std.testing.expect(!frames[3].attempted);
+    try std.testing.expectEqual(execution_values.Status.success, frames[1].status.?);
+    try std.testing.expectEqual(execution_values.Status.revert, frames[2].status.?);
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(before_group, 0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(group_success, 0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(group_failure, 0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(skipped, 0));
+
+    try executor.finalizeTransactionState();
+    const executed = Cancun.Executor.Executed([4]FrameObservation){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = frames,
+    };
+    const view = executed.view();
+    try std.testing.expectEqual(@as(usize, 1), view.logs.len());
+    try std.testing.expectEqual(@as(u256, 0x10), view.output[0].log_range.view(view.logs).get(0).topics[0]);
+    try std.testing.expect(view.output[1].log_range.isValid(view.logs));
+    try std.testing.expect(view.output[2].log_range.isValid(view.logs));
+    try std.testing.expect(view.output[3].log_range.isValid(view.logs));
+    executed.retain();
+
+    comptime {
+        std.debug.assert(!@hasField(transaction_runtime.RootExecutionOutcome, "receipt"));
+        std.debug.assert(!@hasField(transaction_runtime.RootExecutionOutcome, "transaction_status"));
+    }
+}
+
+test "multi-root entry policy charges target access without warming the caller" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const entry_point = evmz.addr(0xeeee);
+    const session_warm = evmz.addr(0xaaaa);
+    const target = evmz.addr(0x1111);
+    const failed_target = evmz.addr(0x2222);
+    const out_of_gas_target = evmz.addr(0x3333);
+    const context = testExecutionContext(entry_point, 100_000);
+    const revert_code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .REVERT });
+    const cold_cost: u64 = @intCast(
+        evmz.eth.cancun.call.base_gas + evmz.eth.cancun.call.cold_account_access_gas.?,
+    );
+    const warm_cost: u64 = @intCast(evmz.eth.cancun.call.base_gas);
+
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, target, .{});
+    try evmz.t.seedExecutorAccount(&executor, failed_target, .{ .code = &revert_code });
+    try evmz.t.seedExecutorAccount(&executor, out_of_gas_target, .{});
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{
+        .initial_warm_set = .{ .accounts = &.{session_warm} },
+    });
+    try std.testing.expect(executor.state.isAccountWarm(session_warm));
+    try std.testing.expect(!executor.state.isAccountWarm(entry_point));
+    try std.testing.expect(!executor.state.isAccountWarm(target));
+
+    const cold = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = target } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(Interpreter.Status.success, cold.result.status());
+    try std.testing.expectEqual(@as(i64, 10_000 - cold_cost), cold.result.gas_left);
+    try std.testing.expect(executor.state.isAccountWarm(target));
+    try std.testing.expect(!executor.state.isAccountWarm(entry_point));
+
+    const warm = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = target } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(@as(i64, 10_000 - warm_cost), warm.result.gas_left);
+
+    const failed = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = failed_target } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(Interpreter.Status.revert, failed.result.status());
+    try std.testing.expect(!executor.state.isAccountWarm(failed_target));
+
+    const out_of_gas = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = out_of_gas_target } },
+        .gas = .legacy(cold_cost - 1),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(TransactionExecutionStage.preparation, out_of_gas.stage);
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, out_of_gas.result.status());
+    try std.testing.expect(!executor.state.isAccountWarm(out_of_gas_target));
+}
+
+test "multi-root static mode reaches nested frames" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const direct = evmz.addr(0x1111);
+    const parent = evmz.addr(0x2222);
+    const child = evmz.addr(0x3333);
+    const create_parent = evmz.addr(0x4444);
+    const create_child = evmz.addr(0x5555);
+    const selfdestruct_parent = evmz.addr(0x6666);
+    const selfdestruct_child = evmz.addr(0x7777);
+    const value_target = evmz.addr(0x8888);
+    const context = testExecutionContext(sender, 100_000);
+    const write_code = evmz.t.bytecode(.{ .PUSH1, 1, .PUSH0, .SSTORE, .STOP });
+    const parent_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0,  .PUSH0, .PUSH0, .PUSH0, .PUSH2,  0x33, 0x33, .GAS, .CALL,
+        .PUSH0, .MSTORE, .PUSH1, 32,     .PUSH0, .RETURN,
+    });
+    const create_parent_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0,  .PUSH0, .PUSH0, .PUSH0, .PUSH2,  0x55, 0x55, .GAS, .CALL,
+        .PUSH0, .MSTORE, .PUSH1, 32,     .PUSH0, .RETURN,
+    });
+    const selfdestruct_parent_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0,  .PUSH0, .PUSH0, .PUSH0, .PUSH2,  0x77, 0x77, .GAS, .CALL,
+        .PUSH0, .MSTORE, .PUSH1, 32,     .PUSH0, .RETURN,
+    });
+    const create_code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .CREATE, .STOP });
+    const selfdestruct_code = evmz.t.bytecode(.{ .PUSH0, .SELFDESTRUCT });
+
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1 });
+    try evmz.t.seedExecutorAccount(&executor, direct, .{ .code = &write_code });
+    try evmz.t.seedExecutorAccount(&executor, parent, .{ .code = &parent_code });
+    try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &write_code });
+    try evmz.t.seedExecutorAccount(&executor, create_parent, .{ .code = &create_parent_code });
+    try evmz.t.seedExecutorAccount(&executor, create_child, .{ .code = &create_code });
+    try evmz.t.seedExecutorAccount(&executor, selfdestruct_parent, .{ .code = &selfdestruct_parent_code });
+    try evmz.t.seedExecutorAccount(&executor, selfdestruct_child, .{ .code = &selfdestruct_code });
+    try evmz.t.seedExecutorAccount(&executor, value_target, .{});
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    const direct_write = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = direct } },
+        .gas = .legacy(100_000),
+    }, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.invalid, direct_write.result.status());
+    try std.testing.expectEqual(execution_values.TerminalCause.write_protection, direct_write.result.outcome.cause);
+    try std.testing.expectEqual(execution_values.FrameHalt.write_protection, direct_write.result.frame_halt.?);
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(direct, 0));
+
+    const nested_write = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = parent } },
+        .gas = .legacy(100_000),
+    }, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.success, nested_write.result.status());
+    try std.testing.expectEqual(@as(usize, 32), nested_write.result.output_data.len);
+    try std.testing.expectEqual(@as(u8, 0), nested_write.result.output_data[31]);
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(child, 0));
+
+    const nested_create = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = create_parent } },
+        .gas = .legacy(100_000),
+    }, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.success, nested_create.result.status());
+    try std.testing.expectEqual(@as(usize, 32), nested_create.result.output_data.len);
+    try std.testing.expectEqual(@as(u8, 0), nested_create.result.output_data[31]);
+
+    const nested_selfdestruct = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = selfdestruct_parent } },
+        .gas = .legacy(100_000),
+    }, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.success, nested_selfdestruct.result.status());
+    try std.testing.expectEqual(@as(usize, 32), nested_selfdestruct.result.output_data.len);
+    try std.testing.expectEqual(@as(u8, 0), nested_selfdestruct.result.output_data[31]);
+
+    const value_write = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = value_target, .value = 1 } },
+        .gas = .legacy(100_000),
+    }, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.invalid, value_write.result.status());
+    try std.testing.expectEqual(execution_values.TerminalCause.write_protection, value_write.result.outcome.cause);
+    try std.testing.expectEqual(@as(u256, 1), try executor.getBalance(sender));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(value_target));
+}
+
+test "independent state gas does not borrow from execution gas" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0x1111);
+    const state_charge: i64 = @intCast(evmz.eth.eip8037.storage_set_state_gas);
+    const code = evmz.t.bytecode(.{ .PUSH1, 1, .PUSH0, .SSTORE, .STOP });
+
+    var runtime = StateGasProbeRuntime{};
+    var context = testExecutionContext(sender, 100_000);
+    context.transaction.extension = .initStateGas(&runtime);
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    runtime.beginRoot(0, state_charge - 1);
+    const state_oog = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = contract } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, state_oog.result.status());
+    try std.testing.expectEqual(execution_values.TerminalCause.out_of_state_gas, state_oog.result.terminalCause());
+    try std.testing.expectEqual(execution_values.FrameHalt.out_of_state_gas, state_oog.result.frame_halt.?);
+    try std.testing.expect(state_oog.result.gas_left > 0);
+    try std.testing.expectEqual(@as(i64, 0), state_oog.result.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 0), state_oog.result.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(0));
+    try std.testing.expectEqual(state_charge - 1, runtime.remaining(0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
+
+    runtime.beginRoot(1, state_charge);
+    const execution_oog = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = contract } },
+        .gas = .legacy(3),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, execution_oog.result.status());
+    try std.testing.expectEqual(execution_values.TerminalCause.out_of_gas, execution_oog.result.terminalCause());
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(1));
+    try std.testing.expectEqual(state_charge, runtime.remaining(1));
+}
+
+test "independent state gas covers top-frame account growth" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const call_target = evmz.addr(0x1111);
+    const create_target = evmz.addr(0x2222);
+    const account_charge: i64 = @intCast(evmz.eth.eip8037.new_account_state_gas);
+
+    var runtime = StateGasProbeRuntime{};
+    var context = testExecutionContext(sender, 100_000);
+    context.transaction.extension = .initStateGas(&runtime);
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    runtime.beginRoot(0, account_charge - 1);
+    const failed_call = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = call_target, .value = 1 } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(execution_values.TerminalCause.out_of_state_gas, failed_call.result.terminalCause());
+    try std.testing.expectEqual(@as(i64, 100_000), failed_call.result.gas_left);
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(call_target));
+
+    runtime.beginRoot(0, account_charge);
+    const successful_call = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = call_target, .value = 1 } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, successful_call.result.status());
+    try std.testing.expectEqual(account_charge, runtime.used(0));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getBalance(call_target));
+
+    runtime.beginRoot(1, account_charge - 1);
+    const failed_create = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .create = .{ .sender = sender, .recipient = create_target, .init_code = &.{} } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(execution_values.TerminalCause.out_of_state_gas, failed_create.result.terminalCause());
+    try std.testing.expectEqual(@as(i64, 100_000), failed_create.result.gas_left);
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(1));
+
+    runtime.beginRoot(1, account_charge);
+    const successful_create = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .create = .{ .sender = sender, .recipient = create_target, .init_code = &.{} } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, successful_create.result.status());
+    try std.testing.expectEqual(account_charge, runtime.used(1));
+    try std.testing.expect(try executor.state.accountExists(create_target));
+}
+
+test "independent state gas refills its owning root through rollback" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0x2222);
+    const state_charge: i64 = @intCast(evmz.eth.eip8037.storage_set_state_gas);
+    const code = evmz.t.bytecode(.{
+        .PUSH0, .CALLDATALOAD, .PUSH0,        .SSTORE,
+        .PUSH1, 32,            .CALLDATALOAD, .PUSH1,
+        11,     .JUMPI,        .STOP,         .JUMPDEST,
+        .PUSH0, .PUSH0,        .REVERT,
+    });
+    var add_input = [_]u8{0} ** 64;
+    add_input[31] = 1;
+    var delete_revert_input = [_]u8{0} ** 64;
+    delete_revert_input[63] = 1;
+    const delete_input = [_]u8{0} ** 64;
+
+    var runtime = StateGasProbeRuntime{};
+    var context = testExecutionContext(sender, 300_000);
+    context.transaction.extension = .initStateGas(&runtime);
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    runtime.beginRoot(0, state_charge);
+    const added = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = contract, .input = &add_input } },
+        .gas = .legacy(300_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, added.result.status());
+    try std.testing.expectEqual(state_charge, runtime.used(0));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 0));
+
+    runtime.beginRoot(1, state_charge);
+    const failed_delete = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = contract, .input = &delete_revert_input } },
+        .gas = .legacy(300_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.revert, failed_delete.result.status());
+    try std.testing.expectEqual(state_charge, runtime.used(0));
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(1));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 0));
+
+    var atomic = executor.checkpoint();
+    runtime.beginRoot(2, state_charge);
+    const deleted = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = contract, .input = &delete_input } },
+        .gas = .legacy(300_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, deleted.result.status());
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
+    atomic.restore();
+    try std.testing.expectEqual(state_charge, runtime.used(0));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 0));
+
+    runtime.beginRoot(2, state_charge);
+    const committed_delete = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = contract, .input = &delete_input } },
+        .gas = .legacy(300_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, committed_delete.result.status());
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(0));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
+}
+
+test "independent state gas follows nested execution checkpoints" {
+    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const success_parent = evmz.addr(0x1111);
+    const success_child = evmz.addr(0x3333);
+    const revert_parent = evmz.addr(0x2222);
+    const revert_child = evmz.addr(0x4444);
+    const create_parent = evmz.addr(0x5555);
+    const deposit_parent = evmz.addr(0x6666);
+    const state_charge: i64 = @intCast(evmz.eth.eip8037.storage_set_state_gas);
+    const account_charge: i64 = @intCast(evmz.eth.eip8037.new_account_state_gas);
+    const code_charge: i64 = @intCast(evmz.eth.eip8037.cost_per_state_byte);
+    const success_parent_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH2, 0x33, 0x33, .GAS, .CALL, .POP, .STOP,
+    });
+    const revert_parent_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH2, 0x44, 0x44, .GAS, .CALL, .POP, .STOP,
+    });
+    const child_code = evmz.t.bytecode(.{ .PUSH1, 1, .PUSH0, .SSTORE, .STOP });
+    const reverting_child_code = evmz.t.bytecode(.{
+        .PUSH1, 1, .PUSH0, .SSTORE, .PUSH0, .PUSH0, .REVERT,
+    });
+    const failing_create_code = evmz.t.bytecode(.{
+        .PUSH1,  0xfe,   .PUSH0,  .MSTORE8,
+        .PUSH1,  1,      .PUSH0,  .PUSH0,
+        .CREATE, .PUSH0, .MSTORE, .PUSH1,
+        32,      .PUSH0, .RETURN,
+    });
+    const deposit_create_code = evmz.t.bytecode(.{
+        .PUSH1, 8,       .PUSH1, 12,       .PUSH0,  .CODECOPY,
+        .PUSH1, 8,       .PUSH0, .PUSH0,   .CREATE, .STOP,
+        .PUSH1, 0,       .PUSH0, .MSTORE8, .PUSH1,  1,
+        .PUSH0, .RETURN,
+    });
+
+    var runtime = StateGasProbeRuntime{};
+    var context = testExecutionContext(sender, 400_000);
+    context.transaction.extension = .initStateGas(&runtime);
+    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, success_parent, .{ .code = &success_parent_code });
+    try evmz.t.seedExecutorAccount(&executor, success_child, .{ .code = &child_code });
+    try evmz.t.seedExecutorAccount(&executor, revert_parent, .{ .code = &revert_parent_code });
+    try evmz.t.seedExecutorAccount(&executor, revert_child, .{ .code = &reverting_child_code });
+    try evmz.t.seedExecutorAccount(&executor, create_parent, .{ .code = &failing_create_code });
+    try evmz.t.seedExecutorAccount(&executor, deposit_parent, .{ .code = &deposit_create_code });
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    runtime.beginRoot(0, state_charge);
+    const nested_success = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = success_parent } },
+        .gas = .legacy(400_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, nested_success.result.status());
+    try std.testing.expectEqual(state_charge, runtime.used(0));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(success_child, 0));
+
+    runtime.beginRoot(1, state_charge);
+    const nested_revert = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = revert_parent } },
+        .gas = .legacy(400_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, nested_revert.result.status());
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(1));
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(revert_child, 0));
+
+    runtime.beginRoot(2, account_charge);
+    const failed_create = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = create_parent } },
+        .gas = .legacy(400_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, failed_create.result.status());
+    try std.testing.expectEqual(@as(u8, 0), failed_create.result.output_data[31]);
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(2));
+    try std.testing.expectEqual(account_charge, runtime.remaining(2));
+
+    runtime.beginRoot(3, account_charge);
+    const failed_deposit = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = deposit_parent } },
+        .gas = .legacy(400_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, failed_deposit.result.status());
+    try std.testing.expectEqual(@as(i64, 0), runtime.used(3));
+    try std.testing.expectEqual(account_charge, runtime.remaining(3));
+
+    runtime.beginRoot(3, account_charge + code_charge);
+    const committed_deposit = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = deposit_parent } },
+        .gas = .legacy(400_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, committed_deposit.result.status());
+    try std.testing.expectEqual(account_charge + code_charge, runtime.used(3));
+    try std.testing.expectEqual(@as(i64, 0), runtime.remaining(3));
+}
+
+test "checkpoint participant follows explicit checkpoint lifetime" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    var runtime = CheckpointProbeRuntime{};
+    var context = testExecutionContext(sender, 100_000);
+    context.transaction.extension = .initCheckpointed(&runtime);
+
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try executor.beginTransaction(context, sender, sender);
+    defer executor.discardStateTransition();
+
+    var restored = executor.checkpoint();
+    runtime.write(1);
+    restored.restore();
+    try std.testing.expectEqual(@as(u64, 0), runtime.value);
+
+    var committed = executor.checkpoint();
+    runtime.write(2);
+    committed.commit();
+    try std.testing.expectEqual(@as(u64, 2), runtime.value);
+
+    var outer = executor.checkpoint();
+    runtime.write(3);
+    var inner = executor.checkpoint();
+    runtime.write(4);
+    inner.commit();
+    outer.restore();
+    try std.testing.expectEqual(@as(u64, 2), runtime.value);
+
+    const restore_count = runtime.restore_count;
+    {
+        var abandoned = executor.checkpoint();
+        defer abandoned.deinit();
+        runtime.write(5);
+    }
+    try std.testing.expectEqual(@as(u64, 2), runtime.value);
+    try std.testing.expectEqual(restore_count + 1, runtime.restore_count);
+    try std.testing.expectEqual(runtime.checkpoint_count, runtime.commit_count + runtime.restore_count);
+}
+
+test "pointer-only transaction extension does not join checkpoints" {
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    var runtime = CheckpointProbeRuntime{};
+    var context = testExecutionContext(sender, 100_000);
+    context.transaction.extension = .init(&runtime);
+
+    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try executor.beginTransaction(context, sender, sender);
+    defer executor.discardStateTransition();
+
+    var checkpoint = executor.checkpoint();
+    runtime.write(1);
+    checkpoint.restore();
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+    try std.testing.expectEqual(@as(usize, 0), runtime.checkpoint_count);
+}
+
+test "checkpoint participant follows nested call outcomes and errors" {
+    const Exact = evmz.t.CustomVm(.cancun, .{
+        .instruction = CheckpointProbeInstruction.instructions(),
+    }) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const success_target = evmz.addr(0x1111);
+    const revert_target = evmz.addr(0x2222);
+    const invalid_target = evmz.addr(0x3333);
+    const out_of_gas_target = evmz.addr(0x4444);
+    const error_target = evmz.addr(0x5555);
+    const write = CheckpointProbeInstruction.write_byte;
+
+    var runtime = CheckpointProbeRuntime{};
+    var context = testExecutionContext(sender, 100_000);
+    context.transaction.extension = .initCheckpointed(&runtime);
+    var executor = Exact.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, success_target, .{ .code = &.{ write, evmz.Opcode.STOP.toByte() } });
+    try evmz.t.seedExecutorAccount(&executor, revert_target, .{ .code = &.{ write, evmz.Opcode.PUSH0.toByte(), evmz.Opcode.PUSH0.toByte(), evmz.Opcode.REVERT.toByte() } });
+    try evmz.t.seedExecutorAccount(&executor, invalid_target, .{ .code = &.{ write, evmz.Opcode.INVALID.toByte() } });
+    try evmz.t.seedExecutorAccount(&executor, out_of_gas_target, .{ .code = &.{CheckpointProbeInstruction.out_of_gas_byte} });
+    try evmz.t.seedExecutorAccount(&executor, error_target, .{ .code = &.{CheckpointProbeInstruction.error_byte} });
+    try executor.beginTransaction(context, sender, success_target);
+    defer executor.discardStateTransition();
+
+    var message = Host.Message{
+        .depth = 1,
+        .kind = .call,
+        .gas = 100_000,
+        .recipient = success_target,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = success_target,
+    };
+    const success = try executor.resolveHostCall(message);
+    try std.testing.expectEqual(Interpreter.Status.success, success.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    message.recipient = revert_target;
+    message.code_address = revert_target;
+    const reverted = try executor.resolveHostCall(message);
+    try std.testing.expectEqual(Interpreter.Status.revert, reverted.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    message.recipient = invalid_target;
+    message.code_address = invalid_target;
+    const invalid = try executor.resolveHostCall(message);
+    try std.testing.expectEqual(Interpreter.Status.invalid, invalid.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    message.recipient = out_of_gas_target;
+    message.code_address = out_of_gas_target;
+    const out_of_gas = try executor.resolveHostCall(message);
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, out_of_gas.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    message.recipient = error_target;
+    message.code_address = error_target;
+    try std.testing.expectError(error.ForcedCheckpointProbeFailure, executor.resolveHostCall(message));
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+    try std.testing.expectEqual(runtime.checkpoint_count, runtime.commit_count + runtime.restore_count);
+}
+
+test "checkpoint participant follows create outcomes and errors" {
+    const Exact = evmz.t.CustomVm(.cancun, .{
+        .instruction = CheckpointProbeInstruction.instructions(),
+    }) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const write = CheckpointProbeInstruction.write_byte;
+    const success_code = [_]u8{ write, evmz.Opcode.STOP.toByte() };
+    const revert_code = [_]u8{ write, evmz.Opcode.PUSH0.toByte(), evmz.Opcode.PUSH0.toByte(), evmz.Opcode.REVERT.toByte() };
+    const invalid_code = [_]u8{ write, evmz.Opcode.INVALID.toByte() };
+    const out_of_gas_code = [_]u8{CheckpointProbeInstruction.out_of_gas_byte};
+    const error_code = [_]u8{CheckpointProbeInstruction.error_byte};
+
+    var runtime = CheckpointProbeRuntime{};
+    var context = testExecutionContext(sender, 100_000);
+    context.transaction.extension = .initCheckpointed(&runtime);
+    var executor = Exact.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try executor.beginTransaction(context, sender, evmz.addr(0x1111));
+    defer executor.discardStateTransition();
+
+    const success = try executor.executeCreate(.{
+        .sender = sender,
+        .recipient = evmz.addr(0x1111),
+        .init_code = &success_code,
+    }, .legacy(100_000));
+    try std.testing.expectEqual(Interpreter.Status.success, success.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    const reverted = try executor.executeCreate(.{
+        .sender = sender,
+        .recipient = evmz.addr(0x2222),
+        .init_code = &revert_code,
+    }, .legacy(100_000));
+    try std.testing.expectEqual(Interpreter.Status.revert, reverted.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    const invalid = try executor.executeCreate(.{
+        .sender = sender,
+        .recipient = evmz.addr(0x3333),
+        .init_code = &invalid_code,
+    }, .legacy(100_000));
+    try std.testing.expectEqual(Interpreter.Status.invalid, invalid.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    const out_of_gas = try executor.executeCreate(.{
+        .sender = sender,
+        .recipient = evmz.addr(0x4444),
+        .init_code = &out_of_gas_code,
+    }, .legacy(100_000));
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, out_of_gas.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    try std.testing.expectError(error.ForcedCheckpointProbeFailure, executor.executeCreate(.{
+        .sender = sender,
+        .recipient = evmz.addr(0x5555),
+        .init_code = &error_code,
+    }, .legacy(100_000)));
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+    try std.testing.expectEqual(runtime.checkpoint_count, runtime.commit_count + runtime.restore_count);
+}
+
+test "checkpoint participant follows roots and outer rollback" {
+    const Exact = evmz.t.CustomVm(.cancun, .{
+        .instruction = CheckpointProbeInstruction.instructions(),
+    }) orelse return error.SkipZigTest;
+    const sender = evmz.addr(0xaaaa);
+    const success_target = evmz.addr(0x1111);
+    const revert_target = evmz.addr(0x2222);
+    const error_target = evmz.addr(0x3333);
+    const write = CheckpointProbeInstruction.write_byte;
+    var runtime = CheckpointProbeRuntime{};
+    var context = testExecutionContext(sender, 100_000);
+    context.transaction.extension = .initCheckpointed(&runtime);
+
+    var executor = Exact.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, success_target, .{ .code = &.{ write, evmz.Opcode.STOP.toByte() } });
+    try evmz.t.seedExecutorAccount(&executor, revert_target, .{ .code = &.{ write, evmz.Opcode.PUSH0.toByte(), evmz.Opcode.PUSH0.toByte(), evmz.Opcode.REVERT.toByte() } });
+    try evmz.t.seedExecutorAccount(&executor, error_target, .{ .code = &.{CheckpointProbeInstruction.error_byte} });
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    const success_request = execution_values.ExecutionRequest{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = success_target } },
+        .gas = .legacy(100_000),
+    };
+    const success = try transaction_runtime.runRoot(&executor, success_request, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.success, success.result.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    const reverted = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = revert_target } },
+        .gas = .legacy(100_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.revert, reverted.result.status());
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    try std.testing.expectError(error.ForcedCheckpointProbeFailure, transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = error_target } },
+        .gas = .legacy(100_000),
+    }, .{}));
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+
+    var outer = executor.checkpoint();
+    defer outer.deinit();
+    _ = try transaction_runtime.runRoot(&executor, success_request, .{ .is_static = true });
+    _ = try transaction_runtime.runRoot(&executor, success_request, .{ .is_static = true });
+    try std.testing.expectEqual(@as(u64, 3), runtime.value);
+    outer.restore();
+    try std.testing.expectEqual(@as(u64, 1), runtime.value);
+    try std.testing.expectEqual(runtime.checkpoint_count, runtime.commit_count + runtime.restore_count);
 }
 
 test "transaction nonce advancement survives payload rollback" {

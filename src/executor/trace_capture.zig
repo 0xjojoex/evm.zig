@@ -163,6 +163,7 @@ fn callStatus(status: Interpreter.Status, cause: evmz.execution.TerminalCause) t
         .none => .success,
         .revert => .revert,
         .out_of_gas => .out_of_gas,
+        .out_of_state_gas => .out_of_gas,
         .invalid => switch (status) {
             .success => .success,
             .revert => .revert,

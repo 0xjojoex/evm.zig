@@ -30,6 +30,40 @@ pub const Row = struct {
 
 pub const Checkpoint = checkpoint_types.LogCheckpoint;
 
+/// Stable row coordinates inside one unresolved transaction log buffer.
+///
+/// Appending later logs preserves the range. A checkpoint restore may truncate
+/// it, so the family that owns an outer checkpoint must clear affected ranges
+/// before exposing its result. The range never owns or copies log payloads.
+pub const LogRange = struct {
+    offset: u32 = 0,
+    len: u32 = 0,
+
+    pub const empty: LogRange = .{};
+
+    pub fn init(offset: usize, len: usize) LogRange {
+        const max = std.math.maxInt(u32);
+        std.debug.assert(offset <= max);
+        std.debug.assert(len <= max - offset);
+        return .{ .offset = @intCast(offset), .len = @intCast(len) };
+    }
+
+    pub fn isValid(self: LogRange, logs: View) bool {
+        return @as(u64, self.offset) + @as(u64, self.len) <= @as(u64, @intCast(logs.len()));
+    }
+
+    pub fn view(self: LogRange, logs: View) View {
+        std.debug.assert(self.isValid(logs));
+        const offset: usize = self.offset;
+        const len: usize = self.len;
+        return .{
+            .rows = logs.rows[offset..][0..len],
+            .topics = logs.topics,
+            .data = logs.data,
+        };
+    }
+};
+
 pub const AppendError = Allocator.Error || error{TooManyLogTopics};
 
 rows: std.ArrayList(Row) = .empty,
@@ -148,6 +182,12 @@ pub const View = struct {
             .data = row.data.slice(self.data),
         };
     }
+
+    pub fn range(self: View, offset: usize, count: usize) LogRange {
+        const result = LogRange.init(offset, count);
+        std.debug.assert(result.isValid(self));
+        return result;
+    }
 };
 
 fn index32(value: usize) u32 {
@@ -176,6 +216,22 @@ test "packed log buffer owns callback bytes and truncates to checkpoint" {
     try std.testing.expectEqual(@as(u8, 2), logs.view().get(0).data[0]);
     logs.truncate(checkpoint_value);
     try std.testing.expectEqual(@as(usize, 0), logs.view().len());
+}
+
+test "log range remains stable across append and detects truncation" {
+    var logs: LogBuffer = .{};
+    defer logs.deinit(std.testing.allocator);
+    try logs.append(std.testing.allocator, .{ .address = Address.zero, .topics = &.{1}, .data = &.{2} });
+    const first = logs.view().range(0, 1);
+    try logs.append(std.testing.allocator, .{ .address = Address.zero, .topics = &.{3}, .data = &.{4} });
+
+    try std.testing.expect(first.isValid(logs.view()));
+    try std.testing.expectEqual(@as(usize, 1), first.view(logs.view()).len());
+    try std.testing.expectEqual(@as(u256, 1), first.view(logs.view()).get(0).topics[0]);
+
+    logs.truncate(.{ .rows_len = 0, .topics_len = 0, .data_len = 0 });
+    try std.testing.expect(!first.isValid(logs.view()));
+    try std.testing.expect(LogRange.empty.isValid(logs.view()));
 }
 
 test "log buffer rejects a fifth topic without disturbing prior rows" {

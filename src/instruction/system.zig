@@ -4,6 +4,7 @@ const Host = @import("../Host.zig");
 const evmz = @import("../evm.zig");
 const Spec = @import("../spec.zig").Spec;
 const std = @import("std");
+const StateGasCharge = @import("../execution/gas.zig").StateGasCharge;
 
 const CallFrame = Interpreter.CallFrame;
 
@@ -84,7 +85,8 @@ pub fn Handlers(comptime spec: Spec) type {
                 account_state_gas = new_account_gas.state;
             }
 
-            if (!frame.trackStateGas(account_state_gas)) return;
+            const account_state_event = evmz.execution.StateGasEvent.account(canonical_address, account_state_gas, 0);
+            const state_gas_charge = frame.applyStateGas(account_state_event) orelse return;
 
             if (try frame.host.accessDelegatedAccount(address)) |delegated_access_status| {
                 const delegated_access_cost = spec.call.delegatedAccountAccessGas(delegated_access_status == .cold);
@@ -120,7 +122,7 @@ pub fn Handlers(comptime spec: Spec) type {
                     .gas_limit = msg.gas,
                     .out_offset = out_offset_usize,
                     .out_size = out_size_usize,
-                    .state_gas_charged = account_state_gas,
+                    .state_gas_charge = state_gas_charge,
                 },
             } });
         }
@@ -173,16 +175,16 @@ pub fn Handlers(comptime spec: Spec) type {
             if (comptime is_create2) {
                 target = evmz.address.create2(creator, salt, init_code);
                 if (frame.msg.depth >= Host.max_call_depth) {
-                    queueCreate(frame, target, value, init_code, 0, true, .call_depth_exceeded);
+                    queueCreate(frame, target, value, init_code, .{}, true, .call_depth_exceeded);
                     return;
                 }
                 if (value != 0 and try frame.host.getBalance(.fromAddress(creator)) < value) {
-                    queueCreate(frame, target, value, init_code, 0, true, .insufficient_balance);
+                    queueCreate(frame, target, value, init_code, .{}, true, .insufficient_balance);
                     return;
                 }
                 const creator_nonce = try frame.host.getNonce(.fromAddress(creator));
                 if (creator_nonce == std.math.maxInt(u64)) {
-                    queueCreate(frame, target, value, init_code, 0, true, .nonce_overflow);
+                    queueCreate(frame, target, value, init_code, .{}, true, .nonce_overflow);
                     return;
                 }
             } else {
@@ -192,15 +194,15 @@ pub fn Handlers(comptime spec: Spec) type {
                 const creator_nonce = try frame.host.getNonce(.fromAddress(creator));
                 target = evmz.address.create(creator, creator_nonce);
                 if (frame.msg.depth >= Host.max_call_depth) {
-                    queueCreate(frame, target, value, init_code, 0, false, .call_depth_exceeded);
+                    queueCreate(frame, target, value, init_code, .{}, false, .call_depth_exceeded);
                     return;
                 }
                 if (value != 0 and try frame.host.getBalance(.fromAddress(creator)) < value) {
-                    queueCreate(frame, target, value, init_code, 0, false, .insufficient_balance);
+                    queueCreate(frame, target, value, init_code, .{}, false, .insufficient_balance);
                     return;
                 }
                 if (creator_nonce == std.math.maxInt(u64)) {
-                    queueCreate(frame, target, value, init_code, 0, false, .nonce_overflow);
+                    queueCreate(frame, target, value, init_code, .{}, false, .nonce_overflow);
                     return;
                 }
             }
@@ -218,9 +220,9 @@ pub fn Handlers(comptime spec: Spec) type {
             const account_state_gas = spec.create.accountStateGas(.{
                 .target_alive = target_alive,
             });
-            if (!frame.trackStateGas(account_state_gas)) return;
+            const state_gas_charge = frame.applyStateGas(.account(target, account_state_gas, 0)) orelse return;
 
-            queueCreate(frame, target, value, init_code, account_state_gas, is_create2, null);
+            queueCreate(frame, target, value, init_code, state_gas_charge, is_create2, null);
         }
 
         fn queueCreate(
@@ -228,7 +230,7 @@ pub fn Handlers(comptime spec: Spec) type {
             target: evmz.Address,
             value: u256,
             init_code: []const u8,
-            account_state_gas: i64,
+            state_gas_charge: StateGasCharge,
             comptime is_create2: bool,
             precheck_failure: ?evmz.execution.TerminalCause,
         ) void {
@@ -259,7 +261,7 @@ pub fn Handlers(comptime spec: Spec) type {
                 .msg = msg,
                 .continuation = .{
                     .gas_limit = msg.gas,
-                    .state_gas_charged = account_state_gas,
+                    .state_gas_charge = state_gas_charge,
                 },
             } });
         }
@@ -291,7 +293,7 @@ pub fn Handlers(comptime spec: Spec) type {
                 .account_exists = try frame.host.accountExists(address_word_key),
             });
             if (!frame.trackGas(new_account_gas.regular)) return;
-            if (!frame.trackStateGas(new_account_gas.state)) return;
+            _ = frame.applyStateGas(.account(address, new_account_gas.state, 0)) orelse return;
             const should_refund = try frame.host.selfDestruct(frame.msg.recipient, address);
 
             if (should_refund) {

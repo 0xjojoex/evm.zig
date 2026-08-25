@@ -1,39 +1,67 @@
-//! Interior call/create checkpoint ownership.
+//! Composite execution checkpoint ownership.
 
 const std = @import("std");
 
 const Status = @import("../evm.zig").interpreter.Status;
+const TransactionCheckpointCursor = @import("../execution/context.zig").TransactionCheckpointParticipant.Cursor;
+const StateCheckpoint = @import("../state/checkpoint.zig").Checkpoint;
+
+pub const Checkpoint = struct {
+    state: StateCheckpoint,
+    transaction: ?TransactionCheckpointCursor,
+
+    pub fn open(executor: anytype) Checkpoint {
+        return .{
+            .state = executor.state.checkpoint(),
+            .transaction = executor.currentExecutionContext().transaction.extension.checkpoint(),
+        };
+    }
+
+    pub fn commit(self: Checkpoint, executor: anytype) void {
+        if (self.transaction) |cursor| {
+            executor.currentExecutionContext().transaction.extension.commitCheckpoint(cursor);
+        }
+        executor.state.commitCheckpoint(self.state);
+    }
+
+    pub fn restore(self: Checkpoint, executor: anytype) void {
+        if (self.transaction) |cursor| {
+            executor.currentExecutionContext().transaction.extension.restoreCheckpoint(cursor);
+        }
+        executor.state.revertToCheckpoint(self.state);
+    }
+};
 
 /// Owns one interior call/create checkpoint until it is resolved or
 /// transferred to a store row. Any early error restores it.
-pub fn Guard(comptime State: type) type {
+pub fn Guard(comptime Executor: type) type {
     return struct {
         const Self = @This();
 
-        state: *State,
-        checkpoint_state: State.Checkpoint,
+        executor: *Executor,
+        checkpoint_state: Checkpoint,
         open: bool = true,
 
-        pub fn init(state: *State, checkpoint_state: State.Checkpoint) Self {
-            return .{ .state = state, .checkpoint_state = checkpoint_state };
+        pub fn init(executor: *Executor, checkpoint_state: Checkpoint) Self {
+            return .{ .executor = executor, .checkpoint_state = checkpoint_state };
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.open) self.state.revertToCheckpoint(self.checkpoint_state);
+            if (self.open) self.checkpoint_state.restore(self.executor);
             self.* = undefined;
         }
 
-        pub fn begin(state: *State) Self {
-            return .{ .state = state, .checkpoint_state = state.checkpoint() };
+        pub fn begin(executor: *Executor) Self {
+            return .{ .executor = executor, .checkpoint_state = .open(executor) };
         }
 
         pub fn commit(self: *Self) void {
-            self.state.commitCheckpoint(self.checkpoint_state);
+            self.checkpoint_state.commit(self.executor);
             self.open = false;
         }
 
         pub fn restore(self: *Self) void {
-            self.state.revertToCheckpoint(self.checkpoint_state);
+            self.checkpoint_state.restore(self.executor);
             self.open = false;
         }
 

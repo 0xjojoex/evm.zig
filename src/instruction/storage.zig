@@ -41,8 +41,7 @@ pub fn Handlers(comptime spec: ExactSpec) type {
             frame.gas_refund += cost.refund;
 
             const state_gas = spec.storage.sstoreStateGas(status);
-            if (!frame.trackStateGas(state_gas.charge)) return;
-            frame.refillStateGas(state_gas.refund);
+            _ = frame.applyStateGas(.storage(frame.msg.recipient, key, state_gas.charge, state_gas.refund)) orelse return;
         }
 
         pub fn sloadAfterPop(frame: *CallFrame, key: u256) !?u256 {

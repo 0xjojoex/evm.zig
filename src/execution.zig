@@ -12,7 +12,12 @@ const execution_context = @import("./execution/context.zig");
 
 const reentrant_native_contract = @import("./execution/reentrant_native_contract.zig");
 
-pub const ExecutionGas = @import("./execution/gas.zig").ExecutionGas;
+const gas_values = @import("./execution/gas.zig");
+
+pub const ExecutionGas = gas_values.ExecutionGas;
+pub const StateGasEvent = gas_values.StateGasEvent;
+pub const StateGasResource = gas_values.StateGasResource;
+pub const StateGasMeterResult = gas_values.StateGasMeterResult;
 pub const ReentrantNativeContractCall = reentrant_native_contract.Call;
 pub const ReentrantNativeContractRuntime = reentrant_native_contract.Runtime;
 pub const NoReentrantNativeContracts = reentrant_native_contract.None;
@@ -23,6 +28,13 @@ pub const Status = enum(u8) {
     revert,
     invalid,
     out_of_gas,
+};
+
+/// Whether root dispatch stopped during entry preparation or reached payload
+/// execution. Family coordinators use this fact to select rollback policy.
+pub const TransactionExecutionStage = enum {
+    preparation,
+    payload,
 };
 
 /// Whether a transaction-scoped warmth record already existed for the thing
@@ -143,6 +155,7 @@ pub const TerminalCause = enum(u8) {
     none,
     revert,
     out_of_gas,
+    out_of_state_gas,
     invalid,
     call_depth_exceeded,
     insufficient_balance,
@@ -167,6 +180,7 @@ pub const FrameHalt = enum(u8) {
     success,
     revert,
     out_of_gas,
+    out_of_state_gas,
     invalid_opcode,
     stack_underflow,
     stack_overflow,
@@ -178,7 +192,7 @@ pub const FrameHalt = enum(u8) {
         return switch (self) {
             .success => .success,
             .revert => .revert,
-            .out_of_gas => .out_of_gas,
+            .out_of_gas, .out_of_state_gas => .out_of_gas,
             .invalid_opcode,
             .stack_underflow,
             .stack_overflow,
@@ -194,6 +208,7 @@ pub const FrameHalt = enum(u8) {
             .success => .none,
             .revert => .revert,
             .out_of_gas => .out_of_gas,
+            .out_of_state_gas => .out_of_state_gas,
             .invalid_opcode => .invalid_opcode,
             .stack_underflow => .stack_underflow,
             .stack_overflow => .stack_overflow,
@@ -205,7 +220,7 @@ pub const FrameHalt = enum(u8) {
 
     pub fn consumesAllGas(self: FrameHalt) bool {
         return switch (self) {
-            .success, .revert => false,
+            .success, .revert, .out_of_state_gas => false,
             .out_of_gas,
             .invalid_opcode,
             .stack_underflow,
@@ -378,6 +393,8 @@ pub const ChainEnvironment = execution_context.ChainEnvironment;
 pub const BlockEnvironment = execution_context.BlockEnvironment;
 pub const TransactionEnvironment = execution_context.TransactionEnvironment;
 pub const TransactionExtension = execution_context.TransactionExtension;
+pub const TransactionCheckpointParticipant = execution_context.TransactionCheckpointParticipant;
+pub const TransactionStateGasMeter = execution_context.TransactionStateGasMeter;
 pub const ExecutionContext = execution_context.ExecutionContext;
 
 /// A storage slot that is already warm when root execution starts.
@@ -401,6 +418,24 @@ pub const ExecutionScopeInit = struct {
     pub const WarmSlot = WarmStorageSlot;
 
     initial_warm_set: InitialWarmSet = .{},
+};
+
+/// Account-access behavior applied when entering one root inside an open
+/// multi-root session.
+pub const RootAccessPolicy = enum {
+    /// Ordinary transaction roots begin with their sender and recipient warm.
+    prewarm_sender_and_recipient,
+    /// Charge CALL-family account-access gas for the recipient at root entry.
+    charge_call_target,
+};
+
+/// Execution mode for one root inside an open multi-root session.
+///
+/// Transaction-lifetime warmth belongs to `ExecutionScopeInit`; these options
+/// are intentionally reapplied for each root.
+pub const RootExecutionInit = struct {
+    access: RootAccessPolicy = .prewarm_sender_and_recipient,
+    is_static: bool = false,
 };
 
 /// One immutable, borrowed EVM invocation.
@@ -427,6 +462,13 @@ test "execution request and scope initialization contain no family policy" {
     try std.testing.expectEqual(@as(usize, 1), scope_fields.len);
     try std.testing.expectEqualStrings("initial_warm_set", scope_fields[0].name);
     try std.testing.expect(scope_fields[0].type == InitialWarmSet);
+
+    const root_fields = std.meta.fields(RootExecutionInit);
+    try std.testing.expectEqual(@as(usize, 2), root_fields.len);
+    try std.testing.expectEqualStrings("access", root_fields[0].name);
+    try std.testing.expect(root_fields[0].type == RootAccessPolicy);
+    try std.testing.expectEqualStrings("is_static", root_fields[1].name);
+    try std.testing.expect(root_fields[1].type == bool);
 
     try std.testing.expect(!@hasField(ExecutionRequest, "transaction"));
     try std.testing.expect(!@hasField(ExecutionRequest, "access_list"));

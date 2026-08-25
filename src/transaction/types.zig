@@ -116,7 +116,7 @@ pub const TransactionView = struct {
 /// no opcode can observe.
 pub const Env = struct {
     chain_id: u256 = 1,
-    coinbase: Address = std.mem.zeroes(Address),
+    coinbase: Address = .zero,
     number: u64 = 0,
     slot_number: u64 = 0,
     timestamp: u64 = 0,

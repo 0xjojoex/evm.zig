@@ -1288,7 +1288,7 @@ fn tapeStepOutcome(state: *const Interpreter.FrameState) trace.TraceStepOutcome 
         .halted => |reason| switch (reason) {
             .success => .success,
             .revert => .revert,
-            .out_of_gas => .out_of_gas,
+            .out_of_gas, .out_of_state_gas => .out_of_gas,
             .invalid_opcode,
             .stack_underflow,
             .stack_overflow,

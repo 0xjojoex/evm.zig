@@ -9,7 +9,7 @@ const Memory = @import("../Memory.zig");
 const frame_io = @import("../frame_io.zig");
 const Stack = @import("../Stack.zig");
 const evmz = @import("../evm.zig");
-const Checkpoint = @import("../state/checkpoint.zig").Checkpoint;
+const Checkpoint = @import("./checkpoint.zig").Checkpoint;
 const CallToken = @import("../trace/call_arena.zig").Token;
 
 const FrameStore = @This();

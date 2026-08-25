@@ -52,20 +52,58 @@ const ExecutionScopeInit = evmz.execution.ExecutionScopeInit;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const FrameResult = Interpreter.FrameResult;
+const CompositeCheckpoint = checkpoint_guard.Checkpoint;
 pub const Result = Host.Result;
 
 /// Root execution reports whether the VM reached payload execution so the
 /// transaction program can place its preparation checkpoint without
 /// duplicating CALL/CREATE dispatch semantics.
-pub const TransactionExecutionStage = enum {
-    preparation,
-    payload,
-};
+pub const TransactionExecutionStage = evmz.execution.TransactionExecutionStage;
 
 pub const TransactionExecutionOutcome = struct {
     stage: TransactionExecutionStage,
     result: ExecutionResult,
 };
+
+const TopFrameStateGasCharge = union(enum) {
+    reservoir: top_frame_gas.Charge,
+    metered,
+    exhausted,
+
+    fn finish(self: TopFrameStateGasCharge, result: *ExecutionResult) void {
+        switch (self) {
+            .reservoir => |charge| top_frame_gas.finish(result, charge),
+            .metered => {},
+            .exhausted => unreachable,
+        }
+    }
+};
+
+fn staticWriteProtection(gas: ExecutionGas) TransactionExecutionOutcome {
+    return .{
+        .stage = .preparation,
+        .result = .{
+            .outcome = .{ .status = .invalid, .cause = .write_protection },
+            .gas_left = 0,
+            .gas_refund = 0,
+            .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+            .output_data = &.{},
+        },
+    };
+}
+
+fn outOfStateGas(gas: ExecutionGas) TransactionExecutionOutcome {
+    return .{
+        .stage = .preparation,
+        .result = .{
+            .outcome = .{ .status = .out_of_gas, .cause = .out_of_state_gas },
+            .gas_left = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+            .gas_refund = 0,
+            .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+            .output_data = &.{},
+        },
+    };
+}
 
 const ScopeRoot = struct {
     sender: Address,
@@ -123,6 +161,7 @@ pub const PreparedCallTransaction = struct {
     gas: u64,
     gas_reservoir: u64 = 0,
     value: u256 = 0,
+    is_static: bool = false,
 };
 
 pub const Call = evmz.execution.Call;
@@ -378,7 +417,7 @@ pub fn ExecutorType(
             try self.openTransactionScope(context, mode);
             errdefer self.discardStateTransition();
 
-            try transaction_runtime.initializeMessageScope(self, message, scope_init, .none);
+            try transaction_runtime.initializeMessageScope(self, message, scope_init);
         }
 
         fn beginSystemCall(
@@ -655,27 +694,27 @@ pub fn ExecutorType(
         /// Treat this token as move-only.
         pub const ExecutionCheckpoint = struct {
             executor: *Executor,
-            journal_checkpoint: State.Checkpoint,
+            checkpoint_state: CompositeCheckpoint,
             id: usize,
             parent_id: usize,
             open: bool = true,
 
             pub fn commit(self: *ExecutionCheckpoint) void {
                 self.validateClose();
-                self.executor.state.commitCheckpoint(self.journal_checkpoint);
+                self.checkpoint_state.commit(self.executor);
                 self.finishClose();
             }
 
             pub fn restore(self: *ExecutionCheckpoint) void {
                 self.validateClose();
-                self.executor.state.revertToCheckpoint(self.journal_checkpoint);
+                self.checkpoint_state.restore(self.executor);
                 self.finishClose();
             }
 
             pub fn deinit(self: *ExecutionCheckpoint) void {
                 if (self.open) {
                     std.debug.assert(self.executor.checkpoint_top == self.id);
-                    self.executor.state.revertToCheckpoint(self.journal_checkpoint);
+                    self.checkpoint_state.restore(self.executor);
                     self.finishClose();
                 }
                 self.* = undefined;
@@ -698,12 +737,12 @@ pub fn ExecutorType(
             std.debug.assert(self.next_checkpoint_id < std.math.maxInt(usize));
             const id = self.next_checkpoint_id + 1;
             const parent_id = self.checkpoint_top;
-            const journal_checkpoint = self.state.checkpoint();
+            const checkpoint_state = CompositeCheckpoint.open(self);
             self.next_checkpoint_id = id;
             self.checkpoint_top = id;
             return .{
                 .executor = self,
-                .journal_checkpoint = journal_checkpoint,
+                .checkpoint_state = checkpoint_state,
                 .id = id,
                 .parent_id = parent_id,
             };
@@ -719,7 +758,7 @@ pub fn ExecutorType(
             self.state.restoreBranch(checkpoint_state);
         }
 
-        const CheckpointGuard = checkpoint_guard.Guard(State);
+        const CheckpointGuard = checkpoint_guard.Guard(Executor);
 
         // Ambient per-execution state. Each of these is saved and restored by hand at
         // every entrypoint that owns it, rather than inherited from a scope value.
@@ -1093,7 +1132,7 @@ pub fn ExecutorType(
         };
 
         const ChildCall = struct {
-            checkpoint_state: State.Checkpoint,
+            checkpoint_state: CompositeCheckpoint,
             bytecode: Bytecode.View,
         };
 
@@ -1108,7 +1147,7 @@ pub fn ExecutorType(
         };
 
         const ChildCreate = struct {
-            checkpoint_state: State.Checkpoint,
+            checkpoint_state: CompositeCheckpoint,
             /// Consumed synchronously while the originating CREATE action or
             /// root message remains alive. Address, kind, and init code are
             /// projections of this message and must not be duplicated here.
@@ -1144,8 +1183,8 @@ pub fn ExecutorType(
                     const index = self.frames.len() - 1;
                     switch (self.frames.control(index).kind) {
                         .root_call => {},
-                        .call => |checkpoint_state| self.executor.state.revertToCheckpoint(checkpoint_state),
-                        .create => |child| self.executor.state.revertToCheckpoint(child.checkpoint_state),
+                        .call => |checkpoint_state| checkpoint_state.restore(self.executor),
+                        .create => |child| child.checkpoint_state.restore(self.executor),
                     }
                     self.dropFrame();
                 }
@@ -1175,7 +1214,7 @@ pub fn ExecutorType(
                 self: *CallRuntime,
                 msg: *const Host.Message,
                 bytecode: Bytecode.View,
-                checkpoint_state: State.Checkpoint,
+                checkpoint_state: CompositeCheckpoint,
                 call_capture: ?evmz.trace.CallToken,
             ) !void {
                 try self.pushFrame(msg, bytecode, .{
@@ -1388,7 +1427,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = CheckpointGuard.init(self.executor, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCall(msg, child.bytecode, child.checkpoint_state, call_capture);
@@ -1420,7 +1459,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = CheckpointGuard.init(self.executor, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCreate(child, call_capture);
@@ -1438,8 +1477,8 @@ pub fn ExecutorType(
                 const call_capture = control.call_capture;
                 var frame_checkpoint: ?CheckpointGuard = switch (frame_kind) {
                     .root_call => null,
-                    .call => |checkpoint_state| CheckpointGuard.init(&self.executor.state, checkpoint_state),
-                    .create => |child| CheckpointGuard.init(&self.executor.state, child.checkpoint_state),
+                    .call => |checkpoint_state| CheckpointGuard.init(self.executor, checkpoint_state),
+                    .create => |child| CheckpointGuard.init(self.executor, child.checkpoint_state),
                 };
                 defer if (frame_checkpoint) |*guard| guard.deinit();
 
@@ -1496,7 +1535,7 @@ pub fn ExecutorType(
             if (resolved.delegated) try self.traceAccountAccess(resolved.address);
             const code = try self.resolvedCodeView(resolved);
 
-            var call_checkpoint = CheckpointGuard.begin(&self.state);
+            var call_checkpoint = CheckpointGuard.begin(self);
             defer call_checkpoint.deinit();
 
             if (msg.value > 0 and (msg.kind == .call or msg.kind == .callcode)) {
@@ -1643,7 +1682,7 @@ pub fn ExecutorType(
             return switch (try begin(self, &msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
-                    var child_checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = CheckpointGuard.init(self, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -1694,7 +1733,7 @@ pub fn ExecutorType(
 
         fn beginPreparedCreate(self: *Executor, msg: *const Host.Message) !StartedCreate {
             const create_address = msg.recipient;
-            var create_checkpoint = CheckpointGuard.begin(&self.state);
+            var create_checkpoint = CheckpointGuard.begin(self);
             defer create_checkpoint.deinit();
 
             if (try self.createCollision(create_address)) {
@@ -1774,9 +1813,14 @@ pub fn ExecutorType(
                 create_checkpoint.restore();
                 return self.createFailureFromResult(deposit_result, .out_of_gas, .code_store_out_of_gas);
             };
-            deposit_result.trackStateGas(deposit_state_gas);
-            if (deposit_result.outcome.status != .success) {
+            if (!self.applyCreateDepositStateGas(&deposit_result, child.address, deposit_state_gas)) {
                 create_checkpoint.restore();
+                if (deposit_result.outcome.cause == .out_of_state_gas) {
+                    deposit_result.gas_refund = 0;
+                    self.clearLastOutput();
+                    deposit_result.output_data = &.{};
+                    return Host.Result.fromExecution(deposit_result, true);
+                }
                 return self.createFailureFromResult(deposit_result, deposit_result.outcome.status, .code_store_out_of_gas);
             }
 
@@ -1784,6 +1828,29 @@ pub fn ExecutorType(
             create_checkpoint.commit();
 
             return Host.Result.fromExecution(deposit_result, false);
+        }
+
+        fn applyCreateDepositStateGas(
+            self: *Executor,
+            result: *ExecutionResult,
+            address: Address,
+            amount: i64,
+        ) bool {
+            const extension = self.currentExecutionContext().transaction.extension;
+            if (extension.applyStateGas(.code(address, amount))) |application| {
+                switch (application) {
+                    .exhausted => {
+                        result.outcome = .{ .status = .out_of_gas, .cause = .out_of_state_gas };
+                        return false;
+                    },
+                    .applied => |token| {
+                        if (amount > 0) std.debug.assert(token != null) else std.debug.assert(token == null);
+                        return true;
+                    },
+                }
+            }
+            result.trackStateGas(amount);
+            return result.outcome.status == .success;
         }
 
         fn createFailureWithCause(
@@ -1858,7 +1925,7 @@ pub fn ExecutorType(
             } else switch (try self.beginCall(&msg)) {
                 .immediate => |immediate| immediate,
                 .child => |child| blk: {
-                    var child_checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = CheckpointGuard.init(self, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -1895,7 +1962,7 @@ pub fn ExecutorType(
             recipient: Address,
             value: u256,
             gas: *ExecutionGas,
-        ) !top_frame_gas.Charge {
+        ) !TopFrameStateGasCharge {
             const same_address = Address.eql(sender, recipient);
             const creates_account = if (value == 0 or same_address)
                 false
@@ -1906,14 +1973,14 @@ pub fn ExecutorType(
                 .same_address = same_address,
                 .creates_account = creates_account,
             });
-            return top_frame_gas.charge(gas, charge_i64);
+            return self.chargeTopFrameStateGas(recipient, charge_i64, gas);
         }
 
         fn chargeTopFrameCreateStateGas(
             self: *Executor,
             options: Create,
             gas: *ExecutionGas,
-        ) !top_frame_gas.Charge {
+        ) !TopFrameStateGasCharge {
             // The integrated rule compares the pre-transaction account to the
             // empty account value. Storage does not make an account alive.
             const target_alive = if (try self.state.getAccountOrLoad(stateAddress(options.recipient))) |account|
@@ -1923,10 +1990,33 @@ pub fn ExecutorType(
             else
                 false;
 
-            return top_frame_gas.charge(
-                gas,
+            return self.chargeTopFrameStateGas(
+                options.recipient,
                 spec.create.accountStateGas(.{ .target_alive = target_alive }),
+                gas,
             );
+        }
+
+        fn chargeTopFrameStateGas(
+            self: *Executor,
+            address: Address,
+            amount: i64,
+            gas: *ExecutionGas,
+        ) TopFrameStateGasCharge {
+            const extension = self.currentExecutionContext().transaction.extension;
+            if (extension.applyStateGas(.account(address, amount, 0))) |application| {
+                return switch (application) {
+                    .exhausted => .exhausted,
+                    .applied => |token| if (amount > 0) blk: {
+                        std.debug.assert(token != null);
+                        break :blk .metered;
+                    } else blk: {
+                        std.debug.assert(token == null);
+                        break :blk .metered;
+                    },
+                };
+            }
+            return .{ .reservoir = top_frame_gas.charge(gas, amount) };
         }
 
         // Entrypoints. The whole public execution surface, ordered outermost first.
@@ -2013,12 +2103,54 @@ pub fn ExecutorType(
         ) !TransactionExecutionOutcome {
             self.validateScopeContext(request.context);
             self.validateScopeRoot(.fromMessage(request.message));
-            return self.executeTransactionRequestTrustedPhased(request);
+            return self.executeTransactionRequestTrustedPhased(request, false);
+        }
+
+        /// Execute one root with explicit frame-entry behavior inside an open
+        /// multi-root transaction session.
+        pub fn executeRootTransactionRequestPhased(
+            self: *Executor,
+            request: ExecutionRequest,
+            root_init: evmz.execution.RootExecutionInit,
+        ) !TransactionExecutionOutcome {
+            self.validateScopeContext(request.context);
+            self.validateScopeRoot(.fromMessage(request.message));
+
+            var charged_request = request;
+            if (root_init.access == .charge_call_target) {
+                const call = switch (request.message) {
+                    .call => |call| call,
+                    .create => unreachable,
+                };
+                var host_iface = self.host();
+                const access_status = try host_iface.accessAccount(.fromAddress(call.recipient));
+                const access_gas = spec.call.base_gas + if (access_status == .cold)
+                    spec.call.cold_account_access_gas orelse 0
+                else
+                    0;
+                std.debug.assert(access_gas >= 0);
+                const cost: u64 = @intCast(access_gas);
+                if (cost > charged_request.gas.regular_left) {
+                    return .{
+                        .stage = .preparation,
+                        .result = .{
+                            .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
+                            .gas_left = 0,
+                            .gas_refund = 0,
+                            .gas_reservoir = std.math.cast(i64, charged_request.gas.reservoir) orelse std.math.maxInt(i64),
+                            .output_data = &.{},
+                        },
+                    };
+                }
+                charged_request.gas.regular_left -= cost;
+            }
+            return self.executeTransactionRequestTrustedPhased(charged_request, root_init.is_static);
         }
 
         fn executeTransactionRequestTrustedPhased(
             self: *Executor,
             request: ExecutionRequest,
+            is_static: bool,
         ) !TransactionExecutionOutcome {
             switch (request.message) {
                 .call => |call| try self.traceAccountAccess(call.recipient),
@@ -2026,14 +2158,15 @@ pub fn ExecutorType(
             }
             const call_capture = try self.beginRootCapture(request.message, request.gas);
             const outcome = try switch (request.message) {
-                .call => |call| self.executeCallTransactionPhased(
+                .call => |call| self.executeCallTransactionPhasedMode(
                     call.sender,
                     call.recipient,
                     call.input,
                     request.gas,
                     call.value,
+                    is_static,
                 ),
-                .create => |create| self.executeCreateTransactionPhased(create, request.gas),
+                .create => |create| self.executeCreateTransactionPhasedMode(create, request.gas, is_static),
             };
             if (call_capture) |token| try self.finishRootCapture(token, outcome.result);
             return outcome;
@@ -2077,29 +2210,46 @@ pub fn ExecutorType(
             gas: ExecutionGas,
             value: u256,
         ) !TransactionExecutionOutcome {
+            return self.executeCallTransactionPhasedMode(sender, recipient, input, gas, value, false);
+        }
+
+        fn executeCallTransactionPhasedMode(
+            self: *Executor,
+            sender: Address,
+            recipient: Address,
+            input: []const u8,
+            gas: ExecutionGas,
+            value: u256,
+            is_static: bool,
+        ) !TransactionExecutionOutcome {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
             _ = self.currentExecutionContext();
+            if (is_static and value != 0) return staticWriteProtection(gas);
             var execution_gas = gas;
             const top_frame_state_gas = try self.chargeTopFrameValueTransferStateGas(sender, recipient, value, &execution_gas);
-            if (top_frame_state_gas.out_of_gas) {
-                return .{
-                    .stage = .preparation,
-                    .result = .{
-                        .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
-                        .gas_left = 0,
-                        .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
-                        .output_data = &.{},
-                    },
-                };
+            switch (top_frame_state_gas) {
+                .exhausted => return outOfStateGas(execution_gas),
+                .reservoir => |charge| if (charge.out_of_gas) {
+                    return .{
+                        .stage = .preparation,
+                        .result = .{
+                            .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
+                            .gas_left = 0,
+                            .gas_refund = 0,
+                            .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                            .output_data = &.{},
+                        },
+                    };
+                },
+                .metered => {},
             }
 
             const resolved = try self.resolveCode(recipient);
             if (!resolved.delegated and nativeContractActive(recipient)) {
-                var result = try self.runNativeCallTransaction(sender, recipient, input, execution_gas, value);
-                top_frame_gas.finish(&result, top_frame_state_gas);
+                var result = try self.runNativeCallTransaction(sender, recipient, input, execution_gas, value, is_static);
+                top_frame_state_gas.finish(&result);
                 return .{ .stage = .payload, .result = result };
             }
             if (resolved.delegated) {
@@ -2116,7 +2266,7 @@ pub fn ExecutorType(
                         .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
                         .output_data = &.{},
                     };
-                    top_frame_gas.finish(&result, top_frame_state_gas);
+                    top_frame_state_gas.finish(&result);
                     return .{ .stage = .preparation, .result = result };
                 }
                 execution_gas.regular_left -= access_cost;
@@ -2132,8 +2282,9 @@ pub fn ExecutorType(
                 .gas = execution_gas.regular_left,
                 .gas_reservoir = execution_gas.reservoir,
                 .value = value,
+                .is_static = is_static,
             });
-            top_frame_gas.finish(&result, top_frame_state_gas);
+            top_frame_state_gas.finish(&result);
             return .{ .stage = .payload, .result = result };
         }
 
@@ -2144,6 +2295,7 @@ pub fn ExecutorType(
             input: []const u8,
             gas: ExecutionGas,
             value: u256,
+            is_static: bool,
         ) !ExecutionResult {
             self.clearLastOutput();
             _ = self.currentExecutionContext();
@@ -2167,6 +2319,7 @@ pub fn ExecutorType(
                 .input_data = input,
                 .value = value,
                 .code_address = recipient,
+                .is_static = is_static,
             };
             const call_result = (try self.runNativeCall(&message)) orelse unreachable;
             if (call_result.status() == .success) try self.touchEmptyCallRecipient(&message);
@@ -2179,6 +2332,10 @@ pub fn ExecutorType(
 
             self.clearLastOutput();
             _ = currentExecutionContext(self);
+            if (options.is_static and options.value != 0) return staticWriteProtection(.{
+                .regular_left = options.gas,
+                .reservoir = options.gas_reservoir,
+            }).result;
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
                 return .{
                     .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
@@ -2199,6 +2356,7 @@ pub fn ExecutorType(
                 .input_data = options.input,
                 .value = options.value,
                 .code_address = options.recipient,
+                .is_static = options.is_static,
             };
 
             const host_result = try self.executePreparedCallMessage(message, options.bytecode);
@@ -2259,24 +2417,38 @@ pub fn ExecutorType(
             options: Create,
             gas: ExecutionGas,
         ) !TransactionExecutionOutcome {
+            return self.executeCreateTransactionPhasedMode(options, gas, false);
+        }
+
+        fn executeCreateTransactionPhasedMode(
+            self: *Executor,
+            options: Create,
+            gas: ExecutionGas,
+            is_static: bool,
+        ) !TransactionExecutionOutcome {
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
             self.clearLastOutput();
             _ = self.currentExecutionContext();
+            if (is_static) return staticWriteProtection(gas);
             var execution_gas = gas;
             const top_frame_state_gas = try self.chargeTopFrameCreateStateGas(options, &execution_gas);
-            if (top_frame_state_gas.out_of_gas) {
-                return .{
-                    .stage = .preparation,
-                    .result = .{
-                        .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
-                        .gas_left = 0,
-                        .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
-                        .output_data = &.{},
-                    },
-                };
+            switch (top_frame_state_gas) {
+                .exhausted => return outOfStateGas(execution_gas),
+                .reservoir => |charge| if (charge.out_of_gas) {
+                    return .{
+                        .stage = .preparation,
+                        .result = .{
+                            .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
+                            .gas_left = 0,
+                            .gas_refund = 0,
+                            .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                            .output_data = &.{},
+                        },
+                    };
+                },
+                .metered => {},
             }
 
             const host_result = try self.executeTransactionCreateMessage(.{
@@ -2290,7 +2462,7 @@ pub fn ExecutorType(
                 .value = options.value,
             });
             var result = host_result.executionResult(self.lastOutputData());
-            top_frame_gas.finish(&result, top_frame_state_gas);
+            top_frame_state_gas.finish(&result);
             return .{ .stage = .payload, .result = result };
         }
 
@@ -2554,23 +2726,22 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
 
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    const attempt = executor.state.beginTransaction();
-    executor.state.beginScope();
-    defer {
-        executor.state.closeScope();
-        executor.state.seal(attempt);
-        executor.state.discard(attempt);
-    }
+    try executor.beginTransaction(
+        evmz.t.defaultExecutionContext(address, 100_000),
+        address,
+        address,
+    );
+    defer executor.discardStateTransition();
 
     {
-        var checkpoint = Executor.CheckpointGuard.begin(&executor.state);
+        var checkpoint = Executor.CheckpointGuard.begin(&executor);
         defer checkpoint.deinit();
         try executor.state.addBalance(address, 7);
     }
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(address));
 
     {
-        var checkpoint = Executor.CheckpointGuard.begin(&executor.state);
+        var checkpoint = Executor.CheckpointGuard.begin(&executor);
         defer checkpoint.deinit();
         try executor.state.addBalance(address, 9);
         checkpoint.commit();
@@ -2615,13 +2786,13 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     try call.prepare();
     try call.pushRootCall(&root_message, bytecode.view());
 
-    const parent_checkpoint = executor.state.checkpoint();
+    const parent_checkpoint = CompositeCheckpoint.open(&executor);
     try executor.state.addBalance(parent_write, 7);
     var parent_message = root_message;
     parent_message.depth = 1;
     try call.pushChildCall(&parent_message, bytecode.view(), parent_checkpoint, null);
 
-    const child_checkpoint = executor.state.checkpoint();
+    const child_checkpoint = CompositeCheckpoint.open(&executor);
     try executor.state.addBalance(child_write, 9);
     var child_message = root_message;
     child_message.depth = 2;

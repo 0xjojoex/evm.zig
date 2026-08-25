@@ -385,7 +385,7 @@ pub const CallFrame = struct {
     /// Resume only a CALL action. A mismatch leaves the frame suspended.
     pub fn resumeWithCall(self: *CallFrame, child: Host.Result) !void {
         const continuation = (try self.takeSuspended(.call)).continuation;
-        if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
+        if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charge, child)) return;
 
         const output_size = @min(continuation.out_size, child.output_data.len);
         self.memory.writeBytes(continuation.out_offset, child.output_data[0..output_size]);
@@ -397,7 +397,7 @@ pub const CallFrame = struct {
     pub fn resumeWithCreate(self: *CallFrame, child: Host.Result) !void {
         const suspended = try self.takeSuspended(.create);
         const continuation = suspended.continuation;
-        if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charged, child)) return;
+        if (!self.settleChild(continuation.gas_limit, continuation.state_gas_charge, child)) return;
 
         if (child.outcome.status == .success) {
             // A deployed contract yields its address, never return data. The
@@ -426,13 +426,13 @@ pub const CallFrame = struct {
 
     /// Fold a returned child frame's gas accounting into this one. Returns
     /// whether execution may continue.
-    fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charged: i64, child: Host.Result) bool {
+    fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charge: frame_io.StateGasCharge, child: Host.Result) bool {
         const succeeded = child.outcome.status == .success;
         const gas_charged = self.trackGas(gas_limit - @max(child.gas_left, 0));
         self.gas_reservoir = child.gas_reservoir;
         self.state_gas_spent +|= child.state_gas_spent;
         self.state_gas_from_gas_left +|= child.state_gas_from_gas_left;
-        if (!succeeded) self.refillStateGas(state_gas_charged);
+        if (!succeeded) self.reverseStateGasCharge(state_gas_charge);
         if (!gas_charged) return false;
         // EIP-2200: child call-frame refunds only survive committed frames.
         if (succeeded) self.gas_refund += child.gas_refund;
@@ -482,8 +482,47 @@ pub const CallFrame = struct {
         self.state_gas_spent = std.math.sub(i64, self.state_gas_spent, gas) catch std.math.minInt(i64);
     }
 
-    /// Terminal EVM transition. Fault halts consume all remaining gas;
-    /// successful and reverting halts preserve it.
+    /// Apply state gas through a transaction-owned independent meter when one
+    /// is installed; otherwise retain the EIP-8037 reservoir behavior.
+    pub inline fn applyStateGas(self: *CallFrame, event: evmz.execution.StateGasEvent) ?frame_io.StateGasCharge {
+        if (event.isEmpty()) return .{};
+        return self.applyNonzeroStateGas(event);
+    }
+
+    fn applyNonzeroStateGas(self: *CallFrame, event: evmz.execution.StateGasEvent) ?frame_io.StateGasCharge {
+        if (self.execution_context.transaction.extension.applyStateGas(event)) |application| {
+            return switch (application) {
+                .exhausted => {
+                    self.halt(.out_of_state_gas);
+                    return null;
+                },
+                .applied => |token| if (event.charge > 0)
+                    frame_io.StateGasCharge.metered(token orelse unreachable)
+                else blk: {
+                    std.debug.assert(token == null);
+                    break :blk .{};
+                },
+            };
+        }
+        if (!self.trackStateGas(event.charge)) return null;
+        self.refillStateGas(event.refill);
+        return if (event.charge > 0) .reservoir(event.charge) else .{};
+    }
+
+    inline fn reverseStateGasCharge(self: *CallFrame, charge: frame_io.StateGasCharge) void {
+        if (charge.meterToken()) |token| {
+            @branchHint(.unlikely);
+            return self.reverseMeteredStateGasCharge(token);
+        }
+        self.refillStateGas(charge.reservoirOrNone().?);
+    }
+
+    fn reverseMeteredStateGasCharge(self: *CallFrame, token: usize) void {
+        self.execution_context.transaction.extension.reverseStateGasCharge(token);
+    }
+
+    /// Terminal EVM transition. EVM faults consume all remaining execution
+    /// gas; success, revert, and independent state-gas exhaustion preserve it.
     pub fn halt(self: *CallFrame, reason: FrameHalt) void {
         std.debug.assert(self.isRunning());
         self.state = .{ .halted = reason };
@@ -1073,7 +1112,7 @@ test "yielded action stays in frame-owned sidecar until resume" {
         .gas_limit = 10,
         .out_offset = 0,
         .out_size = 0,
-        .state_gas_charged = 0,
+        .state_gas_charge = .{},
     };
     owned.frame.state = .running;
     owned.frame.suspendWith(.{ .call = .{

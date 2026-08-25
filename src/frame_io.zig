@@ -3,6 +3,8 @@
 const std = @import("std");
 const Host = @import("./Host.zig");
 
+pub const StateGasCharge = @import("./execution/gas.zig").StateGasCharge;
+
 pub const Action = union(enum) {
     call: Call,
     create: Create,
@@ -11,12 +13,12 @@ pub const Action = union(enum) {
         gas_limit: i64,
         out_offset: usize,
         out_size: usize,
-        state_gas_charged: i64 = 0,
+        state_gas_charge: StateGasCharge = .{},
     };
 
     pub const CreateResume = struct {
         gas_limit: i64,
-        state_gas_charged: i64 = 0,
+        state_gas_charge: StateGasCharge = .{},
     };
 
     pub const Call = struct {
