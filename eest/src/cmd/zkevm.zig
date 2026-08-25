@@ -241,7 +241,7 @@ fn printUsage() void {
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
         \\against the raw statelessOutputBytes public values.
         \\Uses {d} workers by default (maximum {d}). --limit and diagnostic
-        \\output options require --jobs 1.
+        \\options require --jobs 1; metric and evidence output support workers.
         \\Use --trace-mismatch with --verbose to print selected gas/state trace events.
         \\Use --classify-failures to print one tab-separated record per failure.
         \\Use --oracle-differential to require dense/tracked consensus-result parity

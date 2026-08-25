@@ -11,7 +11,8 @@ complete upstream fixture release: `guest-<track>@vX.Y.Z-rc.0` pairs with
 The independently numbered `tests-zkevm` wire/corpus release is also recorded.
 Devnet tracks carry no compatibility guarantee at any bump; the release
 manifest states what an ELF proves, the stateless schema id is the wire
-compatibility token, and the verification key identifies the exact bytes. See
+compatibility token, and each backend verification key identifies its exact
+ELF bytes. See
 [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
 
 ## Building
@@ -130,27 +131,34 @@ model; `guest-zisk` still requires the real `libziskos_staticlib.a`.
 ## Guest benchmark CI
 
 The `Guest benchmark` workflow is the execute-only guest performance path.
-Automatic and release-qualified runs remain ZisK-only. Manual dispatches can
-run SP1 or OpenVM against the same `tests-zkevm@vX.Y.Z` corpus and retain ERE
-`BenchmarkRun` rows. Correctness still gates the run: every public output must
-match. Metrics from different zkVMs are kept separate, and emulator execution
-duration is not proving time.
+Automatic runs remain ZisK-only. Manual dispatches can run SP1 or OpenVM
+against the same `tests-zkevm@vX.Y.Z` corpus. Correctness gates every backend:
+the corpus must be complete and every public output must match. Metrics from
+different zkVMs are kept separate, and emulator execution duration is not
+proving time.
 
 Reports are absolute: the workflow measures the candidate ELF and does not
-compare against a release. The existing `zkevm` command writes the ERE rows,
-aggregated report, and one `evidence.json`; there is no separate reporting
-script or stored release baseline.
+compare against a release. The `zkevm` command writes backend-neutral ERE rows,
+an aggregated report, and one `evidence.json`. Reports identify the backend's
+primary metric, optional secondary metric, and execution duration; there is no
+separate reporting script or stored release baseline.
 
-A strict `tests-zkevm` dispatch produces the only artifact eligible for guest
-release. `Guest release` accepts that run id, verifies the evidence, tag, source
-commit, and ELF hash, then promotes the tested bytes without rebuilding them.
+`Guest release` qualifies ZisK, SP1, and OpenVM in parallel against the same
+strict corpus identity. It verifies that every artifact records the dispatched
+source commit and ELF hash, generates each backend's VK with its digest-pinned
+ERE 0.16.2 server image, and publishes one release bundle containing the exact
+tested ELFs, VKs, reports, evidence, checksums, and signatures. The commit may
+be outside `main` for an explicitly dispatched special build. The guest version
+is shared; backend artifacts are members of that version, matching
+`ere-guests`' `artifacts[]` model.
 
 `zig build zkevm -- --executor zisk|sp1|openvm` runs the same ERE-shaped
 measurements locally. All three use the same persistent host protocol and
 cache the parsed or compiled ELF per worker. Pass `--zisk-host`/`--zisk-elf`
 or `--sp1-host`/`--sp1-elf` and fixture paths. OpenVM additionally needs
 `--openvm-config`. `--evidence-dir` enables the release evidence path used by
-CI; ZisK remains the only release evidence backend.
+CI for any guest backend; `--strict-evidence` additionally requires the pinned
+`tests-zkevm` corpus identity.
 
 The common response carries a primary counter, a secondary counter, elapsed
 execution time, and public output. The counter meanings are deliberately

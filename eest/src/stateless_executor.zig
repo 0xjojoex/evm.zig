@@ -25,6 +25,31 @@ pub const Target = enum {
         };
     }
 
+    pub fn displayName(self: Target) []const u8 {
+        return switch (self) {
+            .native => "Native",
+            .zisk => "ZisK",
+            .sp1 => "SP1",
+            .openvm => "OpenVM",
+        };
+    }
+
+    pub fn primaryMetric(self: Target) ?[]const u8 {
+        return switch (self) {
+            .native => null,
+            .zisk => "steps",
+            .sp1 => "cycles",
+            .openvm => "retired_instructions",
+        };
+    }
+
+    pub fn secondaryMetric(self: Target) ?[]const u8 {
+        return switch (self) {
+            .openvm => "trace_cells",
+            .native, .zisk, .sp1 => null,
+        };
+    }
+
     pub fn parse(value: []const u8) ?Target {
         return std.meta.stringToEnum(Target, value);
     }

@@ -108,7 +108,7 @@ evmz exposes the execution stack as separate reusable surfaces:
 | Transaction program | Envelope validation, fees, nonce, execution, and settlement |
 | Block program       | Ordered transaction execution and block-level rules         |
 | Stateless validator | Witness validation and post-state and receipts roots        |
-| Guest               | The stateless validator compiled for SP1 or ZisK            |
+| Guest               | The stateless validator compiled for ZisK, SP1, or OpenVM    |
 
 ## Exact specifications
 

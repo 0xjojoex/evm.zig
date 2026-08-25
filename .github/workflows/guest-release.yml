@@ -21,8 +21,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # ere-server-zisk:0.16.2, pinned by digest so the VK provenance is immutable.
-  ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:4d00a96890a26dc54b523e537e9c1b25a26cf18d166bd3614fc97bbd09317091
+  # ERE 0.16.2 server images, pinned by digest so VK provenance is immutable.
+  ERE_ZISK_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:4d00a96890a26dc54b523e537e9c1b25a26cf18d166bd3614fc97bbd09317091
+  ERE_SP1_IMAGE: ghcr.io/eth-act/ere/ere-server-sp1@sha256:561ba9d13e0f4f198c57ad8c76b8320f691635275f6567bcb27b36d4e4159af4
+  ERE_OPENVM_IMAGE: ghcr.io/eth-act/ere/ere-server-openvm@sha256:d56f5f59f1560bc2b58e84165accb8dc6586596ca1b9ff53b99862560f7b563c
 
 jobs:
   qualify:
@@ -30,6 +32,7 @@ jobs:
     uses: ./.github/workflows/guest-benchmark.yml
     with:
       release_gate: true
+      backend: all
     permissions:
       contents: read
 
@@ -41,33 +44,35 @@ jobs:
     permissions:
       contents: read
     outputs:
-      elf-name: ${{ steps.bundle.outputs.elf-name }}
       source-commit: ${{ steps.bundle.outputs.source-commit }}
       evidence-url: ${{ steps.bundle.outputs.evidence-url }}
 
     steps:
       - name: Checkout qualified source
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Require qualified source on main
-        env:
-          SOURCE_COMMIT: ${{ github.sha }}
-        run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
 
       - name: Require a new tag
         env:
           TAG: ${{ inputs.tag }}
         run: test -z "$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
 
-      - name: Download qualified guest
+      - name: Download qualified ZisK guest
         uses: actions/download-artifact@v7
         with:
-          name: ${{ needs.qualify.outputs.artifact_name }}
-          path: ${{ runner.temp }}/evidence
+          name: ${{ needs.qualify.outputs.zisk_artifact_name }}
+          path: ${{ runner.temp }}/evidence/zisk
+
+      - name: Download qualified SP1 guest
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.qualify.outputs.sp1_artifact_name }}
+          path: ${{ runner.temp }}/evidence/sp1
+
+      - name: Download qualified OpenVM guest
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.qualify.outputs.openvm_artifact_name }}
+          path: ${{ runner.temp }}/evidence/openvm
 
       - name: Stage tested release bundle
         id: bundle
@@ -76,38 +81,57 @@ jobs:
           EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          source_dir="${RUNNER_TEMP}/evidence"
-          evidence="${source_dir}/guest-evidence/evidence.json"
-          report="${source_dir}/guest-evidence/report.md"
-          test -s "${evidence}"
-          test -s "${report}"
-          test "$(jq -er .source_ref "${evidence}")" = "${SOURCE_COMMIT}"
-
-          elf_name="$(jq -er '.guest.elf_name | select(type == "string" and length > 0)' "${evidence}")"
-          test "$(basename "${elf_name}")" = "${elf_name}"
-          elf="${source_dir}/${elf_name}"
-          test -s "${elf}"
-          expected_sha="$(jq -er .guest.elf_sha256 "${evidence}")"
-          actual_sha="$(sha256sum "${elf}" | cut -d ' ' -f 1)"
-          test "${actual_sha}" = "${expected_sha}"
-
           artifacts="${GITHUB_WORKSPACE}/release-artifacts"
           mkdir -p "${artifacts}"
-          install -m 0644 "${elf}" "${artifacts}/${elf_name}"
-          install -m 0644 "${evidence}" "${artifacts}/evidence.json"
-          install -m 0644 "${report}" "${artifacts}/report.md"
+          corpus_id=""
+          corpus_identity=""
+          for backend in zisk sp1 openvm; do
+            source_dir="${RUNNER_TEMP}/evidence/${backend}"
+            evidence="${source_dir}/guest-evidence/evidence.json"
+            report="${source_dir}/guest-evidence/report.md"
+            test -s "${evidence}"
+            test -s "${report}"
+            jq -e '.schema_version == 2 and .gate.strict == true and .gate.passed == true' "${evidence}"
+            test "$(jq -er .backend "${evidence}")" = "${backend}"
+            test "$(jq -er .source_ref "${evidence}")" = "${SOURCE_COMMIT}"
+
+            current_corpus="$(jq -er .corpus.id "${evidence}")"
+            current_identity="$(jq -cer '[.corpus.id, .corpus.digest, .corpus.fixture_release, .corpus.network, .corpus.expected_fixtures]' "${evidence}")"
+            if [[ -z "${corpus_id}" ]]; then
+              corpus_id="${current_corpus}"
+              corpus_identity="${current_identity}"
+            else
+              test "${current_identity}" = "${corpus_identity}"
+            fi
+
+            elf_name="$(jq -er '.guest.elf_name | select(type == "string" and length > 0)' "${evidence}")"
+            test "$(basename "${elf_name}")" = "${elf_name}"
+            elf="${source_dir}/${elf_name}"
+            test -s "${elf}"
+            expected_sha="$(jq -er .guest.elf_sha256 "${evidence}")"
+            actual_sha="$(sha256sum "${elf}" | cut -d ' ' -f 1)"
+            test "${actual_sha}" = "${expected_sha}"
+
+            install -m 0644 "${elf}" "${artifacts}/${elf_name}"
+            install -m 0644 "${evidence}" "${artifacts}/evidence-${backend}.json"
+            install -m 0644 "${report}" "${artifacts}/report-${backend}.md"
+          done
           {
-            echo "elf-name=${elf_name}"
             echo "source-commit=${SOURCE_COMMIT}"
             echo "evidence-url=${EVIDENCE_URL}"
           } >> "${GITHUB_OUTPUT}"
           {
             echo "## Release evidence"
             echo ""
-            echo "- ELF SHA-256: \`${actual_sha}\`"
             echo "- Qualification run: ${EVIDENCE_URL}"
-            echo "- Spec: \`$(jq -er .corpus.network "${evidence}")\`"
-            echo "- Fixture release: \`$(jq -er .corpus.fixture_release "${evidence}")\`"
+            echo "- Corpus: \`${corpus_id}\`"
+            echo ""
+            echo "| Backend | ELF SHA-256 |"
+            echo "| --- | --- |"
+            for backend in zisk sp1 openvm; do
+              evidence="${artifacts}/evidence-${backend}.json"
+              echo "| ${backend} | \`$(jq -er .guest.elf_sha256 "${evidence}")\` |"
+            done
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload release bundle
@@ -124,7 +148,7 @@ jobs:
     needs: verify
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     environment: release
     permissions:
       contents: write
@@ -137,15 +161,17 @@ jobs:
           path: release-artifacts
 
       - name: Resolve bundle paths
-        env:
-          ELF_NAME: ${{ needs.verify.outputs.elf-name }}
         run: |
           set -euo pipefail
-          echo "ARTIFACTS=${GITHUB_WORKSPACE}/release-artifacts" >> "${GITHUB_ENV}"
-          echo "ELF_NAME=${ELF_NAME}" >> "${GITHUB_ENV}"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/${ELF_NAME}"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/evidence.json"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/report.md"
+          artifacts="${GITHUB_WORKSPACE}/release-artifacts"
+          echo "ARTIFACTS=${artifacts}" >> "${GITHUB_ENV}"
+          for backend in zisk sp1 openvm; do
+            evidence="${artifacts}/evidence-${backend}.json"
+            test -s "${evidence}"
+            test -s "${artifacts}/report-${backend}.md"
+            elf_name="$(jq -er .guest.elf_name "${evidence}")"
+            test -s "${artifacts}/${elf_name}"
+          done
 
       - name: Free disk space for VK generation
         run: |
@@ -154,19 +180,30 @@ jobs:
           sudo rm -rf /opt/ghc /usr/local/.ghcup
           sudo rm -rf /opt/hostedtoolcache
 
-      - name: Generate ZisK verification key
+      - name: Generate verification keys
         run: |
           set -euo pipefail
-          vk_name="${ELF_NAME%.elf}.vk"
-          docker pull "${ERE_IMAGE}"
-          docker run --rm \
-            -v "${ARTIFACTS}:/output" \
-            "${ERE_IMAGE}" \
-            --elf-path "/output/${ELF_NAME}" \
-            keygen \
-            --program-vk-path "/output/${vk_name}"
-          test "$(stat -c %s "${ARTIFACTS}/${vk_name}")" -eq 32
-          echo "VK_NAME=${vk_name}" >> "${GITHUB_ENV}"
+          for backend in zisk sp1 openvm; do
+            evidence="${ARTIFACTS}/evidence-${backend}.json"
+            elf_name="$(jq -er .guest.elf_name "${evidence}")"
+            vk_name="${elf_name%.elf}.vk"
+            case "${backend}" in
+              zisk) image="${ERE_ZISK_IMAGE}" ;;
+              sp1) image="${ERE_SP1_IMAGE}" ;;
+              openvm) image="${ERE_OPENVM_IMAGE}" ;;
+            esac
+            docker pull "${image}"
+            docker run --rm --shm-size=8g \
+              -v "${ARTIFACTS}:/output" \
+              "${image}" \
+              --elf-path "/output/${elf_name}" \
+              keygen \
+              --program-vk-path "/output/${vk_name}"
+            test -s "${ARTIFACTS}/${vk_name}"
+            if [[ "${backend}" != openvm ]]; then
+              test "$(stat -c %s "${ARTIFACTS}/${vk_name}")" -eq 32
+            fi
+          done
 
       - name: Install Minisign
         run: |
@@ -185,12 +222,12 @@ jobs:
           test -n "${MINISIGN_PASSWORD}"
           (
             cd "${ARTIFACTS}"
-            sha256sum "${ELF_NAME}" "${VK_NAME}" evidence.json report.md > SHA256SUMS
+            sha256sum ./*.elf ./*.vk ./evidence-*.json ./report-*.md > SHA256SUMS
           )
           secret_key="${RUNNER_TEMP}/minisign.key"
           printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${secret_key}"
           printf '%s\n' "${MINISIGN_PUBLIC_KEY}" > "${ARTIFACTS}/minisign.pub"
-          for file in "${ARTIFACTS}/${ELF_NAME}" "${ARTIFACTS}/${VK_NAME}" "${ARTIFACTS}/SHA256SUMS"; do
+          for file in "${ARTIFACTS}"/*.elf "${ARTIFACTS}"/*.vk "${ARTIFACTS}/SHA256SUMS"; do
             printf '%s\n' "${MINISIGN_PASSWORD}" | minisign \
               -Sm "${file}" \
               -s "${secret_key}" \
@@ -207,30 +244,35 @@ jobs:
           EVIDENCE_URL: ${{ needs.verify.outputs.evidence-url }}
         run: |
           set -euo pipefail
-          evidence="${ARTIFACTS}/evidence.json"
           notes="${RUNNER_TEMP}/release-notes.md"
-          vk_sha="$(sha256sum "${ARTIFACTS}/${VK_NAME}" | cut -d ' ' -f 1)"
-          jq -r \
-            --arg tag "${TAG}" \
-            --arg source "${SOURCE_COMMIT}" \
-            --arg run "${EVIDENCE_URL}" \
-            --arg image "${ERE_IMAGE}" \
-            --arg vk_sha "${vk_sha}" \
-            '"ZisK guest pre-release for integration testing.\n\n" +
-             "- Spec: " + .corpus.network + "\n" +
-             "- Fixture release: " + .corpus.fixture_release + "\n" +
-             "- Corpus: " + .corpus.id + "\n" +
-             "- Stateless schema: " + .stateless_schema + "\n" +
-             "- Source commit: " + $source + "\n" +
-             "- Zig: " + .guest.zig_version + "\n" +
-             "- ZisK: v" + .guest.backend_version + " (" + .guest.backend_commit + ")\n" +
-             "- ZisK Rust toolchain: " + .guest.backend_toolchain + "\n" +
-             "- ERE keygen image: " + $image + "\n" +
-             "- Benchmark evidence: " + $run + "\n" +
-             "- ELF SHA-256: " + .guest.elf_sha256 + "\n" +
-             "- VK SHA-256: " + $vk_sha + "\n\n" +
-             "The attached ELF is the exact artifact executed by this release qualification run."' \
-            "${evidence}" > "${notes}"
+          common="${ARTIFACTS}/evidence-zisk.json"
+          {
+            echo "Evmz multi-backend guest pre-release for integration testing."
+            echo ""
+            echo "- Spec: $(jq -er .corpus.network "${common}")"
+            echo "- Fixture release: $(jq -er .corpus.fixture_release "${common}")"
+            echo "- Corpus: $(jq -er .corpus.id "${common}")"
+            echo "- Stateless schema: $(jq -er .stateless_schema "${common}")"
+            echo "- Source commit: ${SOURCE_COMMIT}"
+            echo "- Zig: $(jq -er .guest.zig_version "${common}")"
+            echo "- Qualification evidence: ${EVIDENCE_URL}"
+            echo ""
+            echo "| Backend | Version | ELF SHA-256 | VK SHA-256 | ERE keygen image |"
+            echo "| --- | --- | --- | --- | --- |"
+            for backend in zisk sp1 openvm; do
+              evidence="${ARTIFACTS}/evidence-${backend}.json"
+              elf_name="$(jq -er .guest.elf_name "${evidence}")"
+              vk_name="${elf_name%.elf}.vk"
+              case "${backend}" in
+                zisk) image="${ERE_ZISK_IMAGE}" ;;
+                sp1) image="${ERE_SP1_IMAGE}" ;;
+                openvm) image="${ERE_OPENVM_IMAGE}" ;;
+              esac
+              echo "| ${backend} | $(jq -er .guest.backend_version "${evidence}") | $(jq -er .guest.elf_sha256 "${evidence}") | $(sha256sum "${ARTIFACTS}/${vk_name}" | cut -d ' ' -f 1) | ${image} |"
+            done
+            echo ""
+            echo "The attached ELFs are the exact artifacts executed by this release qualification run."
+          } > "${notes}"
           gh release create "${TAG}" \
             -R "${GITHUB_REPOSITORY}" \
             --target "${SOURCE_COMMIT}" \

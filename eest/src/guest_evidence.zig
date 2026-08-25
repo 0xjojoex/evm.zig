@@ -34,7 +34,9 @@ const CorpusManifest = struct {
 const KnownDocument = struct {
     schema_version: u32,
     corpus: []const u8,
-    zisk: std.json.ArrayHashMap([]const u8),
+    zisk: ?std.json.ArrayHashMap([]const u8) = null,
+    sp1: ?std.json.ArrayHashMap([]const u8) = null,
+    openvm: ?std.json.ArrayHashMap([]const u8) = null,
 };
 
 const BenchmarkRun = struct {
@@ -47,6 +49,8 @@ const BenchmarkRun = struct {
         success: ?struct {
             output_matched: bool,
             total_num_cycles: u64,
+            region_cycles: struct { trace_cells: u64 },
+            execution_duration: struct { secs: u64, nanos: u32 },
         } = null,
         crashed: ?struct {
             reason: []const u8,
@@ -57,7 +61,9 @@ const BenchmarkRun = struct {
 const Row = struct {
     name: []const u8,
     source: []const u8,
-    steps: ?u64,
+    primary: ?u64,
+    secondary: u64 = 0,
+    duration_nanos: u64 = 0,
     upstream_matched: ?bool,
     crash: ?[]const u8,
 
@@ -70,7 +76,9 @@ const Aggregate = struct {
     fixture_count: u64 = 0,
     crashes: u64 = 0,
     upstream_matches: u64 = 0,
-    total_steps: u64 = 0,
+    total_primary: u64 = 0,
+    total_secondary: u64 = 0,
+    total_duration_nanos: u64 = 0,
     known_failures: u64 = 0,
     unexpected_failures: u64 = 0,
     known_failure_names: []const []const u8 = &.{},
@@ -81,7 +89,7 @@ const Aggregate = struct {
     fn passed(self: Aggregate, expected_fixtures: u64) bool {
         return self.fixture_count > 0 and
             self.fixture_count == expected_fixtures and
-            self.total_steps > 0 and
+            self.total_primary > 0 and
             self.unexpected_failures == 0 and
             self.unexpected_passes.len == 0 and
             self.stale_known.len == 0;
@@ -96,10 +104,13 @@ const Aggregate = struct {
 };
 
 const Evidence = struct {
-    schema_version: u32 = 1,
+    schema_version: u32 = 2,
     source_ref: []const u8,
     backend: []const u8,
-    metric: []const u8 = "steps",
+    metrics: struct {
+        primary: []const u8,
+        secondary: ?[]const u8,
+    },
     stateless_schema: []const u8,
     guest: struct {
         elf_name: []const u8,
@@ -143,7 +154,7 @@ pub fn prepare(
 }
 
 pub fn write(io: std.Io, allocator: Allocator, options: Options) !bool {
-    if (options.backend != .zisk) return error.UnsupportedEvidenceBackend;
+    const primary_metric = options.backend.primaryMetric() orelse return error.EvidenceRequiresGuestBackend;
     if (options.source_ref.len == 0 or
         options.stateless_schema.len == 0 or
         options.zig_version.len == 0 or
@@ -198,11 +209,19 @@ pub fn write(io: std.Io, allocator: Allocator, options: Options) !bool {
         defer document.deinit();
         if (document.value.schema_version != 1) return error.UnsupportedKnownFailures;
         if (std.mem.eql(u8, document.value.corpus, manifest.value.id)) {
-            var it = document.value.zisk.map.iterator();
-            while (it.next()) |entry| {
-                const name = try allocator.dupe(u8, entry.key_ptr.*);
-                errdefer allocator.free(name);
-                try known.put(name, {});
+            const entries = switch (options.backend) {
+                .zisk => document.value.zisk,
+                .sp1 => document.value.sp1,
+                .openvm => document.value.openvm,
+                .native => null,
+            };
+            if (entries) |backend_known| {
+                var it = backend_known.map.iterator();
+                while (it.next()) |entry| {
+                    const name = try allocator.dupe(u8, entry.key_ptr.*);
+                    errdefer allocator.free(name);
+                    try known.put(name, {});
+                }
             }
         }
     }
@@ -221,6 +240,10 @@ pub fn write(io: std.Io, allocator: Allocator, options: Options) !bool {
     const evidence = Evidence{
         .source_ref = options.source_ref,
         .backend = @tagName(options.backend),
+        .metrics = .{
+            .primary = primary_metric,
+            .secondary = options.backend.secondaryMetric(),
+        },
         .stateless_schema = options.stateless_schema,
         .guest = .{
             .elf_name = std.fs.path.basename(options.elf_path),
@@ -254,7 +277,7 @@ pub fn write(io: std.Io, allocator: Allocator, options: Options) !bool {
 
     var report: std.Io.Writer.Allocating = .init(allocator);
     defer report.deinit();
-    try writeReport(&report.writer, evidence, rows.items, &known);
+    try writeReport(&report.writer, evidence, options.backend.displayName(), rows.items, &known);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = report_path, .data = report.written() });
     std.debug.print("{s}", .{report.written()});
     return passed;
@@ -289,7 +312,9 @@ fn loadRows(
                     .{
                         .name = document.name,
                         .source = document.metadata.source_path,
-                        .steps = success.total_num_cycles,
+                        .primary = success.total_num_cycles,
+                        .secondary = success.region_cycles.trace_cells,
+                        .duration_nanos = try durationNanos(success.execution_duration.secs, success.execution_duration.nanos),
                         .upstream_matched = success.output_matched,
                         .crash = null,
                     }
@@ -297,7 +322,7 @@ fn loadRows(
                     .{
                         .name = document.name,
                         .source = document.metadata.source_path,
-                        .steps = null,
+                        .primary = null,
                         .upstream_matched = null,
                         .crash = crashed.reason,
                     }
@@ -308,6 +333,13 @@ fn loadRows(
             else => {},
         }
     }
+}
+
+fn durationNanos(secs: u64, nanos: u32) !u64 {
+    if (nanos >= std.time.ns_per_s) return error.InvalidExecutionDuration;
+    const seconds_nanos = std.math.mul(u64, secs, std.time.ns_per_s) catch
+        return error.InvalidExecutionDuration;
+    return std.math.add(u64, seconds_nanos, nanos) catch error.InvalidExecutionDuration;
 }
 
 fn aggregateRows(
@@ -327,7 +359,12 @@ fn aggregateRows(
         try rows_by_name.put(row.name, row);
         if (row.crash != null) aggregate.crashes += 1;
         if (row.upstream_matched == true) aggregate.upstream_matches += 1;
-        aggregate.total_steps += row.steps orelse 0;
+        aggregate.total_primary = std.math.add(u64, aggregate.total_primary, row.primary orelse 0) catch
+            return error.MetricOverflow;
+        aggregate.total_secondary = std.math.add(u64, aggregate.total_secondary, row.secondary) catch
+            return error.MetricOverflow;
+        aggregate.total_duration_nanos = std.math.add(u64, aggregate.total_duration_nanos, row.duration_nanos) catch
+            return error.MetricOverflow;
         if (row.failed()) {
             if (known.contains(row.name)) {
                 aggregate.known_failures += 1;
@@ -361,25 +398,32 @@ fn aggregateRows(
 fn writeReport(
     writer: *std.Io.Writer,
     evidence: Evidence,
+    backend_name: []const u8,
     rows: []const Row,
     known: *const std.StringHashMap(void),
 ) !void {
     try writer.print(
-        "# ZisK execution steps\n\n" ++
+        "# {s} guest execution\n\n" ++
             "- Current: `{s}`\n" ++
             "- ELF SHA-256: `{s}`\n" ++
             "- Fixtures: `{s}`\n" ++
             "- Corpus digest: `{s}`\n" ++
-            "- Strict gate: {s}\n\n" ++
-            "| Fixtures | Expected | Known failures | Unexpected failures | Crashes | Upstream matches | Total steps |\n" ++
-            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n" ++
-            "| {d} | {d} | {d} | {d} | {d} | {d}/{d} | {d} |\n\n",
+            "- Strict gate: {s}\n" ++
+            "- Gate passed: {s}\n\n" ++
+            "| Fixtures | Expected | Known failures | Unexpected failures | Crashes | Upstream matches |\n" ++
+            "| ---: | ---: | ---: | ---: | ---: | ---: |\n" ++
+            "| {d} | {d} | {d} | {d} | {d} | {d}/{d} |\n\n" ++
+            "| Metric | Total |\n" ++
+            "| --- | ---: |\n" ++
+            "| `{s}` | {d} |\n",
         .{
+            backend_name,
             evidence.source_ref,
             evidence.guest.elf_sha256,
             evidence.corpus.id,
             evidence.corpus.digest orelse "unspecified",
             if (evidence.gate.strict) "yes" else "no",
+            if (evidence.gate.passed) "yes" else "no",
             evidence.results.fixture_count,
             evidence.corpus.expected_fixtures,
             evidence.results.known_failures,
@@ -387,9 +431,14 @@ fn writeReport(
             evidence.results.crashes,
             evidence.results.upstream_matches,
             evidence.results.fixture_count,
-            evidence.results.total_steps,
+            evidence.metrics.primary,
+            evidence.results.total_primary,
         },
     );
+    if (evidence.metrics.secondary) |metric| {
+        try writer.print("| `{s}` | {d} |\n", .{ metric, evidence.results.total_secondary });
+    }
+    try writer.print("| `execution_duration_nanos` | {d} |\n\n", .{evidence.results.total_duration_nanos});
     for (rows) |row| {
         if (!row.failed() or known.contains(row.name)) continue;
         try writer.print("- `{s}: {s}`: {s}\n", .{
@@ -430,8 +479,8 @@ fn sortStrings(strings: [][]const u8) void {
 
 test "release evidence accepts exact known failures" {
     const rows = [_]Row{
-        .{ .name = "pass", .source = "a.json", .steps = 10, .upstream_matched = true, .crash = null },
-        .{ .name = "known", .source = "b.json", .steps = null, .upstream_matched = null, .crash = "provider crash" },
+        .{ .name = "pass", .source = "a.json", .primary = 10, .upstream_matched = true, .crash = null },
+        .{ .name = "known", .source = "b.json", .primary = null, .upstream_matched = null, .crash = "provider crash" },
     };
     var known = std.StringHashMap(void).init(std.testing.allocator);
     defer known.deinit();
@@ -443,8 +492,8 @@ test "release evidence accepts exact known failures" {
 
 test "release evidence rejects unexpected failures" {
     const rows = [_]Row{
-        .{ .name = "pass", .source = "a.json", .steps = 10, .upstream_matched = true, .crash = null },
-        .{ .name = "unexpected", .source = "b.json", .steps = null, .upstream_matched = null, .crash = "new crash" },
+        .{ .name = "pass", .source = "a.json", .primary = 10, .upstream_matched = true, .crash = null },
+        .{ .name = "unexpected", .source = "b.json", .primary = null, .upstream_matched = null, .crash = "new crash" },
     };
     var known = std.StringHashMap(void).init(std.testing.allocator);
     defer known.deinit();
@@ -455,7 +504,7 @@ test "release evidence rejects unexpected failures" {
 
 test "known failure drift fails in both directions" {
     const rows = [_]Row{
-        .{ .name = "fixed", .source = "a.json", .steps = 10, .upstream_matched = true, .crash = null },
+        .{ .name = "fixed", .source = "a.json", .primary = 10, .upstream_matched = true, .crash = null },
     };
     var known = std.StringHashMap(void).init(std.testing.allocator);
     defer known.deinit();
@@ -470,13 +519,59 @@ test "known failure drift fails in both directions" {
 
 test "evidence requires an execution metric" {
     const rows = [_]Row{
-        .{ .name = "zero", .source = "a.json", .steps = 0, .upstream_matched = true, .crash = null },
+        .{ .name = "zero", .source = "a.json", .primary = 0, .upstream_matched = true, .crash = null },
     };
     var known = std.StringHashMap(void).init(std.testing.allocator);
     defer known.deinit();
     const aggregate = try aggregateRows(std.testing.allocator, &rows, &known);
     defer aggregate.deinit(std.testing.allocator);
     try std.testing.expect(!aggregate.passed(1));
+}
+
+test "execution duration rejects invalid or overflowing input" {
+    try std.testing.expectError(error.InvalidExecutionDuration, durationNanos(0, std.time.ns_per_s));
+    try std.testing.expectError(error.InvalidExecutionDuration, durationNanos(std.math.maxInt(u64), 0));
+}
+
+test "report names backend metrics without release policy" {
+    const evidence: Evidence = .{
+        .source_ref = "abc123",
+        .backend = "openvm",
+        .metrics = .{ .primary = "retired_instructions", .secondary = "trace_cells" },
+        .stateless_schema = "0x1501",
+        .guest = .{
+            .elf_name = "guest.elf",
+            .elf_sha256 = "deadbeef",
+            .zig_version = "0.16.0",
+            .backend_version = "v2.1.0-preview",
+            .backend_commit = "def456",
+            .backend_toolchain = "openvm-1.94.1",
+        },
+        .corpus = .{
+            .mode = "tests-zkevm",
+            .id = "tests-zkevm@v1",
+            .digest = "digest",
+            .fixture_release = "v1",
+            .network = "Amsterdam",
+            .expected_fixtures = 1,
+        },
+        .results = .{
+            .fixture_count = 1,
+            .upstream_matches = 1,
+            .total_primary = 42,
+            .total_secondary = 84,
+            .total_duration_nanos = 99,
+        },
+        .gate = .{ .strict = true, .passed = true },
+    };
+    var report: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer report.deinit();
+    var known = std.StringHashMap(void).init(std.testing.allocator);
+    defer known.deinit();
+    try writeReport(&report.writer, evidence, "OpenVM", &.{}, &known);
+    try std.testing.expect(std.mem.indexOf(u8, report.written(), "# OpenVM guest execution") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report.written(), "`retired_instructions` | 42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report.written(), "`trace_cells` | 84") != null);
 }
 
 test "prepare removes output from an earlier evidence run" {
