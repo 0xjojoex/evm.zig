@@ -40,6 +40,7 @@ jobs:
       - name: Resolve tests-zkevm through execution-specs
         env:
           FIXTURE_CACHE: ${{ runner.temp }}/execution-spec-tests
+          GITHUB_TOKEN: ${{ github.token }}
           RESOLVED_MANIFEST: ${{ runner.temp }}/tests-zkevm.json
         run: |
           zig build zkevm-resolve --summary all -- \
@@ -118,6 +119,8 @@ jobs:
           cache-dependency-glob: eest/consume/uv.lock
 
       - name: Run state and BlockSTF fixtures through consume direct
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
           zig build -Doptimize=ReleaseFast eest-consume --summary all -- \

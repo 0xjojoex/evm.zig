@@ -409,7 +409,8 @@ fn writeReport(
             "- Fixtures: `{s}`\n" ++
             "- Corpus digest: `{s}`\n" ++
             "- Strict gate: {s}\n" ++
-            "- Gate passed: {s}\n\n" ++
+            "- Gate passed: {s}\n" ++
+            "- Execution time is summed across fixtures, not workflow wall time.\n\n" ++
             "| Fixtures | Expected | Known failures | Unexpected failures | Crashes | Upstream matches |\n" ++
             "| ---: | ---: | ---: | ---: | ---: | ---: |\n" ++
             "| {d} | {d} | {d} | {d} | {d} | {d}/{d} |\n\n" ++
@@ -438,7 +439,8 @@ fn writeReport(
     if (evidence.metrics.secondary) |metric| {
         try writer.print("| `{s}` | {d} |\n", .{ metric, evidence.results.total_secondary });
     }
-    try writer.print("| `execution_duration_nanos` | {d} |\n\n", .{evidence.results.total_duration_nanos});
+    const execution_duration = std.Io.Duration.fromNanoseconds(evidence.results.total_duration_nanos);
+    try writer.print("| Guest execution time (sum) | {f} |\n\n", .{execution_duration});
     for (rows) |row| {
         if (!row.failed() or known.contains(row.name)) continue;
         try writer.print("- `{s}: {s}`: {s}\n", .{
@@ -560,7 +562,10 @@ test "report names backend metrics without release policy" {
             .upstream_matches = 1,
             .total_primary = 42,
             .total_secondary = 84,
-            .total_duration_nanos = 99,
+            .total_duration_nanos = 3 * std.time.ns_per_hour +
+                2 * std.time.ns_per_min +
+                5 * std.time.ns_per_s +
+                250 * std.time.ns_per_ms,
         },
         .gate = .{ .strict = true, .passed = true },
     };
@@ -572,6 +577,8 @@ test "report names backend metrics without release policy" {
     try std.testing.expect(std.mem.indexOf(u8, report.written(), "# OpenVM guest execution") != null);
     try std.testing.expect(std.mem.indexOf(u8, report.written(), "`retired_instructions` | 42") != null);
     try std.testing.expect(std.mem.indexOf(u8, report.written(), "`trace_cells` | 84") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report.written(), "Guest execution time (sum) | 3h2m5.25s") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report.written(), "execution_duration_nanos") == null);
 }
 
 test "prepare removes output from an earlier evidence run" {

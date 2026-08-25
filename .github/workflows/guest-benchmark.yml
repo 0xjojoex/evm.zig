@@ -128,6 +128,8 @@ jobs:
           cache-dependency-glob: eest/consume/uv.lock
 
       - name: Resolve tests-zkevm through execution-specs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           zig build zkevm-resolve --summary all -- \
             --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
@@ -316,6 +318,8 @@ jobs:
           rustup run "${OPENVM_RUST_TOOLCHAIN}" rustc -vV
 
       - name: Resolve tests-zkevm through execution-specs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           zig build zkevm-resolve --summary all -- \
             --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
@@ -462,6 +466,8 @@ jobs:
           rustup run "${SP1_RUST_TOOLCHAIN}" rustc -vV
 
       - name: Resolve tests-zkevm through execution-specs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           zig build zkevm-resolve --summary all -- \
             --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \

@@ -147,17 +147,37 @@ existing tag syntax.
 
 ### Cutting a guest release
 
-Dispatch `Guest release` with the intended tag. The workflow calls `Guest
-benchmark` internally with the release corpus and qualification checks for
-ZisK, SP1, and OpenVM, then passes that same run's tested ELFs, evidence, and
-reports to the release jobs. It verifies that every evidence record names the
-dispatched source commit and matches its ELF hash before generating the backend
-VKs and signatures; it never rebuilds a guest or searches another run. The
-source commit need not descend from `main`, which permits explicitly dispatched
-special builds without weakening artifact provenance. Correctness and corpus
-qualification belong to the benchmark jobs that produced the artifacts. One
-tag identifies the shared guest version; the backend artifacts remain
-separately addressable members of that release.
+`Guest release` assembles one release through an append-only draft. For each
+backend, dispatch the intended tag with operation `stage` and select ZisK, SP1,
+or OpenVM. The first stage creates and pushes the Git tag at its qualified
+source commit, then creates the draft from that verified tag. The tag is only a
+fixed release anchor: later stages never move it and record their own source
+commits.
+
+Each stage calls `Guest benchmark` for only the selected backend, verifies the
+strict evidence and ELF hash, generates its VK, and uploads the ELF, VK,
+evidence, and report one at a time. It uploads `backend-<backend>.json` last as
+the completed-slot marker. That manifest records the qualification run, source
+commit, exact digest-pinned keygen image, compatibility identity, and SHA-256 of
+every backend file. Retries accept identical files, fill missing files, and
+reject different bytes rather than replacing an asset. A completed backend
+with the same ELF is a no-op; a different ELF or corpus requires a new tag.
+
+After all three backend manifests are present, dispatch the same tag with
+operation `publish`. Publication downloads the complete draft, requires
+matching schema and corpus identities, rechecks every staged file against its
+manifest, writes and signs the combined checksums, builds the notes from the
+stored manifests, and only then publishes the prerelease. Published assets are
+never appended or overwritten by the workflow; repository-level immutable
+releases should be enabled for server-side enforcement.
+
+Qualification commits may differ because backend integration and release
+tooling can advance independently. Each manifest and evidence record still has
+to name the commit that produced its exact ELF. None of these commits need
+descend from `main`, which permits explicitly dispatched special builds without
+weakening artifact provenance. One tag identifies the shared guest
+compatibility version, while every backend artifact remains separately
+addressable through `ere-guests`' `artifacts[]` entries.
 
 ## Changelog
 
