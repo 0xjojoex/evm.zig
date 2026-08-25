@@ -139,7 +139,7 @@ jobs:
           artifacts-dir: ${{ env.ZISK_ARTIFACTS }}
           build-provider: ${{ steps.zisk-provider-cache.outputs.cache-hit != 'true' }}
           build-host: "true"
-          host-manifest: ${{ github.workspace }}/guest/runtime/zisk/host/Cargo.toml
+          host-manifest: ${{ github.workspace }}/guest/runtime/Cargo.toml
 
       - name: Resolve pinned ZisK artifacts
         id: zisk
@@ -317,7 +317,8 @@ jobs:
             --quiet \
             --release \
             --locked \
-            --manifest-path guest/runtime/openvm/host/Cargo.toml \
+            --manifest-path guest/runtime/Cargo.toml \
+            --package evmz-openvm-host \
             --target-dir "${RUNNER_TEMP}/openvm-host-target"
           zig build guest-openvm \
             -Dguest-payload=stateless-ere \
@@ -421,7 +422,8 @@ jobs:
             --quiet \
             --release \
             --locked \
-            --manifest-path guest/runtime/sp1/host/Cargo.toml \
+            --manifest-path guest/runtime/Cargo.toml \
+            --package evmz-sp1-host \
             --target-dir "${RUNNER_TEMP}/sp1-host-target"
           zig build guest-sp1 \
             -Dguest-payload=stateless-ere \

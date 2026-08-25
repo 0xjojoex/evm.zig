@@ -1305,7 +1305,7 @@ fn addGuestRunner(
             run_step.dependOn(&run.step);
         },
         .sp1 => {
-            const host_manifest = b.pathFromRoot("guest/runtime/sp1/host/Cargo.toml");
+            const host_manifest = b.pathFromRoot("guest/runtime/Cargo.toml");
             const host_target = b.cache_root.join(b.allocator, &.{"sp1-host"}) catch @panic("OOM");
             const build_host = b.addSystemCommand(&.{
                 "cargo",
@@ -1315,6 +1315,8 @@ fn addGuestRunner(
                 "--locked",
                 "--manifest-path",
                 host_manifest,
+                "--package",
+                "evmz-sp1-host",
                 "--target-dir",
                 host_target,
             });

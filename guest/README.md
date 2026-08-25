@@ -16,6 +16,12 @@ compatibility token, and the verification key identifies the exact bytes. See
 
 ## Building
 
+The native benchmark hosts and their shared protocol are one Cargo workspace at
+`guest/runtime/Cargo.toml`. Its OpenVM host follows ERE's compatibility patch,
+which places OpenVM's stable Plonky3 crates on a separate Git source from SP1's
+`0.4.3-succinct` crates. Guest provider crates remain standalone because their
+locks define static archives built by backend-specific Rust toolchains.
+
 `guest-zisk` builds the selected payload as a ZisK RV64 ELF. A real
 `libziskos_staticlib.a` provider is required:
 
@@ -192,7 +198,7 @@ cargo-zisk verify --proof /path/to/proof.bin
 The persistent ZisK benchmark host builds with the same pinned revision:
 
 ```sh
-cargo build --release --manifest-path guest/runtime/zisk/host/Cargo.toml
+cargo build --release --manifest-path guest/runtime/Cargo.toml -p evmz-zisk-host
 ```
 
 The `stateless-ere` guest publishes the raw SSZ `StatelessValidationResult`,

@@ -1,11 +1,11 @@
 [package]
 name = "evmz-zisk-host"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [dependencies]
-evmz-guest-host-protocol = { path = "../../host-protocol" }
-zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
-zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
-ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
+evmz-guest-host-protocol.workspace = true
+zisk-core.workspace = true
+zisk-transpiler-riscv.workspace = true
+ziskemu.workspace = true
