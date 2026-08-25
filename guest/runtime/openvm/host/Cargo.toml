@@ -5,6 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
+evmz-guest-host-protocol = { path = "../../host-protocol" }
+# ERE's OpenVM fork only changes proof-stack dependency sources at v0.16.2.
+# This execute-only host keeps the identical SDK code from the official tag.
 openvm-sdk = { git = "https://github.com/openvm-org/openvm.git", tag = "v2.1.0-preview", default-features = false }
 openvm-sdk-config = { git = "https://github.com/openvm-org/openvm.git", tag = "v2.1.0-preview" }
 toml = "0.8.14"

@@ -1605,9 +1605,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "evmz-guest-host-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "evmz-zisk-host"
 version = "0.1.0"
 dependencies = [
+ "evmz-guest-host-protocol",
  "zisk-core",
  "zisk-transpiler-riscv",
  "ziskemu",

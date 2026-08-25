@@ -1,0 +1,31 @@
+[workspace]
+
+[package]
+name = "evmz-sp1-provider"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+
+# Match ERE's SP1 guests until the standards-conformance fixes in SP1 #2865
+# are released upstream.
+[patch.crates-io]
+sp1-lib = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
+
+[patch."https://github.com/succinctlabs/sp1.git"]
+sp1-lib = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
+sp1-primitives = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
+sp1-zkvm = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
+sp1-libzkevm = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84", package = "libzkevm" }
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = true
+codegen-units = 1
+

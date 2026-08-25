@@ -476,7 +476,7 @@ pub fn build(b: *std.Build) void {
     const sp1_staticlib_path = b.option(
         []const u8,
         "sp1-staticlib",
-        "Path to an SP1 libzkevm.a provider for guest-sp1",
+        "Override the repo-owned SP1 provider archive",
     );
     const guest_input_path = b.option([]const u8, "guest-input", "Path to zkVM guest input");
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write zkVM public output");
@@ -924,7 +924,7 @@ const GuestBackend = enum {
                     .step = "guest-sp1-run",
                     .description = "Run the SP1 guest ELF",
                 },
-                .missing_provider = "guest-sp1 requires -Dsp1-staticlib=<path>/libzkevm.a",
+                .missing_provider = null,
             },
             .openvm => .{
                 .target = "riscv64-freestanding",
@@ -1189,7 +1189,11 @@ fn addGuest(
         config.runtime_root,
         &.{.{ .name = "guest_payload", .module = payload_mod }},
     );
-    if (backend == .openvm) {
+    if (provider_path_option) |path| {
+        root_mod.addObjectFile(.{ .cwd_relative = path });
+    } else if (backend == .sp1) {
+        root_mod.addObjectFile(buildSp1Provider(b));
+    } else if (backend == .openvm) {
         root_mod.addObjectFile(buildOpenVmProvider(b));
     } else {
         root_mod.addObjectFile(.{ .cwd_relative = provider_path_option.? });
@@ -1246,6 +1250,33 @@ fn buildOpenVmProvider(b: *std.Build) std.Build.LazyPath {
         "guest/runtime/openvm/provider/Cargo.lock",
         "guest/runtime/openvm/provider/.cargo/config.toml",
         "guest/runtime/openvm/provider/src/lib.rs",
+    }) |path| build_provider.addFileInput(b.path(path));
+    return archive;
+}
+
+fn buildSp1Provider(b: *std.Build) std.Build.LazyPath {
+    const builder_manifest = b.path("guest/runtime/sp1/provider-builder/Cargo.toml");
+    const provider_dir = b.pathFromRoot("guest/runtime/sp1/provider");
+    const builder_target_dir = b.cache_root.join(b.allocator, &.{"sp1-provider-builder"}) catch @panic("OOM");
+    const provider_target_dir = b.cache_root.join(b.allocator, &.{"sp1-provider"}) catch @panic("OOM");
+    const build_provider = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--quiet",
+        "--release",
+        "--locked",
+        "--manifest-path",
+    });
+    build_provider.addFileArg(builder_manifest);
+    build_provider.addArgs(&.{ "--target-dir", builder_target_dir, "--", provider_dir });
+    const archive = build_provider.addOutputFileArg("libevmz_sp1_provider.a");
+    build_provider.addArg(provider_target_dir);
+    for ([_][]const u8{
+        "guest/runtime/sp1/provider-builder/Cargo.lock",
+        "guest/runtime/sp1/provider-builder/src/main.rs",
+        "guest/runtime/sp1/provider/Cargo.lock",
+        "guest/runtime/sp1/provider/Cargo.toml",
+        "guest/runtime/sp1/provider/src/lib.rs",
     }) |path| build_provider.addFileInput(b.path(path));
     return archive;
 }

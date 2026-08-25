@@ -42,6 +42,7 @@ on:
         type: choice
         options:
           - zisk
+          - sp1
           - openvm
 
 permissions:
@@ -359,6 +360,109 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: guest-openvm-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: guest-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+  sp1:
+    name: sp1 tests-zkevm
+    if: github.event_name == 'workflow_dispatch' && inputs.backend == 'sp1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
+      STATELESS_SCHEMA: "0x1501"
+      ZIG_VERSION: 0.16.0
+      SP1_VERSION: v6.4.0
+      SP1_COMMIT: f66b4bff51d0ccff51d152e0f7f66b2ffedf3529
+      SP1_PROVIDER_COMMIT: 7929b001303feb6803ce1214557d5ab1f17eee84
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: eest/consume/uv.lock
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Install pinned SP1 toolchain
+        run: |
+          mkdir -p "${HOME}/.sp1/bin"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/succinctlabs/sp1/${SP1_COMMIT}/sp1up/sp1up" \
+            -o "${HOME}/.sp1/bin/sp1up"
+          chmod +x "${HOME}/.sp1/bin/sp1up"
+          export PATH="${HOME}/.sp1/bin:${PATH}"
+          echo "${HOME}/.sp1/bin" >> "${GITHUB_PATH}"
+          sp1up -v "${SP1_VERSION}"
+          cargo prove --version
+          rustup run succinct rustc -vV
+
+      - name: Resolve tests-zkevm through execution-specs
+        run: |
+          zig build zkevm-resolve --summary all -- \
+            --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
+            --manifest="${RESOLVED_MANIFEST}"
+
+      - name: Build SP1 host and guest
+        run: |
+          cargo build \
+            --quiet \
+            --release \
+            --locked \
+            --manifest-path guest/runtime/sp1/host/Cargo.toml \
+            --target-dir "${RUNNER_TEMP}/sp1-host-target"
+          zig build guest-sp1 \
+            -Dguest-payload=stateless-ere \
+            "-Dstateless-schema=${STATELESS_SCHEMA}" \
+            -Doptimize=ReleaseFast \
+            --prefix "${RUNNER_TEMP}/guest" \
+            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
+            --summary all
+          elf="${RUNNER_TEMP}/guest/guest/sp1/evmz-guest-sp1.elf"
+          zig build check-guest-elf -- --require-rv64im "${elf}"
+          {
+            echo "SP1_ELF=${elf}"
+            echo "SP1_HOST=${RUNNER_TEMP}/sp1-host-target/release/evmz-sp1-host"
+          } >> "${GITHUB_ENV}"
+
+      - name: Run corpus
+        run: |
+          mapfile -t fixture_roots < <(jq -r '.fixture_roots[]' "${RESOLVED_MANIFEST}")
+          test "${#fixture_roots[@]}" -gt 0
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- \
+            --executor sp1 \
+            --jobs 1 \
+            --sp1-host "${SP1_HOST}" \
+            --sp1-elf "${SP1_ELF}" \
+            --output-folder "${GITHUB_WORKSPACE}/guest-evidence/rows" \
+            "${fixture_roots[@]}"
+
+      - name: Write runtime identity
+        run: |
+          mkdir -p guest-evidence
+          {
+            echo "SP1 ${SP1_VERSION} (${SP1_COMMIT})"
+            echo "ERE v0.16.2 provider with SP1 patch ${SP1_PROVIDER_COMMIT}"
+            sha256sum "${SP1_HOST}" "${SP1_ELF}"
+          } | tee guest-evidence/runtime.txt
+
+      - name: Upload SP1 benchmark rows
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-sp1-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
           path: guest-evidence
           if-no-files-found: warn
           retention-days: 14

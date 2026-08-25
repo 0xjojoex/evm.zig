@@ -1,0 +1,9 @@
+[package]
+name = "evmz-sp1-provider-builder"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sp1-build = { git = "https://github.com/succinctlabs/sp1.git", tag = "v6.4.0" }
+

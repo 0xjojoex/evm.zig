@@ -110,9 +110,6 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
         } else if (std.mem.eql(u8, arg, "--sp1-elf")) {
             const value = args.next() orelse return error.MissingSp1ElfPath;
             options.executor.sp1_elf_path = try arena.dupe(u8, value);
-        } else if (std.mem.eql(u8, arg, "--sp1-work-dir")) {
-            const value = args.next() orelse return error.MissingSp1WorkDir;
-            options.executor.sp1_work_dir = try arena.dupe(u8, value);
         } else if (std.mem.eql(u8, arg, "--openvm-host")) {
             const value = args.next() orelse return error.MissingOpenVmHostPath;
             options.executor.openvm_host_path = try arena.dupe(u8, value);
@@ -239,7 +236,7 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
 
 fn printUsage() void {
     std.debug.print(
-        \\usage: zig build zkevm -- [--executor native|zisk|sp1|openvm] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--evidence-dir PATH --corpus-manifest PATH --source-ref REF --stateless-schema ID --zig-version VERSION --backend-version VERSION --backend-commit SHA --backend-toolchain VERSION [--known-failures PATH] [--strict-evidence]] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--sp1-work-dir PATH] [--openvm-host PATH] [--openvm-config PATH] [--openvm-elf PATH] [path ...]
+        \\usage: zig build zkevm -- [--executor native|zisk|sp1|openvm] [--jobs N] [--test NAME] [--limit N] [--verbose] [--trace-mismatch] [--classify-failures] [--oracle-differential] [--report PATH] [--output-folder PATH] [--evidence-dir PATH --corpus-manifest PATH --source-ref REF --stateless-schema ID --zig-version VERSION --backend-version VERSION --backend-commit SHA --backend-toolchain VERSION [--known-failures PATH] [--strict-evidence]] [--zisk-host PATH] [--zisk-elf PATH] [--sp1-host PATH] [--sp1-elf PATH] [--openvm-host PATH] [--openvm-config PATH] [--openvm-elf PATH] [path ...]
         \\
         \\Runs EEST zkEVM blockchain fixtures by comparing statelessInputBytes
         \\against the raw statelessOutputBytes public values.

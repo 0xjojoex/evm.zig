@@ -1,8 +1,8 @@
+use evmz_guest_host_protocol::{serve, Success};
 use sp1_core_executor::{MinimalExecutorEnum, Program};
 use std::{
     env,
     error::Error,
-    fmt::Write,
     fs,
     panic::{catch_unwind, AssertUnwindSafe},
     path::PathBuf,
@@ -20,17 +20,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_args()?;
     let elf_path = options.elf.ok_or("missing --elf PATH")?;
     let program = Arc::new(Program::from(&fs::read(elf_path)?)?);
-    let mut executor = MinimalExecutorEnum::new(program, false, None);
-
-    if let Some(path) = options.input {
-        executor.with_input(&fs::read(path)?);
+    if let Some(input_path) = options.input {
+        let success = execute(program, fs::read(input_path)?)?;
+        if let Some(output_path) = options.output {
+            fs::write(output_path, &success.output)?;
+        }
+        println!("sp1 cycles={}", success.primary);
+        return Ok(());
     }
+    if options.output.is_some() {
+        return Err("--output requires --input".into());
+    }
+    serve(|input| execute(program.clone(), input))?;
+    Ok(())
+}
+
+fn execute(program: Arc<Program>, input: Vec<u8>) -> Result<Success, String> {
+    // ERE resets pooled SP1 executors on its Linux JIT path. The portable
+    // executor used on Apple Silicon does not implement reset, so only share
+    // the parsed program across requests.
+    let mut executor = MinimalExecutorEnum::new(program, false, None);
+    executor.with_input(&input);
     loop {
         let result = catch_unwind(AssertUnwindSafe(|| executor.try_execute_chunk()));
         match result {
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) => break,
-            Ok(Err(err)) => return Err(err.into()),
+            Ok(Err(err)) => return Err(err.to_string()),
             Err(_) => {
                 let registers = executor.registers();
                 return Err(format!(
@@ -41,27 +57,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                     registers[1],
                     registers[2],
                     registers[10]
-                )
-                .into());
+                ));
             }
         }
     }
 
     let exit_code = executor.exit_code();
     let cycles = executor.global_clk();
-    let public_values = executor.into_public_values_stream();
-    if let Some(path) = options.output {
-        fs::write(path, &public_values)?;
-    }
-
-    println!(
-        "sp1 cycles={cycles} exit_code={exit_code} public_values=0x{}",
-        encode_hex(&public_values)
-    );
     if exit_code != 0 {
-        return Err(format!("SP1 guest exited with code {exit_code}").into());
+        return Err(format!("SP1 guest exited with code {exit_code}"));
     }
-    Ok(())
+    Ok(Success {
+        output: executor.into_public_values_stream(),
+        primary: cycles,
+        secondary: 0,
+    })
 }
 
 fn parse_args() -> Result<Options, Box<dyn Error>> {
@@ -80,12 +90,4 @@ fn parse_args() -> Result<Options, Box<dyn Error>> {
         }
     }
     Ok(options)
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(encoded, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    encoded
 }

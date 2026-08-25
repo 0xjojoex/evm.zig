@@ -9,7 +9,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const evmz = @import("evmz");
-const ere_io = @import("stateless_ere_io.zig");
 
 pub const Target = enum {
     native,
@@ -37,7 +36,6 @@ pub const Options = struct {
     zisk_elf_path: ?[]const u8 = null,
     sp1_host_path: ?[]const u8 = null,
     sp1_elf_path: ?[]const u8 = null,
-    sp1_work_dir: []const u8 = "zig-out/zkevm-sp1",
     openvm_host_path: ?[]const u8 = null,
     openvm_config_path: ?[]const u8 = null,
     openvm_elf_path: ?[]const u8 = null,
@@ -75,21 +73,18 @@ pub const Outcome = union(enum) {
 pub const Executor = struct {
     io: std.Io,
     options: Options,
-    zisk_host: ?ZiskHost = null,
-    openvm_host: ?OpenVmHost = null,
+    guest_host: ?GuestHost = null,
 
     pub fn init(io: std.Io, options: Options) !Executor {
         return .{
             .io = io,
             .options = options,
-            .zisk_host = if (options.target == .zisk) try ZiskHost.init(io, options) else null,
-            .openvm_host = if (options.target == .openvm) try OpenVmHost.init(io, options) else null,
+            .guest_host = if (options.target == .native) null else try GuestHost.init(io, options),
         };
     }
 
     pub fn deinit(self: *Executor) void {
-        if (self.zisk_host) |*host| host.deinit(self.io);
-        if (self.openvm_host) |*host| host.deinit(self.io);
+        if (self.guest_host) |*host| host.deinit(self.io);
     }
 
     /// A guest writes its result into a fixed-width public region, and an
@@ -107,20 +102,18 @@ pub const Executor = struct {
     ) !Outcome {
         return switch (self.options.target) {
             .native => executeNative(self.io, allocator, input),
-            .zisk => self.executeZisk(allocator, input, canonical_len, label),
-            .sp1 => executeSp1(self.io, allocator, input, canonical_len, self.options, label),
-            .openvm => self.executeOpenVm(allocator, input, canonical_len),
+            .zisk, .sp1, .openvm => self.executeGuest(allocator, input, canonical_len, label),
         };
     }
 
-    fn executeZisk(
+    fn executeGuest(
         self: *Executor,
         allocator: std.mem.Allocator,
         input: []const u8,
         canonical_len: usize,
         label: []const u8,
     ) !Outcome {
-        var response = try self.zisk_host.?.execute(self.io, allocator, input, label);
+        var response = try self.guest_host.?.execute(self.io, allocator, input, label);
         defer response.deinit(allocator);
         if (response.status != 0) {
             return .{ .crashed = .{ .reason = try allocator.dupe(u8, response.payload) } };
@@ -129,29 +122,8 @@ pub const Executor = struct {
             allocator,
             response.payload,
             canonical_len,
-            response.steps,
-            0,
-            response.duration_nanos,
-        );
-    }
-
-    fn executeOpenVm(
-        self: *Executor,
-        allocator: std.mem.Allocator,
-        input: []const u8,
-        canonical_len: usize,
-    ) !Outcome {
-        var response = try self.openvm_host.?.execute(self.io, allocator, input);
-        defer response.deinit(allocator);
-        if (response.status != 0) {
-            return .{ .crashed = .{ .reason = try allocator.dupe(u8, response.payload) } };
-        }
-        return canonicalOutcome(
-            allocator,
-            response.payload,
-            canonical_len,
-            response.instret,
-            response.trace_cells,
+            response.primary,
+            response.secondary,
             response.duration_nanos,
         );
     }
@@ -166,64 +138,6 @@ fn executeNative(io: std.Io, allocator: std.mem.Allocator, input: []const u8) !O
         .trace_cells = 0,
         .duration_nanos = monotonicNanos(io) - start,
     } };
-}
-
-fn executeSp1(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    canonical_len: usize,
-    options: Options,
-    label: []const u8,
-) !Outcome {
-    const host_path = options.sp1_host_path orelse return error.MissingSp1HostPath;
-    const elf_path = options.sp1_elf_path orelse return error.MissingSp1ElfPath;
-
-    const run_id = try std.fmt.allocPrint(allocator, "{s}-{d}", .{ label, monotonicNanos(io) });
-    defer allocator.free(run_id);
-    const work_dir = try std.fs.path.join(allocator, &.{ options.sp1_work_dir, run_id });
-    defer allocator.free(work_dir);
-    try std.Io.Dir.cwd().createDirPath(io, work_dir);
-
-    const input_path = try std.fs.path.join(allocator, &.{ work_dir, "stdin.bin" });
-    defer allocator.free(input_path);
-    const output_path = try std.fs.path.join(allocator, &.{ work_dir, "public.bin" });
-    defer allocator.free(output_path);
-
-    const framed = try ere_io.inputBytes(allocator, input, .sp1);
-    defer allocator.free(framed);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = input_path, .data = framed });
-
-    const argv = [_][]const u8{ host_path, "--elf", elf_path, "--input", input_path, "--output", output_path };
-    const start = monotonicNanos(io);
-    const result = try std.process.run(allocator, io, .{
-        .argv = &argv,
-        .stdout_limit = .limited(4 * 1024 * 1024),
-        .stderr_limit = .limited(4 * 1024 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    const elapsed_ns = monotonicNanos(io) - start;
-
-    if (!childTermOk(result.term)) {
-        return .{ .crashed = .{ .reason = try std.fmt.allocPrint(
-            allocator,
-            "SP1 executor exited with {f}: {s}{s}",
-            .{ fmtTerm(result.term), result.stdout, result.stderr },
-        ) } };
-    }
-    const cycles = parseSp1Cycles(result.stdout) orelse parseSp1Cycles(result.stderr) orelse 0;
-    if (cycles == 0) {
-        return .{ .crashed = .{ .reason = try std.fmt.allocPrint(
-            allocator,
-            "SP1 executor reported no cycle count: {s}{s}",
-            .{ result.stdout, result.stderr },
-        ) } };
-    }
-
-    const public = try std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .limited(4 * 1024));
-    defer allocator.free(public);
-    return canonicalOutcome(allocator, public, canonical_len, cycles, 0, elapsed_ns);
 }
 
 /// Strips guest framing after the host has confirmed a successful guest exit.
@@ -253,19 +167,36 @@ fn canonicalOutcome(
     } };
 }
 
-const ZiskHost = struct {
+const GuestHost = struct {
     child: std.process.Child,
+    target: Target,
 
-    const ready = "EVZKH001";
-    const response_header_bytes = 32;
+    const ready = "EVMZH001";
+    const response_header_bytes = 40;
     const max_response_payload_bytes = 4 * 1024 * 1024;
 
-    fn init(io: std.Io, options: Options) !ZiskHost {
-        const host_path = options.zisk_host_path orelse return error.MissingZiskHostPath;
-        const elf_path = options.zisk_elf_path orelse return error.MissingZiskElfPath;
-        const argv = [_][]const u8{ host_path, "--elf", elf_path };
+    fn init(io: std.Io, options: Options) !GuestHost {
+        const argv: []const []const u8 = switch (options.target) {
+            .zisk => &.{
+                options.zisk_host_path orelse return error.MissingZiskHostPath,
+                "--elf",
+                options.zisk_elf_path orelse return error.MissingZiskElfPath,
+            },
+            .sp1 => &.{
+                options.sp1_host_path orelse return error.MissingSp1HostPath,
+                "--elf",
+                options.sp1_elf_path orelse return error.MissingSp1ElfPath,
+            },
+            .openvm => &.{
+                options.openvm_host_path orelse return error.MissingOpenVmHostPath,
+                "--server",
+                options.openvm_config_path orelse return error.MissingOpenVmConfigPath,
+                options.openvm_elf_path orelse return error.MissingOpenVmElfPath,
+            },
+            .native => unreachable,
+        };
         var child = try std.process.spawn(io, .{
-            .argv = &argv,
+            .argv = argv,
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,
@@ -275,23 +206,24 @@ const ZiskHost = struct {
 
         var handshake: [ready.len]u8 = undefined;
         readPipeAll(child.stdout.?, io, &handshake) catch |cause| {
-            logZiskHostFailure(ziskHostFailureAfterExit(&child, io, .handshake, null, cause));
-            return error.ZiskHostStartupFailed;
+            logGuestHostFailure(guestHostFailureAfterExit(options.target, &child, io, .handshake, null, cause));
+            return error.GuestHostStartupFailed;
         };
         if (!std.mem.eql(u8, &handshake, ready)) {
-            logZiskHostFailure(ziskHostFailureAfterKill(
+            logGuestHostFailure(guestHostFailureAfterKill(
+                options.target,
                 &child,
                 io,
                 .handshake,
                 null,
-                error.InvalidZiskHostHandshake,
+                error.InvalidGuestHostHandshake,
             ));
-            return error.ZiskHostStartupFailed;
+            return error.GuestHostStartupFailed;
         }
-        return .{ .child = child };
+        return .{ .child = child, .target = options.target };
     }
 
-    fn deinit(self: *ZiskHost, io: std.Io) void {
+    fn deinit(self: *GuestHost, io: std.Io) void {
         if (self.child.id == null) return;
         if (self.child.stdin) |stdin| {
             stdin.close(io);
@@ -304,72 +236,93 @@ const ZiskHost = struct {
     }
 
     fn execute(
-        self: *ZiskHost,
+        self: *GuestHost,
         io: std.Io,
         allocator: std.mem.Allocator,
         input: []const u8,
         label: []const u8,
     ) !Response {
-        if (self.child.id == null) return error.ZiskHostUnavailable;
-        const stdin = self.child.stdin orelse return error.ZiskHostUnavailable;
-        const stdout = self.child.stdout orelse return error.ZiskHostUnavailable;
+        if (self.child.id == null) return error.GuestHostUnavailable;
+        const stdin = self.child.stdin orelse return error.GuestHostUnavailable;
+        const stdout = self.child.stdout orelse return error.GuestHostUnavailable;
 
         var length_bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &length_bytes, @intCast(input.len), .little);
         writePipeAll(stdin, io, &length_bytes) catch |cause| {
-            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .request_length, label, cause));
-            return error.ZiskHostProcessFailed;
+            logGuestHostFailure(guestHostFailureAfterExit(self.target, &self.child, io, .request_length, label, cause));
+            return error.GuestHostProcessFailed;
         };
         writePipeAll(stdin, io, input) catch |cause| {
-            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .request_payload, label, cause));
-            return error.ZiskHostProcessFailed;
+            logGuestHostFailure(guestHostFailureAfterExit(self.target, &self.child, io, .request_payload, label, cause));
+            return error.GuestHostProcessFailed;
         };
 
         var header: [response_header_bytes]u8 = undefined;
         readPipeAll(stdout, io, &header) catch |cause| {
-            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .response_header, label, cause));
-            return error.ZiskHostProcessFailed;
+            logGuestHostFailure(guestHostFailureAfterExit(self.target, &self.child, io, .response_header, label, cause));
+            return error.GuestHostProcessFailed;
         };
-        const status = header[0];
-        if (status > 1) {
-            logZiskHostFailure(ziskHostFailureAfterKill(
+        const decoded = decodeHeader(&header);
+        if (decoded.status > 1) {
+            logGuestHostFailure(guestHostFailureAfterKill(
+                self.target,
                 &self.child,
                 io,
                 .response_header,
                 label,
-                error.InvalidZiskHostStatus,
+                error.InvalidGuestHostStatus,
             ));
-            return error.ZiskHostProtocolFailed;
+            return error.GuestHostProtocolFailed;
         }
-        const payload_len = std.mem.readInt(u64, header[24..32], .little);
-        if (payload_len > max_response_payload_bytes) {
-            logZiskHostFailure(ziskHostFailureAfterKill(
+        if (decoded.payload_len > max_response_payload_bytes) {
+            logGuestHostFailure(guestHostFailureAfterKill(
+                self.target,
                 &self.child,
                 io,
                 .response_header,
                 label,
-                error.ZiskHostResponseTooLarge,
+                error.GuestHostResponseTooLarge,
             ));
-            return error.ZiskHostProtocolFailed;
+            return error.GuestHostProtocolFailed;
         }
 
-        const payload = try allocator.alloc(u8, @intCast(payload_len));
+        const payload = try allocator.alloc(u8, @intCast(decoded.payload_len));
         errdefer allocator.free(payload);
         readPipeAll(stdout, io, payload) catch |cause| {
-            logZiskHostFailure(ziskHostFailureAfterExit(&self.child, io, .response_payload, label, cause));
-            return error.ZiskHostProcessFailed;
+            logGuestHostFailure(guestHostFailureAfterExit(self.target, &self.child, io, .response_payload, label, cause));
+            return error.GuestHostProcessFailed;
         };
         return .{
-            .status = status,
-            .steps = std.mem.readInt(u64, header[8..16], .little),
-            .duration_nanos = std.mem.readInt(u64, header[16..24], .little),
+            .status = decoded.status,
+            .primary = decoded.primary,
+            .secondary = decoded.secondary,
+            .duration_nanos = decoded.duration_nanos,
             .payload = payload,
+        };
+    }
+
+    const Header = struct {
+        status: u8,
+        primary: u64,
+        secondary: u64,
+        duration_nanos: u64,
+        payload_len: u64,
+    };
+
+    fn decodeHeader(bytes: *const [response_header_bytes]u8) Header {
+        return .{
+            .status = bytes[0],
+            .primary = std.mem.readInt(u64, bytes[8..16], .little),
+            .secondary = std.mem.readInt(u64, bytes[16..24], .little),
+            .duration_nanos = std.mem.readInt(u64, bytes[24..32], .little),
+            .payload_len = std.mem.readInt(u64, bytes[32..40], .little),
         };
     }
 
     const Response = struct {
         status: u8,
-        steps: u64,
+        primary: u64,
+        secondary: u64,
         duration_nanos: u64,
         payload: []u8,
 
@@ -379,83 +332,7 @@ const ZiskHost = struct {
     };
 };
 
-const OpenVmHost = struct {
-    child: std.process.Child,
-
-    const ready = "EVOMH001";
-    const response_header_bytes = 40;
-    const max_response_payload_bytes = 4 * 1024 * 1024;
-
-    fn init(io: std.Io, options: Options) !OpenVmHost {
-        const host_path = options.openvm_host_path orelse return error.MissingOpenVmHostPath;
-        const config_path = options.openvm_config_path orelse return error.MissingOpenVmConfigPath;
-        const elf_path = options.openvm_elf_path orelse return error.MissingOpenVmElfPath;
-        const argv = [_][]const u8{ host_path, "--server", config_path, elf_path };
-        var child = try std.process.spawn(io, .{
-            .argv = &argv,
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = .inherit,
-        });
-        errdefer child.kill(io);
-
-        var handshake: [ready.len]u8 = undefined;
-        try readPipeAll(child.stdout.?, io, &handshake);
-        if (!std.mem.eql(u8, &handshake, ready)) return error.InvalidOpenVmHostHandshake;
-        return .{ .child = child };
-    }
-
-    fn deinit(self: *OpenVmHost, io: std.Io) void {
-        if (self.child.id == null) return;
-        if (self.child.stdin) |stdin| {
-            stdin.close(io);
-            self.child.stdin = null;
-        }
-        _ = self.child.wait(io) catch {
-            self.child.kill(io);
-            return;
-        };
-    }
-
-    fn execute(self: *OpenVmHost, io: std.Io, allocator: std.mem.Allocator, input: []const u8) !Response {
-        var length_bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &length_bytes, @intCast(input.len), .little);
-        try writePipeAll(self.child.stdin.?, io, &length_bytes);
-        try writePipeAll(self.child.stdin.?, io, input);
-
-        var header: [response_header_bytes]u8 = undefined;
-        try readPipeAll(self.child.stdout.?, io, &header);
-        const status = header[0];
-        if (status > 1) return error.InvalidOpenVmHostStatus;
-        const payload_len = std.mem.readInt(u64, header[32..40], .little);
-        if (payload_len > max_response_payload_bytes) return error.OpenVmHostResponseTooLarge;
-
-        const payload = try allocator.alloc(u8, @intCast(payload_len));
-        errdefer allocator.free(payload);
-        try readPipeAll(self.child.stdout.?, io, payload);
-        return .{
-            .status = status,
-            .instret = std.mem.readInt(u64, header[8..16], .little),
-            .trace_cells = std.mem.readInt(u64, header[16..24], .little),
-            .duration_nanos = std.mem.readInt(u64, header[24..32], .little),
-            .payload = payload,
-        };
-    }
-
-    const Response = struct {
-        status: u8,
-        instret: u64,
-        trace_cells: u64,
-        duration_nanos: u64,
-        payload: []u8,
-
-        fn deinit(self: *Response, allocator: std.mem.Allocator) void {
-            allocator.free(self.payload);
-        }
-    };
-};
-
-const ZiskHostPhase = enum {
+const GuestHostPhase = enum {
     handshake,
     request_length,
     request_payload,
@@ -463,8 +340,9 @@ const ZiskHostPhase = enum {
     response_payload,
 };
 
-const ZiskHostFailure = struct {
-    phase: ZiskHostPhase,
+const GuestHostFailure = struct {
+    target: Target,
+    phase: GuestHostPhase,
     fixture: ?[]const u8,
     pid: ?u64,
     cause: anyerror,
@@ -472,8 +350,8 @@ const ZiskHostFailure = struct {
     wait_error: ?anyerror = null,
     max_rss_bytes: ?usize,
 
-    pub fn format(self: ZiskHostFailure, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("ZisK host failed phase={s}", .{@tagName(self.phase)});
+    pub fn format(self: GuestHostFailure, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("{s} host failed phase={s}", .{ @tagName(self.target), @tagName(self.phase) });
         if (self.fixture) |fixture| try writer.print(" fixture={s}", .{fixture});
         if (self.pid) |pid| try writer.print(" pid={d}", .{pid});
         try writer.print(" cause={s}", .{@errorName(self.cause)});
@@ -488,17 +366,19 @@ const ZiskHostFailure = struct {
     }
 };
 
-fn ziskHostFailureAfterExit(
+fn guestHostFailureAfterExit(
+    target: Target,
     child: *std.process.Child,
     io: std.Io,
-    phase: ZiskHostPhase,
+    phase: GuestHostPhase,
     fixture: ?[]const u8,
     cause: anyerror,
-) ZiskHostFailure {
+) GuestHostFailure {
     const pid = childPid(child);
     const term = child.wait(io) catch |wait_error| {
         child.kill(io);
         return .{
+            .target = target,
             .phase = phase,
             .fixture = fixture,
             .pid = pid,
@@ -509,6 +389,7 @@ fn ziskHostFailureAfterExit(
         };
     };
     return .{
+        .target = target,
         .phase = phase,
         .fixture = fixture,
         .pid = pid,
@@ -518,16 +399,18 @@ fn ziskHostFailureAfterExit(
     };
 }
 
-fn ziskHostFailureAfterKill(
+fn guestHostFailureAfterKill(
+    target: Target,
     child: *std.process.Child,
     io: std.Io,
-    phase: ZiskHostPhase,
+    phase: GuestHostPhase,
     fixture: ?[]const u8,
     cause: anyerror,
-) ZiskHostFailure {
+) GuestHostFailure {
     const pid = childPid(child);
     child.kill(io);
     return .{
+        .target = target,
         .phase = phase,
         .fixture = fixture,
         .pid = pid,
@@ -546,7 +429,7 @@ fn childPid(child: *const std.process.Child) ?u64 {
     };
 }
 
-fn logZiskHostFailure(failure: ZiskHostFailure) void {
+fn logGuestHostFailure(failure: GuestHostFailure) void {
     std.debug.print("{f}\n", .{failure});
 }
 
@@ -561,25 +444,6 @@ fn readPipeAll(file: std.Io.File, io: std.Io, bytes: []u8) !void {
 
 fn writePipeAll(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
     try file.writeStreamingAll(io, bytes);
-}
-
-fn parseSp1Cycles(bytes: []const u8) ?u64 {
-    return parseCounter(bytes, "cycles=") orelse parseCounter(bytes, "total_cycles=");
-}
-
-fn parseCounter(bytes: []const u8, needle: []const u8) ?u64 {
-    const start = std.mem.indexOf(u8, bytes, needle) orelse return null;
-    var end = start + needle.len;
-    while (end < bytes.len and std.ascii.isDigit(bytes[end])) end += 1;
-    if (end == start + needle.len) return null;
-    return std.fmt.parseInt(u64, bytes[start + needle.len .. end], 10) catch null;
-}
-
-fn childTermOk(term: std.process.Child.Term) bool {
-    return switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
 }
 
 fn formatTerm(term: std.process.Child.Term, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -615,6 +479,21 @@ test "canonical outcome strips the guest public region's zero padding" {
     try std.testing.expectEqual(@as(u64, 84), outcome.completed.trace_cells);
 }
 
+test "guest host response header carries two counters and duration" {
+    var bytes: [GuestHost.response_header_bytes]u8 = @splat(0);
+    bytes[0] = 1;
+    std.mem.writeInt(u64, bytes[8..16], 42, .little);
+    std.mem.writeInt(u64, bytes[16..24], 84, .little);
+    std.mem.writeInt(u64, bytes[24..32], 99, .little);
+    std.mem.writeInt(u64, bytes[32..40], 3, .little);
+    const header = GuestHost.decodeHeader(&bytes);
+    try std.testing.expectEqual(@as(u8, 1), header.status);
+    try std.testing.expectEqual(@as(u64, 42), header.primary);
+    try std.testing.expectEqual(@as(u64, 84), header.secondary);
+    try std.testing.expectEqual(@as(u64, 99), header.duration_nanos);
+    try std.testing.expectEqual(@as(u64, 3), header.payload_len);
+}
+
 test "canonical outcome rejects non-zero padding" {
     const padded = try std.testing.allocator.alloc(u8, 256);
     defer std.testing.allocator.free(padded);
@@ -633,8 +512,9 @@ test "a guest public region shorter than the expected result is a crash" {
     try std.testing.expect(outcome == .crashed);
 }
 
-test "ZisK host failure names the phase fixture cause and process outcome" {
-    const failure = ZiskHostFailure{
+test "guest host failure names the backend phase fixture cause and process outcome" {
+    const failure = GuestHostFailure{
+        .target = .sp1,
         .phase = .response_header,
         .fixture = "case-1",
         .pid = 42,
@@ -645,13 +525,13 @@ test "ZisK host failure names the phase fixture cause and process outcome" {
     const rendered = try std.fmt.allocPrint(std.testing.allocator, "{f}", .{failure});
     defer std.testing.allocator.free(rendered);
     try std.testing.expectEqualStrings(
-        "ZisK host failed phase=response_header fixture=case-1 pid=42 " ++
+        "sp1 host failed phase=response_header fixture=case-1 pid=42 " ++
             "cause=UnexpectedEndOfStream term=exit code 137 max_rss_bytes=4096",
         rendered,
     );
 }
 
-test "ZisK host failure diagnosis preserves an early child exit" {
+test "guest host failure diagnosis preserves an early child exit" {
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
 
     const argv = [_][]const u8{"/usr/bin/false"};
@@ -664,7 +544,8 @@ test "ZisK host failure diagnosis preserves an early child exit" {
     });
     errdefer child.kill(std.testing.io);
 
-    const failure = ziskHostFailureAfterExit(
+    const failure = guestHostFailureAfterExit(
+        .zisk,
         &child,
         std.testing.io,
         .handshake,

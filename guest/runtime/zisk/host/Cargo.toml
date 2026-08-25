@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+evmz-guest-host-protocol = { path = "../../host-protocol" }
 zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
 zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
 ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
