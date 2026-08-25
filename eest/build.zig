@@ -135,8 +135,8 @@ fn hasFixturePath(args: ?[]const []const u8) bool {
     return false;
 }
 
-const default_execution_input = "tests-glamsterdam-devnet@latest";
-const default_zkevm_input = "tests-zkevm@latest";
+const default_execution_input = "tests-glamsterdam-devnet@v8.1.1";
+const default_zkevm_input = "tests-zkevm@v0.8.2";
 
 const direct_selection =
     "state_test or (blockchain_test and " ++

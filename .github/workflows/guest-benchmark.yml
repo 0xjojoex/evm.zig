@@ -64,15 +64,24 @@ jobs:
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
       ZIG_VERSION: 0.16.0
-      ZISK_VERSION: 1.1.0-alpha
-      ZISK_COMMIT: 9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93
-      ZISK_RUST_TOOLCHAIN: zisk-3.0.0
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: ${{ inputs.release_gate && 0 || 1 }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-key: guest-benchmark-${{ github.event_name }}-tests-zkevm
+
+      - name: Load pinned ZisK version
+        run: |
+          zig build zisk-config --prefix "${RUNNER_TEMP}/zisk-config" --summary none
+          cat "${RUNNER_TEMP}/zisk-config/share/evmz/zisk.env" >> "${GITHUB_ENV}"
 
       - name: Require release qualification inputs
         if: inputs.release_gate
@@ -105,13 +114,6 @@ jobs:
             libomp5-18 \
             libopenmpi3t64 \
             libsodium23
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: ${{ github.event_name != 'pull_request' }}
-          cache-key: guest-benchmark-${{ github.event_name }}-tests-zkevm
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1

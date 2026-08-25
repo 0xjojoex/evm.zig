@@ -126,6 +126,8 @@ runs:
         CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS: "-C target-feature=+unaligned-scalar-mem"
       run: |
         set -euo pipefail
+        rustup_bin="$(dirname "$(command -v rustup)")"
+        export PATH="${rustup_bin}:${ZISK_HOME}/bin:${PATH}"
         provider="${ARTIFACTS_DIR}/libziskos_staticlib.a"
         if [[ "${BUILD_PROVIDER}" == true ]]; then
           cd "${ZISK_SOURCE}"

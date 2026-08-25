@@ -20,12 +20,16 @@ compatibility token, and the verification key identifies the exact bytes. See
 `libziskos_staticlib.a` provider is required:
 
 ```sh
+provider=$(guest/runtime/zisk/build_provider.sh)
 zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dstateless-schema=0x1501 \
-  -Dziskos-staticlib=/path/to/libziskos_staticlib.a
+  -Dziskos-staticlib="$provider"
 ```
 
-Build the ZisK provider with
+`build_provider.sh` uses the same version and source commit as CI, ensures the
+ZisK Rust target resolves through rustup instead of a system Rust installation,
+and caches the provider under `~/.zisk/evmz/`. Override `ZISK_SOURCE` to reuse
+an existing checkout of the pinned commit. The provider is built with
 `CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS="-C target-feature=+unaligned-scalar-mem"`.
 The pinned CI build uses this target policy. A provider built without it produces
 a different guest ELF and verification key.
@@ -123,7 +127,7 @@ model; `guest-zisk` still requires the real `libziskos_staticlib.a`.
 
 The `Guest benchmark` workflow is the execute-only guest performance path.
 Automatic and release-qualified runs remain ZisK-only. A manual dispatch can
-run OpenVM against the same `tests-zkevm@latest` corpus and retain ERE
+run OpenVM against the same `tests-zkevm@vX.Y.Z` corpus and retain ERE
 `BenchmarkRun` rows with retired instructions and trace-cell cost. Correctness
 still gates the run: every public output must match. Metrics from different
 zkVMs are kept separate, and emulator execution duration is not proving time.

@@ -1,5 +1,17 @@
 const std = @import("std");
 
+const ZiskConfig = struct {
+    version: []const u8,
+    commit: []const u8,
+    rust_toolchain: []const u8,
+};
+
+const zisk: ZiskConfig = .{
+    .version = "1.1.0-alpha",
+    .commit = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93",
+    .rust_toolchain = "zisk-3.0.0",
+};
+
 const EvmzBuildConfig = struct {
     profile: Profile,
     native_keccak: KeccakBackend,
@@ -60,6 +72,8 @@ const GuestPayloadSteps = struct {
 };
 
 pub fn build(b: *std.Build) void {
+    if (b.pkg_hash.len == 0) addZiskConfig(b);
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const core = b.option(
@@ -535,6 +549,17 @@ pub fn build(b: *std.Build) void {
         addExamplesDelegate(b, "example-test", "Run tests in the selected Zig example", "example-test", example_name, target, optimize_name, evmz_build, null);
         addExamplesDelegate(b, "examples-test-all", "Run tests in all Zig examples", "test", example_name, target, optimize_name, evmz_build, null);
     }
+}
+
+fn addZiskConfig(b: *std.Build) void {
+    const generated = b.addWriteFiles().add("zisk.env", b.fmt(
+        \\ZISK_VERSION={s}
+        \\ZISK_COMMIT={s}
+        \\ZISK_RUST_TOOLCHAIN={s}
+        \\
+    , .{ zisk.version, zisk.commit, zisk.rust_toolchain }));
+    const install = b.addInstallFile(generated, "share/evmz/zisk.env");
+    b.step("zisk-config", "Write the pinned ZisK build configuration").dependOn(&install.step);
 }
 
 // `b.option` validates and lists these in `zig build --help`
