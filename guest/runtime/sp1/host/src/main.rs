@@ -20,8 +20,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_args()?;
     let elf_path = options.elf.ok_or("missing --elf PATH")?;
     let program = Arc::new(Program::from(&fs::read(elf_path)?)?);
+    let mut executor = GuestExecutor::new(program);
     if let Some(input_path) = options.input {
-        let success = execute(program, fs::read(input_path)?)?;
+        let success = executor.execute(&fs::read(input_path)?)?;
         if let Some(output_path) = options.output {
             fs::write(output_path, &success.output)?;
         }
@@ -31,16 +32,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     if options.output.is_some() {
         return Err("--output requires --input".into());
     }
-    serve(|input| execute(program.clone(), input))?;
+    serve(|input| executor.execute(&input))?;
     Ok(())
 }
 
-fn execute(program: Arc<Program>, input: Vec<u8>) -> Result<Success, String> {
-    // ERE resets pooled SP1 executors on its Linux JIT path. The portable
-    // executor used on Apple Silicon does not implement reset, so only share
-    // the parsed program across requests.
-    let mut executor = MinimalExecutorEnum::new(program, false, None);
-    executor.with_input(&input);
+struct GuestExecutor {
+    program: Arc<Program>,
+    reusable: Option<MinimalExecutorEnum>,
+}
+
+impl GuestExecutor {
+    fn new(program: Arc<Program>) -> Self {
+        let reusable = cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            .then(|| MinimalExecutorEnum::new(program.clone(), false, None));
+        Self { program, reusable }
+    }
+
+    fn execute(&mut self, input: &[u8]) -> Result<Success, String> {
+        if let Some(executor) = &mut self.reusable {
+            executor.reset();
+            return execute(executor, input);
+        }
+
+        // SP1's portable executor does not implement reset yet.
+        let mut executor = MinimalExecutorEnum::new(self.program.clone(), false, None);
+        execute(&mut executor, input)
+    }
+}
+
+fn execute(executor: &mut MinimalExecutorEnum, input: &[u8]) -> Result<Success, String> {
+    executor.with_input(input);
     loop {
         let result = catch_unwind(AssertUnwindSafe(|| executor.try_execute_chunk()));
         match result {
@@ -68,7 +89,7 @@ fn execute(program: Arc<Program>, input: Vec<u8>) -> Result<Success, String> {
         return Err(format!("SP1 guest exited with code {exit_code}"));
     }
     Ok(Success {
-        output: executor.into_public_values_stream(),
+        output: executor.public_values_stream().clone(),
         primary: cycles,
         secondary: 0,
     })
