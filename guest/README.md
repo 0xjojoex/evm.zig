@@ -23,6 +23,13 @@ which places OpenVM's stable Plonky3 crates on a separate Git source from SP1's
 `0.4.3-succinct` crates. Guest provider crates remain standalone because their
 locks define static archives built by backend-specific Rust toolchains.
 
+Zig codegen follows each backend's effective guest policy: ZisK enables Zbb,
+Zbs, Zbkb, and the screened efficient-unaligned-memory tuning; SP1 remains
+RV64IM; OpenVM enables Zicclsm and efficient unaligned scalar memory. Zig
+spells the last LLVM feature `unaligned_scalar_mem`, while Rust spells it
+`unaligned-scalar-mem`. ZisK's A and custom DMA extensions remain properties
+of its linked runtime rather than of evmz Zig code.
+
 `guest-zisk` builds the selected payload as a ZisK RV64 ELF. A real
 `libziskos_staticlib.a` provider is required:
 

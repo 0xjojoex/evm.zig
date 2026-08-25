@@ -898,7 +898,7 @@ const GuestBackend = enum {
             .native => unreachable,
             .zisk => .{
                 .target = "riscv64-freestanding",
-                .target_features = "generic_rv64+m+zicclsm+relax",
+                .target_features = "generic_rv64+m+zbb+zbs+zbkb+zicclsm+unaligned_scalar_mem+relax",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
                 .artifact_name = "evmz-guest-zisk",
@@ -928,7 +928,7 @@ const GuestBackend = enum {
             },
             .openvm => .{
                 .target = "riscv64-freestanding",
-                .target_features = "generic_rv64+m+relax",
+                .target_features = "generic_rv64+m+zicclsm+unaligned_scalar_mem+relax",
                 .runtime_root = "guest/runtime/openvm/root.zig",
                 .linker_script = "guest/runtime/openvm/openvm-rv64.ld",
                 .artifact_name = "evmz-guest-openvm",
