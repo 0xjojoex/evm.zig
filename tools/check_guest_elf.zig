@@ -141,7 +141,12 @@ const Checker = struct {
         return null;
     }
 
-    fn checkArchitecture(checker: *Checker, attributes: []const u8, allow_attribute_a: bool) error{InvalidElf}!void {
+    fn checkArchitecture(
+        checker: *Checker,
+        attributes: []const u8,
+        target: TargetContract,
+        allow_attribute_a: bool,
+    ) error{InvalidElf}!void {
         const marker = std.mem.indexOf(u8, attributes, "rv64") orelse return checker.fail("missing RISC-V architecture attribute");
         var end = marker + 4;
         while (end < attributes.len) : (end += 1) {
@@ -170,7 +175,9 @@ const Checker = struct {
             }
         }
         if (!has_m) return checker.fail("RISC-V target must declare M");
-        if (!has_zicclsm) return checker.fail("RISC-V target must declare Zicclsm");
+        if (target == .rv64im_zicclsm and !has_zicclsm) {
+            return checker.fail("RISC-V target must declare Zicclsm");
+        }
     }
 
     fn check(checker: *Checker, options: CheckOptions) error{InvalidElf}!Summary {
@@ -273,9 +280,9 @@ const Checker = struct {
         const rodata_load = try checker.loadIndex(loads, rodata.address, rodata.size) orelse return checker.fail(".rodata is not contained in a PT_LOAD");
         if (text_load == rodata_load) return checker.fail(".text and .rodata must use separate PT_LOAD segments");
 
-        if (options.require_target) {
+        if (options.target != .none) {
             const attributes = try checker.findSection(sections, section_names, ".riscv.attributes") orelse return checker.fail("missing .riscv.attributes");
-            try checker.checkArchitecture(try checker.sectionBytes(attributes), options.allow_attribute_a);
+            try checker.checkArchitecture(try checker.sectionBytes(attributes), options.target, options.allow_attribute_a);
             try checker.checkExecutableSections(sections, options.allow_rev8);
         }
 
@@ -358,10 +365,18 @@ fn forbiddenInstruction(instruction: u32, allow_rev8: bool) ?[]const u8 {
 /// instructions. The executable-section scan stays unconditional, and the
 /// `rev8` waiver never excuses actual atomics or floating-point instructions.
 const CheckOptions = struct {
-    require_target: bool = false,
+    target: TargetContract = .none,
     allow_attribute_a: bool = false,
     allow_rev8: bool = false,
 };
+
+const TargetContract = enum {
+    none,
+    rv64im,
+    rv64im_zicclsm,
+};
+
+const usage = "usage: check-guest-elf [--require-rv64im | --require-rv64im-zicclsm] [--allow-attribute-a] [--allow-rev8] ELF\n";
 
 const Options = struct {
     path: []const u8,
@@ -377,14 +392,18 @@ fn parseOptions(init: std.process.Init, allocator: Allocator) !Options {
     var check: CheckOptions = .{};
     while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
-        if (std.mem.eql(u8, arg, "--require-rv64im-zicclsm")) {
-            check.require_target = true;
+        if (std.mem.eql(u8, arg, "--require-rv64im")) {
+            if (check.target != .none) return error.InvalidArguments;
+            check.target = .rv64im;
+        } else if (std.mem.eql(u8, arg, "--require-rv64im-zicclsm")) {
+            if (check.target != .none) return error.InvalidArguments;
+            check.target = .rv64im_zicclsm;
         } else if (std.mem.eql(u8, arg, "--allow-attribute-a")) {
             check.allow_attribute_a = true;
         } else if (std.mem.eql(u8, arg, "--allow-rev8")) {
             check.allow_rev8 = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            std.debug.print("usage: check-guest-elf [--require-rv64im-zicclsm [--allow-attribute-a] [--allow-rev8]] ELF\n", .{});
+            std.debug.print(usage, .{});
             std.process.exit(0);
         } else if (std.mem.startsWith(u8, arg, "-") or path != null) {
             return error.InvalidArguments;
@@ -392,14 +411,14 @@ fn parseOptions(init: std.process.Init, allocator: Allocator) !Options {
             path = arg;
         }
     }
-    if ((check.allow_attribute_a or check.allow_rev8) and !check.require_target) return error.InvalidArguments;
+    if ((check.allow_attribute_a or check.allow_rev8) and check.target == .none) return error.InvalidArguments;
     return .{ .path = path orelse return error.InvalidArguments, .check = check };
 }
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const options = parseOptions(init, allocator) catch {
-        std.debug.print("usage: check-guest-elf [--require-rv64im-zicclsm [--allow-attribute-a] [--allow-rev8]] ELF\n", .{});
+        std.debug.print(usage, .{});
         std.process.exit(2);
     };
     const data = std.Io.Dir.cwd().readFileAlloc(init.io, options.path, allocator, max_elf_bytes) catch |err| {
@@ -470,7 +489,17 @@ test "opcode scan covers every executable section" {
 
 test "accepts required architecture attributes" {
     var checker: Checker = .{ .allocator = std.testing.allocator, .data = "" };
-    try checker.checkArchitecture("\x00rv64i2p1_m2p0_zicclsm1p0_zicsr2p0\x00", false);
+    try checker.checkArchitecture("\x00rv64i2p1_m2p0_zicclsm1p0_zicsr2p0\x00", .rv64im_zicclsm, false);
+    try checker.checkArchitecture("\x00rv64i2p1_m2p0_zicsr2p0\x00", .rv64im, false);
+}
+
+test "requires Zicclsm only for its target contract" {
+    var checker: Checker = .{ .allocator = std.testing.allocator, .data = "" };
+    try std.testing.expectError(
+        error.InvalidElf,
+        checker.checkArchitecture("\x00rv64i2p1_m2p0_zicsr2p0\x00", .rv64im_zicclsm, false),
+    );
+    try std.testing.expectEqualStrings("RISC-V target must declare Zicclsm", checker.failure);
 }
 
 test "rejects atomic architecture attributes" {
@@ -478,19 +507,19 @@ test "rejects atomic architecture attributes" {
     defer if (!std.mem.eql(u8, checker.failure, "invalid ELF")) std.testing.allocator.free(checker.failure);
     try std.testing.expectError(
         error.InvalidElf,
-        checker.checkArchitecture("\x00rv64i2p1_m2p0_zicclsm1p0_zaamo1p0_zalrsc1p0\x00", false),
+        checker.checkArchitecture("\x00rv64i2p1_m2p0_zicclsm1p0_zaamo1p0_zalrsc1p0\x00", .rv64im_zicclsm, false),
     );
     try std.testing.expectEqualStrings("RISC-V target declares forbidden extension: zaamo1p0", checker.failure);
 }
 
 test "waives only the atomic attribute family when allowed" {
     var checker: Checker = .{ .allocator = std.testing.allocator, .data = "" };
-    try checker.checkArchitecture("\x00rv64i2p1_m2p0_a2p1_zicclsm1p0_zaamo1p0_zalrsc1p0\x00", true);
+    try checker.checkArchitecture("\x00rv64i2p1_m2p0_a2p1_zicclsm1p0_zaamo1p0_zalrsc1p0\x00", .rv64im_zicclsm, true);
 
     defer if (!std.mem.eql(u8, checker.failure, "invalid ELF")) std.testing.allocator.free(checker.failure);
     try std.testing.expectError(
         error.InvalidElf,
-        checker.checkArchitecture("\x00rv64i2p1_m2p0_a2p1_zicclsm1p0_d2p2\x00", true),
+        checker.checkArchitecture("\x00rv64i2p1_m2p0_a2p1_zicclsm1p0_d2p2\x00", .rv64im_zicclsm, true),
     );
     try std.testing.expectEqualStrings("RISC-V target declares forbidden extension: d2p2", checker.failure);
 }

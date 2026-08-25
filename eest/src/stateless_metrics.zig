@@ -78,6 +78,7 @@ pub fn write(
             .output_matched = output_matched,
             .public_values = try .init(allocator, completed.output),
             .total_num_cycles = completed.cycles,
+            .region_cycles = .{ .trace_cells = completed.trace_cells },
             .execution_duration = durationJson(completed.duration_nanos),
         } },
     };
@@ -120,7 +121,7 @@ const Success = struct {
     output_matched: bool,
     public_values: PublicValuesHex,
     total_num_cycles: u64,
-    region_cycles: struct {} = .{},
+    region_cycles: struct { trace_cells: u64 },
     execution_duration: DurationJson,
 };
 
