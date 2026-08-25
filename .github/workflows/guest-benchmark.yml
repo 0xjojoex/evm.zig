@@ -445,7 +445,7 @@ jobs:
           test "${#fixture_roots[@]}" -gt 0
           zig build -Doptimize=ReleaseFast zkevm --summary all -- \
             --executor sp1 \
-            --jobs 1 \
+            --jobs 2 \
             --sp1-host "${SP1_HOST}" \
             --sp1-elf "${SP1_ELF}" \
             --output-folder "${GITHUB_WORKSPACE}/guest-evidence/rows" \
@@ -456,6 +456,7 @@ jobs:
           mkdir -p guest-evidence
           {
             echo "SP1 ${SP1_VERSION} (${SP1_COMMIT})"
+            echo "SP1 fixture workers 2"
             echo "ERE v0.16.2 provider with SP1 patch ${SP1_PROVIDER_COMMIT}"
             sha256sum "${SP1_HOST}" "${SP1_ELF}"
           } | tee guest-evidence/runtime.txt
