@@ -45,11 +45,16 @@ SECTIONS
     PROVIDE(__global_pointer$ = __data_start + 0x800);
     ASSERT(_heap_end <= 0x20000000, "evmz heap exceeds OpenVM memory")
 
+    /* Non-loaded ISA metadata consumed by check-guest-elf. */
+    .riscv.attributes 0 :
+    {
+        KEEP(*(.riscv.attributes))
+    }
+
     /DISCARD/ :
     {
         *(.comment)
         *(.note .note.*)
         *(.eh_frame .eh_frame.*)
-        *(.riscv.attributes)
     }
 }

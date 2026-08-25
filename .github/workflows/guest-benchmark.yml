@@ -324,7 +324,7 @@ jobs:
             --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/openvm/evmz-guest-openvm.elf"
-          zig build check-guest-elf -- "${elf}"
+          zig build check-guest-elf -- --require-rv64im "${elf}"
           {
             echo "OPENVM_ELF=${elf}"
             echo "OPENVM_HOST=${RUNNER_TEMP}/openvm-host-target/release/evmz-openvm-host"

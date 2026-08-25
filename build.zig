@@ -468,8 +468,8 @@ pub fn build(b: *std.Build) void {
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write zkVM public output");
     const guest_payload = b.option(GuestPayload, "guest-payload", "Guest payload") orelse .@"stateless-ere";
     const guest_zisk_strip = b.option(bool, "guest-zisk-strip", "Strip symbols from the ZisK guest ELF") orelse false;
-    const guest_sp1_strip = b.option(bool, "guest-sp1-strip", "Strip symbols from the SP1 guest ELF") orelse true;
-    const guest_openvm_strip = b.option(bool, "guest-openvm-strip", "Strip symbols from the OpenVM guest ELF") orelse true;
+    const guest_sp1_strip = b.option(bool, "guest-sp1-strip", "Strip symbols from the SP1 guest ELF") orelse false;
+    const guest_openvm_strip = b.option(bool, "guest-openvm-strip", "Strip symbols from the OpenVM guest ELF") orelse false;
     const guest_zisk_profile_tags = b.option(bool, "guest-zisk-profile-tags", "Instrument ZisK stateless validation phases") orelse false;
     const guest_heap_metrics = b.option(bool, "guest-heap-metrics", "Meter guest fixed-heap usage") orelse false;
     addGuest(
