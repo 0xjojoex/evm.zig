@@ -158,13 +158,14 @@ backend manifest. The manifest records the source, qualification run, keygen
 image, compatibility identity, and hashes of the ELF, VK, evidence, and report.
 Its signature is the completed-slot marker.
 
-The first completed run creates the fixed Git tag and draft. Rerunning a
-backend replaces only that backend's draft slot and uploads the signed manifest
-last. Existing signed slots must use the same schema and corpus. Review the
-three signed slots in the draft, then publish the prerelease manually in
-GitHub. Backend qualification commits may differ and may be outside `main`;
-their signed manifests and evidence retain the byte-level provenance. The
-guest version is shared, matching `ere-guests`' `artifacts[]` model.
+The first completed run uses the requested Git tag, creating it if absent, and
+creates the draft. Rerunning a backend replaces only that backend's draft slot
+and uploads the signed manifest last. Existing signed slots must use the same
+schema and corpus. Review the three signed slots in the draft, then publish the
+prerelease manually in GitHub. Backend qualification commits may differ and
+may be outside `main`; their signed manifests and evidence retain the
+byte-level provenance. The guest version is shared, matching `ere-guests`'
+`artifacts[]` model.
 
 `zig build zkevm -- --executor zisk|sp1|openvm` runs the same ERE-shaped
 measurements locally. All three use the same persistent host protocol and

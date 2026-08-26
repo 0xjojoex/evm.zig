@@ -346,13 +346,7 @@ jobs:
               exit 1
             }
           else
-            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null 2>&1; then
-              git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
-              test "$(git rev-list -n 1 "${TAG}")" = "$(jq -er .source_ref "${EVIDENCE}")" || {
-                echo "${TAG} already points to another commit" >&2
-                exit 1
-              }
-            else
+            if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null 2>&1; then
               git tag -- "${TAG}" "$(jq -er .source_ref "${EVIDENCE}")"
               git push origin "refs/tags/${TAG}"
             fi

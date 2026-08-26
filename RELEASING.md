@@ -151,9 +151,9 @@ existing tag syntax.
 each selected backend. ZisK, SP1, and OpenVM qualification, key generation, and
 signing may run in parallel. The workflow serializes only the final draft
 update, so concurrent runs cannot mutate the release at the same time. The
-first update creates and pushes the Git tag at its qualified source commit,
-then creates the draft from that verified tag. The tag is a fixed release
-anchor; later backend runs record their own source commits.
+first update uses the requested remote Git tag, creating it at its qualified
+source commit if absent, then creates the draft from that verified tag. The tag
+is a fixed release anchor; later backend runs record their own source commits.
 
 Each run calls `Guest benchmark` for its selected backend, verifies the strict
 evidence and tested ELF hash, generates the VK, and signs the ELF, VK, and
