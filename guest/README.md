@@ -48,7 +48,7 @@ an existing checkout of the pinned commit. The provider is built with
 The pinned CI build uses this target policy. A provider built without it produces
 a different guest ELF and verification key.
 
-SP1 uses the repo-owned ERE v0.16.2 platform provider. Install the matching
+SP1 uses the repo-owned ERE v0.16.3 platform provider. Install the matching
 SP1 v6.4.0 toolchain once:
 
 ```sh
@@ -86,7 +86,7 @@ zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dstateless-schema=0x1501
 ```
 
-The build links OpenVM's official startup and ERE v0.16.2's
+The build links OpenVM's official startup and ERE v0.16.3's
 `ere-platform-openvm` implementation of the accelerator ABI. The repo-owned
 Rust crate only bridges Zig input and output to that platform. Its build checks
 the startup, I/O, and accelerator symbols before linking.
@@ -152,7 +152,7 @@ separate reporting script or stored release baseline.
 
 `Guest release` qualifies and stages one backend at a time against the strict
 corpus. Each stage verifies the selected artifact's source commit and ELF hash,
-generates its VK with the digest-pinned ERE 0.16.2 server image, and appends the
+generates its VK with the digest-pinned ERE 0.16.3 server image, and appends the
 ELF, VK, report, and evidence to one tag-scoped draft. A backend manifest is
 uploaded last and records the source, qualification run, keygen image, and
 hashes of all four files. The first stage creates the fixed Git tag; later

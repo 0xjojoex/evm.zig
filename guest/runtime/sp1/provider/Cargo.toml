@@ -10,7 +10,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.3" }
 
 # Match ERE's SP1 guests until the standards-conformance fixes in SP1 #2865
 # are released upstream.
@@ -28,4 +28,3 @@ opt-level = 3
 panic = "abort"
 lto = true
 codegen-units = 1
-

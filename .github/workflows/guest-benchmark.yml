@@ -527,7 +527,7 @@ jobs:
           {
             echo "SP1 ${SP1_VERSION} (${SP1_COMMIT})"
             echo "SP1 fixture workers 4"
-            echo "ERE v0.16.2 provider with SP1 patch ${SP1_PROVIDER_COMMIT}"
+            echo "ERE v0.16.3 provider with SP1 patch ${SP1_PROVIDER_COMMIT}"
             sha256sum "${SP1_HOST}" "${SP1_ELF}"
           } | tee guest-evidence/runtime.txt
 

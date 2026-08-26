@@ -488,13 +488,13 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ere-platform-core"
-version = "0.16.2"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.16.2#8961a4e7ac5c9ca2dc6a2fc848452f23a186b1aa"
+version = "0.16.3"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.16.3#e115f4ffb46c614db9cb0bb1024f3f45326565ce"
 
 [[package]]
 name = "ere-platform-openvm"
-version = "0.16.2"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.16.2#8961a4e7ac5c9ca2dc6a2fc848452f23a186b1aa"
+version = "0.16.3"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.16.3#e115f4ffb46c614db9cb0bb1024f3f45326565ce"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
