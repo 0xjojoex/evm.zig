@@ -1172,11 +1172,9 @@ pub const NormalizedInput = struct {
     input: input_mod.Input,
     transactions: transaction_raw.DecodedBatch,
     withdrawals: []const Withdrawal,
-    execution_requests: []const []const u8,
 
     pub fn deinit(self: *NormalizedInput, allocator: std.mem.Allocator) void {
         self.transactions.deinit(allocator);
-        freeOpaqueRequests(allocator, self.execution_requests);
         allocator.free(self.withdrawals);
         self.* = undefined;
     }
@@ -1187,11 +1185,11 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!Norm
     const payload = input.new_payload_request.payloadView();
     const withdrawals = payload.withdrawals;
 
-    const execution_requests = if (input.new_payload_request.executionRequests()) |requests|
-        try requests.typedOpaqueRequests(allocator)
-    else
-        &.{};
-    errdefer freeOpaqueRequests(allocator, execution_requests);
+    const requests_hash = if (input.new_payload_request.executionRequests()) |requests| hash: {
+        const opaque_requests = try requests.typedOpaqueRequests(allocator);
+        defer freeOpaqueRequests(allocator, opaque_requests);
+        break :hash try block_stf.requestsHash(allocator, opaque_requests);
+    } else null;
     var transactions = try normalizeTransactions(
         allocator,
         payload.transactions,
@@ -1223,7 +1221,7 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!Norm
                 .excess_blob_gas = payload.excess_blob_gas,
                 .versioned_hashes = input.new_payload_request.versionedHashes(),
                 .parent_beacon_block_root = input.new_payload_request.parentBeaconBlockRoot(),
-                .execution_requests = execution_requests,
+                .requests_hash = requests_hash,
                 .block_access_list = if (revision.isImpl(.amsterdam)) payload.block_access_list else null,
                 .slot_number = payload.slot_number,
             },
@@ -1235,7 +1233,6 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!Norm
         },
         .transactions = transactions,
         .withdrawals = withdrawals,
-        .execution_requests = execution_requests,
     };
 }
 

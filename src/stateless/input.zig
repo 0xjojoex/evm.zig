@@ -37,7 +37,10 @@ pub const Block = struct {
     excess_blob_gas: ?u64 = null,
     versioned_hashes: []const [32]u8 = &.{},
     parent_beacon_block_root: ?[32]u8 = null,
-    execution_requests: []const []const u8 = &.{},
+    /// Header commitment for execution-derived requests. Engine API adapters
+    /// derive it from request bytes; historical importers read the authenticated
+    /// value directly from the execution header.
+    requests_hash: ?[32]u8 = null,
     block_access_list: ?[]const u8 = null,
     slot_number: u64 = 0,
 };

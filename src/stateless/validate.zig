@@ -220,10 +220,7 @@ fn validateExact(
             .logs_bloom = block.logs_bloom,
             .blob_gas_used = block.blob_gas_used,
             .excess_blob_gas = try expectedExcessBlobGas(revision, block),
-            .requests_hash = if (revision.isImpl(.prague))
-                try block_stf.requestsHash(allocator, block.execution_requests)
-            else
-                null,
+            .requests_hash = block.requests_hash,
         },
         .header_hash_claim = .{
             .block_hash = block.block_hash,
@@ -273,7 +270,7 @@ fn blockShapeValid(revision: Revision, block: *const input_mod.Block) bool {
     if (has_cancun) {
         if (!versionedHashesMatch(block.transactions, block.versioned_hashes)) return false;
     } else if (block.versioned_hashes.len != 0) return false;
-    if (!revision.isImpl(.prague) and block.execution_requests.len != 0) return false;
+    if ((block.requests_hash != null) != revision.isImpl(.prague)) return false;
 
     if (revision.isImpl(.amsterdam)) {
         if (block.block_access_list == null) return false;
@@ -557,7 +554,19 @@ test "normalized stateless block shape uses actual fields" {
     extra_hash.versioned_hashes = &.{ expected_hashes[0], expected_hashes[1], expected_hashes[0] };
     try std.testing.expect(!blockShapeValid(.cancun, &extra_hash));
 
-    var amsterdam = cancun;
+    var premature_requests_hash = cancun;
+    premature_requests_hash.requests_hash = block_stf.empty_requests_hash;
+    try std.testing.expect(!blockShapeValid(.cancun, &premature_requests_hash));
+
+    var prague = cancun;
+    prague.requests_hash = block_stf.empty_requests_hash;
+    try std.testing.expect(blockShapeValid(.prague, &prague));
+
+    var missing_requests_hash = prague;
+    missing_requests_hash.requests_hash = null;
+    try std.testing.expect(!blockShapeValid(.prague, &missing_requests_hash));
+
+    var amsterdam = prague;
     amsterdam.block_access_list = &.{};
     try std.testing.expect(blockShapeValid(.amsterdam, &amsterdam));
 
