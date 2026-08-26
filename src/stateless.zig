@@ -30,6 +30,8 @@ pub const ValidationOptions = validator.Options;
 pub const CommitOutput = validator.CommitOutput;
 pub const Validator = validator.Validator;
 pub const ValidatorWithOptions = validator.ValidatorWithOptions;
+pub const RevisionValidator = validator.RevisionValidator;
+pub const RevisionValidatorWithOptions = validator.RevisionValidatorWithOptions;
 pub const testing = struct {
     pub const TrackedValidator = validator.TrackedValidator;
 };

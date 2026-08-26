@@ -11,6 +11,7 @@ const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
 const eth_header = @import("../eth/header.zig");
+const eth_spec = @import("../eth/spec.zig");
 const input_mod = @import("./input.zig");
 const trie = @import("../eth/trie.zig");
 const rlp = @import("rlp");
@@ -65,6 +66,28 @@ pub fn TrackedValidator(comptime spec: Spec) type {
     return ValidatorType(block_stf.Bind(
         .amsterdam,
         Vm.VmWithOptions(spec, .{ .step_capture = true }),
+    ));
+}
+
+/// Stateless validator for a canonical revision before Amsterdam. The revision
+/// selects both the header lineage and its matching tracked-state VM. Opcode
+/// capture is excluded; diagnostic callers opt in through
+/// `RevisionValidatorWithOptions`.
+pub fn RevisionValidator(comptime revision: Revision) type {
+    return RevisionValidatorWithOptions(revision, .{});
+}
+
+pub fn RevisionValidatorWithOptions(
+    comptime revision: Revision,
+    comptime options: Vm.CompileOptions,
+) type {
+    switch (revision) {
+        .prague, .osaka => {},
+        else => @compileError("revision stateless validation supports Prague and Osaka"),
+    }
+    return ValidatorType(block_stf.Bind(
+        revision,
+        Vm.VmWithOptions(eth_spec.specAt(revision), options),
     ));
 }
 
@@ -601,6 +624,23 @@ test "stateless block errors preserve witness and body taxonomy" {
         (try mapBlockError(error.WithdrawalBalanceOverflow)).status,
     );
     try std.testing.expectError(error.BlockTransitionFailed, mapBlockError(error.CodeUnavailable));
+}
+
+test "revision stateless validator binds matching tracked specs" {
+    const Prague = RevisionValidator(.prague);
+    const Osaka = RevisionValidator(.osaka);
+    const CapturingPrague = RevisionValidatorWithOptions(.prague, .{ .step_capture = true });
+
+    comptime {
+        std.debug.assert(Prague.fork == .prague);
+        std.debug.assert(Prague.BlockStf.spec.transaction.regular_gas_cap == null);
+        std.debug.assert(Prague.BlockStf.Vm.Executor.State == state.TrackedState);
+        std.debug.assert(!Prague.compile_options.step_capture);
+        std.debug.assert(CapturingPrague.compile_options.step_capture);
+        std.debug.assert(Osaka.fork == .osaka);
+        std.debug.assert(Osaka.BlockStf.spec.transaction.regular_gas_cap != null);
+        std.debug.assert(Osaka.BlockStf.Vm.Executor.State == state.TrackedState);
+    }
 }
 
 test "shape rejection clears reused commit output" {
