@@ -2071,7 +2071,11 @@ fn dropsEmptyAccount(self: *const TrackedState, account: Account) bool {
 }
 
 fn loadAcceptedAccount(self: *TrackedState, address: Address) !AccountValue {
-    if (self.accepted.accounts.get(address)) |row| {
+    // One probe serves the hit check and the write-back: neither the reader
+    // nor emptiness resolution touches the accepted map, so the row pointer
+    // stays valid across the load.
+    const existing = self.accepted.accounts.getPtr(address);
+    if (existing) |row| {
         switch (row.value) {
             .loaded, .absent => return row.value,
             .exists_only => {},
@@ -2082,7 +2086,7 @@ fn loadAcceptedAccount(self: *TrackedState, address: Address) !AccountValue {
         if (self.dropsEmptyAccount(account)) .absent else .{ .loaded = account }
     else
         .absent;
-    if (self.accepted.accounts.getPtr(address)) |row| {
+    if (existing) |row| {
         row.value = value;
     } else {
         try self.accepted.accounts.put(address, .{ .value = value });
@@ -2226,11 +2230,16 @@ fn appendCodeChunk(self: *TrackedState, required_bytes: usize) !usize {
 }
 
 fn readAcceptedStorage(self: *TrackedState, key: StorageKey) !u256 {
-    if (self.accepted.storage.get(key)) |row| {
+    // One probe serves every branch; the wipe check probes the accounts map
+    // only when some accepted account was actually wiped (the flag is set
+    // exactly where `storage_wipes` appends, so the list length gates it).
+    const existing = self.accepted.storage.getPtr(key);
+    if (existing) |row| {
         if (row.changed) return row.value;
     }
-    if (acceptedStorageWiped(&self.accepted, key.address)) return 0;
-    if (self.accepted.storage.get(key)) |row| return row.value;
+    if (self.accepted.storage_wipes.items.len != 0 and
+        acceptedStorageWiped(&self.accepted, key.address)) return 0;
+    if (existing) |row| return row.value;
     const value = if (self.reader) |reader|
         try reader.getStorage(key.address, key.key)
     else
