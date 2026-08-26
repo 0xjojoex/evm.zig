@@ -47,7 +47,9 @@ jobs:
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    environment: release
+    environment:
+      name: release
+      deployment: false
     permissions:
       contents: read
 
@@ -247,7 +249,9 @@ jobs:
     concurrency:
       group: guest-release-draft-${{ inputs.tag }}
       cancel-in-progress: false
-    environment: release
+    environment:
+      name: release
+      deployment: false
     permissions:
       contents: write
 
