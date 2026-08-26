@@ -105,9 +105,8 @@ pub fn bindAssumeSorted(
                             pop(workspace);
                             continue;
                         };
-                        const child = try followRequired(
-                            node.extensionChild() orelse return error.InvalidNodeReference,
-                        );
+                        const child = try (node.extensionChild() orelse
+                            return error.InvalidNodeReference).followRequired();
                         const child_node = topology.node(child) orelse return error.InvalidNodeReference;
                         if (child_node.kind != .branch) return error.NonCanonicalNode;
                         frame.* = .{
@@ -140,7 +139,7 @@ pub fn bindAssumeSorted(
                 branch.next = group_end;
                 const children = topology.branchChildren(frame.node) orelse
                     return error.InvalidNodeReference;
-                const child = (try follow(children[selected])) orelse {
+                const child = (try children[selected].follow()) orelse {
                     @memset(results[group_begin..group_end], .{ .absent = .missing_branch_child });
                     continue;
                 };
@@ -175,18 +174,6 @@ fn push(workspace: *BindWorkspace, frame: Frame) void {
 fn pop(workspace: *BindWorkspace) void {
     std.debug.assert(workspace.len != 0);
     workspace.len -= 1;
-}
-
-fn followRequired(link: Catalog.Link) Error!Catalog.NodeId {
-    return (try follow(link)) orelse return error.InvalidNodeReference;
-}
-
-fn follow(link: Catalog.Link) Error!?Catalog.NodeId {
-    return switch (link) {
-        .empty => null,
-        .@"opaque" => error.MissingNode,
-        _ => link.node() orelse error.InvalidNodeReference,
-    };
 }
 
 fn validateSortedKeys(keys: []const FixedKey) BatchLookupError!void {

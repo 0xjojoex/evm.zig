@@ -63,6 +63,8 @@ pub const Catalog = struct {
         @"opaque" = std.math.maxInt(u32) - 1,
         _,
 
+        pub const FollowError = error{ MissingNode, InvalidNodeReference };
+
         fn fromNode(id: NodeId) Link {
             return @enumFromInt(@intFromEnum(id));
         }
@@ -71,6 +73,18 @@ pub const Catalog = struct {
             const raw = @intFromEnum(self);
             if (raw >= @intFromEnum(Link.@"opaque")) return null;
             return @enumFromInt(raw);
+        }
+
+        pub fn follow(self: Link) FollowError!?NodeId {
+            return switch (self) {
+                .empty => null,
+                .@"opaque" => error.MissingNode,
+                _ => self.node() orelse error.InvalidNodeReference,
+            };
+        }
+
+        pub fn followRequired(self: Link) FollowError!NodeId {
+            return (try self.follow()) orelse error.InvalidNodeReference;
         }
 
         comptime {
@@ -281,7 +295,8 @@ pub const Catalog = struct {
                 .extension => {
                     const path = current_node.path() orelse return error.InvalidNode;
                     if (!path.matchesKey(key, depth)) return .{ .absent = .divergent_path };
-                    current = try followRequired(current_node.extensionChild() orelse return error.InvalidNodeReference);
+                    current = try (current_node.extensionChild() orelse
+                        return error.InvalidNodeReference).followRequired();
                     depth += path.len;
                 },
                 .branch => {
@@ -294,24 +309,12 @@ pub const Catalog = struct {
                     if (depth > key_nibbles) return error.InvalidNode;
                     const children = self.branchChildren(current) orelse return error.InvalidNodeReference;
                     const selected = children[nibble.keyNibbleAt(key, depth)];
-                    current = (try follow(selected)) orelse
+                    current = (try selected.follow()) orelse
                         return .{ .absent = .missing_branch_child };
                     depth += 1;
                 },
             }
         }
-    }
-
-    fn followRequired(link: Link) errors.LookupError!NodeId {
-        return (try follow(link)) orelse return error.InvalidNodeReference;
-    }
-
-    fn follow(link: Link) errors.LookupError!?NodeId {
-        return switch (link) {
-            .empty => null,
-            .@"opaque" => error.MissingNode,
-            _ => link.node() orelse error.InvalidNodeReference,
-        };
     }
 
     /// Batch-bind sorted unique fixed keys against the sealed catalog after
