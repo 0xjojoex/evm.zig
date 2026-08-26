@@ -54,6 +54,7 @@ pub const Entry = construct.Entry;
 pub const Update = sparse.Update;
 pub const FixedKey = fixed_key.FixedKey;
 pub const FixedUpdate = occurrence.Update;
+pub const NodeUpdates = occurrence.NodeUpdates;
 
 pub const Lookup = proof.Lookup;
 pub const Absence = proof.Absence;
@@ -203,20 +204,44 @@ pub fn Trie(comptime KeccakContext: type) type {
             source: anytype,
             updates: []const FixedUpdate,
         ) (std.mem.Allocator.Error || UpdateError)!Root {
+            return self.updateFixedMode(region, source, updates, {});
+        }
+
+        /// Apply sorted fixed-key updates and retain content-addressed dirty
+        /// nodes in caller-owned storage before the region is rewound.
+        pub fn updateFixedSortedWithNodeUpdates(
+            self: Self,
+            region: *Region,
+            source: anytype,
+            updates: []const FixedUpdate,
+            node_updates: *NodeUpdates,
+        ) (std.mem.Allocator.Error || UpdateError)!Root {
+            return self.updateFixedMode(region, source, updates, node_updates);
+        }
+
+        fn updateFixedMode(
+            self: Self,
+            region: *Region,
+            source: anytype,
+            updates: []const FixedUpdate,
+            node_updates: anytype,
+        ) (std.mem.Allocator.Error || UpdateError)!Root {
             return switch (comptime sourceModeOf(@TypeOf(source))) {
-                .witness => occurrence.updateIndexSorted(
+                .witness => occurrence.updateIndexSortedWithUpdates(
                     self.keccak_context,
                     region,
                     source.root,
                     proof.sealedIndex(source.index),
                     updates,
+                    node_updates,
                 ),
-                .catalog => occurrence.updateCatalogSorted(
+                .catalog => occurrence.updateCatalogSortedWithUpdates(
                     self.keccak_context,
                     region,
                     source.topology,
                     source.root,
                     updates,
+                    node_updates,
                 ),
             };
         }
@@ -279,10 +304,38 @@ pub fn Trie(comptime KeccakContext: type) type {
                     source: anytype,
                     updates: []const KeyedSelf.Update,
                 ) (std.mem.Allocator.Error || UpdateError)!Root {
+                    return self.updateMode(region, source, updates, {});
+                }
+
+                pub fn updateWithNodeUpdates(
+                    self: KeyedSelf,
+                    region: *Region,
+                    source: anytype,
+                    updates: []const KeyedSelf.Update,
+                    node_updates: *NodeUpdates,
+                ) (std.mem.Allocator.Error || UpdateError)!Root {
+                    return self.updateMode(region, source, updates, node_updates);
+                }
+
+                fn updateMode(
+                    self: KeyedSelf,
+                    region: *Region,
+                    source: anytype,
+                    updates: []const KeyedSelf.Update,
+                    node_updates: anytype,
+                ) (std.mem.Allocator.Error || UpdateError)!Root {
                     const mark = region.mark();
                     defer region.rewind(mark);
                     const structural_updates = try self.project(region, updates);
-                    return self.structural.updateFixedSorted(region, source, structural_updates);
+                    return if (comptime @TypeOf(node_updates) == void)
+                        self.structural.updateFixedSorted(region, source, structural_updates)
+                    else
+                        self.structural.updateFixedSortedWithNodeUpdates(
+                            region,
+                            source,
+                            structural_updates,
+                            node_updates,
+                        );
                 }
 
                 fn project(

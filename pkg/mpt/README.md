@@ -38,6 +38,10 @@ bending one general trie to every phase:
   untouched children stay authenticated references, and dirty nodes encode
   once at the end.
 
+Optional `NodeUpdates` output retains each dirty root or hashed child as its
+already-computed digest plus encoded bytes. Embedded children remain part of
+their parent encoding and are not emitted as independent persistence records.
+
 The overlay fits hashed keys well: Keccak-derived keys disperse quickly, so an
 update batch shares little deep topology. Memoizing each materialized path
 across the batch captures the sharing that does exist, without dedicated batch

@@ -902,6 +902,71 @@ test "occurrence catalog update accepts an empty update batch" {
     try std.testing.expectEqualSlices(u8, &mpt.empty_root, &actual);
 }
 
+test "occurrence updates expose content-addressed dirty nodes" {
+    const trie = mpt.init(std.testing.allocator);
+    var first = fixedKey(0);
+    first[31] = 1;
+    var second = fixedKey(0);
+    second[31] = 2;
+    const update = [_]mpt.FixedUpdate{
+        .{ .key = first, .value = &[_]u8{0x01} },
+        .{ .key = second, .value = &[_]u8{0x02} },
+    };
+
+    var indexed_region = mpt.Region.init(std.testing.allocator);
+    defer indexed_region.deinit();
+    var indexed_nodes = mpt.NodeUpdates.init(std.testing.allocator);
+    defer indexed_nodes.deinit();
+    const indexed_root = try trie.updateFixedSortedWithNodeUpdates(
+        &indexed_region,
+        mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
+        &update,
+        &indexed_nodes,
+    );
+    // The leaves and branch are embedded into the root extension, so only the
+    // independently content-addressed root is retained.
+    try std.testing.expectEqual(@as(usize, 1), indexed_nodes.len());
+    const indexed_root_update = indexed_nodes.at(indexed_nodes.len() - 1);
+    try std.testing.expectEqualSlices(
+        u8,
+        &indexed_root,
+        &indexed_root_update.digest,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &indexed_root_update.digest,
+        &mpt.StdKeccak256Context.keccak256(.{}, indexed_root_update.bytes),
+    );
+
+    var catalog_builder = try mpt.Catalog.Builder.init(trie.allocator, mpt.WitnessIndex.empty);
+    defer catalog_builder.deinit();
+    const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
+    var catalog = try catalog_builder.finish();
+    defer catalog.deinit();
+    var catalog_region = mpt.Region.init(std.testing.allocator);
+    defer catalog_region.deinit();
+    var catalog_nodes = mpt.NodeUpdates.init(std.testing.allocator);
+    defer catalog_nodes.deinit();
+    const catalog_root = try trie.updateFixedSortedWithNodeUpdates(
+        &catalog_region,
+        mpt.catalogSource(&catalog, root_ref),
+        &update,
+        &catalog_nodes,
+    );
+    try std.testing.expectEqual(@as(usize, 1), catalog_nodes.len());
+    const catalog_root_update = catalog_nodes.at(catalog_nodes.len() - 1);
+    try std.testing.expectEqualSlices(
+        u8,
+        &catalog_root,
+        &catalog_root_update.digest,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &catalog_root_update.digest,
+        &mpt.StdKeccak256Context.keccak256(.{}, catalog_root_update.bytes),
+    );
+}
+
 test "occurrence catalog update replaces, splits, deletes, and compresses catalog leaf" {
     const trie = mpt.init(std.testing.allocator);
     const first = fixedKey(0x10);
