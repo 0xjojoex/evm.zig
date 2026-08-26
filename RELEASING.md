@@ -147,29 +147,33 @@ existing tag syntax.
 
 ### Cutting a guest release
 
-`Guest release` assembles one release through an append-only draft. For each
-backend, dispatch the intended tag with operation `stage` and select ZisK, SP1,
-or OpenVM. The first stage creates and pushes the Git tag at its qualified
-source commit, then creates the draft from that verified tag. The tag is only a
-fixed release anchor: later stages never move it and record their own source
-commits.
+`Guest release` maintains a mutable draft. Dispatch the intended tag once for
+each selected backend. ZisK, SP1, and OpenVM qualification, key generation, and
+signing may run in parallel. The workflow serializes only the final draft
+update, so concurrent runs cannot mutate the release at the same time. The
+first update creates and pushes the Git tag at its qualified source commit,
+then creates the draft from that verified tag. The tag is a fixed release
+anchor; later backend runs record their own source commits.
 
-Each stage calls `Guest benchmark` for only the selected backend, verifies the
-strict evidence and ELF hash, generates its VK, and uploads the ELF, VK,
-evidence, and report one at a time. It uploads `backend-<backend>.json` last as
-the completed-slot marker. That manifest records the qualification run, source
+Each run calls `Guest benchmark` for its selected backend, verifies the strict
+evidence and tested ELF hash, generates the VK, and signs the ELF, VK, and
+`backend-<backend>.json`. The manifest records the qualification run, source
 commit, exact digest-pinned keygen image, compatibility identity, and SHA-256 of
-every backend file. Retries accept identical files, fill missing files, and
-reject different bytes rather than replacing an asset. A completed backend
-with the same ELF is a no-op; a different ELF or corpus requires a new tag.
+the ELF, VK, evidence, and report. Its `.minisig` file is the completed-slot
+marker and covers the evidence and report through their recorded hashes.
 
-After all three backend manifests are present, dispatch the same tag with
-operation `publish`. Publication downloads the complete draft, requires
-matching schema and corpus identities, rechecks every staged file against its
-manifest, writes and signs the combined checksums, builds the notes from the
-stored manifests, and only then publishes the prerelease. Published assets are
-never appended or overwritten by the workflow; repository-level immutable
-releases should be enabled for server-side enforcement.
+Rerunning a backend removes that slot's manifest signature first, replaces its
+draft assets, and uploads the new signed manifest last. A failed replacement
+therefore leaves the slot visibly incomplete and another run can repair it.
+The upload checks every other completed slot's signature and requires the same
+schema and corpus identity. It also rebuilds the draft notes with the current
+status and provenance of all three slots.
+
+After all three signed manifests are present, review the draft assets and notes
+in GitHub and publish the prerelease manually. Publication is the immutability
+boundary. The workflow refuses to modify a release after publication;
+repository-level immutable releases should remain enabled for server-side
+enforcement.
 
 Qualification commits may differ because backend integration and release
 tooling can advance independently. Each manifest and evidence record still has

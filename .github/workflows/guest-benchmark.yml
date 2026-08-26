@@ -59,7 +59,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-tests-zkevm
+  # Release callers use their run ID so backend qualifications can overlap.
+  group: guest-benchmark-${{ inputs.release_gate && github.run_id || github.event.pull_request.number || github.ref_name }}-tests-zkevm
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

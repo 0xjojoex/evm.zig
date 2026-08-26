@@ -150,18 +150,21 @@ an aggregated report, and one `evidence.json`. Reports identify the backend's
 primary metric, optional secondary metric, and execution duration; there is no
 separate reporting script or stored release baseline.
 
-`Guest release` qualifies and stages one backend at a time against the strict
-corpus. Each stage verifies the selected artifact's source commit and ELF hash,
-generates its VK with the digest-pinned ERE 0.16.3 server image, and appends the
-ELF, VK, report, and evidence to one tag-scoped draft. A backend manifest is
-uploaded last and records the source, qualification run, keygen image, and
-hashes of all four files. The first stage creates the fixed Git tag; later
-stages never retarget it. Publishing is a separate dispatch: it requires ZisK,
-SP1, and OpenVM manifests, verifies their shared schema and corpus identity,
-signs the combined bundle, and makes the prerelease public. Backend
-qualification commits may differ and may be outside `main`; their manifests
-and evidence remain the byte-level provenance. The guest version is shared,
-matching `ere-guests`' `artifacts[]` model.
+`Guest release` qualifies and signs one selected backend against the strict
+corpus. ZisK, SP1, and OpenVM runs may execute in parallel; only their short
+draft updates are serialized. Each run verifies its tested ELF, generates the
+VK with the digest-pinned ERE 0.16.3 server image, and signs the ELF, VK, and
+backend manifest. The manifest records the source, qualification run, keygen
+image, compatibility identity, and hashes of the ELF, VK, evidence, and report.
+Its signature is the completed-slot marker.
+
+The first completed run creates the fixed Git tag and draft. Rerunning a
+backend replaces only that backend's draft slot and uploads the signed manifest
+last. Existing signed slots must use the same schema and corpus. Review the
+three signed slots in the draft, then publish the prerelease manually in
+GitHub. Backend qualification commits may differ and may be outside `main`;
+their signed manifests and evidence retain the byte-level provenance. The
+guest version is shared, matching `ere-guests`' `artifacts[]` model.
 
 `zig build zkevm -- --executor zisk|sp1|openvm` runs the same ERE-shaped
 measurements locally. All three use the same persistent host protocol and
