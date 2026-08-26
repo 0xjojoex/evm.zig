@@ -14,18 +14,18 @@ direct`:
 zig build -Doptimize=ReleaseFast eest-consume -- --no-html -n 4
 ```
 
-The default source is `tests-glamsterdam-devnet@latest`. Pass another upstream
-release selector or a local fixture directory with `--input`:
+The default source is pinned in `eest/build.zig` . Pass another
+upstream release selector or a local fixture directory with `--input`:
 
 ```sh
 zig build eest-consume -- --input=tests@latest -k add11
 zig build eest-consume -- --input=/path/to/fixtures -m state_test
 ```
 
-The execution-specs packages are pinned in `consume/uv.lock`; fixture releases
-are not pinned in this repository. `@latest` is resolved by execution-specs,
-and CI records the exact resolved release where evidence needs an immutable
-corpus identity.
+The execution-specs packages are pinned in `consume/uv.lock`, and the default
+execution and zkEVM fixture releases are pinned in `eest/build.zig`. Callers can
+still request `@latest` explicitly for a rolling diagnostic; CI evidence uses
+the repository defaults and records the resolved corpus identity.
 
 `evmz-eest` provides the deliberately small process boundary consumed by the
 pytest plugins:
@@ -141,14 +141,14 @@ source release, which must match the archive release in
 
 ## Ownership summary
 
-| Lane | Source/orchestration owner | evmz-owned code |
-| --- | --- | --- |
-| State fixtures | execution-specs `consume direct` | fixture-to-TransactionSTF adapter |
-| Blockchain fixtures | execution-specs `consume direct` | fixture-to-BlockSTF adapter |
-| zkEVM native corpus | execution-specs `consume direct` | stateless block adapter and oracle |
-| zkVM guest corpus | execution-specs resolver manifest | persistent guest executor/evidence |
-| Witness mutations | execution-specs resolver manifest | bounded semantic mutations |
-| Consensus SSZ | consensus-spec release archives | SSZ conformance adapter and schemas |
+| Lane                | Source/orchestration owner        | evmz-owned code                     |
+| ------------------- | --------------------------------- | ----------------------------------- |
+| State fixtures      | execution-specs `consume direct`  | fixture-to-TransactionSTF adapter   |
+| Blockchain fixtures | execution-specs `consume direct`  | fixture-to-BlockSTF adapter         |
+| zkEVM native corpus | execution-specs `consume direct`  | stateless block adapter and oracle  |
+| zkVM guest corpus   | execution-specs resolver manifest | persistent guest executor/evidence  |
+| Witness mutations   | execution-specs resolver manifest | bounded semantic mutations          |
+| Consensus SSZ       | consensus-spec release archives   | SSZ conformance adapter and schemas |
 
 BlockSTF owns execution ordering and typed engine errors. The EEST adapter owns
 only fixture decoding and mapping those typed results to EEST exception names.

@@ -11,51 +11,67 @@ complete upstream fixture release: `guest-<track>@vX.Y.Z-rc.0` pairs with
 The independently numbered `tests-zkevm` wire/corpus release is also recorded.
 Devnet tracks carry no compatibility guarantee at any bump; the release
 manifest states what an ELF proves, the stateless schema id is the wire
-compatibility token, and the verification key identifies the exact bytes. See
+compatibility token, and each backend verification key identifies its exact
+ELF bytes. See
 [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
 
 ## Building
+
+The native benchmark hosts and their shared protocol are one Cargo workspace at
+`guest/runtime/Cargo.toml`. Its OpenVM host follows ERE's compatibility patch,
+which places OpenVM's stable Plonky3 crates on a separate Git source from SP1's
+`0.4.3-succinct` crates. Guest provider crates remain standalone because their
+locks define static archives built by backend-specific Rust toolchains.
+
+Zig codegen follows each backend's effective guest policy: ZisK enables Zbb,
+Zbs, Zbkb, and the screened efficient-unaligned-memory tuning; SP1 remains
+RV64IM; OpenVM enables Zicclsm and efficient unaligned scalar memory. Zig
+spells the last LLVM feature `unaligned_scalar_mem`, while Rust spells it
+`unaligned-scalar-mem`. ZisK's A and custom DMA extensions remain properties
+of its linked runtime rather than of evmz Zig code.
 
 `guest-zisk` builds the selected payload as a ZisK RV64 ELF. A real
 `libziskos_staticlib.a` provider is required:
 
 ```sh
+provider=$(guest/runtime/zisk/build_provider.sh)
 zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dstateless-schema=0x1501 \
-  -Dziskos-staticlib=/path/to/libziskos_staticlib.a
+  -Dziskos-staticlib="$provider"
 ```
 
-Build the ZisK provider with
+`build_provider.sh` uses the same version and source commit as CI, ensures the
+ZisK Rust target resolves through rustup instead of a system Rust installation,
+and caches the provider under `~/.zisk/evmz/`. Override `ZISK_SOURCE` to reuse
+an existing checkout of the pinned commit. The provider is built with
 `CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS="-C target-feature=+unaligned-scalar-mem"`.
 The pinned CI build uses this target policy. A provider built without it produces
 a different guest ELF and verification key.
 
-For SP1 (v6.3.1), download the released SDK and verify its pinned archive:
+SP1 uses the repo-owned ERE v0.16.3 platform provider. Install the matching
+SP1 v6.4.0 toolchain once:
 
 ```sh
-curl -fL \
-  https://github.com/succinctlabs/sp1/releases/download/v6.3.1/zkevm-sdk-v6.3.1.tar.gz \
-  -o /tmp/zkevm-sdk-v6.3.1.tar.gz
-echo "ef9124009aa88a5039f003bda51fc5210888cc6aa878320aac04666a3389bfb8  /tmp/zkevm-sdk-v6.3.1.tar.gz" \
-  | shasum -a 256 -c -
-tar -xzf /tmp/zkevm-sdk-v6.3.1.tar.gz -C /tmp
+curl -L https://sp1up.succinct.xyz | bash
+~/.sp1/bin/sp1up -v v6.4.0
 ```
 
-Build or execute a payload with the released `libzkevm.a`:
+The guest build compiles ERE's SP1 platform and its `libzkevm` accelerator ABI
+into a static archive before linking Zig. It follows ERE's current SP1 guest
+patch for the unreleased standards-conformance fixes in SP1 #2865.
 
 ```sh
-zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
-  -Dsp1-staticlib=/tmp/zkevm-sdk-v6.3.1/libzkevm.a
+zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast
 
 zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
-  -Dsp1-staticlib=/tmp/zkevm-sdk-v6.3.1/libzkevm.a \
   -Dguest-input=/path/to/raw-stateless-input.bin \
   -Dguest-output=/path/to/public-values.bin
 ```
 
-The SP1 host driver is locked to `sp1-core-executor` 6.3.1 and built on
-demand. It reports deterministic execute-only instruction cycles — not proof
-cycles or proving time.
+`-Dsp1-staticlib=/path/to/provider.a` remains available as an explicit archive
+override. The SP1 host driver is locked to `sp1-core-executor` 6.4.0. It
+reports deterministic execute-only instruction cycles — not proof cycles or
+proving time.
 
 OpenVM `v2.1.0-preview` requires its `openvm-1.94.1` Rust toolchain. Install it
 with the matching `cargo-openvm`, then build the RV64 guest:
@@ -70,7 +86,7 @@ zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dstateless-schema=0x1501
 ```
 
-The build links OpenVM's official startup and ERE v0.15.0's
+The build links OpenVM's official startup and ERE v0.16.3's
 `ere-platform-openvm` implementation of the accelerator ABI. The repo-owned
 Rust crate only bridges Zig input and output to that platform. Its build checks
 the startup, I/O, and accelerator symbols before linking.
@@ -122,27 +138,58 @@ model; `guest-zisk` still requires the real `libziskos_staticlib.a`.
 ## Guest benchmark CI
 
 The `Guest benchmark` workflow is the execute-only guest performance path.
-Automatic and release-qualified runs remain ZisK-only. A manual dispatch can
-run OpenVM against the same `tests-zkevm@latest` corpus and retain ERE
-`BenchmarkRun` rows with retired instructions and trace-cell cost. Correctness
-still gates the run: every public output must match. Metrics from different
-zkVMs are kept separate, and emulator execution duration is not proving time.
+Automatic runs remain ZisK-only. Manual dispatches can run SP1 or OpenVM
+against the same `tests-zkevm@vX.Y.Z` corpus. Correctness gates every backend:
+the corpus must be complete and every public output must match. Metrics from
+different zkVMs are kept separate, and emulator execution duration is not
+proving time.
 
 Reports are absolute: the workflow measures the candidate ELF and does not
-compare against a release. The existing `zkevm` command writes the ERE rows,
-aggregated report, and one `evidence.json`; there is no separate reporting
-script or stored release baseline.
+compare against a release. The `zkevm` command writes backend-neutral ERE rows,
+an aggregated report, and one `evidence.json`. Reports identify the backend's
+primary metric, optional secondary metric, and execution duration; there is no
+separate reporting script or stored release baseline.
 
-A strict `tests-zkevm` dispatch produces the only artifact eligible for guest
-release. `Guest release` accepts that run id, verifies the evidence, tag, source
-commit, and ELF hash, then promotes the tested bytes without rebuilding them.
+`Guest release` qualifies and signs one selected backend against the strict
+corpus. ZisK, SP1, and OpenVM runs may execute in parallel; only their short
+draft updates are serialized. Each run verifies its tested ELF, generates the
+VK with the digest-pinned ERE 0.16.3 server image, and signs the ELF, VK, and
+backend manifest. The manifest records the source, qualification run, keygen
+image, compatibility identity, and hashes of the ELF, VK, evidence, and report.
+Its signature is the completed-slot marker.
+
+The first completed run uses the requested Git tag, creating it if absent, and
+creates the draft. Rerunning a backend replaces only that backend's draft slot
+and uploads the signed manifest last. Existing signed slots must use the same
+schema and corpus. Review the three signed slots in the draft, then publish the
+prerelease manually in GitHub. Backend qualification commits may differ and
+may be outside `main`; their signed manifests and evidence retain the
+byte-level provenance. The guest version is shared, matching `ere-guests`'
+`artifacts[]` model.
 
 `zig build zkevm -- --executor zisk|sp1|openvm` runs the same ERE-shaped
-measurements locally; pass `--zisk-host`/`--zisk-elf` or
-`--sp1-host`/`--sp1-elf` and fixture paths. OpenVM uses `--openvm-host`,
-`--openvm-config`, and `--openvm-elf`; use `--jobs 1` so the host converts the
-ELF only once. `--evidence-dir` enables the release evidence path used by CI;
-ZisK remains the only release evidence backend.
+measurements locally. All three use the same persistent host protocol and
+cache the parsed or compiled ELF per worker. Pass `--zisk-host`/`--zisk-elf`
+or `--sp1-host`/`--sp1-elf` and fixture paths. OpenVM additionally needs
+`--openvm-config`. `--evidence-dir` enables the release evidence path used by
+CI for any guest backend; `--strict-evidence` additionally requires the pinned
+`tests-zkevm` corpus identity.
+
+The common response carries a primary counter, a secondary counter, elapsed
+execution time, and public output. The counter meanings are deliberately
+backend-specific: ZisK steps and zero, SP1 cycles and zero, or OpenVM retired
+instructions and trace cells.
+
+The benchmark hosts call the backend executors directly instead of constructing
+an `ere-prover-*` instance. ERE's prover constructors also initialize proving
+or key-generation state, while this path only needs repeated execution and
+backend-native counters. Release key generation still uses the matching ERE
+server image.
+
+ZisK stays on its direct, exact-commit `ziskos-staticlib` build. ERE's ZisK
+platform is a thin wrapper over that runtime and does not own a distinct
+accelerator implementation, so routing the provider through ERE would add an
+indirection without replacing any evmz-owned integration.
 
 ## Real proof gate
 
@@ -174,7 +221,7 @@ cargo-zisk verify --proof /path/to/proof.bin
 The persistent ZisK benchmark host builds with the same pinned revision:
 
 ```sh
-cargo build --release --manifest-path guest/runtime/zisk/host/Cargo.toml
+cargo build --release --manifest-path guest/runtime/Cargo.toml -p evmz-zisk-host
 ```
 
 The `stateless-ere` guest publishes the raw SSZ `StatelessValidationResult`,

@@ -1,5 +1,17 @@
 const std = @import("std");
 
+const ZiskConfig = struct {
+    version: []const u8,
+    commit: []const u8,
+    rust_toolchain: []const u8,
+};
+
+const zisk: ZiskConfig = .{
+    .version = "1.1.0-alpha",
+    .commit = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93",
+    .rust_toolchain = "zisk-3.0.0",
+};
+
 const EvmzBuildConfig = struct {
     profile: Profile,
     native_keccak: KeccakBackend,
@@ -60,6 +72,8 @@ const GuestPayloadSteps = struct {
 };
 
 pub fn build(b: *std.Build) void {
+    if (b.pkg_hash.len == 0) addZiskConfig(b);
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const core = b.option(
@@ -462,7 +476,7 @@ pub fn build(b: *std.Build) void {
     const sp1_staticlib_path = b.option(
         []const u8,
         "sp1-staticlib",
-        "Path to an SP1 libzkevm.a provider for guest-sp1",
+        "Override the repo-owned SP1 provider archive",
     );
     const guest_input_path = b.option([]const u8, "guest-input", "Path to zkVM guest input");
     const guest_output_path = b.option([]const u8, "guest-output", "Path to write zkVM public output");
@@ -535,6 +549,17 @@ pub fn build(b: *std.Build) void {
         addExamplesDelegate(b, "example-test", "Run tests in the selected Zig example", "example-test", example_name, target, optimize_name, evmz_build, null);
         addExamplesDelegate(b, "examples-test-all", "Run tests in all Zig examples", "test", example_name, target, optimize_name, evmz_build, null);
     }
+}
+
+fn addZiskConfig(b: *std.Build) void {
+    const generated = b.addWriteFiles().add("zisk.env", b.fmt(
+        \\ZISK_VERSION={s}
+        \\ZISK_COMMIT={s}
+        \\ZISK_RUST_TOOLCHAIN={s}
+        \\
+    , .{ zisk.version, zisk.commit, zisk.rust_toolchain }));
+    const install = b.addInstallFile(generated, "share/evmz/zisk.env");
+    b.step("zisk-config", "Write the pinned ZisK build configuration").dependOn(&install.step);
 }
 
 // `b.option` validates and lists these in `zig build --help`
@@ -873,7 +898,7 @@ const GuestBackend = enum {
             .native => unreachable,
             .zisk => .{
                 .target = "riscv64-freestanding",
-                .target_features = "generic_rv64+m+zicclsm+relax",
+                .target_features = "generic_rv64+m+zbb+zbs+zbkb+zicclsm+unaligned_scalar_mem+relax",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
                 .artifact_name = "evmz-guest-zisk",
@@ -899,11 +924,11 @@ const GuestBackend = enum {
                     .step = "guest-sp1-run",
                     .description = "Run the SP1 guest ELF",
                 },
-                .missing_provider = "guest-sp1 requires -Dsp1-staticlib=<path>/libzkevm.a",
+                .missing_provider = null,
             },
             .openvm => .{
                 .target = "riscv64-freestanding",
-                .target_features = "generic_rv64+m+relax",
+                .target_features = "generic_rv64+m+zicclsm+unaligned_scalar_mem+relax",
                 .runtime_root = "guest/runtime/openvm/root.zig",
                 .linker_script = "guest/runtime/openvm/openvm-rv64.ld",
                 .artifact_name = "evmz-guest-openvm",
@@ -1164,7 +1189,11 @@ fn addGuest(
         config.runtime_root,
         &.{.{ .name = "guest_payload", .module = payload_mod }},
     );
-    if (backend == .openvm) {
+    if (provider_path_option) |path| {
+        root_mod.addObjectFile(.{ .cwd_relative = path });
+    } else if (backend == .sp1) {
+        root_mod.addObjectFile(buildSp1Provider(b));
+    } else if (backend == .openvm) {
         root_mod.addObjectFile(buildOpenVmProvider(b));
     } else {
         root_mod.addObjectFile(.{ .cwd_relative = provider_path_option.? });
@@ -1225,6 +1254,33 @@ fn buildOpenVmProvider(b: *std.Build) std.Build.LazyPath {
     return archive;
 }
 
+fn buildSp1Provider(b: *std.Build) std.Build.LazyPath {
+    const builder_manifest = b.path("guest/runtime/sp1/provider-builder/Cargo.toml");
+    const provider_dir = b.pathFromRoot("guest/runtime/sp1/provider");
+    const builder_target_dir = b.cache_root.join(b.allocator, &.{"sp1-provider-builder"}) catch @panic("OOM");
+    const provider_target_dir = b.cache_root.join(b.allocator, &.{"sp1-provider"}) catch @panic("OOM");
+    const build_provider = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--quiet",
+        "--release",
+        "--locked",
+        "--manifest-path",
+    });
+    build_provider.addFileArg(builder_manifest);
+    build_provider.addArgs(&.{ "--target-dir", builder_target_dir, "--", provider_dir });
+    const archive = build_provider.addOutputFileArg("libevmz_sp1_provider.a");
+    build_provider.addArg(provider_target_dir);
+    for ([_][]const u8{
+        "guest/runtime/sp1/provider-builder/Cargo.lock",
+        "guest/runtime/sp1/provider-builder/src/main.rs",
+        "guest/runtime/sp1/provider/Cargo.lock",
+        "guest/runtime/sp1/provider/Cargo.toml",
+        "guest/runtime/sp1/provider/src/lib.rs",
+    }) |path| build_provider.addFileInput(b.path(path));
+    return archive;
+}
+
 fn addGuestRunner(
     b: *std.Build,
     backend: GuestBackend,
@@ -1249,7 +1305,7 @@ fn addGuestRunner(
             run_step.dependOn(&run.step);
         },
         .sp1 => {
-            const host_manifest = b.pathFromRoot("guest/runtime/sp1/host/Cargo.toml");
+            const host_manifest = b.pathFromRoot("guest/runtime/Cargo.toml");
             const host_target = b.cache_root.join(b.allocator, &.{"sp1-host"}) catch @panic("OOM");
             const build_host = b.addSystemCommand(&.{
                 "cargo",
@@ -1259,6 +1315,8 @@ fn addGuestRunner(
                 "--locked",
                 "--manifest-path",
                 host_manifest,
+                "--package",
+                "evmz-sp1-host",
                 "--target-dir",
                 host_target,
             });

@@ -126,6 +126,8 @@ runs:
         CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS: "-C target-feature=+unaligned-scalar-mem"
       run: |
         set -euo pipefail
+        rustup_bin="$(dirname "$(command -v rustup)")"
+        export PATH="${rustup_bin}:${ZISK_HOME}/bin:${PATH}"
         provider="${ARTIFACTS_DIR}/libziskos_staticlib.a"
         if [[ "${BUILD_PROVIDER}" == true ]]; then
           cd "${ZISK_SOURCE}"
@@ -141,7 +143,11 @@ runs:
         host=""
         if [[ "${BUILD_HOST}" == true ]]; then
           test -n "${HOST_MANIFEST}"
-          cargo build --locked --release --manifest-path "${HOST_MANIFEST}"
+          cargo build \
+            --locked \
+            --release \
+            --manifest-path "${HOST_MANIFEST}" \
+            --package evmz-zisk-host
           host_source="$(dirname "${HOST_MANIFEST}")/target/release/evmz-zisk-host"
           test -x "${host_source}"
           install -D -m 0755 \

@@ -4,7 +4,7 @@ A fast, composable EVM execution engine in Zig. One exact Ethereum specification
 dispatch table, gas schedule, precompiles, transaction rules, and block hooks —
 is a compile-time value, resolved into one concrete VM with no runtime fork
 selection. The same block state transition function runs natively and as an
-RV64 guest on SP1 and ZisK.
+RV64 guest on SP1, ZisK, and OpenVM.
 
 ## Status
 
@@ -19,7 +19,7 @@ Implemented:
 - Ethereum execution through the latest supported Glamsterdam prerelease, whose
   execution-layer fork is Amsterdam
 - Stateless block validation from execution witnesses
-- Native, SP1, and ZisK execution of the stateless validator
+- Native, SP1, ZisK, and OpenVM execution of the stateless validator
 
 Experimental:
 
@@ -108,7 +108,7 @@ evmz exposes the execution stack as separate reusable surfaces:
 | Transaction program | Envelope validation, fees, nonce, execution, and settlement |
 | Block program       | Ordered transaction execution and block-level rules         |
 | Stateless validator | Witness validation and post-state and receipts roots        |
-| Guest               | The stateless validator compiled for SP1 or ZisK            |
+| Guest               | The stateless validator compiled for ZisK, SP1, or OpenVM    |
 
 ## Exact specifications
 
@@ -151,8 +151,8 @@ const result = try Validator.validate(allocator, input);
 ```
 
 The same validator is compiled natively and as an RV64 ELF under `guest/`.
-SP1 and ZisK share one accelerator ABI while retaining backend-specific
-runtimes and host drivers.
+SP1, ZisK, and OpenVM share one accelerator ABI and persistent host protocol
+while retaining backend-specific runtimes and metrics.
 
 Run the full test suite through the zkVM adapters on the host, with no RV64
 toolchain or vendor library required:
@@ -161,14 +161,16 @@ toolchain or vendor library required:
 zig build test-evmz-zkvm
 ```
 
-Building a guest ELF requires the backend's static provider library:
+ZisK requires its exact-commit provider archive. SP1 and OpenVM build their
+ERE-backed providers from the pinned repo manifests:
 
 ```sh
 zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
     -Dziskos-staticlib=/path/to/libziskos_staticlib.a
 
-zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
-    -Dsp1-staticlib=/path/to/libzkevm.a
+zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast
+
+zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast
 ```
 
 The matching `guest-zisk-run` and `guest-sp1-run` steps execute the built ELF

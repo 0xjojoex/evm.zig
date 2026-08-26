@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.15.0", default-features = false, features = ["zkvm-accelerator"] }
+ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.3", default-features = false, features = ["zkvm-accelerator"] }
 
 [profile.release]
 opt-level = 3

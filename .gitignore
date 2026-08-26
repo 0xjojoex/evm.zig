@@ -8,6 +8,4 @@ __pycache__/
 bench/revm/target/
 output/
 .kraft/
-guest/runtime/sp1/host/target/
-guest/runtime/openvm/host/target/
-guest/runtime/openvm/provider/target/
+guest/runtime/**/target/

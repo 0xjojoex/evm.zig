@@ -1,0 +1,5 @@
+[package]
+name = "evmz-guest-host-protocol"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

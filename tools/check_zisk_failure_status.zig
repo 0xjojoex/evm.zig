@@ -4,8 +4,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const ready = "EVZKH001";
-const response_header_bytes = 32;
+const ready = "EVMZH001";
+const response_header_bytes = 40;
 const max_response_bytes = 4 * 1024 * 1024;
 
 const Options = struct {
@@ -39,7 +39,7 @@ const Checker = struct {
     }
 
     fn payloadSize(checker: *Checker, header: *const [response_header_bytes]u8) error{CheckFailed}!usize {
-        const size = std.mem.readInt(u64, header[24..32], .little);
+        const size = std.mem.readInt(u64, header[32..40], .little);
         if (size > max_response_bytes) return checker.failFmt("ZisK host response is too large: {d}", .{size});
         return @intCast(size);
     }
@@ -218,8 +218,22 @@ pub fn main(init: std.process.Init) !void {
 fn responseHeader(status: u8, payload_size: u64) [response_header_bytes]u8 {
     var header = [_]u8{0} ** response_header_bytes;
     header[0] = status;
-    std.mem.writeInt(u64, header[24..32], payload_size, .little);
+    std.mem.writeInt(u64, header[32..40], payload_size, .little);
     return header;
+}
+
+test "accepts unified guest host handshake" {
+    var checker: Checker = .{ .allocator = std.testing.allocator };
+    const handshake: [ready.len]u8 = "EVMZH001".*;
+    try checker.validateHandshake(&handshake);
+}
+
+test "reads payload length from unified response header" {
+    var checker: Checker = .{ .allocator = std.testing.allocator };
+    var header = [_]u8{0} ** response_header_bytes;
+    std.mem.writeInt(u64, header[24..32], 99, .little);
+    std.mem.writeInt(u64, header[32..40], 4, .little);
+    try std.testing.expectEqual(4, try checker.payloadSize(&header));
 }
 
 test "accepts propagated guest failure" {

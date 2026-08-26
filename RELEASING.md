@@ -82,23 +82,25 @@ The historical tags, their GitHub releases, and the `release/rlp` and
 `release/ssz` branches stay reachable for existing consumers. Never retarget,
 advance, or delete them, and never create new package-prefixed tags.
 
-A guest release is an artifact identified by its bytes, not a Zig package. It
-keeps its own gates and its own cadence; neither tag substitutes for the other.
+A guest release is a backend artifact set identified by its bytes, not a Zig
+package. It keeps its own gates and its own cadence; neither tag substitutes
+for the other.
 
 ## Guest releases
 
 A guest build can compile a router for one or more known stateless schemas. A
 released guest pins its accepted schema set explicitly; the current production
-policy pins one schema and specification per artifact. The evidence record, not
-the tag alone, states what the artifact accepts and what corpus it passed.
+policy pins one schema and specification per backend artifact. Each backend's
+evidence record, not the tag alone, states what the artifact accepts and what
+corpus it passed.
 
 Three identities serve different purposes:
 
 - the accepted **schema ids** select wire decoders, but do not by themselves
   prove the complete input/output contract;
-- the **ELF SHA-256** identifies the exact released bytes;
-- the **verification key** identifies the corresponding proving program and
-  must be generated from those verified bytes.
+- each backend's **ELF SHA-256** identifies its exact released bytes;
+- each backend's **verification key** identifies the corresponding proving
+  program and must be generated from those verified bytes.
 
 ### Current devnet naming convention
 
@@ -113,11 +115,11 @@ The version is not evmz software SemVer. It mirrors the complete authoritative
 fixture release: `@vX.Y.Z` means `tests-<track>@vX.Y.Z`. An `-rc.N` suffix
 records artifact qualification without changing that compatibility coordinate.
 The separately numbered `tests-zkevm` wire/corpus release remains explicit in
-`evidence.json` and the release notes.
+each backend's evidence and the release notes.
 
-The release qualification's `evidence.json` records both the network and exact
-fixture release compiled into the tested guest. The naming policy pairs a
-devnet tag with that evidence as follows:
+Each release qualification record contains both the network and exact fixture
+release compiled into the tested guest. The naming policy pairs a devnet tag
+with that evidence as follows:
 
 ~~~
 network == "<track>-<major>"
@@ -127,7 +129,7 @@ fixture_release == "tests-<track>@vX.Y.Z"
 Thus `@v8.1.0` names neither devnet-7 nor another devnet-8 fixture line such as
 `v8.2.0`. The release pipeline does not derive this mapping from the tag: it
 runs the guest benchmark as its qualification job, promotes that job's tested
-artifact, and keeps `evidence.json` as the reviewable compatibility record.
+artifacts, and keeps each evidence file as a reviewable compatibility record.
 
 A devnet track offers **no compatibility guarantee at any bump**. Upstream
 publishes every `tests-*` release as a pre-release for the same reason: the
@@ -145,13 +147,41 @@ existing tag syntax.
 
 ### Cutting a guest release
 
-Dispatch `Guest release` with the intended tag. The workflow calls `Guest
-benchmark` internally with the release corpus and qualification checks, then
-passes that same run's tested ELF, `evidence.json`, and report to the release
-jobs. It verifies source ancestry and the ELF hash before generating the VK and
-signatures; it never rebuilds the guest or searches another run. Correctness
-and corpus qualification belong to the benchmark job that produced the
-artifact.
+`Guest release` maintains a mutable draft. Dispatch the intended tag once for
+each selected backend. ZisK, SP1, and OpenVM qualification, key generation, and
+signing may run in parallel. The workflow serializes only the final draft
+update, so concurrent runs cannot mutate the release at the same time. The
+first update uses the requested remote Git tag, creating it at its qualified
+source commit if absent, then creates the draft from that verified tag. The tag
+is a fixed release anchor; later backend runs record their own source commits.
+
+Each run calls `Guest benchmark` for its selected backend, verifies the strict
+evidence and tested ELF hash, generates the VK, and signs the ELF, VK, and
+`backend-<backend>.json`. The manifest records the qualification run, source
+commit, exact digest-pinned keygen image, compatibility identity, and SHA-256 of
+the ELF, VK, evidence, and report. Its `.minisig` file is the completed-slot
+marker and covers the evidence and report through their recorded hashes.
+
+Rerunning a backend removes that slot's manifest signature first, replaces its
+draft assets, and uploads the new signed manifest last. A failed replacement
+therefore leaves the slot visibly incomplete and another run can repair it.
+The upload checks every other completed slot's signature and requires the same
+schema and corpus identity. It also rebuilds the draft notes with the current
+status and provenance of all three slots.
+
+After all three signed manifests are present, review the draft assets and notes
+in GitHub and publish the prerelease manually. Publication is the immutability
+boundary. The workflow refuses to modify a release after publication;
+repository-level immutable releases should remain enabled for server-side
+enforcement.
+
+Qualification commits may differ because backend integration and release
+tooling can advance independently. Each manifest and evidence record still has
+to name the commit that produced its exact ELF. None of these commits need
+descend from `main`, which permits explicitly dispatched special builds without
+weakening artifact provenance. One tag identifies the shared guest
+compatibility version, while every backend artifact remains separately
+addressable through `ere-guests`' `artifacts[]` entries.
 
 ## Changelog
 

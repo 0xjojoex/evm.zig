@@ -1,4 +1,4 @@
-# Guest correctness and execute-only metrics. Release qualification remains ZisK-only.
+# Guest correctness, execute-only metrics, and release qualification.
 name: Guest benchmark
 
 on:
@@ -8,10 +8,20 @@ on:
         description: Produce release-qualified evidence
         required: true
         type: boolean
+      backend:
+        description: Guest backend, or all release backends
+        required: true
+        type: string
     outputs:
-      artifact_name:
-        description: Release-qualified guest artifact
+      zisk_artifact_name:
+        description: Release-qualified ZisK guest artifact
         value: ${{ jobs.measure.outputs.release_artifact_name }}
+      sp1_artifact_name:
+        description: Release-qualified SP1 guest artifact
+        value: ${{ jobs.sp1.outputs.release_artifact_name }}
+      openvm_artifact_name:
+        description: Release-qualified OpenVM guest artifact
+        value: ${{ jobs.openvm.outputs.release_artifact_name }}
   pull_request:
     paths:
       - build.zig
@@ -42,19 +52,24 @@ on:
         type: choice
         options:
           - zisk
+          - sp1
           - openvm
 
 permissions:
   contents: read
 
 concurrency:
-  group: guest-benchmark-${{ github.event.pull_request.number || github.ref_name }}-tests-zkevm
+  # Release callers use their run ID so backend qualifications can overlap.
+  group: guest-benchmark-${{ inputs.release_gate && github.run_id || github.event.pull_request.number || github.ref_name }}-tests-zkevm
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   measure:
     name: zisk tests-zkevm
-    if: github.event_name != 'workflow_dispatch' || inputs.backend == 'zisk'
+    if: >-
+      (github.event_name != 'workflow_dispatch' && github.event_name != 'workflow_call')
+      || inputs.backend == 'zisk'
+      || inputs.backend == 'all'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -64,21 +79,22 @@ jobs:
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
       ZIG_VERSION: 0.16.0
-      ZISK_VERSION: 1.1.0-alpha
-      ZISK_COMMIT: 9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93
-      ZISK_RUST_TOOLCHAIN: zisk-3.0.0
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          fetch-depth: ${{ inputs.release_gate && 0 || 1 }}
 
-      - name: Require release qualification inputs
-        if: inputs.release_gate
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-key: guest-benchmark-${{ github.event_name }}-tests-zkevm
+
+      - name: Load pinned ZisK version
         run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
+          zig build zisk-config --prefix "${RUNNER_TEMP}/zisk-config" --summary none
+          cat "${RUNNER_TEMP}/zisk-config/share/evmz/zisk.env" >> "${GITHUB_ENV}"
 
       - name: Resolve runner paths
         run: |
@@ -106,13 +122,6 @@ jobs:
             libopenmpi3t64 \
             libsodium23
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: ${{ github.event_name != 'pull_request' }}
-          cache-key: guest-benchmark-${{ github.event_name }}-tests-zkevm
-
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
         with:
@@ -120,6 +129,8 @@ jobs:
           cache-dependency-glob: eest/consume/uv.lock
 
       - name: Resolve tests-zkevm through execution-specs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           zig build zkevm-resolve --summary all -- \
             --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
@@ -136,7 +147,7 @@ jobs:
           artifacts-dir: ${{ env.ZISK_ARTIFACTS }}
           build-provider: ${{ steps.zisk-provider-cache.outputs.cache-hit != 'true' }}
           build-host: "true"
-          host-manifest: ${{ github.workspace }}/guest/runtime/zisk/host/Cargo.toml
+          host-manifest: ${{ github.workspace }}/guest/runtime/Cargo.toml
 
       - name: Resolve pinned ZisK artifacts
         id: zisk
@@ -263,11 +274,16 @@ jobs:
 
   openvm:
     name: openvm tests-zkevm
-    if: github.event_name == 'workflow_dispatch' && inputs.backend == 'openvm'
+    if: >-
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
+      && (inputs.backend == 'openvm' || inputs.backend == 'all')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      release_artifact_name: ${{ steps.release-artifact.outputs.name }}
     env:
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
+      SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
       ZIG_VERSION: 0.16.0
       OPENVM_VERSION: v2.1.0-preview
@@ -303,6 +319,8 @@ jobs:
           rustup run "${OPENVM_RUST_TOOLCHAIN}" rustc -vV
 
       - name: Resolve tests-zkevm through execution-specs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           zig build zkevm-resolve --summary all -- \
             --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
@@ -314,7 +332,8 @@ jobs:
             --quiet \
             --release \
             --locked \
-            --manifest-path guest/runtime/openvm/host/Cargo.toml \
+            --manifest-path guest/runtime/Cargo.toml \
+            --package evmz-openvm-host \
             --target-dir "${RUNNER_TEMP}/openvm-host-target"
           zig build guest-openvm \
             -Dguest-payload=stateless-ere \
@@ -325,38 +344,220 @@ jobs:
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/openvm/evmz-guest-openvm.elf"
           zig build check-guest-elf -- --require-rv64im "${elf}"
+          candidate="${GITHUB_WORKSPACE}/stateless-validator-evmz-openvm-${OPENVM_VERSION}.elf"
+          install -D -m 0644 "${elf}" "${candidate}"
           {
-            echo "OPENVM_ELF=${elf}"
+            echo "OPENVM_ELF=${candidate}"
             echo "OPENVM_HOST=${RUNNER_TEMP}/openvm-host-target/release/evmz-openvm-host"
           } >> "${GITHUB_ENV}"
 
-      - name: Run corpus
+      - name: Run corpus and produce evidence
+        env:
+          RELEASE_GATE: ${{ inputs.release_gate }}
         run: |
-          mapfile -t fixture_roots < <(jq -r '.fixture_roots[]' "${RESOLVED_MANIFEST}")
-          test "${#fixture_roots[@]}" -gt 0
-          zig build -Doptimize=ReleaseFast zkevm --summary all -- \
-            --executor openvm \
-            --jobs 1 \
-            --openvm-host "${OPENVM_HOST}" \
-            --openvm-config "${GITHUB_WORKSPACE}/guest/runtime/openvm/openvm.toml" \
-            --openvm-elf "${OPENVM_ELF}" \
-            --output-folder "${GITHUB_WORKSPACE}/guest-evidence/rows" \
-            "${fixture_roots[@]}"
+          args=(
+            --executor openvm
+            --jobs 2
+            --openvm-host "${OPENVM_HOST}"
+            --openvm-config "${GITHUB_WORKSPACE}/guest/runtime/openvm/openvm.toml"
+            --openvm-elf "${OPENVM_ELF}"
+            --evidence-dir "${GITHUB_WORKSPACE}/guest-evidence"
+            --corpus-manifest "${RESOLVED_MANIFEST}"
+            --source-ref "${SOURCE_COMMIT}"
+            --stateless-schema "${STATELESS_SCHEMA}"
+            --zig-version "${ZIG_VERSION}"
+            --backend-version "${OPENVM_VERSION}"
+            --backend-commit "${OPENVM_COMMIT}"
+            --backend-toolchain "${OPENVM_RUST_TOOLCHAIN}"
+          )
+          if [[ "${RELEASE_GATE}" == true ]]; then
+            args+=(--strict-evidence)
+          fi
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}"
 
       - name: Write runtime identity
         run: |
           mkdir -p guest-evidence
           {
             echo "OpenVM ${OPENVM_VERSION} (${OPENVM_COMMIT})"
+            echo "OpenVM fixture workers 2"
             echo "Rust ${OPENVM_RUST_TOOLCHAIN}"
             sha256sum "${OPENVM_HOST}" "${OPENVM_ELF}"
           } | tee guest-evidence/runtime.txt
 
-      - name: Upload OpenVM benchmark rows
-        if: always()
+      - name: Publish job summary
+        if: always() && hashFiles('guest-evidence/report.md') != ''
+        run: cat guest-evidence/report.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload OpenVM benchmark evidence
+        if: always() && !inputs.release_gate
         uses: actions/upload-artifact@v7
         with:
           name: guest-openvm-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
           path: guest-evidence
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Name release evidence
+        id: release-artifact
+        if: success() && inputs.release_gate
+        run: echo "name=guest-openvm-strict-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload strict release evidence
+        if: success() && inputs.release_gate
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.release-artifact.outputs.name }}
+          path: |
+            ${{ env.OPENVM_ELF }}
+            guest-evidence/evidence.json
+            guest-evidence/report.md
+          if-no-files-found: error
+          retention-days: 90
+
+  sp1:
+    name: sp1 tests-zkevm
+    if: >-
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
+      && (inputs.backend == 'sp1' || inputs.backend == 'all')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      release_artifact_name: ${{ steps.release-artifact.outputs.name }}
+    env:
+      RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
+      SOURCE_COMMIT: ${{ github.sha }}
+      STATELESS_SCHEMA: "0x1501"
+      ZIG_VERSION: 0.16.0
+      SP1_VERSION: v6.4.0
+      SP1_COMMIT: f66b4bff51d0ccff51d152e0f7f66b2ffedf3529
+      SP1_PROVIDER_COMMIT: 7929b001303feb6803ce1214557d5ab1f17eee84
+      SP1_RUST_TOOLCHAIN: succinct
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: eest/consume/uv.lock
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Install pinned SP1 toolchain
+        run: |
+          mkdir -p "${HOME}/.sp1/bin"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/succinctlabs/sp1/${SP1_COMMIT}/sp1up/sp1up" \
+            -o "${HOME}/.sp1/bin/sp1up"
+          chmod +x "${HOME}/.sp1/bin/sp1up"
+          export PATH="${HOME}/.sp1/bin:${PATH}"
+          echo "${HOME}/.sp1/bin" >> "${GITHUB_PATH}"
+          sp1up -v "${SP1_VERSION}"
+          cargo prove --version
+          rustup run "${SP1_RUST_TOOLCHAIN}" rustc -vV
+
+      - name: Resolve tests-zkevm through execution-specs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          zig build zkevm-resolve --summary all -- \
+            --cache-folder="${RUNNER_TEMP}/execution-spec-tests" \
+            --manifest="${RESOLVED_MANIFEST}"
+
+      - name: Build SP1 host and guest
+        run: |
+          cargo build \
+            --quiet \
+            --release \
+            --locked \
+            --manifest-path guest/runtime/Cargo.toml \
+            --package evmz-sp1-host \
+            --target-dir "${RUNNER_TEMP}/sp1-host-target"
+          zig build guest-sp1 \
+            -Dguest-payload=stateless-ere \
+            "-Dstateless-schema=${STATELESS_SCHEMA}" \
+            -Doptimize=ReleaseFast \
+            --prefix "${RUNNER_TEMP}/guest" \
+            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
+            --summary all
+          elf="${RUNNER_TEMP}/guest/guest/sp1/evmz-guest-sp1.elf"
+          zig build check-guest-elf -- --require-rv64im "${elf}"
+          candidate="${GITHUB_WORKSPACE}/stateless-validator-evmz-sp1-${SP1_VERSION}.elf"
+          install -D -m 0644 "${elf}" "${candidate}"
+          {
+            echo "SP1_ELF=${candidate}"
+            echo "SP1_HOST=${RUNNER_TEMP}/sp1-host-target/release/evmz-sp1-host"
+          } >> "${GITHUB_ENV}"
+
+      - name: Run corpus and produce evidence
+        env:
+          RELEASE_GATE: ${{ inputs.release_gate }}
+        run: |
+          args=(
+            --executor sp1
+            --jobs 4
+            --sp1-host "${SP1_HOST}"
+            --sp1-elf "${SP1_ELF}"
+            --evidence-dir "${GITHUB_WORKSPACE}/guest-evidence"
+            --corpus-manifest "${RESOLVED_MANIFEST}"
+            --source-ref "${SOURCE_COMMIT}"
+            --stateless-schema "${STATELESS_SCHEMA}"
+            --zig-version "${ZIG_VERSION}"
+            --backend-version "${SP1_VERSION}"
+            --backend-commit "${SP1_COMMIT}"
+            --backend-toolchain "${SP1_RUST_TOOLCHAIN}"
+          )
+          if [[ "${RELEASE_GATE}" == true ]]; then
+            args+=(--strict-evidence)
+          fi
+          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}"
+
+      - name: Write runtime identity
+        run: |
+          mkdir -p guest-evidence
+          {
+            echo "SP1 ${SP1_VERSION} (${SP1_COMMIT})"
+            echo "SP1 fixture workers 4"
+            echo "ERE v0.16.3 provider with SP1 patch ${SP1_PROVIDER_COMMIT}"
+            sha256sum "${SP1_HOST}" "${SP1_ELF}"
+          } | tee guest-evidence/runtime.txt
+
+      - name: Publish job summary
+        if: always() && hashFiles('guest-evidence/report.md') != ''
+        run: cat guest-evidence/report.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload SP1 benchmark evidence
+        if: always() && !inputs.release_gate
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-sp1-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: guest-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Name release evidence
+        id: release-artifact
+        if: success() && inputs.release_gate
+        run: echo "name=guest-sp1-strict-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload strict release evidence
+        if: success() && inputs.release_gate
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.release-artifact.outputs.name }}
+          path: |
+            ${{ env.SP1_ELF }}
+            guest-evidence/evidence.json
+            guest-evidence/report.md
+          if-no-files-found: error
+          retention-days: 90

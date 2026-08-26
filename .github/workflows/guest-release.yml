@@ -7,8 +7,17 @@ on:
         description: guest-<track>@vX.Y.Z[-rc.N]
         required: true
         type: string
+      backend:
+        description: Backend to qualify and stage
+        required: true
+        default: zisk
+        type: choice
+        options:
+          - zisk
+          - sp1
+          - openvm
       dry_run:
-        description: Qualify and prepare the guest but skip VK generation, signing, and release creation
+        description: Qualify the backend without keygen, signing, or draft mutation
         required: true
         default: false
         type: boolean
@@ -16,136 +25,111 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: guest-release
-  cancel-in-progress: false
-
 env:
-  # ere-server-zisk:0.16.2, pinned by digest so the VK provenance is immutable.
-  ERE_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:4d00a96890a26dc54b523e537e9c1b25a26cf18d166bd3614fc97bbd09317091
+  # ERE 0.16.2 server images, pinned by digest so VK provenance is immutable.
+  ERE_ZISK_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:4d00a96890a26dc54b523e537e9c1b25a26cf18d166bd3614fc97bbd09317091
+  ERE_SP1_IMAGE: ghcr.io/eth-act/ere/ere-server-sp1@sha256:561ba9d13e0f4f198c57ad8c76b8320f691635275f6567bcb27b36d4e4159af4
+  ERE_OPENVM_IMAGE: ghcr.io/eth-act/ere/ere-server-openvm@sha256:d56f5f59f1560bc2b58e84165accb8dc6586596ca1b9ff53b99862560f7b563c
 
 jobs:
   qualify:
-    name: Qualify ${{ inputs.tag }}
+    name: Qualify ${{ inputs.backend }} for ${{ inputs.tag }}
     uses: ./.github/workflows/guest-benchmark.yml
     with:
       release_gate: true
+      backend: ${{ inputs.backend }}
     permissions:
       contents: read
 
-  verify:
-    name: Prepare ${{ inputs.tag }}
+  assemble:
+    name: Sign ${{ inputs.backend }} for ${{ inputs.tag }}
     needs: qualify
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 120
+    environment:
+      name: release
+      deployment: false
     permissions:
       contents: read
-    outputs:
-      elf-name: ${{ steps.bundle.outputs.elf-name }}
-      source-commit: ${{ steps.bundle.outputs.source-commit }}
-      evidence-url: ${{ steps.bundle.outputs.evidence-url }}
 
     steps:
       - name: Checkout qualified source
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
-      - name: Require qualified source on main
+      - name: Resolve qualified artifact
+        id: artifact
         env:
-          SOURCE_COMMIT: ${{ github.sha }}
+          BACKEND: ${{ inputs.backend }}
+          ZISK_ARTIFACT: ${{ needs.qualify.outputs.zisk_artifact_name }}
+          SP1_ARTIFACT: ${{ needs.qualify.outputs.sp1_artifact_name }}
+          OPENVM_ARTIFACT: ${{ needs.qualify.outputs.openvm_artifact_name }}
         run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "${SOURCE_COMMIT}" FETCH_HEAD
-
-      - name: Require a new tag
-        env:
-          TAG: ${{ inputs.tag }}
-        run: test -z "$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
+          set -euo pipefail
+          case "${BACKEND}" in
+            zisk) artifact="${ZISK_ARTIFACT}" ;;
+            sp1) artifact="${SP1_ARTIFACT}" ;;
+            openvm) artifact="${OPENVM_ARTIFACT}" ;;
+          esac
+          test -n "${artifact}"
+          echo "name=${artifact}" >> "${GITHUB_OUTPUT}"
 
       - name: Download qualified guest
         uses: actions/download-artifact@v7
         with:
-          name: ${{ needs.qualify.outputs.artifact_name }}
-          path: ${{ runner.temp }}/evidence
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/qualified
 
-      - name: Stage tested release bundle
-        id: bundle
+      - name: Verify qualified guest
         env:
+          BACKEND: ${{ inputs.backend }}
           SOURCE_COMMIT: ${{ github.sha }}
-          EVIDENCE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          QUALIFICATION_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          source_dir="${RUNNER_TEMP}/evidence"
+          source_dir="${RUNNER_TEMP}/qualified"
           evidence="${source_dir}/guest-evidence/evidence.json"
           report="${source_dir}/guest-evidence/report.md"
+          artifacts="${GITHUB_WORKSPACE}/release-artifacts"
           test -s "${evidence}"
           test -s "${report}"
+          jq -e '.schema_version == 2 and .gate.strict == true and .gate.passed == true' "${evidence}"
+          test "$(jq -er .backend "${evidence}")" = "${BACKEND}"
           test "$(jq -er .source_ref "${evidence}")" = "${SOURCE_COMMIT}"
 
           elf_name="$(jq -er '.guest.elf_name | select(type == "string" and length > 0)' "${evidence}")"
           test "$(basename "${elf_name}")" = "${elf_name}"
           elf="${source_dir}/${elf_name}"
           test -s "${elf}"
-          expected_sha="$(jq -er .guest.elf_sha256 "${evidence}")"
-          actual_sha="$(sha256sum "${elf}" | cut -d ' ' -f 1)"
-          test "${actual_sha}" = "${expected_sha}"
+          test "$(sha256sum "${elf}" | cut -d ' ' -f 1)" = "$(jq -er .guest.elf_sha256 "${evidence}")"
 
-          artifacts="${GITHUB_WORKSPACE}/release-artifacts"
+          case "${BACKEND}" in
+            zisk) image="${ERE_ZISK_IMAGE}" ;;
+            sp1) image="${ERE_SP1_IMAGE}" ;;
+            openvm) image="${ERE_OPENVM_IMAGE}" ;;
+          esac
           mkdir -p "${artifacts}"
           install -m 0644 "${elf}" "${artifacts}/${elf_name}"
-          install -m 0644 "${evidence}" "${artifacts}/evidence.json"
-          install -m 0644 "${report}" "${artifacts}/report.md"
+          install -m 0644 "${evidence}" "${artifacts}/evidence-${BACKEND}.json"
+          install -m 0644 "${report}" "${artifacts}/report-${BACKEND}.md"
           {
-            echo "elf-name=${elf_name}"
-            echo "source-commit=${SOURCE_COMMIT}"
-            echo "evidence-url=${EVIDENCE_URL}"
-          } >> "${GITHUB_OUTPUT}"
+            echo "ARTIFACTS=${artifacts}"
+            echo "BACKEND=${BACKEND}"
+            echo "EVIDENCE=${artifacts}/evidence-${BACKEND}.json"
+            echo "ELF_NAME=${elf_name}"
+            echo "VK_NAME=${elf_name%.elf}.vk"
+            echo "MANIFEST_NAME=backend-${BACKEND}.json"
+            echo "KEYGEN_IMAGE=${image}"
+          } >> "${GITHUB_ENV}"
+
           {
-            echo "## Release evidence"
+            echo "## ${BACKEND} release evidence"
             echo ""
-            echo "- ELF SHA-256: \`${actual_sha}\`"
-            echo "- Qualification run: ${EVIDENCE_URL}"
-            echo "- Spec: \`$(jq -er .corpus.network "${evidence}")\`"
-            echo "- Fixture release: \`$(jq -er .corpus.fixture_release "${evidence}")\`"
+            echo "- Qualification run: ${QUALIFICATION_URL}"
+            echo "- Source commit: \`${SOURCE_COMMIT}\`"
+            echo "- Corpus: \`$(jq -er .corpus.id "${evidence}")\`"
+            echo "- ELF SHA-256: \`$(jq -er .guest.elf_sha256 "${evidence}")\`"
           } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload release bundle
-        if: ${{ !inputs.dry_run }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-bundle
-          path: release-artifacts
-          if-no-files-found: error
-          retention-days: 7
-
-  release:
-    name: Draft ${{ inputs.tag }}
-    needs: verify
-    if: ${{ !inputs.dry_run }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    environment: release
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download release bundle
-        uses: actions/download-artifact@v7
-        with:
-          name: release-bundle
-          path: release-artifacts
-
-      - name: Resolve bundle paths
-        env:
-          ELF_NAME: ${{ needs.verify.outputs.elf-name }}
-        run: |
-          set -euo pipefail
-          echo "ARTIFACTS=${GITHUB_WORKSPACE}/release-artifacts" >> "${GITHUB_ENV}"
-          echo "ELF_NAME=${ELF_NAME}" >> "${GITHUB_ENV}"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/${ELF_NAME}"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/evidence.json"
-          test -s "${GITHUB_WORKSPACE}/release-artifacts/report.md"
 
       - name: Free disk space for VK generation
         run: |
@@ -154,26 +138,71 @@ jobs:
           sudo rm -rf /opt/ghc /usr/local/.ghcup
           sudo rm -rf /opt/hostedtoolcache
 
-      - name: Generate ZisK verification key
+      - name: Generate verification key
         run: |
           set -euo pipefail
-          vk_name="${ELF_NAME%.elf}.vk"
-          docker pull "${ERE_IMAGE}"
-          docker run --rm \
+          docker pull "${KEYGEN_IMAGE}"
+          docker run --rm --shm-size=8g \
             -v "${ARTIFACTS}:/output" \
-            "${ERE_IMAGE}" \
+            "${KEYGEN_IMAGE}" \
             --elf-path "/output/${ELF_NAME}" \
             keygen \
-            --program-vk-path "/output/${vk_name}"
-          test "$(stat -c %s "${ARTIFACTS}/${vk_name}")" -eq 32
-          echo "VK_NAME=${vk_name}" >> "${GITHUB_ENV}"
+            --program-vk-path "/output/${VK_NAME}"
+          test -s "${ARTIFACTS}/${VK_NAME}"
+          if [[ "${BACKEND}" != openvm ]]; then
+            test "$(stat -c %s "${ARTIFACTS}/${VK_NAME}")" -eq 32
+          fi
+
+      - name: Write backend manifest
+        env:
+          QUALIFICATION_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          evidence_name="evidence-${BACKEND}.json"
+          report_name="report-${BACKEND}.md"
+          jq -S \
+            --arg backend "${BACKEND}" \
+            --arg qualification_run "${QUALIFICATION_URL}" \
+            --arg keygen_image "${KEYGEN_IMAGE}" \
+            --arg elf_name "${ELF_NAME}" \
+            --arg elf_sha256 "$(sha256sum "${ARTIFACTS}/${ELF_NAME}" | cut -d ' ' -f 1)" \
+            --arg vk_name "${VK_NAME}" \
+            --arg vk_sha256 "$(sha256sum "${ARTIFACTS}/${VK_NAME}" | cut -d ' ' -f 1)" \
+            --arg evidence_name "${evidence_name}" \
+            --arg evidence_sha256 "$(sha256sum "${ARTIFACTS}/${evidence_name}" | cut -d ' ' -f 1)" \
+            --arg report_name "${report_name}" \
+            --arg report_sha256 "$(sha256sum "${ARTIFACTS}/${report_name}" | cut -d ' ' -f 1)" \
+            '{
+              schema_version: 1,
+              backend: $backend,
+              backend_version: .guest.backend_version,
+              source_commit: .source_ref,
+              qualification_run: $qualification_run,
+              keygen_image: $keygen_image,
+              compatibility: {
+                stateless_schema: .stateless_schema,
+                corpus: (.corpus | {
+                  id,
+                  digest,
+                  fixture_release,
+                  network,
+                  expected_fixtures
+                })
+              },
+              artifacts: {
+                elf: { name: $elf_name, sha256: $elf_sha256 },
+                vk: { name: $vk_name, sha256: $vk_sha256 },
+                evidence: { name: $evidence_name, sha256: $evidence_sha256 },
+                report: { name: $report_name, sha256: $report_sha256 }
+              }
+            }' "${EVIDENCE}" > "${ARTIFACTS}/${MANIFEST_NAME}"
 
       - name: Install Minisign
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends minisign
 
-      - name: Hash and sign release assets
+      - name: Sign backend bundle
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
@@ -183,59 +212,268 @@ jobs:
           test -n "${MINISIGN_SECRET_KEY}"
           test -n "${MINISIGN_PUBLIC_KEY}"
           test -n "${MINISIGN_PASSWORD}"
-          (
-            cd "${ARTIFACTS}"
-            sha256sum "${ELF_NAME}" "${VK_NAME}" evidence.json report.md > SHA256SUMS
-          )
+
           secret_key="${RUNNER_TEMP}/minisign.key"
+          public_key="${ARTIFACTS}/minisign.pub"
           printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${secret_key}"
-          printf '%s\n' "${MINISIGN_PUBLIC_KEY}" > "${ARTIFACTS}/minisign.pub"
-          for file in "${ARTIFACTS}/${ELF_NAME}" "${ARTIFACTS}/${VK_NAME}" "${ARTIFACTS}/SHA256SUMS"; do
+          chmod 0600 "${secret_key}"
+          printf '%s\n' "${MINISIGN_PUBLIC_KEY}" > "${public_key}"
+          for file in \
+            "${ARTIFACTS}/${ELF_NAME}" \
+            "${ARTIFACTS}/${VK_NAME}" \
+            "${ARTIFACTS}/${MANIFEST_NAME}"
+          do
             printf '%s\n' "${MINISIGN_PASSWORD}" | minisign \
               -Sm "${file}" \
               -s "${secret_key}" \
               -x "${file}.minisig" \
               -t "$(basename "${file}")"
+            minisign -Vm "${file}" -p "${public_key}" -x "${file}.minisig"
           done
           rm -f "${secret_key}"
 
-      - name: Create draft prerelease
+      - name: Upload signed backend bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: signed-release-bundle
+          path: release-artifacts
+          if-no-files-found: error
+          retention-days: 7
+
+  draft:
+    name: Update ${{ inputs.backend }} in draft ${{ inputs.tag }}
+    needs: assemble
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: guest-release-draft-${{ inputs.tag }}
+      cancel-in-progress: false
+    environment:
+      name: release
+      deployment: false
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+
+      - name: Download signed backend bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: signed-release-bundle
+          path: release-artifacts
+
+      - name: Install Minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+
+      - name: Verify signed backend bundle
+        env:
+          BACKEND: ${{ inputs.backend }}
+          MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          artifacts="${GITHUB_WORKSPACE}/release-artifacts"
+          evidence="${artifacts}/evidence-${BACKEND}.json"
+          manifest_name="backend-${BACKEND}.json"
+          manifest="${artifacts}/${manifest_name}"
+          public_key="${artifacts}/minisign.pub"
+          expected_public_key="${RUNNER_TEMP}/minisign.pub"
+          printf '%s\n' "${MINISIGN_PUBLIC_KEY}" > "${expected_public_key}"
+          cmp "${expected_public_key}" "${public_key}"
+
+          test -s "${evidence}"
+          test -s "${manifest}"
+          jq -e '.schema_version == 1' "${manifest}"
+          test "$(jq -er .backend "${manifest}")" = "${BACKEND}"
+          test "$(jq -er .source_commit "${manifest}")" = "$(jq -er .source_ref "${evidence}")"
+          test -n "$(jq -er .qualification_run "${manifest}")"
+          jq -er '.keygen_image | select(test("@sha256:[0-9a-f]{64}$"))' "${manifest}" > /dev/null
+          jq -e '.artifacts | keys == ["elf", "evidence", "report", "vk"]' "${manifest}" > /dev/null
+          jq -e '.schema_version == 2 and .gate.strict == true and .gate.passed == true' "${evidence}"
+          test "$(jq -er .backend "${evidence}")" = "${BACKEND}"
+
+          elf_name="$(jq -er .artifacts.elf.name "${manifest}")"
+          vk_name="$(jq -er .artifacts.vk.name "${manifest}")"
+          test "$(basename "${elf_name}")" = "${elf_name}"
+          test "${elf_name}" = "$(jq -er .guest.elf_name "${evidence}")"
+          test "${vk_name}" = "${elf_name%.elf}.vk"
+          test "$(jq -er .artifacts.elf.sha256 "${manifest}")" = "$(jq -er .guest.elf_sha256 "${evidence}")"
+          while IFS=$'\t' read -r name digest; do
+            test "$(basename "${name}")" = "${name}"
+            test -s "${artifacts}/${name}"
+            test "$(sha256sum "${artifacts}/${name}" | cut -d ' ' -f 1)" = "${digest}"
+          done < <(jq -r '.artifacts[] | [.name, .sha256] | @tsv' "${manifest}")
+          if [[ "${BACKEND}" != openvm ]]; then
+            test "$(stat -c %s "${artifacts}/${vk_name}")" -eq 32
+          fi
+          for file in "${artifacts}/${elf_name}" "${artifacts}/${vk_name}" "${manifest}"; do
+            minisign -Vm "${file}" -p "${public_key}" -x "${file}.minisig"
+          done
+
+          case "${BACKEND}" in
+            zisk) image="${ERE_ZISK_IMAGE}" ;;
+            sp1) image="${ERE_SP1_IMAGE}" ;;
+            openvm) image="${ERE_OPENVM_IMAGE}" ;;
+          esac
+          test "$(jq -er .keygen_image "${manifest}")" = "${image}"
+          {
+            echo "ARTIFACTS=${artifacts}"
+            echo "BACKEND=${BACKEND}"
+            echo "EVIDENCE=${evidence}"
+            echo "ELF_NAME=${elf_name}"
+            echo "VK_NAME=${vk_name}"
+            echo "MANIFEST_NAME=${manifest_name}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Replace backend slot in draft
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
-          SOURCE_COMMIT: ${{ needs.verify.outputs.source-commit }}
-          EVIDENCE_URL: ${{ needs.verify.outputs.evidence-url }}
         run: |
           set -euo pipefail
-          evidence="${ARTIFACTS}/evidence.json"
-          notes="${RUNNER_TEMP}/release-notes.md"
-          vk_sha="$(sha256sum "${ARTIFACTS}/${VK_NAME}" | cut -d ' ' -f 1)"
-          jq -r \
-            --arg tag "${TAG}" \
-            --arg source "${SOURCE_COMMIT}" \
-            --arg run "${EVIDENCE_URL}" \
-            --arg image "${ERE_IMAGE}" \
-            --arg vk_sha "${vk_sha}" \
-            '"ZisK guest pre-release for integration testing.\n\n" +
-             "- Spec: " + .corpus.network + "\n" +
-             "- Fixture release: " + .corpus.fixture_release + "\n" +
-             "- Corpus: " + .corpus.id + "\n" +
-             "- Stateless schema: " + .stateless_schema + "\n" +
-             "- Source commit: " + $source + "\n" +
-             "- Zig: " + .guest.zig_version + "\n" +
-             "- ZisK: v" + .guest.backend_version + " (" + .guest.backend_commit + ")\n" +
-             "- ZisK Rust toolchain: " + .guest.backend_toolchain + "\n" +
-             "- ERE keygen image: " + $image + "\n" +
-             "- Benchmark evidence: " + $run + "\n" +
-             "- ELF SHA-256: " + .guest.elf_sha256 + "\n" +
-             "- VK SHA-256: " + $vk_sha + "\n\n" +
-             "The attached ELF is the exact artifact executed by this release qualification run."' \
-            "${evidence}" > "${notes}"
-          gh release create "${TAG}" \
+          git check-ref-format "refs/tags/${TAG}"
+          release_json="${RUNNER_TEMP}/release.json"
+          existing="${RUNNER_TEMP}/existing-release"
+          mkdir -p "${existing}"
+
+          if gh release view "${TAG}" -R "${GITHUB_REPOSITORY}" --json assets,isDraft > "${release_json}" 2>/dev/null; then
+            jq -e '.isDraft == true' "${release_json}" > /dev/null || {
+              echo "${TAG} is already published; released assets are immutable" >&2
+              exit 1
+            }
+            git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null || {
+              echo "${TAG} draft has no remote Git tag" >&2
+              exit 1
+            }
+          else
+            if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null 2>&1; then
+              git tag -- "${TAG}" "$(jq -er .source_ref "${EVIDENCE}")"
+              git push origin "refs/tags/${TAG}"
+            fi
+            notes="${RUNNER_TEMP}/draft-notes.md"
+            printf '%s\n' \
+              "Evmz multi-backend guest pre-release for integration testing." \
+              "" \
+              "Backend runs qualify and sign independently. Review all three signed backend slots before publishing this draft manually." \
+              > "${notes}"
+            gh release create "${TAG}" \
+              -R "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "${TAG}" \
+              --notes-file "${notes}" \
+              --draft \
+              --prerelease
+            gh release view "${TAG}" -R "${GITHUB_REPOSITORY}" --json assets,isDraft > "${release_json}"
+          fi
+
+          has_asset() {
+            jq -e --arg name "$1" '.assets[] | select(.name == $name)' "${release_json}" > /dev/null
+          }
+
+          public_key="${ARTIFACTS}/minisign.pub"
+          if has_asset minisign.pub; then
+            gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" --pattern minisign.pub --dir "${existing}"
+            cmp "${public_key}" "${existing}/minisign.pub"
+          else
+            gh release upload "${TAG}" -R "${GITHUB_REPOSITORY}" "${public_key}"
+          fi
+
+          candidate_identity="$(jq -cer '[.stateless_schema, .corpus.id, .corpus.digest, .corpus.fixture_release, .corpus.network, .corpus.expected_fixtures]' "${EVIDENCE}")"
+          for other in zisk sp1 openvm; do
+            [[ "${other}" == "${BACKEND}" ]] && continue
+            other_manifest="backend-${other}.json"
+            other_signature="${other_manifest}.minisig"
+            if has_asset "${other_signature}"; then
+              has_asset "${other_manifest}" || {
+                echo "${other} has a signed slot marker without its manifest" >&2
+                exit 1
+              }
+              other_dir="${existing}/${other}"
+              mkdir -p "${other_dir}"
+              gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" --pattern "${other_manifest}" --dir "${other_dir}"
+              gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" --pattern "${other_signature}" --dir "${other_dir}"
+              minisign -Vm "${other_dir}/${other_manifest}" \
+                -p "${public_key}" \
+                -x "${other_dir}/${other_signature}"
+              staged_identity="$(jq -cer '[.compatibility.stateless_schema, .compatibility.corpus.id, .compatibility.corpus.digest, .compatibility.corpus.fixture_release, .compatibility.corpus.network, .compatibility.corpus.expected_fixtures]' "${other_dir}/${other_manifest}")"
+              test "${staged_identity}" = "${candidate_identity}" || {
+                echo "${other_manifest} has a different schema or corpus identity" >&2
+                exit 1
+              }
+            fi
+          done
+
+          delete_asset() {
+            if has_asset "$1"; then
+              gh release delete-asset "${TAG}" "$1" -R "${GITHUB_REPOSITORY}" --yes
+            fi
+          }
+
+          delete_asset "${MANIFEST_NAME}.minisig"
+          delete_asset "${MANIFEST_NAME}"
+          while IFS= read -r name; do
+            delete_asset "${name}"
+          done < <(jq -r --arg backend "${BACKEND}" '
+            .assets[].name
+            | select(
+                . == "evidence-\($backend).json"
+                or . == "report-\($backend).md"
+                or test("^stateless-validator-evmz-\($backend)-.*\\.(elf|vk)(\\.minisig)?$")
+              )
+          ' "${release_json}")
+          delete_asset SHA256SUMS.minisig
+          delete_asset SHA256SUMS
+
+          gh release upload "${TAG}" -R "${GITHUB_REPOSITORY}" \
+            "${ARTIFACTS}/${ELF_NAME}" \
+            "${ARTIFACTS}/${ELF_NAME}.minisig" \
+            "${ARTIFACTS}/${VK_NAME}" \
+            "${ARTIFACTS}/${VK_NAME}.minisig" \
+            "${ARTIFACTS}/evidence-${BACKEND}.json" \
+            "${ARTIFACTS}/report-${BACKEND}.md"
+          gh release upload "${TAG}" -R "${GITHUB_REPOSITORY}" "${ARTIFACTS}/${MANIFEST_NAME}"
+          gh release upload "${TAG}" -R "${GITHUB_REPOSITORY}" "${ARTIFACTS}/${MANIFEST_NAME}.minisig"
+
+          gh release view "${TAG}" -R "${GITHUB_REPOSITORY}" --json assets,isDraft > "${release_json}"
+          notes_dir="${RUNNER_TEMP}/release-notes"
+          notes="${RUNNER_TEMP}/draft-notes.md"
+          mkdir -p "${notes_dir}"
+          {
+            echo "Evmz multi-backend guest pre-release for integration testing."
+            echo ""
+            echo "- Spec: $(jq -er .corpus.network "${EVIDENCE}")"
+            echo "- Fixture release: $(jq -er .corpus.fixture_release "${EVIDENCE}")"
+            echo "- Corpus: $(jq -er .corpus.id "${EVIDENCE}")"
+            echo "- Stateless schema: $(jq -er .stateless_schema "${EVIDENCE}")"
+            echo ""
+            echo "| Backend | Status | Source commit | Version | ELF SHA-256 | VK SHA-256 | Qualification | ERE keygen image |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
+            for backend in zisk sp1 openvm; do
+              manifest="backend-${backend}.json"
+              signature="${manifest}.minisig"
+              if jq -e --arg name "${manifest}" '.assets[] | select(.name == $name)' "${release_json}" > /dev/null \
+                && jq -e --arg name "${signature}" '.assets[] | select(.name == $name)' "${release_json}" > /dev/null
+              then
+                backend_dir="${notes_dir}/${backend}"
+                mkdir -p "${backend_dir}"
+                gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" --pattern "${manifest}" --dir "${backend_dir}"
+                gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" --pattern "${signature}" --dir "${backend_dir}"
+                minisign -Vm "${backend_dir}/${manifest}" -p "${public_key}" -x "${backend_dir}/${signature}" > /dev/null
+                staged="${backend_dir}/${manifest}"
+                echo "| ${backend} | signed | $(jq -er .source_commit "${staged}") | $(jq -er .backend_version "${staged}") | $(jq -er .artifacts.elf.sha256 "${staged}") | $(jq -er .artifacts.vk.sha256 "${staged}") | $(jq -er .qualification_run "${staged}") | $(jq -er .keygen_image "${staged}") |"
+              else
+                echo "| ${backend} | not staged |  |  |  |  |  |  |"
+              fi
+            done
+            echo ""
+            echo "Review the signed backend slots, then publish this draft manually."
+          } > "${notes}"
+          gh release edit "${TAG}" \
             -R "${GITHUB_REPOSITORY}" \
-            --target "${SOURCE_COMMIT}" \
             --title "${TAG}" \
-            --notes-file "${notes}" \
-            --draft \
-            --prerelease \
-            "${ARTIFACTS}"/*
+            --notes-file "${notes}"
+          echo "Updated signed ${BACKEND} slot in draft release ${TAG}." >> "${GITHUB_STEP_SUMMARY}"

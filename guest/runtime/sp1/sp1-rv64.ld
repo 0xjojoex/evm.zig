@@ -1,5 +1,5 @@
 /*
- * Adapted from SP1 v6.3.1 zkevm/zkvm.ld.
+ * Adapted from SP1 v6.4.0 zkevm/zkvm.ld.
  * SP1 owns _start; Zig exports main and uses a build-time bounded payload heap.
  */
 OUTPUT_FORMAT("elf64-littleriscv")
@@ -78,11 +78,16 @@ SECTIONS
 
     ASSERT(_end <= __input_start, "evmz heap overlaps SP1 input region")
 
+    /* Non-loaded ISA metadata consumed by check-guest-elf. */
+    .riscv.attributes 0 :
+    {
+        KEEP(*(.riscv.attributes))
+    }
+
     /DISCARD/ :
     {
         *(.comment)
         *(.note .note.*)
         *(.eh_frame .eh_frame.*)
-        *(.riscv.attributes)
     }
 }
