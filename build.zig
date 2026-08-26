@@ -849,7 +849,7 @@ const GuestBackend = enum {
         return switch (self) {
             .native => unreachable,
             .zisk => .{
-                .target_features = "generic_rv64+m+zicclsm+relax",
+                .target_features = "generic_rv64+m+unaligned_scalar_mem+zicclsm+relax+zbb+zbs+zbkb",
                 .runtime_root = "guest/runtime/zisk/root.zig",
                 .linker_script = "guest/runtime/zisk/zisk-rv64.ld",
                 .artifact_name = "evmz-guest-zisk",

@@ -9,11 +9,11 @@ ENTRY(_start)
 
 MEMORY {
   rom (xa) : ORIGIN = 0x80000000, LENGTH = 0x08000000
-  ram (wxa) : ORIGIN = 0xA0030000, LENGTH = _evmz_ram_size
+  ram (wxa) : ORIGIN = 0xA0430000, LENGTH = _evmz_ram_size
 }
 
 PHDRS {
-  text PT_LOAD FLAGS(5);
+  text PT_LOAD FLAGS(1);
   rodata PT_LOAD FLAGS(4);
   data PT_LOAD FLAGS(6);
   bss PT_LOAD FLAGS(6);
@@ -34,6 +34,21 @@ SECTIONS
   .rodata : {
     *(.srodata .srodata.*)
     *(.rodata .rodata.*)
+  } >rom AT>rom :rodata
+
+  . = ALIGN(8);
+  .init_array ALIGN(8) : {
+    PROVIDE(__init_array_start = .);
+    KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+    KEEP(*(.init_array))
+    PROVIDE(__init_array_end = .);
+  } >rom AT>rom :rodata
+
+  .fini_array : {
+    PROVIDE(__fini_array_start = .);
+    KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*)))
+    KEEP(*(.fini_array))
+    PROVIDE(__fini_array_end = .);
   } >rom AT>rom :rodata
 
   .eh_frame : {
