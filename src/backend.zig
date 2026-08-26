@@ -8,6 +8,7 @@ const RootProvider = @import("./state/RootProvider.zig");
 const TrackedState = @import("./state/TrackedState.zig");
 const MemoryStore = @import("./state/MemoryStore.zig");
 const witness_reader = @import("./stateless/WitnessReader.zig");
+const trie = @import("./eth/trie.zig");
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
 const ChangesView = TrackedState.ChangesView;
 const DenseCommitView = @import("./stateless/BlockState.zig").CommitView;
@@ -96,11 +97,21 @@ pub const Backend = union(enum) {
         };
     }
 
-    pub fn stateRootAfterChanges(self: *Backend, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
+    /// `node_updates` retains content-addressed dirty commitment nodes; only
+    /// witness lanes own an MPT, so an external backend requires null.
+    pub fn stateRootAfterChanges(
+        self: *Backend,
+        allocator: std.mem.Allocator,
+        changes: ChangesView,
+        node_updates: ?*trie.NodeUpdates,
+    ) ![32]u8 {
         return switch (self.*) {
-            .witness => |*witness| witness.stateRootAfterChanges(allocator, changes),
-            .catalog_witness => |*witness| witness.stateRootAfterChanges(allocator, changes),
-            .external => |external| external.root_provider.afterChanges(allocator, changes),
+            .witness => |*witness| witness.stateRootAfterChanges(allocator, changes, node_updates),
+            .catalog_witness => |*witness| witness.stateRootAfterChanges(allocator, changes, node_updates),
+            .external => |external| blk: {
+                std.debug.assert(node_updates == null);
+                break :blk external.root_provider.afterChanges(allocator, changes);
+            },
         };
     }
 
@@ -110,9 +121,10 @@ pub const Backend = union(enum) {
         self: *Backend,
         allocator: std.mem.Allocator,
         commit_view: DenseCommitView,
+        node_updates: ?*trie.NodeUpdates,
     ) ![32]u8 {
         return switch (self.*) {
-            .catalog_witness => |*witness| witness.stateRootAfterDenseCommit(allocator, commit_view),
+            .catalog_witness => |*witness| witness.stateRootAfterDenseCommit(allocator, commit_view, node_updates),
             .witness => error.InvalidWitness,
             .external => error.InvalidWitness,
         };
@@ -128,7 +140,6 @@ pub const Backend = union(enum) {
 };
 
 test "witness backend releases its owned node index" {
-    const trie = @import("./eth/trie.zig");
     const nodes = [_][]const u8{"encoded witness node"};
     var backend = try Backend.fromWitness(
         std.testing.allocator,
@@ -140,7 +151,6 @@ test "witness backend releases its owned node index" {
 }
 
 test "catalog witness authenticates its root during construction" {
-    const trie = @import("./eth/trie.zig");
     const missing_root = [_]u8{0xab} ** 32;
 
     var indexed = try Backend.fromWitness(std.testing.allocator, missing_root, &.{}, &.{});

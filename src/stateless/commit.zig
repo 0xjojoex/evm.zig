@@ -55,6 +55,16 @@ pub fn stateRootAfterCatalog(
     catalog: *const trie.WitnessCatalog,
     commit: anytype,
 ) trie.UpdateError![32]u8 {
+    return stateRootAfterCatalogWithNodeUpdates(allocator, root_hash, catalog, commit, {});
+}
+
+pub fn stateRootAfterCatalogWithNodeUpdates(
+    allocator: Allocator,
+    root_hash: mpt.Root,
+    catalog: *const trie.WitnessCatalog,
+    commit: anytype,
+    node_updates: anytype,
+) trie.UpdateError![32]u8 {
     comptime assertCommitView(@TypeOf(commit));
     try catalog.validateStateRoot(root_hash);
     var workspace = DenseCommitWorkspace.init(allocator);
@@ -100,6 +110,7 @@ pub fn stateRootAfterCatalog(
                     .absent => trie.empty_root_hash,
                     .present => |parent| parent.storage_root,
                 },
+                node_updates,
             );
             break :value if (account.hasNoState())
                 null
@@ -113,11 +124,19 @@ pub fn stateRootAfterCatalog(
     }
     std.debug.assert(account_updates.items.len == dirty_account_count);
 
-    return trie.updateHashedSorted(
-        &workspace.mpt_region,
-        catalog.source(catalog.stateCatalogRoot()),
-        account_updates.items,
-    );
+    return if (comptime @TypeOf(node_updates) == void)
+        trie.updateHashedSorted(
+            &workspace.mpt_region,
+            catalog.source(catalog.stateCatalogRoot()),
+            account_updates.items,
+        )
+    else
+        trie.updateHashedSortedWithNodeUpdates(
+            &workspace.mpt_region,
+            catalog.source(catalog.stateCatalogRoot()),
+            account_updates.items,
+            node_updates,
+        );
 }
 
 fn storageRootAfterCatalog(
@@ -126,6 +145,7 @@ fn storageRootAfterCatalog(
     commit: anytype,
     account_id: anytype,
     parent_root: [32]u8,
+    node_updates: anytype,
 ) trie.UpdateError![32]u8 {
     if (!commit.accountStorageDirty(account_id)) return parent_root;
     var scope = workspace.beginScope();
@@ -162,11 +182,19 @@ fn storageRootAfterCatalog(
         .empty
     else
         try catalog.storageCatalogRoot(parent_root);
-    return trie.updateHashedSorted(
-        &workspace.mpt_region,
-        catalog.source(root_ref),
-        updates.items,
-    );
+    return if (comptime @TypeOf(node_updates) == void)
+        trie.updateHashedSorted(
+            &workspace.mpt_region,
+            catalog.source(root_ref),
+            updates.items,
+        )
+    else
+        trie.updateHashedSortedWithNodeUpdates(
+            &workspace.mpt_region,
+            catalog.source(root_ref),
+            updates.items,
+            node_updates,
+        );
 }
 
 /// Owns the serial dense-commit lifetime tree. Retained account material lives

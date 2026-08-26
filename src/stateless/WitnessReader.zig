@@ -144,11 +144,12 @@ pub fn Reader(comptime mode: Mode) type {
             self: *const WitnessStateReader,
             allocator: std.mem.Allocator,
             changes: anytype,
+            node_updates: ?*trie.NodeUpdates,
         ) RootError![32]u8 {
             var seal_region = RewindableRegion.init(allocator);
             defer seal_region.deinit();
             const scratch = seal_region.allocator();
-            return narrowRoot(self.rootAfterChanges(scratch, changes));
+            return narrowRoot(self.rootAfterChanges(scratch, changes, node_updates));
         }
 
         /// Post-state root for a sealed dense commit view, which stays projected as
@@ -157,28 +158,62 @@ pub fn Reader(comptime mode: Mode) type {
             self: *const WitnessStateReader,
             allocator: std.mem.Allocator,
             commit_view: anytype,
+            node_updates: ?*trie.NodeUpdates,
         ) RootError![32]u8 {
             comptime std.debug.assert(mode == .catalog);
-            return narrowRoot(StatelessCommit.stateRootAfterCatalog(allocator, self.state_root, &self.backend, commit_view));
+            return narrowRoot(if (node_updates) |updates|
+                StatelessCommit.stateRootAfterCatalogWithNodeUpdates(
+                    allocator,
+                    self.state_root,
+                    &self.backend,
+                    commit_view,
+                    updates,
+                )
+            else
+                StatelessCommit.stateRootAfterCatalog(
+                    allocator,
+                    self.state_root,
+                    &self.backend,
+                    commit_view,
+                ));
         }
 
         fn rootAfterChanges(
             self: *const WitnessStateReader,
             scratch: std.mem.Allocator,
             changes: anytype,
+            node_updates: ?*trie.NodeUpdates,
         ) trie.UpdateError![32]u8 {
             if (comptime mode == .catalog) {
-                return trie.stateRootAfterChanges(
-                    scratch,
-                    try trie.catalogSource(&self.backend, self.state_root, &self.accounts),
-                    changes,
+                const source = try trie.catalogSource(
+                    &self.backend,
+                    self.state_root,
+                    &self.accounts,
                 );
+                return if (node_updates) |updates|
+                    trie.stateRootAfterChangesWithNodeUpdates(
+                        scratch,
+                        source,
+                        changes,
+                        updates,
+                    )
+                else
+                    trie.stateRootAfterChanges(scratch, source, changes);
             }
-            return trie.stateRootAfterChanges(
-                scratch,
-                trie.witnessSource(self.backend.witness, self.state_root, &self.accounts),
-                changes,
+            const source = trie.witnessSource(
+                self.backend.witness,
+                self.state_root,
+                &self.accounts,
             );
+            return if (node_updates) |updates|
+                trie.stateRootAfterChangesWithNodeUpdates(
+                    scratch,
+                    source,
+                    changes,
+                    updates,
+                )
+            else
+                trie.stateRootAfterChanges(scratch, source, changes);
         }
 
         /// Every trie or RLP failure over a sealed witness means the witness itself
@@ -309,7 +344,7 @@ test "witness state reader derives root directly from tracked changes" {
     defer witness.deinit();
     try std.testing.expect(!try witness.reader().accountExists(address.addr(1)));
 
-    const actual = try witness.stateRootAfterChanges(std.testing.allocator, changes);
+    const actual = try witness.stateRootAfterChanges(std.testing.allocator, changes, null);
     const expected = try trie.stateRootAfterChangesFromNodes(
         std.testing.allocator,
         trie.empty_root_hash,

@@ -27,6 +27,7 @@ pub const Input = @import("./stateless/input.zig").Input;
 pub const input = @import("./stateless/input.zig");
 const validator = @import("./stateless/validate.zig");
 pub const ValidationOptions = validator.Options;
+pub const CommitOutput = validator.CommitOutput;
 pub const Validator = validator.Validator;
 pub const ValidatorWithOptions = validator.ValidatorWithOptions;
 pub const testing = struct {

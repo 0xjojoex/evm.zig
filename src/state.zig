@@ -4,6 +4,7 @@
 //! - `TrackedState`: accepted branch, transaction rows, and scope rollback.
 //! - `checkpoint`: scope-rollback shapes shared with the stateless lane.
 //! - `LogBuffer`: packed emitted logs, also shared with the stateless lane.
+//! - `StateDelta`: owned block-final semantic changes, detached from execution.
 //! - `Committer`: integration-owned sink for borrowed tracked-state changes.
 //! - `RootProvider`: integration-owned post-state root over borrowed changes.
 //! - `MemoryStore`: in-memory store for seeded pre-state and test/demo commits.
@@ -20,6 +21,7 @@ pub const checkpoint = @import("./state/checkpoint.zig");
 pub const LogBuffer = @import("./state/LogBuffer.zig");
 pub const Reader = @import("./state/Reader.zig");
 pub const ConcurrentReader = @import("./state/ConcurrentReader.zig");
+pub const StateDelta = @import("./state/StateDelta.zig");
 pub const Committer = @import("./state/Committer.zig");
 pub const RootProvider = @import("./state/RootProvider.zig");
 pub const TrackedState = @import("./state/TrackedState.zig");

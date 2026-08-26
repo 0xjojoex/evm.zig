@@ -29,6 +29,8 @@ pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || sta
     BlockTransitionFailed,
 };
 
+pub const CommitOutput = @import("../eth/state_domain.zig").CommitOutput;
+
 pub const Options = struct {
     /// Prove every BAL-declared account/storage path before execution. Disabled
     /// by default because witness-backed readers would otherwise traverse the
@@ -36,6 +38,9 @@ pub const Options = struct {
     precheck_block_access_list_state: bool = false,
     /// Optional expected-vs-observed BAL diagnostics.
     bal_differential: ?*block_stf.BalDifferentialReport = null,
+    /// Optional accepted block-final delta and MPT node updates. Validation
+    /// clears it on entry and populates it only after every claim matches.
+    commit_output: ?*CommitOutput = null,
 };
 
 /// Compile the production stateless validator from one complete specification.
@@ -120,6 +125,7 @@ fn validateWithScratchExact(
     capture: ?block_stf.ExecutionCapture,
     options: Options,
 ) Error!block_stf.Result {
+    if (options.commit_output) |output| output.deinit();
     const block = &input.block;
     if (!blockShapeValid(ExactBlockStf.fork, block)) return .{ .status = .invalid_block_body };
     if (ExactBlockStf.fork.isImpl(.osaka) and !blockRlpSizeValid(ExactBlockStf.fork, block, max_rlp_block_size)) {
@@ -227,6 +233,7 @@ fn validateExact(
         },
         .capture = capture,
         .bal_differential = options.bal_differential,
+        .commit_output = options.commit_output,
         // Future optimization: verified values can seed the execution overlay
         // or reader cache, after which this can become the default without
         // repeating proof traversal. It never changes EVM warmth semantics.
@@ -585,6 +592,39 @@ test "stateless block errors preserve witness and body taxonomy" {
         (try mapBlockError(error.WithdrawalBalanceOverflow)).status,
     );
     try std.testing.expectError(error.BlockTransitionFailed, mapBlockError(error.CodeUnavailable));
+}
+
+test "shape rejection clears reused commit output" {
+    const Amsterdam = Validator(@import("../eth/spec.zig").amsterdam);
+    const invalid_block = input_mod.Block{
+        .parent_hash = [_]u8{0} ** 32,
+        .fee_recipient = address.Address.fromBytes([_]u8{0} ** 20),
+        .state_root = [_]u8{0} ** 32,
+        .receipts_root = [_]u8{0} ** 32,
+        .logs_bloom = [_]u8{0} ** 256,
+        .prev_randao = 0,
+        .number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 0,
+        .timestamp = 1,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1,
+        .block_hash = [_]u8{0} ** 32,
+    };
+    var output: CommitOutput = .{
+        .mpt_nodes = trie.NodeUpdates.init(std.testing.allocator),
+    };
+    defer output.deinit();
+
+    const result = try Amsterdam.validateWithOptions(std.testing.allocator, .{
+        .chain_id = 1,
+        .block = invalid_block,
+        .witness = .{},
+    }, .{ .commit_output = &output });
+
+    try std.testing.expectEqual(block_stf.Status.invalid_block_body, result.status);
+    try std.testing.expect(output.delta == null);
+    try std.testing.expect(output.mpt_nodes == null);
 }
 
 test "stateless BAL witness precheck is an explicit Amsterdam option" {

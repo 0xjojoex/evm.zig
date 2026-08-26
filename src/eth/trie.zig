@@ -71,6 +71,22 @@ pub inline fn updateHashedSorted(
     return structuralTrie(region.allocator()).updateFixedSorted(region, source, updates);
 }
 
+pub const NodeUpdates = mpt.NodeUpdates;
+
+pub inline fn updateHashedSortedWithNodeUpdates(
+    region: *mpt.Region,
+    source: anytype,
+    updates: []const mpt.FixedUpdate,
+    node_updates: *NodeUpdates,
+) UpdateError![32]u8 {
+    return structuralTrie(region.allocator()).updateFixedSortedWithNodeUpdates(
+        region,
+        source,
+        updates,
+        node_updates,
+    );
+}
+
 pub const Error = Allocator.Error || mpt.Error || error{Overflow};
 pub const ProofLookupError = rlp.DecodeError || mpt.Error;
 pub const UpdateError = Allocator.Error || ProofLookupError || Error;
@@ -587,6 +603,7 @@ fn storageRootAfterChanges(
     changes: anytype,
     storage_write_indices: []const u32,
     wiped: bool,
+    node_updates: anytype,
 ) UpdateError![32]u8 {
     if (storage_write_indices.len == 0) return if (wiped) empty_root_hash else root_hash;
 
@@ -603,11 +620,16 @@ fn storageRootAfterChanges(
         updates.appendAssumeCapacity(.{ .key = write.key, .value = value });
     }
 
-    return storageTrie(allocator).update(
-        region,
-        try source.storageSource(root_hash, wiped),
-        updates.items,
-    );
+    const storage = storageTrie(allocator);
+    return if (comptime @TypeOf(node_updates) == void)
+        storage.update(region, try source.storageSource(root_hash, wiped), updates.items)
+    else
+        storage.updateWithNodeUpdates(
+            region,
+            try source.storageSource(root_hash, wiped),
+            updates.items,
+            node_updates,
+        );
 }
 
 /// Comptime contract for `TrackedState.ChangesView`, kept structural here so
@@ -661,6 +683,15 @@ pub fn stateRootAfterChanges(
     allocator: Allocator,
     source: anytype,
     changes: anytype,
+) UpdateError![32]u8 {
+    return stateRootAfterChangesWithNodeUpdates(allocator, source, changes, {});
+}
+
+pub fn stateRootAfterChangesWithNodeUpdates(
+    allocator: Allocator,
+    source: anytype,
+    changes: anytype,
+    node_updates: anytype,
 ) UpdateError![32]u8 {
     comptime assertStateSource(@TypeOf(source));
     comptime assertTrackedChangesView(@TypeOf(changes));
@@ -745,6 +776,7 @@ pub fn stateRootAfterChanges(
             changes,
             storage_write_indices[batch.storage_start..storage_end],
             batch.wiped,
+            node_updates,
         );
         var next_account = previous;
         if (account_change) |account| {
@@ -761,7 +793,15 @@ pub fn stateRootAfterChanges(
         updates.appendAssumeCapacity(.{ .key = target, .value = value });
     }
 
-    return accounts.update(&region, source.stateSource(), updates.items);
+    return if (comptime @TypeOf(node_updates) == void)
+        accounts.update(&region, source.stateSource(), updates.items)
+    else
+        accounts.updateWithNodeUpdates(
+            &region,
+            source.stateSource(),
+            updates.items,
+            node_updates,
+        );
 }
 
 pub fn hashedAddressKey(target: address.Address) [32]u8 {

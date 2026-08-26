@@ -35,6 +35,7 @@ const ParentBlobGas = block_stf.ParentBlobGas;
 const ParentHeaderContext = block_stf.ParentHeaderContext;
 const ReceiptPayload = block_stf.ReceiptPayload;
 const RootChecks = block_stf.RootChecks;
+const CommitOutput = @import("state_domain.zig").CommitOutput;
 const Status = block_stf.Status;
 const TransactionInput = block_stf.TransactionInput;
 const encodeReceipt = block_stf.encodeReceipt;
@@ -222,9 +223,40 @@ test "BlockSTF validates a single witnessed transaction" {
     try std.testing.expectEqual(trace_recorder.step_starts, trace_recorder.step_ends);
     try std.testing.expect(trace_recorder.storage_writes > 0);
 
+    var commit_output: CommitOutput = .{};
+    defer commit_output.deinit();
+    const retained = try StfFrontier.applyAssumeDecoded(scratch, .{
+        .env = .{ .gas_limit = 100_000 },
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .commit_output = &commit_output,
+        .transactions = &tx_input,
+        .root_checks = testRootChecks(
+            expected_state_root,
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            first_result.receipts_root,
+        ),
+        .header_claims = .{
+            .gas_used = first_result.gas_used,
+            .block_gas_used = first_result.block_gas_used,
+            .logs_bloom = expected_logs_bloom,
+        },
+    });
+    try std.testing.expectEqual(Status.valid, retained.status);
+    try std.testing.expect(commit_output.delta.?.view().hasChanges());
+    const post_state_nodes = &commit_output.mpt_nodes.?;
+    try std.testing.expect(post_state_nodes.len() > 0);
+    const root_update = post_state_nodes.at(post_state_nodes.len() - 1);
+    try std.testing.expectEqualSlices(u8, &expected_state_root, &root_update.digest);
+    try std.testing.expectEqualSlices(
+        u8,
+        &root_update.digest,
+        &crypto.keccak256(root_update.bytes),
+    );
+
     const gas_mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .commit_output = &commit_output,
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -234,6 +266,8 @@ test "BlockSTF validates a single witnessed transaction" {
         .header_claims = .{ .gas_used = first_result.gas_used + 1 },
     });
     try std.testing.expectEqual(Status.gas_used_mismatch, gas_mismatch.status);
+    try std.testing.expect(commit_output.delta == null);
+    try std.testing.expect(commit_output.mpt_nodes == null);
 
     const block_gas_mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },

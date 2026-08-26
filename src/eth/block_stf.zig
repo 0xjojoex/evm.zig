@@ -33,6 +33,8 @@ const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
 const vm = @import("../vm.zig");
 const Backend = @import("../backend.zig").Backend;
+const StateDelta = @import("../state/StateDelta.zig");
+const CommitOutput = @import("state_domain.zig").CommitOutput;
 
 pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
 pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
@@ -118,6 +120,9 @@ fn BlockInputType(comptime Transactions: type) type {
         block_hash_source: ?BlockHashSource = null,
         block_header: ?BlockHeader = null,
         state_backend: Backend,
+        /// Optional accepted block-final delta and commitment node updates.
+        /// Cleared on entry; populated only after every claim matches.
+        commit_output: ?*CommitOutput = null,
         /// Caller-owned prepared-artifact service; not part of the VM resource bound.
         prepared_code_backend: ?prepared_code.Backend = null,
         /// Optional caller-owned service for the validated BAL-derived resource
@@ -161,6 +166,7 @@ pub fn assumeDecodedBlockInput(
         .block_hash_source = input.block_hash_source,
         .block_header = input.block_header,
         .state_backend = state_backend,
+        .commit_output = input.commit_output,
         .prepared_code_backend = input.prepared_code_backend,
         .execution_resource_preparer = input.execution_resource_preparer,
         .transactions = transactions,
@@ -206,6 +212,9 @@ fn ProduceInputType(comptime Transactions: type) type {
         block_hash_source: ?BlockHashSource = null,
         block_header: ?BlockHeader = null,
         state_backend: Backend,
+        /// Optional accepted block-final delta and commitment node updates.
+        /// Cleared on entry; populated only for a produced (valid) block.
+        commit_output: ?*CommitOutput = null,
         /// Caller-owned prepared-artifact service; not part of the VM resource bound.
         prepared_code_backend: ?prepared_code.Backend = null,
         transactions: Transactions,
@@ -606,6 +615,7 @@ fn produceExact(
         .block_hash_source = input.block_hash_source,
         .block_header = input.block_header,
         .state_backend = state_backend,
+        .commit_output = input.commit_output,
         .prepared_code_backend = input.prepared_code_backend,
         .transactions = decoded_transactions.transactions,
         .withdrawals = input.withdrawals,
@@ -636,6 +646,7 @@ fn produceAssumeDecodedExact(
         .block_hash_source = input.block_hash_source,
         .block_header = input.block_header,
         .state_backend = input.state_backend,
+        .commit_output = input.commit_output,
         .prepared_code_backend = input.prepared_code_backend,
         .transactions = input.transactions,
         .withdrawals = input.withdrawals,
@@ -890,6 +901,7 @@ fn BlockRun(comptime Engine: type) type {
         state_backend: Backend,
         executor: ?Engine.Executor = null,
         encoded_block_access_list: ?[]u8 = null,
+        node_updates: ?trie.NodeUpdates = null,
         block_access_list_mismatch: bool = false,
         candidate_ready: bool = false,
         committed: bool = false,
@@ -905,18 +917,41 @@ fn BlockRun(comptime Engine: type) type {
         }
 
         fn deinit(self: *Self) void {
+            if (self.node_updates) |*nodes| nodes.deinit();
             if (self.encoded_block_access_list) |encoded| self.allocator.free(encoded);
             if (self.executor) |*executor| executor.deinit();
             self.state_backend.deinit();
             self.* = undefined;
         }
 
-        fn commit(self: *Self) !void {
+        /// Retention target for dirty commitment nodes during root derivation.
+        /// External backends own their commitment, so they never retain nodes.
+        fn nodeUpdatesTarget(self: *Self, retain_output: bool) ?*trie.NodeUpdates {
+            if (!retain_output) return null;
+            switch (self.state_backend) {
+                .external => return null,
+                .witness, .catalog_witness => {},
+            }
+            std.debug.assert(self.node_updates == null);
+            self.node_updates = trie.NodeUpdates.init(self.allocator);
+            return &self.node_updates.?;
+        }
+
+        fn commit(self: *Self, output: ?*CommitOutput) !void {
             std.debug.assert(self.candidate_ready);
             std.debug.assert(!self.committed);
             const executor = &self.executor.?;
+            var delta: ?StateDelta = if (output != null)
+                try StateDelta.init(self.allocator, executor.acceptedView().changes())
+            else
+                null;
+            errdefer if (delta) |*value| value.deinit();
             try Engine.StateDomain.Lifecycle.commit(&self.state_backend, executor.acceptedView());
             self.committed = true;
+            if (output) |target| {
+                target.* = .{ .delta = delta, .mpt_nodes = self.node_updates };
+                self.node_updates = null;
+            }
         }
 
         fn takeEncodedBlockAccessList(self: *Self) []u8 {
@@ -940,6 +975,7 @@ pub fn applyExecution(
     claims: Claims,
     observer: anytype,
 ) !Result {
+    if (input.commit_output) |output| output.deinit();
     var run = BlockRun(Engine).init(allocator, input.state_backend);
     defer run.deinit();
 
@@ -983,7 +1019,7 @@ pub fn applyExecution(
         run.block_access_list_mismatch,
         block_hash_mismatch,
     );
-    if (result.status == .valid) try run.commit();
+    if (result.status == .valid) try run.commit(input.commit_output);
     return result;
 }
 
@@ -994,6 +1030,7 @@ fn produceExecution(
     input: anytype,
     observer: anytype,
 ) !ProduceOutcome {
+    if (input.commit_output) |output| output.deinit();
     var run = BlockRun(Engine).init(allocator, input.state_backend);
     defer run.deinit();
 
@@ -1007,7 +1044,7 @@ fn produceExecution(
     const result = try executeBlock(revision, Engine, false, allocator, input, &run, observer);
     if (result.status != .valid) return .{ .rejected = result };
 
-    try run.commit();
+    try run.commit(input.commit_output);
     return .{ .produced = .{
         .output = DerivedBlockOutput.fromResult(result),
         .encoded_block_access_list = run.takeEncodedBlockAccessList(),
@@ -1329,6 +1366,7 @@ fn executeBlock(
             allocator,
             &run.state_backend,
             accepted_state,
+            run.nodeUpdatesTarget(input.commit_output != null),
         ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             else => return err,

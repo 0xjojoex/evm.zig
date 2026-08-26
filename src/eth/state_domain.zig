@@ -14,9 +14,11 @@ const ClaimPlan = @import("bal/ClaimPlan.zig").ClaimPlan;
 const DenseClaimVerifier = @import("bal/DenseClaimVerifier.zig");
 const Spec = @import("../spec.zig").Spec;
 const Reader = @import("../state/Reader.zig");
+const StateDelta = @import("../state/StateDelta.zig");
 const TrackedState = @import("../state/TrackedState.zig");
 const DenseState = @import("../stateless/BlockState.zig");
 const tracked_state_projector = @import("bal/tracked_state_projector.zig");
+const trie = @import("trie.zig");
 
 pub const AdmissionInput = struct {
     backend: *Backend,
@@ -37,6 +39,22 @@ pub const CommitError = error{
     InvalidWitness,
     OutOfMemory,
     ResourceLimitExceeded,
+};
+
+/// Optional accepted block-final output, detached from execution: the owned
+/// semantic delta plus, on witness lanes, the content-addressed dirty MPT
+/// nodes produced while deriving the accepted root. External backends own
+/// their commitment, so they never populate `mpt_nodes`.
+pub const CommitOutput = struct {
+    delta: ?StateDelta = null,
+    mpt_nodes: ?trie.NodeUpdates = null,
+
+    /// Release output with the allocator supplied to block validation.
+    pub fn deinit(self: *CommitOutput) void {
+        if (self.mpt_nodes) |*nodes| nodes.deinit();
+        if (self.delta) |*delta| delta.deinit();
+        self.* = .{};
+    }
 };
 
 pub const Tracked = struct {
@@ -99,8 +117,9 @@ pub const Tracked = struct {
             allocator: std.mem.Allocator,
             backend: *Backend,
             accepted: Execution.State.AcceptedView,
+            node_updates: ?*trie.NodeUpdates,
         ) CommitError![32]u8 {
-            return backend.stateRootAfterChanges(allocator, accepted.changes()) catch |err|
+            return backend.stateRootAfterChanges(allocator, accepted.changes(), node_updates) catch |err|
                 return normalizeCommitError(err);
         }
 
@@ -206,8 +225,9 @@ pub const BalStateless = struct {
             allocator: std.mem.Allocator,
             backend: *Backend,
             accepted: Execution.State.AcceptedView,
+            node_updates: ?*trie.NodeUpdates,
         ) CommitError![32]u8 {
-            return backend.stateRootAfterDenseCommit(allocator, accepted.commit()) catch |err|
+            return backend.stateRootAfterDenseCommit(allocator, accepted.commit(), node_updates) catch |err|
                 return normalizeCommitError(err);
         }
 
