@@ -1867,6 +1867,9 @@ fn setStorageAfterAccess(
     const status = storage.status(scope_storage.execution_original.?, current, value);
     if (current == value) return status;
 
+    // Wipes are recorded only by finalization, which follows every execution
+    // write; compaction relies on this order to drop a wiped address's writes.
+    std.debug.assert(!transactionStorageWiped(tx, storage_key.address));
     const first_change = !row.mutation.dirty;
     if (first_change) try self.reserveAcceptedStorageMutation(storage_key);
     try self.appendStorageUndo(storage_ref.id, row);
