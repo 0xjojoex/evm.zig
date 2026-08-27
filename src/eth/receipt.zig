@@ -127,21 +127,16 @@ fn addBloomEntry(bloom: *[256]u8, entry: []const u8) void {
 }
 
 test "word-wise logs bloom merge matches byte-wise oracle" {
-    var seed: u64 = 0x9e3779b97f4a7c15;
+    var prng = std.Random.DefaultPrng.init(0x626c6f6f6d);
+    const random = prng.random();
     for (0..256) |_| {
         var target: [256]u8 = undefined;
         var source: [256]u8 = undefined;
         var expected: [256]u8 = undefined;
-        for (&target, &source, &expected) |*target_byte, *source_byte, *expected_byte| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            target_byte.* = @truncate(seed);
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            source_byte.* = @truncate(seed);
-            expected_byte.* = target_byte.* | source_byte.*;
+        random.bytes(&target);
+        random.bytes(&source);
+        for (target, source, &expected) |target_byte, source_byte, *expected_byte| {
+            expected_byte.* = target_byte | source_byte;
         }
         mergeLogsBloom(&target, source);
         try std.testing.expectEqualSlices(u8, &expected, &target);

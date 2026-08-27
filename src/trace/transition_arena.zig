@@ -1,11 +1,12 @@
 //! Typed execution-state transitions referenced by immutable trace metadata.
 
 const std = @import("std");
-const range = @import("../range.zig");
+const range = @import("stdx").range;
 
 const Allocator = std.mem.Allocator;
 
-pub const WordRange = range.Words;
+/// 32-byte words cut from a shared `[]u256` arena.
+pub const WordRange = range.Range(u256, u32);
 pub const ByteRange = range.Bytes;
 pub const MemoryWriteRange = range.Range(MemoryWrite, u32);
 

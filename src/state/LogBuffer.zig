@@ -14,7 +14,7 @@ const std = @import("std");
 const Address = @import("../address.zig").Address;
 const Host = @import("../Host.zig");
 const checkpoint_types = @import("./checkpoint.zig");
-const range = @import("../range.zig");
+const range = @import("stdx").range;
 
 const Allocator = std.mem.Allocator;
 const LogBuffer = @This();
@@ -22,9 +22,12 @@ const LogBuffer = @This();
 /// Consensus caps a log at four topics; `append` rejects anything wider.
 pub const max_topics = 4;
 
+/// Log topics. Consensus caps a log at four topics, so `u8` is generous.
+const TopicRange = range.Range(u256, u8);
+
 pub const Row = struct {
     address: Address,
-    topics: range.Topics,
+    topics: TopicRange,
     data: range.Bytes,
 };
 
@@ -76,7 +79,7 @@ pub fn clearRetainingCapacity(self: *LogBuffer) void {
 pub fn append(self: *LogBuffer, allocator: Allocator, event_log: Host.Log) AppendError!void {
     if (event_log.topics.len > max_topics) return error.TooManyLogTopics;
     std.debug.assert(self.rows.items.len < std.math.maxInt(u32));
-    const topics: range.Topics = .init(self.topics.items.len, event_log.topics.len);
+    const topics: TopicRange = .init(self.topics.items.len, event_log.topics.len);
     const data: range.Bytes = .init(self.data.items.len, event_log.data.len);
     try self.rows.ensureUnusedCapacity(allocator, 1);
     try self.topics.ensureUnusedCapacity(allocator, event_log.topics.len);

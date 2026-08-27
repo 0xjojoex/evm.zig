@@ -1,6 +1,6 @@
 //! `StateReader` adapter over a Merkle Patricia Trie witness nodes.
 const std = @import("std");
-const RewindableRegion = @import("rewindable_region");
+const RewindableRegion = @import("stdx").RewindableRegion;
 
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");

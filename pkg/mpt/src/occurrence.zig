@@ -4,7 +4,7 @@
 //! untouched references, and bottom-up dirty encoding remain shared.
 
 const std = @import("std");
-const RewindableRegion = @import("rewindable_region");
+const RewindableRegion = @import("stdx").RewindableRegion;
 
 const Catalog = @import("catalog.zig").Catalog;
 const encode = @import("encode.zig");

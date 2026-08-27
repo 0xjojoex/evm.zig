@@ -22,7 +22,7 @@ const PackageModules = struct {
     ssz: *std.Build.Module,
     rlp: *std.Build.Module,
     mpt: *std.Build.Module,
-    rewindable_region: *std.Build.Module,
+    stdx: *std.Build.Module,
 };
 
 const EvmzModuleConfig = struct {
@@ -261,7 +261,7 @@ pub fn build(b: *std.Build) void {
         debug_cli_mod.addImport("ssz", ssz_mod);
         debug_cli_mod.addImport("rlp", rlp_mod);
         debug_cli_mod.addImport("mpt", mpt_mod);
-        debug_cli_mod.addImport("rewindable_region", packages.rewindable_region);
+        debug_cli_mod.addImport("stdx", packages.stdx);
         debug_cli_mod.addIncludePath(b.path("include"));
         addPrecompileNative(b, debug_cli_mod, native_precompile_deps);
         addNativeKeccak(debug_cli_mod, xkcp_object);
@@ -291,7 +291,7 @@ pub fn build(b: *std.Build) void {
     call_fixture_oracle_mod.addImport("ssz", ssz_mod);
     call_fixture_oracle_mod.addImport("rlp", rlp_mod);
     call_fixture_oracle_mod.addImport("mpt", mpt_mod);
-    call_fixture_oracle_mod.addImport("rewindable_region", packages.rewindable_region);
+    call_fixture_oracle_mod.addImport("stdx", packages.stdx);
     call_fixture_oracle_mod.addIncludePath(b.path("include"));
     if (is_native_profile) addPrecompileNative(b, call_fixture_oracle_mod, native_precompile_deps);
     addNativeKeccak(call_fixture_oracle_mod, xkcp_object);
@@ -633,8 +633,8 @@ fn createPackageModules(
         .optimize = optimize,
         .omit_frame_pointer = omit_frame_pointer,
     };
-    const region_options = std.Build.Module.CreateOptions{
-        .root_source_file = b.path("pkg/mpt/src/RewindableRegion.zig"),
+    const stdx_options = std.Build.Module.CreateOptions{
+        .root_source_file = b.path("pkg/stdx/src/lib.zig"),
         .target = target,
         .optimize = optimize,
         .omit_frame_pointer = omit_frame_pointer,
@@ -642,14 +642,14 @@ fn createPackageModules(
     const ssz = if (exported) b.addModule("ssz", ssz_options) else b.createModule(ssz_options);
     const rlp = if (exported) b.addModule("rlp", rlp_options) else b.createModule(rlp_options);
     const mpt = if (exported) b.addModule("mpt", mpt_options) else b.createModule(mpt_options);
-    const rewindable_region = b.createModule(region_options);
+    const stdx = b.createModule(stdx_options);
     mpt.addImport("rlp", rlp);
-    mpt.addImport("rewindable_region", rewindable_region);
+    mpt.addImport("stdx", stdx);
     return .{
         .ssz = ssz,
         .rlp = rlp,
         .mpt = mpt,
-        .rewindable_region = rewindable_region,
+        .stdx = stdx,
     };
 }
 
@@ -675,7 +675,7 @@ fn createEvmzModule(b: *std.Build, config: EvmzModuleConfig) *std.Build.Module {
     module.addImport("ssz", config.packages.ssz);
     module.addImport("rlp", config.packages.rlp);
     module.addImport("mpt", config.packages.mpt);
-    module.addImport("rewindable_region", config.packages.rewindable_region);
+    module.addImport("stdx", config.packages.stdx);
     module.addIncludePath(b.path("include"));
     if (config.native_precompiles) |deps| addPrecompileNative(b, module, deps);
     addNativeKeccak(module, config.xkcp);
@@ -839,20 +839,20 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
         .filters = test_filters,
         .test_runner = test_runner,
     });
-    const region_tests = b.addTest(.{
+    const stdx_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("pkg/mpt/src/RewindableRegion.zig"),
+            .root_source_file = b.path("pkg/stdx/src/test.zig"),
             .target = config.target,
             .optimize = config.optimize,
         }),
         .filters = test_filters,
         .test_runner = test_runner,
     });
-    const packages_step = b.step("test-packages", "Run SSZ, RLP, MPT, and region tests");
+    const packages_step = b.step("test-packages", "Run stdx, SSZ, RLP, and MPT tests");
+    packages_step.dependOn(runTests(b, stdx_tests));
     packages_step.dependOn(runTests(b, ssz_tests));
     packages_step.dependOn(runTests(b, rlp_tests));
     packages_step.dependOn(runTests(b, mpt_tests));
-    packages_step.dependOn(runTests(b, region_tests));
 
     const selected_step = b.step("test", "Run unit tests for the selected profile");
     selected_step.dependOn(if (config.selected_profile == .native) native_step else zkvm_step);

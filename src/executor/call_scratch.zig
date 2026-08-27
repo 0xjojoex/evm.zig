@@ -1,5 +1,5 @@
 const std = @import("std");
-const RewindableRegion = @import("rewindable_region");
+const RewindableRegion = @import("stdx").RewindableRegion;
 
 pub const Slot = struct {
     region: RewindableRegion,

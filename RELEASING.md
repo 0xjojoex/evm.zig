@@ -1,7 +1,8 @@
 # Releasing evmz
 
-One repository and one versioned Zig package. `pkg/rlp`, `pkg/mpt`, and
-`pkg/ssz` are directories inside that package, not packages of their own.
+One repository and one versioned Zig package. `pkg/rlp`, `pkg/mpt`, `pkg/ssz`,
+and `pkg/stdx` are directories inside that package, not packages of their own.
+`pkg/stdx` is internal and exports no module; the other three do.
 Guest ELFs are separately released artifacts, not additional Zig packages.
 
 Zig versions package roots, not modules: `.version`, `.name`, `.fingerprint`,

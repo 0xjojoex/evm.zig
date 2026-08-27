@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const Address = @import("../address.zig").Address;
-const range = @import("../range.zig");
+const range = @import("stdx").range;
 
 pub const Kind = enum(u8) {
     call,
