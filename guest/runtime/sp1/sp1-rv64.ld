@@ -1,6 +1,6 @@
 /*
  * Adapted from SP1 v6.4.0 zkevm/zkvm.ld.
- * SP1 owns _start; Zig exports main and uses a build-time bounded payload heap.
+ * SP1 owns _start; Zig exports main and shares SP1's platform heap.
  */
 OUTPUT_FORMAT("elf64-littleriscv")
 OUTPUT_ARCH(riscv)
@@ -14,13 +14,6 @@ MEMORY
 {
     RAM (rwx) : ORIGIN = 0x78000000, LENGTH = 0x1B88000000
 }
-
-/*
- * _evmz_payload_heap_size is an absolute symbol defined by the assembly stub
- * build.zig generates from -Dguest-heap-bytes. It is deliberately left undefined
- * here: without a fallback, an unlinked stub is a link error rather than a
- * silently stale size.
- */
 
 SECTIONS
 {
@@ -57,17 +50,6 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
-    /*
-     * Symbols only, no output section: a section here would join the RW PT_LOAD
-     * and SP1's ELF loader walks p_memsz, inserting a zero word for every
-     * address past p_filesz. An emitted heap section costs ~2M initial
-     * memory-image entries per run.
-    */
-    . = ALIGN(16);
-    _heap_start = .;
-    . = . + _evmz_payload_heap_size;
-    _heap_end = .;
-
     . = ALIGN(16);
     _end = .;
     __stack_top = __sp1_stack_top;
@@ -75,8 +57,10 @@ SECTIONS
 
     __input_start = __sp1_max_memory - __sp1_input_region;
     __input_end = __sp1_max_memory;
+    _heap_start = _end;
+    _heap_end = __input_start;
 
-    ASSERT(_end <= __input_start, "evmz heap overlaps SP1 input region")
+    ASSERT(_heap_start < _heap_end, "evmz image leaves no SP1 heap")
 
     /* Non-loaded ISA metadata consumed by check-guest-elf. */
     .riscv.attributes 0 :

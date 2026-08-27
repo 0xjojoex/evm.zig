@@ -52,8 +52,8 @@ pub const BasicProof = struct {
 };
 
 pub fn evmz_guest_entry() callconv(.c) c_int {
-    var fixed = guest_allocator.fixedBufferAllocator();
-    const proof = runBasicFixture(fixed.allocator()) catch |err| {
+    var allocator_state = guest_allocator.init();
+    const proof = runBasicFixture(allocator_state.allocator()) catch |err| {
         evmz_guest_output = .{
             magic,
             0,

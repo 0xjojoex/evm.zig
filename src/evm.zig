@@ -31,7 +31,6 @@ pub const eth = @import("./eth.zig");
 pub const execution = @import("./execution.zig");
 pub const execution_resources = execution.resources;
 pub const executor = @import("./executor.zig");
-pub const fixed_buffer_meter = @import("./fixed_buffer_meter.zig");
 pub const Host = @import("./Host.zig");
 pub const instruction = @import("./instruction.zig");
 pub const interpreter = @import("./Interpreter.zig");
