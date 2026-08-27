@@ -37,13 +37,12 @@ SECTIONS
     }
 
     . = ALIGN(16);
-    _heap_start = .;
-    . = . + _evmz_payload_heap_size;
-    _heap_end = .;
     _end = .;
+    _heap_start = .;
+    _heap_end = 0x20000000;
 
     PROVIDE(__global_pointer$ = __data_start + 0x800);
-    ASSERT(_heap_end <= 0x20000000, "evmz heap exceeds OpenVM memory")
+    ASSERT(_heap_start < _heap_end, "evmz image leaves no OpenVM heap")
 
     /* Non-loaded ISA metadata consumed by check-guest-elf. */
     .riscv.attributes 0 :

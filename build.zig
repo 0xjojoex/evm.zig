@@ -448,15 +448,13 @@ pub fn build(b: *std.Build) void {
     if (pathExists(b, "pkg/ssz/bench/build.zig")) {
         addSszBenchDelegate(b, bench_optimize_name);
     }
-    // Capacity is free in guest execution steps: the linker reserves the heap
-    // after `_bss_end` as bare address space, nothing zeroes it, and the bump
-    // allocator only writes what it hands out. Default to filling ZisK's RAM,
-    // matching what ERE guests get, rather than to a number sized for one
-    // corpus. Shrink it deliberately once a real workload's peak is known.
+    // ZisK reserves a fixed payload heap after `_bss_end`. SP1 and OpenVM use
+    // their platform allocator for both Zig and Rust, matching ERE guests and
+    // leaving one contiguous heap for accelerators and post-run measurement.
     const guest_heap_bytes = b.option(
         u64,
         "guest-heap-bytes",
-        "Fixed guest payload heap capacity in bytes",
+        "Fixed ZisK guest payload heap capacity in bytes",
     ) orelse 480 * 1024 * 1024;
     // 0xA0430000 + 532480000 = 0xC0000000, ZisK's RAM top.
     const guest_zisk_ram_bytes = b.option(
@@ -485,7 +483,6 @@ pub fn build(b: *std.Build) void {
     const guest_sp1_strip = b.option(bool, "guest-sp1-strip", "Strip symbols from the SP1 guest ELF") orelse false;
     const guest_openvm_strip = b.option(bool, "guest-openvm-strip", "Strip symbols from the OpenVM guest ELF") orelse false;
     const guest_zisk_profile_tags = b.option(bool, "guest-zisk-profile-tags", "Instrument ZisK stateless validation phases") orelse false;
-    const guest_heap_metrics = b.option(bool, "guest-heap-metrics", "Meter guest fixed-heap usage") orelse false;
     addGuest(
         b,
         .zisk,
@@ -497,7 +494,6 @@ pub fn build(b: *std.Build) void {
         guest_zisk_strip,
         omit_frame_pointer,
         guest_zisk_profile_tags,
-        guest_heap_metrics,
         guest_heap_bytes,
         guest_zisk_ram_bytes,
         zkvm_build_options,
@@ -513,7 +509,6 @@ pub fn build(b: *std.Build) void {
         guest_sp1_strip,
         omit_frame_pointer,
         false,
-        guest_heap_metrics,
         guest_heap_bytes,
         null,
         zkvm_build_options,
@@ -529,7 +524,6 @@ pub fn build(b: *std.Build) void {
         guest_openvm_strip,
         omit_frame_pointer,
         false,
-        guest_heap_metrics,
         guest_heap_bytes,
         null,
         zkvm_build_options,
@@ -877,12 +871,10 @@ fn addTests(b: *std.Build, config: TestConfig) TestSteps {
 fn guestOptions(
     b: *std.Build,
     backend: GuestBackend,
-    heap_metrics: bool,
     heap_bytes: u64,
 ) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(GuestBackend, "backend", backend);
-    options.addOption(bool, "heap_metrics", heap_metrics);
     options.addOption(u64, "heap_bytes", heap_bytes);
     return options;
 }
@@ -910,6 +902,7 @@ const GuestBackend = enum {
                     .description = "Run the ZisK guest ELF with ziskemu",
                 },
                 .missing_provider = "guest-zisk requires -Dziskos-staticlib=<path>/libziskos_staticlib.a",
+                .heap = .fixed,
             },
             .sp1 => .{
                 .target = "riscv64-freestanding",
@@ -925,6 +918,7 @@ const GuestBackend = enum {
                     .description = "Run the SP1 guest ELF",
                 },
                 .missing_provider = null,
+                .heap = .platform,
             },
             .openvm => .{
                 .target = "riscv64-freestanding",
@@ -936,6 +930,7 @@ const GuestBackend = enum {
                 .build_step = "guest-openvm",
                 .build_description = "Build the OpenVM rv64 guest ELF",
                 .missing_provider = null,
+                .heap = .platform,
             },
         };
     }
@@ -957,7 +952,10 @@ const GuestBackendConfig = struct {
     build_description: []const u8,
     runner: ?GuestRunnerConfig = null,
     missing_provider: ?[]const u8,
+    heap: GuestHeap,
 };
+
+const GuestHeap = enum { fixed, platform };
 
 const GuestCompilePolicy = struct {
     target: std.Build.ResolvedTarget,
@@ -1009,7 +1007,7 @@ fn addGuestPayloadTests(
     heap_bytes: u64,
 ) GuestPayloadSteps {
     const abi_backend: GuestBackend = if (target.result.os.tag == .freestanding) .zisk else .native;
-    const guest_options = guestOptions(b, abi_backend, false, heap_bytes);
+    const guest_options = guestOptions(b, abi_backend, heap_bytes);
     const guest_options_mod = guest_options.createModule();
     const guest_allocator_mod = b.createModule(.{
         .root_source_file = b.path("guest/allocator.zig"),
@@ -1102,18 +1100,21 @@ fn addGuest(
     strip: bool,
     omit_frame_pointer: bool,
     profile_tags: bool,
-    heap_metrics: bool,
     heap_bytes: u64,
     ram_bytes: ?u64,
     build_options: *std.Build.Step.Options,
 ) void {
     const config = backend.config();
+    const payload_heap_bytes: ?u64 = switch (config.heap) {
+        .fixed => heap_bytes,
+        .platform => null,
+    };
     // A zero heap_bytes collapses _heap_start onto _heap_end, which the guest
     // allocator reads as unreachable. Every other memory bound is left to the linker
     // script, which unlike this function knows the guest's own data and bss sizes.
     const unbuildable: ?[]const u8 = if (provider_path_option == null and config.missing_provider != null)
         config.missing_provider.?
-    else if (heap_bytes == 0)
+    else if (payload_heap_bytes == 0)
         "guest-heap-bytes must be greater than zero"
     else
         null;
@@ -1137,7 +1138,7 @@ fn addGuest(
         .omit_frame_pointer = omit_frame_pointer,
         .strip = strip,
     };
-    const guest_options = guestOptions(b, backend, heap_metrics, heap_bytes);
+    const guest_options = guestOptions(b, backend, payload_heap_bytes orelse 0);
     const guest_options_mod = guest_options.createModule();
     const guest_payload_source = guest_payload.source();
     const stateless_profile_mod = policy.module(
@@ -1198,25 +1199,27 @@ fn addGuest(
     } else {
         root_mod.addObjectFile(.{ .cwd_relative = provider_path_option.? });
     }
-    const memory_symbols_source = if (ram_bytes) |bytes|
-        b.fmt(
-            \\.global _evmz_payload_heap_size
-            \\.set _evmz_payload_heap_size, {d}
-            \\.global _evmz_ram_size
-            \\.set _evmz_ram_size, {d}
-            \\
-        , .{ heap_bytes, bytes })
-    else
-        b.fmt(
-            \\.global _evmz_payload_heap_size
-            \\.set _evmz_payload_heap_size, {d}
-            \\
-        , .{heap_bytes});
-    const memory_symbols = b.addWriteFiles().add(
-        b.fmt("evmz-guest-memory-{s}.S", .{@tagName(backend)}),
-        memory_symbols_source,
-    );
-    root_mod.addAssemblyFile(memory_symbols);
+    if (payload_heap_bytes) |bytes| {
+        const memory_symbols_source = if (ram_bytes) |ram|
+            b.fmt(
+                \\.global _evmz_payload_heap_size
+                \\.set _evmz_payload_heap_size, {d}
+                \\.global _evmz_ram_size
+                \\.set _evmz_ram_size, {d}
+                \\
+            , .{ bytes, ram })
+        else
+            b.fmt(
+                \\.global _evmz_payload_heap_size
+                \\.set _evmz_payload_heap_size, {d}
+                \\
+            , .{bytes});
+        const memory_symbols = b.addWriteFiles().add(
+            b.fmt("evmz-guest-memory-{s}.S", .{@tagName(backend)}),
+            memory_symbols_source,
+        );
+        root_mod.addAssemblyFile(memory_symbols);
+    }
     const guest = b.addExecutable(.{
         .name = config.artifact_name,
         .root_module = root_mod,

@@ -8,5 +8,6 @@ test {
 }
 
 test "native fixed buffer follows configured heap capacity" {
-    try std.testing.expectEqual(guest_options.heap_bytes, guest_allocator.fixedBuffer().len);
+    const allocator_state = guest_allocator.init();
+    try std.testing.expectEqual(guest_options.heap_bytes, allocator_state.buffer.len);
 }

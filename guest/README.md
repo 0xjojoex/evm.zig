@@ -108,18 +108,21 @@ router cannot resolve is a compile error rather than a runtime rejection.
 
 ## Memory
 
-Every payload allocates from a fixed-capacity heap chosen at build time with
-`-Dguest-heap-bytes=<bytes>`, defaulting to 480 MiB. Add
-`-Dguest-heap-metrics=true` to meter peak heap usage; metering changes the
-guest execution-step count. ZisK additionally takes a total RAM envelope with
-`-Dguest-zisk-ram-bytes=<bytes>`, defaulting to end at ZisK's declared RAM
-top. The linker scripts enforce both bounds, and capacity is free: heap and
-envelope size change neither the ELF nor the step count.
+ZisK payloads allocate from a fixed-capacity heap chosen with
+`-Dguest-heap-bytes=<bytes>`, defaulting to 480 MiB. SP1 and OpenVM instead route
+Zig allocations through the platform allocator used by ERE and the Rust
+accelerator provider. Input, Zig state, and accelerator allocations therefore
+share one heap from `_end` to each backend's reserved input or memory boundary.
+
+Post-run SP1 and OpenVM memory scans cover their shared platform heap. ZisK
+additionally takes a total RAM envelope with
+`-Dguest-zisk-ram-bytes=<bytes>`, defaulting to end at ZisK's declared RAM top.
+Fixed capacity is free: its linker reservation changes neither the ELF bytes nor
+the execution cost.
 
 These defaults are a conformance envelope, not a production-mainnet memory
-claim. Size a deployment artifact from metered replay of its real
-witness/block workload, and retain an explicit failure when that fixed
-capacity is exceeded.
+claim. Size a deployment artifact from profiled replay of its real witness/block
+workload, and retain an explicit failure when that fixed capacity is exceeded.
 
 ## Host semantic gate
 

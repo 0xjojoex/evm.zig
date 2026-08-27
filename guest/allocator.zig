@@ -1,11 +1,9 @@
 const std = @import("std");
-const evmz = @import("evmz");
 const guest_options = @import("guest_options");
-
-pub const MeteredFixedBufferAllocator = evmz.fixed_buffer_meter.MeteredFixedBufferAllocator;
 
 extern var _heap_start: u8;
 extern var _heap_end: u8;
+extern fn sys_alloc_aligned(bytes: usize, alignment: usize) callconv(.c) ?[*]u8;
 
 const NativeHeap = if (guest_options.backend != .native) struct {
     fn buffer() []u8 {
@@ -28,7 +26,7 @@ const NativeHeap = if (guest_options.backend != .native) struct {
     }
 };
 
-pub fn fixedBuffer() []u8 {
+fn fixedBuffer() []u8 {
     if (comptime guest_options.backend != .native) {
         const bottom = @intFromPtr(&_heap_start);
         const top = @intFromPtr(&_heap_end);
@@ -42,10 +40,62 @@ pub fn fixedBuffer() []u8 {
     return NativeHeap.buffer();
 }
 
-pub fn fixedBufferAllocator() std.heap.FixedBufferAllocator {
-    return std.heap.FixedBufferAllocator.init(fixedBuffer());
-}
+const PlatformAllocator = struct {
+    pub fn allocator(self: *PlatformAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
 
-pub fn meteredFixedBufferAllocator() MeteredFixedBufferAllocator {
-    return MeteredFixedBufferAllocator.init(fixedBuffer());
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        _ = ctx;
+        _ = ra;
+        return sys_alloc_aligned(len, alignment.toByteUnits());
+    }
+
+    fn resize(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        _ = ctx;
+        _ = alignment;
+        _ = ra;
+        return new_len <= memory.len;
+    }
+
+    fn remap(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        return if (resize(ctx, memory, alignment, new_len, ra)) memory.ptr else null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        _ = ctx;
+        _ = memory;
+        _ = alignment;
+        _ = ra;
+    }
+};
+
+pub const State = if (guest_options.backend == .sp1 or guest_options.backend == .openvm)
+    PlatformAllocator
+else
+    std.heap.FixedBufferAllocator;
+
+pub fn init() State {
+    if (comptime guest_options.backend == .sp1 or guest_options.backend == .openvm) return .{};
+    return std.heap.FixedBufferAllocator.init(fixedBuffer());
 }
