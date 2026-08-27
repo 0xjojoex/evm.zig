@@ -2469,30 +2469,14 @@ test "exact spec drives created account initial nonce" {
 
 test "exact spec drives precompile warm access" {
     const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
-    const NoPrecompiles = struct {
-        pub const Entry = evmz.eth.precompile.Entry;
-
-        pub fn resolve(target: Address) ?Entry {
-            _ = target;
-            return null;
-        }
-
-        pub fn active(target: Address) bool {
-            _ = target;
-            return false;
-        }
-
-        pub fn execute(
-            entry: Entry,
-            call: evmz.precompile.Call,
-        ) evmz.precompile.Error!evmz.precompile.Result {
-            _ = entry;
-            _ = call;
-            return error.NotImplemented;
-        }
+    // An all-inactive catalog is now a plain config value, no custom type.
+    const no_precompiles_config = comptime config: {
+        var config = evmz.eth.precompile.berlin_config;
+        config.active = .initFill(false);
+        break :config config;
     };
     const NoPrecompile = evmz.t.CustomVm(.berlin, .{
-        .precompile = NoPrecompiles,
+        .precompile = .{ .config = no_precompiles_config },
     }) orelse return error.SkipZigTest;
     const precompile_address = evmz.addr(0x01);
 
@@ -2515,16 +2499,13 @@ test "exact spec drives precompile execution" {
     const CustomPrecompileOverrides = struct {
         const custom_address = evmz.addr(0x1234);
 
+        /// Custom dispatch leaf beside the untouched catalog config.
         pub const Precompile = struct {
             pub const Entry = enum { custom };
 
             pub fn resolve(target: Address) ?Entry {
                 if (!evmz.Address.eql(target, custom_address)) return null;
                 return .custom;
-            }
-
-            pub fn active(target: Address) bool {
-                return resolve(target) != null;
             }
 
             pub fn execute(
@@ -2541,7 +2522,10 @@ test "exact spec drives precompile execution" {
         };
     };
     const CustomPrecompile = evmz.t.CustomVm(.cancun, .{
-        .precompile = CustomPrecompileOverrides.Precompile,
+        .precompile = .{
+            .config = evmz.eth.precompile.cancun_config,
+            .custom = CustomPrecompileOverrides.Precompile,
+        },
     }) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);

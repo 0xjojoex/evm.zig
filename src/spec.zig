@@ -10,12 +10,19 @@
 //! Every section derives forward with `extend(patch)`. Patch fields default
 //! to inheriting the base value; optional spec fields patch through
 //! `OptionalPatch`, whose `.replace` can also override the base to `null`.
+//!
+//! Specifications are values. A `type` appears only as a dispatch leaf —
+//! code the engine must call with comptime specialization: custom
+//! instruction handlers (`instruction.Target.custom`), custom precompiles
+//! (`precompile.Spec.custom`), reentrant native contracts, and a program's
+//! transaction family.
 
 const std = @import("std");
 
 const block_lifecycle = @import("block/lifecycle.zig");
 const execution = @import("execution.zig");
 const instruction_table = @import("instruction/table.zig");
+const precompile = @import("precompile.zig");
 const authorization = @import("transaction/authorization.zig");
 const tx = @import("transaction/types.zig");
 const tx_blob = @import("transaction/blob.zig");
@@ -352,9 +359,9 @@ pub const Spec = struct {
     valueTransferLog: *const fn (execution.ValueTransferInput) ?execution.ValueTransferLog,
     /// Exact instruction table: activation, static gas, dispatch targets.
     instruction: instruction_table.Spec,
-    /// Precompile set: any type declaring `Entry`, `resolve`, `active`, and
-    /// data-only `execute`.
-    precompile: type,
+    /// Precompile set: catalog configuration plus an optional custom
+    /// dispatch leaf.
+    precompile: precompile.Spec,
     /// Host-capable native-contract address set. This capability is separate
     /// because Ethereum precompiles are terminal and cannot reenter the EVM.
     reentrant_native_contract: type,
@@ -371,7 +378,7 @@ pub const Spec = struct {
         retains_empty_accounts: ?bool = null,
         valueTransferLog: ?@FieldType(Spec, "valueTransferLog") = null,
         instruction: ?instruction_table.Spec = null,
-        precompile: ?type = null,
+        precompile: ?precompile.Spec = null,
         reentrant_native_contract: ?type = null,
     };
 

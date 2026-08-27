@@ -146,21 +146,47 @@ pub fn ImplType(
             return .{};
         }
 
+        /// The prepared value `transact` completes. Exposed so a wrapping
+        /// family may adjust the settlement plan between `prepare` and
+        /// `transactPrepared` — an OP-style family widens `upfront_debit`
+        /// and `minimum_balance` with rollup fees the way op-revm folds its
+        /// L1 cost into one caller deduction.
+        pub const Executable = PreparedTransaction;
+
         pub fn transact(
             context: *Context,
             tx_value: transaction.Transaction,
         ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
+            return switch (try prepare(context, tx_value)) {
+                .rejected => |reason| .{ .rejected = reason },
+                .executable => |executable| try transactPrepared(context, executable),
+            };
+        }
+
+        /// Validate and plan one transaction without touching state. A widened
+        /// plan is the caller's responsibility to keep affordable: preparation
+        /// validated only the unwidened requirement, so re-check the payer
+        /// balance before completing or the shortfall becomes an
+        /// included-invalid result instead of a rejection.
+        pub fn prepare(
+            context: *Context,
+            tx_value: transaction.Transaction,
+        ) Error!transaction.PrepareResult(tx_settlement.DefaultPlan, Rejection) {
             const input_value = context.input();
-            const prepared = (transaction_prepare.Runtime(spec){}).prepare(.{
+            return (transaction_prepare.Runtime(spec){}).prepare(.{
                 .tx = tx_value,
                 .env = input_value.env,
                 .block = input_value.progress,
                 .state = context.preparationState(),
             }) catch |err| return context.infrastructureError(err);
-            return switch (prepared) {
-                .rejected => |reason| .{ .rejected = reason },
-                .executable => |executable| try completeExecutable(context, executable),
-            };
+        }
+
+        /// Open the transaction lifetime and complete a prepared transaction.
+        pub fn transactPrepared(
+            context: *Context,
+            executable: PreparedTransaction,
+        ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
+            return completeExecutable(context, executable);
         }
 
         fn completeExecutable(

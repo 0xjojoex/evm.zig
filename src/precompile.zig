@@ -33,7 +33,9 @@ pub const Contract = enum(u16) {
     }
 };
 
-pub const contract_slots = @intFromEnum(Contract.p256verify) + 1;
+/// Dense per-contract table keyed by the catalog enum. The enum's *values*
+/// are sparse addresses (0x01..0x11, 0x100); the table is not.
+pub const ActiveSet = std.enums.EnumArray(Contract, bool);
 
 /// Resolved scalar gas inputs consumed by the precompile formulas below.
 /// Exact specifications provide one value per semantic key.
@@ -72,23 +74,77 @@ pub const ModexpPricing = enum {
     eip7883,
 };
 
+pub const InputSizeLimits = std.enums.EnumArray(Contract, ?u32);
+
 /// One exact precompile execution configuration. No fork identity enters a
 /// precompile invocation after this value is selected.
 pub const Config = struct {
-    active: [contract_slots]bool,
+    active: ActiveSet,
     gas: GasSchedule,
     modexp_pricing: ModexpPricing,
     modexp_max_input_len: ?u256,
+    /// Per-contract cap on accepted input length. An over-limit call fails
+    /// before any work, consuming its gas like any malformed precompile
+    /// input. OP forks bound bn254 pairing and BLS MSM/pairing inputs this
+    /// way (Granite, Isthmus); null entries are uncapped.
+    input_size_limit: InputSizeLimits = .initFill(null),
 };
 
-/// Bind precompile activation and pricing to one exact engine configuration.
-pub fn Exact(comptime config: Config) type {
+/// Sentinel for a specification without chain-custom precompiles.
+pub const NoCustomPrecompiles = struct {};
+
+/// Exact precompile specification consumed by an engine spec: the catalog
+/// configuration plus an optional custom dispatch leaf.
+///
+/// `custom` is the only type-shaped part — a dispatch leaf the engine calls,
+/// like a custom instruction handler. It owns addresses outside the catalog
+/// and is consulted first; shadowing an active catalog address is the
+/// author's own semantics to answer for. Any type declaring `Entry`,
+/// `resolve`, and data-only `execute` qualifies.
+///
+/// The comptime-self methods below are the engine's call surface; they
+/// delegate to the `Exact` dispatcher derived from this value.
+pub const Spec = struct {
+    config: Config,
+    custom: type = NoCustomPrecompiles,
+
+    pub fn resolve(comptime self: Spec, target: Address) ?Exact(self).Entry {
+        return Exact(self).resolve(target);
+    }
+
+    pub fn active(comptime self: Spec, target: Address) bool {
+        return Exact(self).active(target);
+    }
+
+    pub fn execute(comptime self: Spec, entry: Exact(self).Entry, call: Call) Error!Result {
+        return Exact(self).execute(entry, call);
+    }
+};
+
+/// Bind one exact precompile specification to its concrete dispatcher.
+pub fn Exact(comptime spec: Spec) type {
+    const config = spec.config;
+    const Custom = spec.custom;
+    const has_custom = Custom != NoCustomPrecompiles;
+    if (has_custom) validateCustom(Custom);
+
     return struct {
-        pub const Entry = Contract;
+        pub const Entry = if (has_custom) union(enum) {
+            builtin: Contract,
+            custom: Custom.Entry,
+        } else Contract;
 
         pub fn resolve(target: Address) ?Entry {
+            if (has_custom) {
+                if (Custom.resolve(target)) |entry| return .{ .custom = entry };
+                return .{ .builtin = resolveBuiltin(target) orelse return null };
+            }
+            return resolveBuiltin(target);
+        }
+
+        fn resolveBuiltin(target: Address) ?Contract {
             const entry = contractFromAddress(target) orelse return null;
-            return if (config.active[@intFromEnum(entry)]) entry else null;
+            return if (config.active.get(entry)) entry else null;
         }
 
         pub fn active(target: Address) bool {
@@ -99,9 +155,24 @@ pub fn Exact(comptime config: Config) type {
             entry: Entry,
             call: Call,
         ) Error!Result {
+            if (has_custom) {
+                return switch (entry) {
+                    .builtin => |contract| executeWithConfig(contract, call, config),
+                    .custom => |custom_entry| Custom.execute(custom_entry, call),
+                };
+            }
             return executeWithConfig(entry, call, config);
         }
     };
+}
+
+fn validateCustom(comptime Custom: type) void {
+    if (!@hasDecl(Custom, "Entry"))
+        @compileError("custom precompile set must declare an Entry type");
+    if (!std.meta.hasFn(Custom, "resolve"))
+        @compileError("custom precompile set must declare resolve(Address) ?Entry");
+    if (!std.meta.hasFn(Custom, "execute"))
+        @compileError("custom precompile set must declare execute(Entry, Call) Error!Result");
 }
 
 pub fn executeWithConfig(
@@ -143,6 +214,19 @@ pub fn executeContract(
     comptime config: Config,
 ) Error!Result {
     validateConfig(config);
+    // Comptime-gated: a configuration with no caps provably skips the lookup
+    // (the runtime `get` alone would rely on LLVM folding a uniform table).
+    const any_input_cap = comptime cap: {
+        for (std.enums.values(Contract)) |entry| {
+            if (config.input_size_limit.get(entry) != null) break :cap true;
+        }
+        break :cap false;
+    };
+    if (any_input_cap) {
+        if (config.input_size_limit.get(contract)) |limit| {
+            if (call.input_data.len > limit) return emptyResult(.failure);
+        }
+    }
     const gas = config.gas;
     return switch (contract) {
         .ecrecover => ecrecover(call, gas),
@@ -827,7 +911,7 @@ fn executeEthereumPrecompileForTest(
         .prague => eth_precompile.prague_config,
         .osaka, .amsterdam => eth_precompile.osaka_config,
     };
-    const ExactConfig = Exact(config);
+    const ExactConfig = Exact(.{ .config = config });
     const contract = ExactConfig.resolve(target) orelse return null;
     return try executeContract(contract, .{
         .allocator = allocator,
@@ -1012,6 +1096,36 @@ test modexp {
 
     const oversized_osaka = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.modexp.toAddress(), &over_osaka_limit_input, 6000)).?;
     try std.testing.expectEqual(Status.out_of_gas, oversized_osaka.status);
+}
+
+test "input size limit fails oversized calls before dispatch" {
+    const capped_config: Config = comptime config: {
+        var result = @import("eth/precompile.zig").istanbul_config;
+        result.input_size_limit.set(.bn254_pairing, bn254_pair_size);
+        break :config result;
+    };
+    const Capped = Exact(.{ .config = capped_config });
+
+    // One byte over the cap fails outright, consuming the provided gas —
+    // the OP Granite/Isthmus bounded-input behavior.
+    const over = [_]u8{0} ** (bn254_pair_size + 1);
+    const over_result = try Capped.execute(.bn254_pairing, .{
+        .allocator = std.testing.allocator,
+        .input_data = &over,
+        .gas = 1_000_000,
+    });
+    try std.testing.expectEqual(Status.failure, over_result.status);
+    try std.testing.expectEqual(@as(i64, 0), over_result.gas_left);
+
+    // At the cap the contract runs normally.
+    const at = [_]u8{0} ** bn254_pair_size;
+    const at_result = try Capped.execute(.bn254_pairing, .{
+        .allocator = std.testing.allocator,
+        .input_data = &at,
+        .gas = 1_000_000,
+    });
+    defer if (at_result.output_owned) std.testing.allocator.free(at_result.output_data);
+    try std.testing.expectEqual(Status.success, at_result.status);
 }
 
 test "P256VERIFY precompile" {

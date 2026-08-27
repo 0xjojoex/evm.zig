@@ -13,7 +13,7 @@
 //!   precompile type owning its own address.
 //!
 //! `spec.block` (system-call hooks) and `spec.valueTransferLog` follow the
-//! same patch pattern; `examples/op_deposit.zig` composes them — together
+//! same patch pattern; `examples/op/` composes them — together
 //! with a family-owned transaction type — into a complete OP-style fork.
 
 const std = @import("std");
