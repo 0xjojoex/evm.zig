@@ -50,8 +50,8 @@ This follows `main`; pin a commit for reproducible builds. Each release
 supports one Zig minor, and every module ships at the package version — see
 [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
 
-| evmz | Zig |
-| --- | --- |
+| evmz   | Zig      |
+| ------ | -------- |
 | `main` | `0.16.x` |
 
 ## Quick start
@@ -108,7 +108,7 @@ evmz exposes the execution stack as separate reusable surfaces:
 | Transaction program | Envelope validation, fees, nonce, execution, and settlement |
 | Block program       | Ordered transaction execution and block-level rules         |
 | Stateless validator | Witness validation and post-state and receipts roots        |
-| Guest               | The stateless validator compiled for ZisK, SP1, or OpenVM    |
+| Guest               | The stateless validator compiled for ZisK, SP1, or OpenVM   |
 
 ## Exact specifications
 
@@ -138,7 +138,7 @@ const MyEvm = evmz.Vm(my_cancun);
 precompile, transaction, or block bindings can also be replaced. See
 [`examples/custom_fork/`](https://github.com/0xjojoex/evm.zig/tree/main/examples/custom_fork)
 and
-[`examples/op_deposit.zig`](https://github.com/0xjojoex/evm.zig/blob/main/examples/op_deposit.zig).
+[`examples/op/`](https://github.com/0xjojoex/evm.zig/blob/main/examples/op).
 
 ## Stateless validation and zkVM guests
 

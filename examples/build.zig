@@ -15,7 +15,7 @@ const Example = struct {
 const examples = [_]Example{
     .{ .name = "basic", .path = "basic.zig" },
     .{ .name = "bal_parallel", .path = "bal_parallel.zig" },
-    .{ .name = "op_deposit", .path = "op_deposit.zig" },
+    .{ .name = "op", .path = "op/main.zig" },
     .{ .name = "custom_fork", .path = "custom_fork/main.zig" },
 };
 

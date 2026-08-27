@@ -9,9 +9,9 @@ pub const Entry = precompile.Contract;
 /// contracts may already have values here; `resolve` owns activation.
 pub const frontier_config: precompile.Config = .{
     .active = active: {
-        var result = [_]bool{false} ** precompile.contract_slots;
+        var result = precompile.ActiveSet.initFill(false);
         for ([_]Entry{ .ecrecover, .sha256, .ripemd160, .identity }) |entry| {
-            result[@intFromEnum(entry)] = true;
+            result.set(entry, true);
         }
         break :active result;
     },
@@ -99,7 +99,7 @@ pub const osaka_config: precompile.Config = config: {
 };
 
 fn activate(config: *precompile.Config, comptime entries: []const Entry) void {
-    inline for (entries) |entry| config.active[@intFromEnum(entry)] = true;
+    inline for (entries) |entry| config.active.set(entry, true);
 }
 
 pub const Exact = precompile.Exact;
@@ -115,13 +115,13 @@ test "Ethereum exact precompile configs extend resolved values" {
 }
 
 test "precompile activation extends exact configs" {
-    const Frontier = Exact(frontier_config);
-    const Byzantium = Exact(byzantium_config);
-    const Istanbul = Exact(istanbul_config);
-    const Berlin = Exact(berlin_config);
-    const Cancun = Exact(cancun_config);
-    const Prague = Exact(prague_config);
-    const Osaka = Exact(osaka_config);
+    const Frontier = Exact(.{ .config = frontier_config });
+    const Byzantium = Exact(.{ .config = byzantium_config });
+    const Istanbul = Exact(.{ .config = istanbul_config });
+    const Berlin = Exact(.{ .config = berlin_config });
+    const Cancun = Exact(.{ .config = cancun_config });
+    const Prague = Exact(.{ .config = prague_config });
+    const Osaka = Exact(.{ .config = osaka_config });
 
     try std.testing.expectEqual(Entry.ecrecover, Frontier.resolve(Entry.ecrecover.toAddress()).?);
     try std.testing.expect(Frontier.resolve(Entry.modexp.toAddress()) == null);

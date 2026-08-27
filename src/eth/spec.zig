@@ -666,7 +666,7 @@ pub const frontier: Spec = .{
     .retains_empty_accounts = true,
     .valueTransferLog = semantics.noValueTransferLog,
     .instruction = eth_instruction.frontier,
-    .precompile = eth_precompile.Exact(eth_precompile.frontier_config),
+    .precompile = .{ .config = eth_precompile.frontier_config },
     .reentrant_native_contract = execution.NoReentrantNativeContracts,
 };
 
@@ -701,7 +701,7 @@ pub const spurious_dragon = tangerine_whistle.extend(.{
 
 pub const byzantium = spurious_dragon.extend(.{
     .instruction = eth_instruction.byzantium,
-    .precompile = eth_precompile.Exact(eth_precompile.byzantium_config),
+    .precompile = .{ .config = eth_precompile.byzantium_config },
 });
 
 pub const constantinople = byzantium.extend(.{
@@ -720,7 +720,7 @@ pub const istanbul = petersburg.extend(.{
         .sstoreGas = semantics.istanbulSstore,
     },
     .instruction = eth_instruction.istanbul,
-    .precompile = eth_precompile.Exact(eth_precompile.istanbul_config),
+    .precompile = .{ .config = eth_precompile.istanbul_config },
 });
 
 pub const muir_glacier = istanbul;
@@ -736,7 +736,7 @@ pub const berlin = muir_glacier.extend(.{
     },
     .self_destruct = .{ .cold_account_access_gas = .{ .replace = eip2929.cold_account_access_cost } },
     .instruction = eth_instruction.berlin,
-    .precompile = eth_precompile.Exact(eth_precompile.berlin_config),
+    .precompile = .{ .config = eth_precompile.berlin_config },
 });
 pub const london = berlin.extend(.{
     .transaction = .{
@@ -780,7 +780,7 @@ pub const cancun = shanghai.extend(.{
         .finalization = semantics.cancunSelfDestructFinalization,
     },
     .instruction = eth_instruction.cancun,
-    .precompile = eth_precompile.Exact(eth_precompile.cancun_config),
+    .precompile = .{ .config = eth_precompile.cancun_config },
 });
 
 pub const prague = cancun.extend(.{
@@ -793,7 +793,7 @@ pub const prague = cancun.extend(.{
     },
     .authorization = .{ .active = true, .warms_delegated_target = true },
     .block = .{ .beforeBlock = semantics.pragueBeforeBlock, .finalizeBlock = semantics.pragueFinalize },
-    .precompile = eth_precompile.Exact(eth_precompile.prague_config),
+    .precompile = .{ .config = eth_precompile.prague_config },
 });
 
 pub const osaka = prague.extend(.{
@@ -803,7 +803,7 @@ pub const osaka = prague.extend(.{
         .total_gas_limit = .{ .replace = eip7825.max_transaction_gas_limit },
     },
     .instruction = eth_instruction.osaka,
-    .precompile = eth_precompile.Exact(eth_precompile.osaka_config),
+    .precompile = .{ .config = eth_precompile.osaka_config },
 });
 
 pub const amsterdam = osaka.extend(.{

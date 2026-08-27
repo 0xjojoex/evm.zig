@@ -155,6 +155,92 @@ test "hand-written multi-variant family dispatches through ProgramType" {
     }
 }
 
+test "family widens the prepared settlement plan with a storage-priced fee" {
+    const Base = evmz.t.Vm(.latest) orelse return error.SkipZigTest;
+    const ExactEngine = evmz.Engine(Base.spec);
+    const Input = struct {
+        env: evmz.Env,
+        tx: evmz.Transaction,
+        progress: evmz.transaction.PreparationBlockProgress = .{},
+    };
+    const Context = ExactEngine.Context(Input);
+    const Eth = ExactEngine.EthereumTransition(Input);
+    const FamilyError = Context.Error || error{Overflow};
+    const Outcome = evmz.transaction.TransitionOutcomeType(
+        evmz.TxExecutionResult,
+        evmz.transaction.validation.ValidationError,
+    );
+    // The OP-shaped composition: an extra fee priced from predeploy storage,
+    // folded into the one upfront caller debit and never refunded.
+    const Family = struct {
+        const fee_source = addr(0xfee);
+        const fee_slot: u256 = 7;
+
+        pub fn transact(context: *Context, tx: evmz.Transaction) FamilyError!Outcome {
+            // Preparation-safe storage read: no transaction lifetime is open.
+            const extra = try context.getStorage(fee_source, fee_slot);
+            switch (try Eth.prepare(context, tx)) {
+                .rejected => |reason| return .{ .rejected = reason },
+                .executable => |executable| {
+                    var widened = executable;
+                    widened.settlement.upfront_debit = try std.math.add(u256, widened.settlement.upfront_debit, extra);
+                    widened.settlement.minimum_balance = try std.math.add(u256, widened.settlement.minimum_balance, extra);
+                    return try Eth.transactPrepared(context, widened);
+                },
+            }
+        }
+    };
+    const Program = ExactEngine.Program(
+        Input,
+        evmz.TxExecutionResult,
+        evmz.transaction.validation.ValidationError,
+        FamilyError,
+        Family,
+    );
+
+    const sender = addr(0xaaaa);
+    const initial_balance: u256 = 10_000_000;
+    const extra_fee: u256 = 500;
+    const gas_price: u256 = 5;
+    const value: u256 = 1_000;
+
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = initial_balance });
+    // Pre-existing recipient: keep new-account state gas out of this test.
+    try evmz.t.seedStoreAccount(&memory, addr(0xbbbb), .{ .balance = 1 });
+    var fee_account = try memory.getOrCreateAccount(Family.fee_source);
+    try fee_account.storage.put(Family.fee_slot, extra_fee);
+
+    var executor = ExactEngine.Executor.init(std.testing.allocator, .{
+        .state = .{ .reader = memory.reader() },
+    });
+    defer executor.deinit();
+
+    const outcome = try Program.transact(&executor, .{
+        .env = .{ .gas_limit = 30_000_000 },
+        .tx = .{
+            .sender = sender,
+            .to = addr(0xbbbb),
+            .gas_limit = 100_000,
+            .gas_price = gas_price,
+            .value = value,
+        },
+    });
+    const result = switch (outcome) {
+        .rejected => return error.UnexpectedRejection,
+        .executed => |executed| executed.retainResult(),
+    };
+
+    // The widened debit stays deducted: settlement refunds unused gas at the
+    // plan price but never the family's extra fee.
+    try std.testing.expectEqual(evmz.TxStatus.success, result.status);
+    try std.testing.expectEqual(
+        initial_balance - value - @as(u256, result.gas.used) * gas_price - extra_fee,
+        try executor.getBalance(sender),
+    );
+}
+
 test "Env execution context derives opcode-visible gas limit from the environment" {
     const origin = addr(0xaaaa);
     const env = Env{ .chain_id = 10, .gas_limit = 30_000_000 };

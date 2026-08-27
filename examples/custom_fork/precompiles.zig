@@ -1,11 +1,12 @@
-//! Precompile customization, two ways:
+//! Precompile customization, two composable knobs on `precompile.Spec`:
 //!
-//! 1. Derive a new exact `precompile.Config` from the Ethereum catalog —
-//!    activation flags and gas pricing are plain comptime values, so an
-//!    L2-style fork can enable P256VERIFY early at its own price.
-//! 2. Hand the spec a completely custom precompile type. The `precompile`
-//!    field is any type with `Entry`/`resolve`/`active`/`execute`; this one
-//!    owns one extra address and delegates the rest to the derived catalog.
+//! 1. `config` — derive a new exact catalog configuration; activation flags
+//!    and gas pricing are plain comptime values, so an L2-style fork can
+//!    enable P256VERIFY early at its own price.
+//! 2. `custom` — a dispatch leaf for chain-owned contracts at addresses the
+//!    catalog does not serve. The engine consults it first and routes
+//!    everything else through the configured catalog, so the leaf declares
+//!    only its own address and behavior.
 
 const std = @import("std");
 const evmz = @import("evmz");
@@ -14,59 +15,48 @@ const harness = @import("harness.zig");
 const l2_precompile_config = blk: {
     var config = evmz.eth.precompile.cancun_config;
     // RIP-7212 P256VERIFY, active before Osaka and priced like an L2 would.
-    config.active[@intFromEnum(evmz.eth.precompile.Entry.p256verify)] = true;
+    config.active.set(.p256verify, true);
     config.gas.set(.p256verify, 3_450);
     break :blk config;
 };
-const StandardSet = evmz.eth.precompile.Exact(l2_precompile_config);
 
 pub const reverse_address = evmz.addr(0x1234);
 const reverse_gas: i64 = 100;
 
-const CustomSet = struct {
-    pub const Entry = union(enum) {
-        standard: StandardSet.Entry,
-        reverse,
-    };
+const ReverseContract = struct {
+    pub const Entry = enum { reverse };
 
     pub fn resolve(target: evmz.Address) ?Entry {
-        if (target.eql(reverse_address)) return .reverse;
-        if (StandardSet.resolve(target)) |entry| return .{ .standard = entry };
-        return null;
-    }
-
-    pub fn active(target: evmz.Address) bool {
-        return resolve(target) != null;
+        return if (target.eql(reverse_address)) .reverse else null;
     }
 
     pub fn execute(
         entry: Entry,
         call: evmz.precompile.Call,
     ) evmz.precompile.Error!evmz.precompile.Result {
-        switch (entry) {
-            .standard => |standard| return StandardSet.execute(standard, call),
-            .reverse => {
-                if (call.gas < reverse_gas) {
-                    return .{
-                        .status = .out_of_gas,
-                        .output_data = &.{},
-                        .gas_left = 0,
-                        .output_owned = false,
-                    };
-                }
-                const output = try call.allocator.dupe(u8, call.input_data);
-                std.mem.reverse(u8, output);
-                return .{
-                    .status = .success,
-                    .output_data = output,
-                    .gas_left = call.gas - reverse_gas,
-                };
-            },
+        std.debug.assert(entry == .reverse);
+        if (call.gas < reverse_gas) {
+            return .{
+                .status = .out_of_gas,
+                .output_data = &.{},
+                .gas_left = 0,
+                .output_owned = false,
+            };
         }
+        const output = try call.allocator.dupe(u8, call.input_data);
+        std.mem.reverse(u8, output);
+        return .{
+            .status = .success,
+            .output_data = output,
+            .gas_left = call.gas - reverse_gas,
+        };
     }
 };
 
-pub const precompile_cancun = evmz.eth.cancun.extend(.{ .precompile = CustomSet });
+pub const precompile_cancun = evmz.eth.cancun.extend(.{ .precompile = .{
+    .config = l2_precompile_config,
+    .custom = ReverseContract,
+} });
 
 const CustomVm = evmz.Vm(precompile_cancun);
 const CancunVm = evmz.Vm(evmz.eth.cancun);
@@ -89,8 +79,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer reversed.deinit(allocator);
 
     std.debug.print(
-        "REVERSE precompile at 0x1234: {s} -> \"{s}\", gas {d}\n",
-        .{ @tagName(reversed.status), reversed.output, reversed.gas_used },
+        "REVERSE precompile at 0x1234: {t} -> \"{s}\", gas {d}\n",
+        .{ reversed.status, reversed.output, reversed.gas_used },
     );
     std.debug.print(
         "P256VERIFY active: custom {}, stock cancun {}\n",

@@ -451,6 +451,17 @@ pub fn ContextType(
             return self.activeExecutor().getCode(account_address) catch |err| return executor_errors.normalize(err);
         }
 
+        /// Read storage through tracked state and its canonical reader.
+        ///
+        /// Valid during family preparation, before `beginTransaction`: chain
+        /// families price fees from predeploy state (an OP L1Block read)
+        /// ahead of the rollback-armed lifetime, and mid-block that state
+        /// must come from the overlay, not the pre-block reader.
+        pub fn getStorage(self: *Self, account_address: Address, key: u256) ContextError!u256 {
+            return self.runtimeState().executor.getStorage(account_address, key) catch |err|
+                return executor_errors.normalize(err);
+        }
+
         pub fn accountAccess(self: *Self, account_address: Address) ContextError!void {
             return self.activeExecutor().traceAccountAccess(account_address) catch |err|
                 return executor_errors.normalize(err);
