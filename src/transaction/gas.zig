@@ -259,8 +259,8 @@ test "transaction gas helpers" {
         .addresses = 2,
         .storage_keys = 3,
     }, accessListCounts(&.{
-        .{ .address = @import("../address.zig").addr(0xaaaa), .storage_keys = storage_keys[0..2] },
-        .{ .address = @import("../address.zig").addr(0xbbbb), .storage_keys = storage_keys[2..] },
+        .{ .address = .addr(0xaaaa), .storage_keys = storage_keys[0..2] },
+        .{ .address = .addr(0xbbbb), .storage_keys = storage_keys[2..] },
     }));
 }
 

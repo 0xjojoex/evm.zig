@@ -184,7 +184,7 @@ test "owned delta detaches values and introduced code" {
             }
             pub fn at(_: @This(), _: u32) AccountChange {
                 return .{
-                    .address = @import("../address.zig").addr(0x1234),
+                    .address = .addr(0x1234),
                     .account = .{ .code_hash = [_]u8{0xab} ** 32 },
                 };
             }
@@ -194,7 +194,7 @@ test "owned delta detaches values and introduced code" {
                 return 1;
             }
             pub fn at(_: @This(), _: u32) StorageChange {
-                return .{ .address = @import("../address.zig").addr(0x1234), .key = 7, .value = 9 };
+                return .{ .address = .addr(0x1234), .key = 7, .value = 9 };
             }
         };
         const Wipes = struct {
@@ -202,7 +202,7 @@ test "owned delta detaches values and introduced code" {
                 return 1;
             }
             pub fn at(_: @This(), _: u32) Address {
-                return @import("../address.zig").addr(0x1234);
+                return .addr(0x1234);
             }
         };
 

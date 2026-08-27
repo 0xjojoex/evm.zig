@@ -84,10 +84,9 @@ fn emptyGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
 }
 
 test "empty state reader returns empty state" {
-    const addr = @import("../address.zig").addr;
     const reader = Reader.empty();
-    try std.testing.expect(!try reader.accountExists(addr(1)));
-    try std.testing.expectEqual(@as(?Account, null), try reader.loadAccount(addr(1)));
+    try std.testing.expect(!try reader.accountExists(.addr(1)));
+    try std.testing.expectEqual(@as(?Account, null), try reader.loadAccount(.addr(1)));
     try std.testing.expectEqualSlices(u8, &.{}, try reader.loadCode(crypto.keccak256_empty));
-    try std.testing.expectEqual(@as(u256, 0), try reader.getStorage(addr(1), 1));
+    try std.testing.expectEqual(@as(u256, 0), try reader.getStorage(.addr(1), 1));
 }
