@@ -48,7 +48,7 @@ pub const UpdateError = errors.UpdateError;
 pub const Root = hash.Root;
 pub const empty_root = hash.empty_root;
 pub const StdKeccak256Context = hash.StdKeccak256Context;
-pub const Region = occurrence.Region;
+pub const ScopedArenaAllocator = @import("stdx").ScopedArenaAllocator;
 
 pub const Entry = construct.Entry;
 pub const Update = sparse.Update;
@@ -197,31 +197,31 @@ pub fn Trie(comptime KeccakContext: type) type {
         /// engine, resolving nodes from `source`: a witness source materializes
         /// authenticated nodes lazily, a catalog source walks pre-authenticated
         /// linked topology.
-        /// Scratch comes from the caller's region and is rewound before return.
+        /// Scratch comes from the caller's arena and is rewound before return.
         pub fn updateFixedSorted(
             self: Self,
-            region: *Region,
+            scratch_arena: *ScopedArenaAllocator,
             source: anytype,
             updates: []const FixedUpdate,
         ) (std.mem.Allocator.Error || UpdateError)!Root {
-            return self.updateFixedMode(region, source, updates, {});
+            return self.updateFixedMode(scratch_arena, source, updates, {});
         }
 
         /// Apply sorted fixed-key updates and retain content-addressed dirty
-        /// nodes in caller-owned storage before the region is rewound.
+        /// nodes in caller-owned storage before the scratch arena is rewound.
         pub fn updateFixedSortedWithNodeUpdates(
             self: Self,
-            region: *Region,
+            scratch_arena: *ScopedArenaAllocator,
             source: anytype,
             updates: []const FixedUpdate,
             node_updates: *NodeUpdates,
         ) (std.mem.Allocator.Error || UpdateError)!Root {
-            return self.updateFixedMode(region, source, updates, node_updates);
+            return self.updateFixedMode(scratch_arena, source, updates, node_updates);
         }
 
         fn updateFixedMode(
             self: Self,
-            region: *Region,
+            scratch_arena: *ScopedArenaAllocator,
             source: anytype,
             updates: []const FixedUpdate,
             node_updates: anytype,
@@ -229,7 +229,7 @@ pub fn Trie(comptime KeccakContext: type) type {
             return switch (comptime sourceModeOf(@TypeOf(source))) {
                 .witness => occurrence.updateIndexSortedWithUpdates(
                     self.keccak_context,
-                    region,
+                    scratch_arena,
                     source.root,
                     proof.sealedIndex(source.index),
                     updates,
@@ -237,7 +237,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                 ),
                 .catalog => occurrence.updateCatalogSortedWithUpdates(
                     self.keccak_context,
-                    region,
+                    scratch_arena,
                     source.topology,
                     source.root,
                     updates,
@@ -297,41 +297,41 @@ pub fn Trie(comptime KeccakContext: type) type {
                 /// `source` (witness or catalog). Domain-key ordering cannot be
                 /// reused because projection may not preserve order.
                 /// Colliding projections are reported as `DuplicateKey`.
-                /// Scratch comes from the caller's region and is rewound before return.
+                /// Scratch comes from the caller's arena and is rewound before return.
                 pub fn update(
                     self: KeyedSelf,
-                    region: *Region,
+                    scratch_arena: *ScopedArenaAllocator,
                     source: anytype,
                     updates: []const KeyedSelf.Update,
                 ) (std.mem.Allocator.Error || UpdateError)!Root {
-                    return self.updateMode(region, source, updates, {});
+                    return self.updateMode(scratch_arena, source, updates, {});
                 }
 
                 pub fn updateWithNodeUpdates(
                     self: KeyedSelf,
-                    region: *Region,
+                    scratch_arena: *ScopedArenaAllocator,
                     source: anytype,
                     updates: []const KeyedSelf.Update,
                     node_updates: *NodeUpdates,
                 ) (std.mem.Allocator.Error || UpdateError)!Root {
-                    return self.updateMode(region, source, updates, node_updates);
+                    return self.updateMode(scratch_arena, source, updates, node_updates);
                 }
 
                 fn updateMode(
                     self: KeyedSelf,
-                    region: *Region,
+                    scratch_arena: *ScopedArenaAllocator,
                     source: anytype,
                     updates: []const KeyedSelf.Update,
                     node_updates: anytype,
                 ) (std.mem.Allocator.Error || UpdateError)!Root {
-                    const mark = region.mark();
-                    defer region.rewind(mark);
-                    const structural_updates = try self.project(region, updates);
+                    const mark = scratch_arena.mark();
+                    defer scratch_arena.rewind(mark);
+                    const structural_updates = try self.project(scratch_arena, updates);
                     return if (comptime @TypeOf(node_updates) == void)
-                        self.structural.updateFixedSorted(region, source, structural_updates)
+                        self.structural.updateFixedSorted(scratch_arena, source, structural_updates)
                     else
                         self.structural.updateFixedSortedWithNodeUpdates(
-                            region,
+                            scratch_arena,
                             source,
                             structural_updates,
                             node_updates,
@@ -340,10 +340,11 @@ pub fn Trie(comptime KeccakContext: type) type {
 
                 fn project(
                     self: KeyedSelf,
-                    region: *Region,
+                    scratch_arena: *ScopedArenaAllocator,
                     updates: []const KeyedSelf.Update,
                 ) std.mem.Allocator.Error![]FixedUpdate {
-                    const structural_updates = try region.allocator().alloc(FixedUpdate, updates.len);
+                    const structural_updates =
+                        try scratch_arena.allocator().alloc(FixedUpdate, updates.len);
                     for (updates, structural_updates) |item, *projected| {
                         projected.* = .{
                             .key = self.key_context.trieKey(item.key),

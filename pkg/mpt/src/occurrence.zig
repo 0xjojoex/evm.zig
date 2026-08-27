@@ -4,7 +4,7 @@
 //! untouched references, and bottom-up dirty encoding remain shared.
 
 const std = @import("std");
-const RewindableRegion = @import("stdx").RewindableRegion;
+const ScopedArenaAllocator = @import("stdx").ScopedArenaAllocator;
 
 const Catalog = @import("catalog.zig").Catalog;
 const encode = @import("encode.zig");
@@ -79,8 +79,6 @@ pub const Update = struct {
     key: fixed_key.FixedKey,
     value: ?[]const u8,
 };
-
-pub const Region = RewindableRegion;
 
 const OccurrenceId = enum(u32) { _ };
 
@@ -986,14 +984,14 @@ fn Context(
 
 pub fn updateCatalogSorted(
     keccak_context: anytype,
-    region: *Region,
+    scratch_arena: *ScopedArenaAllocator,
     topology: *const Catalog,
     root_ref: Catalog.Root,
     updates: []const Update,
 ) AllocUpdateError!hash.Root {
     return updateCatalogSortedWithUpdates(
         keccak_context,
-        region,
+        scratch_arena,
         topology,
         root_ref,
         updates,
@@ -1003,7 +1001,7 @@ pub fn updateCatalogSorted(
 
 pub fn updateCatalogSortedWithUpdates(
     keccak_context: anytype,
-    region: *Region,
+    scratch_arena: *ScopedArenaAllocator,
     topology: *const Catalog,
     root_ref: Catalog.Root,
     updates: []const Update,
@@ -1013,12 +1011,12 @@ pub fn updateCatalogSortedWithUpdates(
     if (updates.len == 0) return root_hash;
     try validateUpdates(updates);
 
-    const mark = region.mark();
-    defer region.rewind(mark);
+    const mark = scratch_arena.mark();
+    defer scratch_arena.rewind(mark);
     return updateResolved(
         .catalog,
         keccak_context,
-        region.allocator(),
+        scratch_arena.allocator(),
         topology,
         switch (root_ref) {
             .empty => null,
@@ -1032,14 +1030,14 @@ pub fn updateCatalogSortedWithUpdates(
 
 pub fn updateIndexSorted(
     keccak_context: anytype,
-    region: *Region,
+    scratch_arena: *ScopedArenaAllocator,
     root_hash: hash.Root,
     index: *const proof.NodeIndex,
     updates: []const Update,
 ) AllocUpdateError!hash.Root {
     return updateIndexSortedWithUpdates(
         keccak_context,
-        region,
+        scratch_arena,
         root_hash,
         index,
         updates,
@@ -1049,7 +1047,7 @@ pub fn updateIndexSorted(
 
 pub fn updateIndexSortedWithUpdates(
     keccak_context: anytype,
-    region: *Region,
+    scratch_arena: *ScopedArenaAllocator,
     root_hash: hash.Root,
     index: *const proof.NodeIndex,
     updates: []const Update,
@@ -1058,12 +1056,12 @@ pub fn updateIndexSortedWithUpdates(
     if (updates.len == 0) return root_hash;
     try validateUpdates(updates);
 
-    const mark = region.mark();
-    defer region.rewind(mark);
+    const mark = scratch_arena.mark();
+    defer scratch_arena.rewind(mark);
     return updateResolved(
         .index,
         keccak_context,
-        region.allocator(),
+        scratch_arena.allocator(),
         index,
         if (std.mem.eql(u8, &root_hash, &hash.empty_root)) null else .{
             .reference = .{ .hashed = &root_hash },

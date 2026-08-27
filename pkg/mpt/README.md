@@ -177,7 +177,7 @@ typed caches.
 for exactly 32-byte keys through a typed `Source`: `witnessSource(index, root)`
 resolves authenticated nodes lazily from a sealed witness index, while
 `catalogSource(topology, root)` carries stable catalog handles. Either way the
-call takes a resettable `Region` from the caller, creates
+call takes a `ScopedArenaAllocator` from the caller as scratch, creates
 mutable occurrences only along selected paths, retains untouched children as
 authenticated references, and encodes dirty ancestors bottom-up — a memoized
 write overlay, not another authenticated source of truth. Fixed width makes
@@ -214,8 +214,8 @@ immutable, and a failed call leaves no partial state.
 `init` takes an allocator retained by the trie; `root`, `rootSorted`,
 `indexWitness`, and `updateSorted` use it, and it must outlive the trie and
 every `WitnessIndex` it creates. Both fixed-key mutation paths take an explicit
-resettable `Region`; the typed `update` facade also
-allocates its projected update descriptors there.
+`ScopedArenaAllocator`; the typed `update` facade also allocates its projected
+update descriptors there.
 
 The primary API has no caller-supplied limits: touched topology grows
 incrementally through the allocator rather than reserving a speculative

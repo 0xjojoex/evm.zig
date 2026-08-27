@@ -64,23 +64,27 @@ fn storageTrie(allocator: Allocator) StorageTrie {
 /// structural trie context here avoids instantiating a second Keccak-backed
 /// MPT implementation merely because commit lives in its own source file.
 pub inline fn updateHashedSorted(
-    region: *mpt.Region,
+    scratch_arena: *mpt.ScopedArenaAllocator,
     source: anytype,
     updates: []const mpt.FixedUpdate,
 ) UpdateError![32]u8 {
-    return structuralTrie(region.allocator()).updateFixedSorted(region, source, updates);
+    return structuralTrie(scratch_arena.allocator()).updateFixedSorted(
+        scratch_arena,
+        source,
+        updates,
+    );
 }
 
 pub const NodeUpdates = mpt.NodeUpdates;
 
 pub inline fn updateHashedSortedWithNodeUpdates(
-    region: *mpt.Region,
+    scratch_arena: *mpt.ScopedArenaAllocator,
     source: anytype,
     updates: []const mpt.FixedUpdate,
     node_updates: *NodeUpdates,
 ) UpdateError![32]u8 {
-    return structuralTrie(region.allocator()).updateFixedSortedWithNodeUpdates(
-        region,
+    return structuralTrie(scratch_arena.allocator()).updateFixedSortedWithNodeUpdates(
+        scratch_arena,
         source,
         updates,
         node_updates,
@@ -596,7 +600,7 @@ fn assertStateSource(comptime T: type) void {
 }
 
 fn storageRootAfterChanges(
-    region: *mpt.Region,
+    scratch_arena: *mpt.ScopedArenaAllocator,
     allocator: Allocator,
     root_hash: [32]u8,
     source: anytype,
@@ -622,10 +626,10 @@ fn storageRootAfterChanges(
 
     const storage = storageTrie(allocator);
     return if (comptime @TypeOf(node_updates) == void)
-        storage.update(region, try source.storageSource(root_hash, wiped), updates.items)
+        storage.update(scratch_arena, try source.storageSource(root_hash, wiped), updates.items)
     else
         storage.updateWithNodeUpdates(
-            region,
+            scratch_arena,
             try source.storageSource(root_hash, wiped),
             updates.items,
             node_updates,
@@ -695,8 +699,8 @@ pub fn stateRootAfterChangesWithNodeUpdates(
 ) UpdateError![32]u8 {
     comptime assertStateSource(@TypeOf(source));
     comptime assertTrackedChangesView(@TypeOf(changes));
-    var region = mpt.Region.init(allocator);
-    defer region.deinit();
+    var scratch_arena: mpt.ScopedArenaAllocator = .init(allocator);
+    defer scratch_arena.deinit();
 
     var batches: AccountBatches = .empty;
     defer batches.deinit(allocator);
@@ -769,7 +773,7 @@ pub fn stateRootAfterChangesWithNodeUpdates(
             null;
         const storage_end = batch.storage_start + batch.storage_len;
         const storage_root = try storageRootAfterChanges(
-            &region,
+            &scratch_arena,
             allocator,
             previous.storage_root,
             source,
@@ -794,10 +798,10 @@ pub fn stateRootAfterChangesWithNodeUpdates(
     }
 
     return if (comptime @TypeOf(node_updates) == void)
-        accounts.update(&region, source.stateSource(), updates.items)
+        accounts.update(&scratch_arena, source.stateSource(), updates.items)
     else
         accounts.updateWithNodeUpdates(
-            &region,
+            &scratch_arena,
             source.stateSource(),
             updates.items,
             node_updates,

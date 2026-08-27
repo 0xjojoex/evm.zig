@@ -786,16 +786,16 @@ test "occurrence catalog update rejects branch values" {
     const root_ref = try builder.authenticateRoot(root_hash);
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     const update = [_]mpt.FixedUpdate{.{ .key = key, .value = &[_]u8{0x03} }};
     try std.testing.expectError(
         error.NonCanonicalNode,
-        trie.updateFixedSorted(&region, mpt.catalogSource(&catalog, root_ref), &update),
+        trie.updateFixedSorted(&arena, mpt.catalogSource(&catalog, root_ref), &update),
     );
     try std.testing.expectError(
         error.NonCanonicalNode,
-        trie.updateFixedSorted(&region, mpt.witnessSource(indexed, root_hash), &update),
+        trie.updateFixedSorted(&arena, mpt.witnessSource(indexed, root_hash), &update),
     );
 }
 
@@ -811,17 +811,17 @@ test "occurrence catalog update rejects variable-width leaves" {
     const root_ref = try builder.authenticateRoot(root_hash);
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     const key = [_]u8{0} ** 32;
     const update = [_]mpt.FixedUpdate{.{ .key = key, .value = &[_]u8{0x02} }};
     try std.testing.expectError(
         error.InvalidNode,
-        trie.updateFixedSorted(&region, mpt.catalogSource(&catalog, root_ref), &update),
+        trie.updateFixedSorted(&arena, mpt.catalogSource(&catalog, root_ref), &update),
     );
     try std.testing.expectError(
         error.InvalidNode,
-        trie.updateFixedSorted(&region, mpt.witnessSource(indexed, root_hash), &update),
+        trie.updateFixedSorted(&arena, mpt.witnessSource(indexed, root_hash), &update),
     );
 }
 
@@ -841,14 +841,14 @@ test "occurrence updates clean every allocation failure position" {
             const root_ref = try builder.authenticateRoot(root_hash);
             var catalog = try builder.finish();
             defer catalog.deinit();
-            var region = mpt.Region.init(allocator);
-            defer region.deinit();
+            var arena: mpt.ScopedArenaAllocator = .init(allocator);
+            defer arena.deinit();
             const updates = [_]mpt.FixedUpdate{
                 .{ .key = first, .value = null },
                 .{ .key = second, .value = &[_]u8{0x02} },
             };
-            _ = try trie.updateFixedSorted(&region, mpt.catalogSource(&catalog, root_ref), &updates);
-            _ = try trie.updateFixedSorted(&region, mpt.witnessSource(indexed, root_hash), &updates);
+            _ = try trie.updateFixedSorted(&arena, mpt.catalogSource(&catalog, root_ref), &updates);
+            _ = try trie.updateFixedSorted(&arena, mpt.witnessSource(indexed, root_hash), &updates);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
@@ -874,10 +874,10 @@ test "occurrence catalog update handles fixed-key insertion from empty root" {
     const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
     var catalog = try catalog_builder.finish();
     defer catalog.deinit();
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     const actual = try trie.updateFixedSorted(
-        &region,
+        &arena,
         mpt.catalogSource(&catalog, root_ref),
         &updates,
     );
@@ -892,10 +892,10 @@ test "occurrence catalog update accepts an empty update batch" {
     const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
     var catalog = try catalog_builder.finish();
     defer catalog.deinit();
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     const actual = try trie.updateFixedSorted(
-        &region,
+        &arena,
         mpt.catalogSource(&catalog, root_ref),
         &.{},
     );
@@ -913,12 +913,12 @@ test "occurrence updates expose content-addressed dirty nodes" {
         .{ .key = second, .value = &[_]u8{0x02} },
     };
 
-    var indexed_region = mpt.Region.init(std.testing.allocator);
-    defer indexed_region.deinit();
-    var indexed_nodes = mpt.NodeUpdates.init(std.testing.allocator);
+    var indexed_arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer indexed_arena.deinit();
+    var indexed_nodes: mpt.NodeUpdates = .init(std.testing.allocator);
     defer indexed_nodes.deinit();
     const indexed_root = try trie.updateFixedSortedWithNodeUpdates(
-        &indexed_region,
+        &indexed_arena,
         mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
         &update,
         &indexed_nodes,
@@ -943,12 +943,12 @@ test "occurrence updates expose content-addressed dirty nodes" {
     const root_ref = try catalog_builder.authenticateRoot(mpt.empty_root);
     var catalog = try catalog_builder.finish();
     defer catalog.deinit();
-    var catalog_region = mpt.Region.init(std.testing.allocator);
-    defer catalog_region.deinit();
+    var catalog_arena = mpt.ScopedArenaAllocator.init(std.testing.allocator);
+    defer catalog_arena.deinit();
     var catalog_nodes = mpt.NodeUpdates.init(std.testing.allocator);
     defer catalog_nodes.deinit();
     const catalog_root = try trie.updateFixedSortedWithNodeUpdates(
-        &catalog_region,
+        &catalog_arena,
         mpt.catalogSource(&catalog, root_ref),
         &update,
         &catalog_nodes,
@@ -977,24 +977,24 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     const nodes = [_][]const u8{&root_node};
     var indexed = try trie.indexWitness(&nodes);
     defer indexed.deinit();
-    var catalog_builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
+    var catalog_builder: mpt.Catalog.Builder = try .init(trie.allocator, indexed);
     defer catalog_builder.deinit();
     const root_ref = try catalog_builder.authenticateRoot(root_hash);
     var catalog = try catalog_builder.finish();
     defer catalog.deinit();
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     const replacement = [_]mpt.FixedUpdate{.{ .key = first, .value = &[_]u8{0x04} }};
     const replaced_entries = [_]mpt.Entry{.{ .key = &first, .value = &[_]u8{0x04} }};
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&replaced_entries)),
-        &(try trie.updateFixedSorted(&region, mpt.catalogSource(&catalog, root_ref), &replacement)),
+        &(try trie.updateFixedSorted(&arena, mpt.catalogSource(&catalog, root_ref), &replacement)),
     );
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&replaced_entries)),
-        &(try trie.updateFixedSorted(&region, mpt.witnessSource(indexed, root_hash), &replacement)),
+        &(try trie.updateFixedSorted(&arena, mpt.witnessSource(indexed, root_hash), &replacement)),
     );
 
     const split = [_]mpt.FixedUpdate{
@@ -1009,24 +1009,24 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&split_entries)),
-        &(try trie.updateFixedSorted(&region, mpt.catalogSource(&catalog, root_ref), &split)),
+        &(try trie.updateFixedSorted(&arena, mpt.catalogSource(&catalog, root_ref), &split)),
     );
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&split_entries)),
-        &(try trie.updateFixedSorted(&region, mpt.witnessSource(indexed, root_hash), &split)),
+        &(try trie.updateFixedSorted(&arena, mpt.witnessSource(indexed, root_hash), &split)),
     );
 
     const delete_only = [_]mpt.FixedUpdate{.{ .key = first, .value = null }};
     try std.testing.expectEqualSlices(
         u8,
         &mpt.empty_root,
-        &(try trie.updateFixedSorted(&region, mpt.catalogSource(&catalog, root_ref), &delete_only)),
+        &(try trie.updateFixedSorted(&arena, mpt.catalogSource(&catalog, root_ref), &delete_only)),
     );
     try std.testing.expectEqualSlices(
         u8,
         &mpt.empty_root,
-        &(try trie.updateFixedSorted(&region, mpt.witnessSource(indexed, root_hash), &delete_only)),
+        &(try trie.updateFixedSorted(&arena, mpt.witnessSource(indexed, root_hash), &delete_only)),
     );
 
     const replace_with_other = [_]mpt.FixedUpdate{
@@ -1037,12 +1037,12 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&compressed_entries)),
-        &(try trie.updateFixedSorted(&region, mpt.catalogSource(&catalog, root_ref), &replace_with_other)),
+        &(try trie.updateFixedSorted(&arena, mpt.catalogSource(&catalog, root_ref), &replace_with_other)),
     );
     try std.testing.expectEqualSlices(
         u8,
         &(try trie.rootSorted(&compressed_entries)),
-        &(try trie.updateFixedSorted(&region, mpt.witnessSource(indexed, root_hash), &replace_with_other)),
+        &(try trie.updateFixedSorted(&arena, mpt.witnessSource(indexed, root_hash), &replace_with_other)),
     );
 }
 

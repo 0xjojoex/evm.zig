@@ -1,6 +1,6 @@
 //! `StateReader` adapter over a Merkle Patricia Trie witness nodes.
 const std = @import("std");
-const RewindableRegion = @import("stdx").RewindableRegion;
+const ScopedArenaAllocator = @import("stdx").ScopedArenaAllocator;
 
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
@@ -146,9 +146,9 @@ pub fn Reader(comptime mode: Mode) type {
             changes: anytype,
             node_updates: ?*trie.NodeUpdates,
         ) RootError![32]u8 {
-            var seal_region = RewindableRegion.init(allocator);
-            defer seal_region.deinit();
-            const scratch = seal_region.allocator();
+            var scratch_arena: ScopedArenaAllocator = .init(allocator);
+            defer scratch_arena.deinit();
+            const scratch = scratch_arena.allocator();
             return narrowRoot(self.rootAfterChanges(scratch, changes, node_updates));
         }
 

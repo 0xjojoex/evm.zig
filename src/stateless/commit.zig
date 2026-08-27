@@ -126,13 +126,13 @@ pub fn stateRootAfterCatalogWithNodeUpdates(
 
     return if (comptime @TypeOf(node_updates) == void)
         trie.updateHashedSorted(
-            &workspace.mpt_region,
+            &workspace.arena,
             catalog.source(catalog.stateCatalogRoot()),
             account_updates.items,
         )
     else
         trie.updateHashedSortedWithNodeUpdates(
-            &workspace.mpt_region,
+            &workspace.arena,
             catalog.source(catalog.stateCatalogRoot()),
             account_updates.items,
             node_updates,
@@ -184,13 +184,13 @@ fn storageRootAfterCatalog(
         try catalog.storageCatalogRoot(parent_root);
     return if (comptime @TypeOf(node_updates) == void)
         trie.updateHashedSorted(
-            &workspace.mpt_region,
+            &workspace.arena,
             catalog.source(root_ref),
             updates.items,
         )
     else
         trie.updateHashedSortedWithNodeUpdates(
-            &workspace.mpt_region,
+            &workspace.arena,
             catalog.source(root_ref),
             updates.items,
             node_updates,
@@ -199,38 +199,38 @@ fn storageRootAfterCatalog(
 
 /// Owns the serial dense-commit lifetime tree. Retained account material lives
 /// at the root; each storage calculation gets a nested scope, while catalog
-/// mutation scopes itself inside the same region.
+/// mutation scopes itself inside the same arena.
 const DenseCommitWorkspace = struct {
-    mpt_region: mpt.Region,
+    arena: mpt.ScopedArenaAllocator,
 
     const Scope = struct {
         workspace: *DenseCommitWorkspace,
-        mark: mpt.Region.Mark,
+        mark: mpt.ScopedArenaAllocator.Mark,
 
         fn allocator(self: *Scope) Allocator {
-            return self.workspace.mpt_region.allocator();
+            return self.workspace.arena.allocator();
         }
 
         fn deinit(self: *Scope) void {
-            self.workspace.mpt_region.rewind(self.mark);
+            self.workspace.arena.rewind(self.mark);
             self.* = undefined;
         }
     };
 
     fn init(parent_allocator: Allocator) DenseCommitWorkspace {
-        return .{ .mpt_region = mpt.Region.init(parent_allocator) };
+        return .{ .arena = mpt.ScopedArenaAllocator.init(parent_allocator) };
     }
 
     fn deinit(self: *DenseCommitWorkspace) void {
-        self.mpt_region.deinit();
+        self.arena.deinit();
         self.* = undefined;
     }
 
     fn retainedAllocator(self: *DenseCommitWorkspace) Allocator {
-        return self.mpt_region.allocator();
+        return self.arena.allocator();
     }
 
     fn beginScope(self: *DenseCommitWorkspace) Scope {
-        return .{ .workspace = self, .mark = self.mpt_region.mark() };
+        return .{ .workspace = self, .mark = self.arena.mark() };
     }
 };

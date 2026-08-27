@@ -29,9 +29,9 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
         .{ .key = &alice_key, .value = "alice" },
     });
 
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
-    const inserted = try map.update(&region, mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root), &.{
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const inserted = try map.update(&arena, mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root), &.{
         .{ .key = .bob, .value = "bob" },
         .{ .key = .alice, .value = "alice" },
     });
@@ -62,11 +62,11 @@ test "typed key facade detects collisions after projection" {
     const Structural = mpt.Trie(mpt.StdKeccak256Context);
     const Map = Structural.Keyed(u8, KeyContext);
     const map = Map.init(Structural.init(std.testing.allocator, .{}), .{});
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
 
     try std.testing.expectError(error.DuplicateKey, map.update(
-        &region,
+        &arena,
         mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
         &.{
             .{ .key = 1, .value = "one" },

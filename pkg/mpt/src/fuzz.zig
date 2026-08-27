@@ -287,10 +287,10 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     const expected = try trie.rootSorted(entries[0..unique]);
     const via_index = try trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, index_updates[0..unique]);
     try expectRootEqual(expected, via_index);
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     const via_fixed_index = try trie.updateFixedSorted(
-        &region,
+        &arena,
         mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
         fixed_updates[0..unique],
     );
@@ -302,7 +302,7 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     var catalog = try builder.finish();
     defer catalog.deinit();
     const via_occurrence = try trie.updateFixedSorted(
-        &region,
+        &arena,
         mpt.catalogSource(&catalog, root_ref),
         fixed_updates[0..unique],
     );

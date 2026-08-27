@@ -1,28 +1,28 @@
 const std = @import("std");
-const RewindableRegion = @import("stdx").RewindableRegion;
+const ScopedArenaAllocator = @import("stdx").ScopedArenaAllocator;
 
 pub const Slot = struct {
-    region: RewindableRegion,
+    arena: ScopedArenaAllocator,
 
     pub fn init(parent_allocator: std.mem.Allocator) Slot {
-        return .{ .region = RewindableRegion.init(parent_allocator) };
+        return .{ .arena = ScopedArenaAllocator.init(parent_allocator) };
     }
 
     pub fn deinit(self: *Slot) void {
-        self.region.deinit();
+        self.arena.deinit();
         self.* = undefined;
     }
 
     pub fn reset(self: *Slot) void {
-        self.region.resetRetainingCapacity();
+        self.arena.resetRetainingCapacity();
     }
 
     pub fn allocator(self: *Slot) std.mem.Allocator {
-        return self.region.allocator();
+        return self.arena.allocator();
     }
 
     pub fn capacity(self: *const Slot) usize {
-        return self.region.capacity();
+        return self.arena.capacity();
     }
 };
 
