@@ -164,7 +164,10 @@ pub const AddressWord = extern struct {
     }
 
     pub inline fn toU256(self: AddressWord) u256 {
-        return self.address().toU256();
+        std.debug.assert(self.words[2] <= std.math.maxInt(u32));
+        return (@as(u256, @byteSwap(self.words[0])) << 96) |
+            (@as(u256, @byteSwap(self.words[1])) << 32) |
+            @byteSwap(@as(u32, @intCast(self.words[2])));
     }
 
     pub inline fn eql(a: AddressWord, b: AddressWord) bool {
@@ -290,6 +293,17 @@ test "address word preserves canonical bytes and truncates EVM words" {
     const from_evm_word: AddressWord = .fromU256(evm_word);
     try std.testing.expect(AddressWord.eql(from_address, from_evm_word));
     try std.testing.expectEqual(canonical.toU256(), from_evm_word.toU256());
+
+    // Randomized oracle: limb recombination must match the canonical byte read.
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    for (0..10_000) |_| {
+        var target: Address = undefined;
+        random.bytes(&target.bytes);
+        const word: AddressWord = .fromAddress(target);
+        try std.testing.expectEqual(target.toU256(), word.toU256());
+        try std.testing.expectEqual(target, AddressWord.fromU256(word.toU256()).address());
+    }
 }
 
 test "Address.fromPublicKey" {

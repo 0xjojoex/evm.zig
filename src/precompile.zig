@@ -7,6 +7,7 @@ const precompile_backend = @import("precompile/backend.zig");
 const uint256 = @import("uint256.zig");
 
 const Address = address.Address;
+const AddressWord = address.AddressWord;
 
 pub const Contract = enum(u16) {
     ecrecover = 0x01,
@@ -116,6 +117,10 @@ pub const Spec = struct {
         return Exact(self).active(target);
     }
 
+    pub fn activeWord(comptime self: Spec, target: AddressWord) bool {
+        return Exact(self).activeWord(target);
+    }
+
     pub fn execute(comptime self: Spec, entry: Exact(self).Entry, call: Call) Error!Result {
         return Exact(self).execute(entry, call);
     }
@@ -149,6 +154,18 @@ pub fn Exact(comptime spec: Spec) type {
 
         pub fn active(target: Address) bool {
             return resolve(target) != null;
+        }
+
+        /// Word-domain twin of `active` for callers holding an `AddressWord`.
+        /// Catalog membership is decided without materializing canonical
+        /// bytes; only a custom set forces the unpack, since its `resolve`
+        /// contract is Address-domain.
+        pub fn activeWord(target: AddressWord) bool {
+            if (contractFromAddressWord(target)) |entry| {
+                if (config.active.get(entry)) return true;
+            }
+            if (has_custom) return Custom.resolve(target.address()) != null;
+            return false;
         }
 
         pub fn execute(
@@ -275,6 +292,20 @@ pub fn contractFromAddress(target: Address) ?Contract {
     if (std.mem.readInt(u64, target.bytes[8..16], .little) != 0) return null;
     if (std.mem.readInt(u16, target.bytes[16..18], .little) != 0) return null;
     const contract_id = std.mem.readInt(u16, target.bytes[18..20], .big);
+    return contractFromSelector(contract_id);
+}
+
+pub fn contractFromAddressWord(target: AddressWord) ?Contract {
+    // Same rejection in the word domain: the 18 zero bytes are words[0],
+    // words[1], and the low half of words[2]; the big-endian selector is the
+    // byteswapped upper half. words[2]'s top four bytes are zero by invariant.
+    if (target.words[0] != 0 or target.words[1] != 0) return null;
+    if (target.words[2] & 0xffff != 0) return null;
+    const contract_id = @byteSwap(@as(u16, @intCast(target.words[2] >> 16)));
+    return contractFromSelector(contract_id);
+}
+
+fn contractFromSelector(contract_id: u16) ?Contract {
     return switch (contract_id) {
         0x01 => .ecrecover,
         0x02 => .sha256,
@@ -303,6 +334,10 @@ test "contractFromAddress round-trips every contract and rejects poisoned high b
     inline for (@typeInfo(Contract).@"enum".fields) |field| {
         const contract: Contract = @enumFromInt(field.value);
         try std.testing.expectEqual(@as(?Contract, contract), contractFromAddress(contract.toAddress()));
+        try std.testing.expectEqual(
+            @as(?Contract, contract),
+            contractFromAddressWord(.fromAddress(contract.toAddress())),
+        );
     }
 
     // Exhaustive 16-bit selector sweep against a linear-scan oracle, then the
@@ -318,10 +353,12 @@ test "contractFromAddress round-trips every contract and rejects poisoned high b
             if (Address.eql(target, canonical)) expected = contract;
         }
         try std.testing.expectEqual(expected, contractFromAddress(target));
+        try std.testing.expectEqual(expected, contractFromAddressWord(.fromAddress(target)));
         for (0..18) |index| {
             var poisoned = target;
             poisoned.bytes[index] = 0x01;
             try std.testing.expectEqual(@as(?Contract, null), contractFromAddress(poisoned));
+            try std.testing.expectEqual(@as(?Contract, null), contractFromAddressWord(.fromAddress(poisoned)));
         }
     }
 
@@ -338,6 +375,7 @@ test "contractFromAddress round-trips every contract and rejects poisoned high b
             if (Address.eql(target, canonical)) expected = contract;
         }
         try std.testing.expectEqual(expected, contractFromAddress(target));
+        try std.testing.expectEqual(expected, contractFromAddressWord(.fromAddress(target)));
     }
 }
 
