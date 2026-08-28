@@ -108,9 +108,11 @@ pub fn Callbacks(
         }
 
         inline fn nativeContractActive(address: AddressWord) bool {
-            const canonical = address.address();
-            return spec.precompile.active(canonical) or
-                spec.reentrant_native_contract.active(canonical);
+            if (spec.precompile.activeWord(address)) return true;
+            // Reentrant sets keep the Address-domain `active` contract; the
+            // default empty set must not force canonical unpacking here.
+            if (spec.reentrant_native_contract == execution.NoReentrantNativeContracts) return false;
+            return spec.reentrant_native_contract.active(address.address());
         }
 
         fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
