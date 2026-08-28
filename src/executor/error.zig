@@ -14,7 +14,6 @@ pub const Error = error{
     StateReaderStrategyFailure,
 
     TraceCapacityExceeded,
-    TraceIndexOverflow,
 
     BalanceOverflow,
     CodeHashMismatch,
@@ -37,7 +36,6 @@ pub fn normalize(err: anyerror) Error {
         => error.StateReaderStrategyFailure,
 
         error.TraceCapacityExceeded => error.TraceCapacityExceeded,
-        error.TraceIndexOverflow => error.TraceIndexOverflow,
 
         error.BalanceOverflow => error.BalanceOverflow,
         error.CodeHashMismatch => error.CodeHashMismatch,
@@ -54,7 +52,6 @@ test "normalization preserves bounded capture failures and contains provider err
     const testing = @import("std").testing;
     const capture_failures = [_]anyerror{
         error.TraceCapacityExceeded,
-        error.TraceIndexOverflow,
     };
     for (capture_failures) |failure| {
         try testing.expectEqualStrings(@errorName(failure), @errorName(normalize(failure)));

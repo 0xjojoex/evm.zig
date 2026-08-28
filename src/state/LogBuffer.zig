@@ -57,9 +57,9 @@ pub fn clone(self: *const LogBuffer, allocator: Allocator) Allocator.Error!LogBu
 
 pub fn checkpoint(self: *const LogBuffer) Checkpoint {
     return .{
-        .rows_len = index32(self.rows.items.len),
-        .topics_len = index32(self.topics.items.len),
-        .data_len = index32(self.data.items.len),
+        .rows_len = @intCast(self.rows.items.len),
+        .topics_len = @intCast(self.topics.items.len),
+        .data_len = @intCast(self.data.items.len),
     };
 }
 
@@ -152,11 +152,6 @@ pub const View = struct {
         };
     }
 };
-
-fn index32(value: usize) u32 {
-    std.debug.assert(value <= std.math.maxInt(u32));
-    return @intCast(value);
-}
 
 comptime {
     std.debug.assert(@sizeOf(Row) == 36);

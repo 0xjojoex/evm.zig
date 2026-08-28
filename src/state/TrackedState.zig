@@ -747,7 +747,7 @@ pub const Journal = struct {
         _,
 
         pub fn index(value: usize) Id {
-            return @enumFromInt(@as(u32, @intCast(value)));
+            return @enumFromInt(value);
         }
     };
 
@@ -825,7 +825,7 @@ pub const Journal = struct {
     }
 
     fn len(self: *const Journal) u32 {
-        return index32(self.entries.items.len);
+        return @intCast(self.entries.items.len);
     }
 
     fn isEmpty(self: *const Journal) bool {
@@ -1424,9 +1424,9 @@ pub fn checkpoint(self: *TrackedState) Checkpoint {
         .attempt_id = tx.id,
         .scope_generation = tx.scope.generation,
         .journal_len = tx.undo.len(),
-        .changed_accounts_len = index32(tx.changed_accounts.items.len),
-        .changed_storage_len = index32(tx.changed_storage.items.len),
-        .storage_wipes_len = index32(tx.storage_wipes.items.len),
+        .changed_accounts_len = @intCast(tx.changed_accounts.items.len),
+        .changed_storage_len = @intCast(tx.changed_storage.items.len),
+        .storage_wipes_len = @intCast(tx.storage_wipes.items.len),
         .logs = tx.logs.checkpoint(),
     };
 }
@@ -1974,7 +1974,7 @@ pub fn finalize(self: *TrackedState, rules: FinalizationRules) !void {
     std.debug.assert(tx.scope.active);
     if (tx.lifecycle_accounts.items.len == 0) return;
 
-    const lifecycle_count = index32(tx.lifecycle_accounts.items.len);
+    const lifecycle_count: u32 = @intCast(tx.lifecycle_accounts.items.len);
     const pending_accounts = tx.changed_accounts.items.len + @as(usize, lifecycle_count);
     try tx.storage_wipes.ensureUnusedCapacity(self.allocator, lifecycle_count);
     try tx.changed_accounts.ensureUnusedCapacity(self.allocator, lifecycle_count);
@@ -2149,7 +2149,7 @@ inline fn observeAccount(
     if (account_ref.row.observation_id) |id|
         return &tx.observed_accounts.items[@intFromEnum(id)];
     try tx.observed_accounts.ensureUnusedCapacity(self.allocator, 1);
-    const id: AccountObservationId = @enumFromInt(index32(tx.observed_accounts.items.len));
+    const id: AccountObservationId = @enumFromInt(tx.observed_accounts.items.len);
     tx.observed_accounts.appendAssumeCapacity(.{ .account = account_ref.id });
     account_ref.row.observation_id = id;
     return &tx.observed_accounts.items[@intFromEnum(id)];
@@ -2264,7 +2264,7 @@ inline fn observeStorage(
     if (storage_ref.row.observation_id) |id|
         return &tx.observed_storage.items[@intFromEnum(id)];
     try tx.observed_storage.ensureUnusedCapacity(self.allocator, 1);
-    const id: StorageObservationId = @enumFromInt(index32(tx.observed_storage.items.len));
+    const id: StorageObservationId = @enumFromInt(tx.observed_storage.items.len);
     tx.observed_storage.appendAssumeCapacity(.{ .storage = storage_ref.id });
     storage_ref.row.observation_id = id;
     return &tx.observed_storage.items[@intFromEnum(id)];
@@ -2480,11 +2480,6 @@ fn appendStorageUndo(self: *TrackedState, storage_id: StorageId, row: *const Sto
         .previous_current = row.current,
         .previous_mutation = row.mutation,
     }, observation_undo);
-}
-
-fn index32(value: usize) u32 {
-    std.debug.assert(value <= std.math.maxInt(u32));
-    return @intCast(value);
 }
 
 comptime {

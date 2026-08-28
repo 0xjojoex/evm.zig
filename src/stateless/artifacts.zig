@@ -44,7 +44,7 @@ pub const CodeRef = enum(u32) {
 
     pub fn fromIndex(index: usize) CodeRef {
         std.debug.assert(index < CodeRef.max_indexed);
-        return @enumFromInt(@as(u32, @intCast(index)));
+        return @enumFromInt(index);
     }
 };
 

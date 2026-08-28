@@ -45,6 +45,13 @@ const TransientStorageKey = extern struct {
     };
 };
 
+comptime {
+    // `HashContext.hash` digests every byte while `eql` compares fields. Interior
+    // padding would let two equal keys hash differently, and the map would miss a
+    // present entry instead of failing loudly.
+    std.debug.assert(std.meta.hasUniqueRepresentation(TransientStorageKey));
+}
+
 const TransientStorageMap = sparse_hash_map.WithContext(
     TransientStorageKey,
     u256,
@@ -376,7 +383,7 @@ const Journal = struct {
     fn appendTransient(self: *Journal, allocator: Allocator, undo: TransientUndo) !void {
         try self.entries.ensureUnusedCapacity(allocator, 1);
         try self.transient.ensureUnusedCapacity(allocator, 1);
-        const id: Id = @enumFromInt(index32(self.transient.items.len));
+        const id: Id = @enumFromInt(self.transient.items.len);
         self.transient.appendAssumeCapacity(undo);
         self.entries.appendAssumeCapacity(.{ .transient_storage = id });
     }
@@ -386,7 +393,7 @@ const Journal = struct {
         undo: AccountUndo,
         observation_undo: ?AccountObservationUndo,
     ) void {
-        const id: Id = @enumFromInt(index32(self.accounts.items.len));
+        const id: Id = @enumFromInt(self.accounts.items.len);
         self.accounts.appendAssumeCapacity(undo);
         if (observation_undo) |value| {
             self.account_observations.appendAssumeCapacity(value);
@@ -401,7 +408,7 @@ const Journal = struct {
         undo: StorageUndo,
         observation_undo: ?StorageObservationUndo,
     ) void {
-        const id: Id = @enumFromInt(index32(self.storage.items.len));
+        const id: Id = @enumFromInt(self.storage.items.len);
         self.storage.appendAssumeCapacity(undo);
         if (observation_undo) |value| {
             self.storage_observations.appendAssumeCapacity(value);
@@ -683,11 +690,11 @@ fn beginTransactionMode(self: *StatelessBlockState, observed: bool) AttemptId {
     self.observed_attempt = observed;
     self.sealed = false;
     self.transaction_active = true;
-    self.transaction_dirty_accounts_start = index32(self.dirty_accounts.items.len);
-    self.transaction_block_changed_accounts_start = index32(self.block_changed_accounts.items.len);
-    self.transaction_block_storage_wipes_start = index32(self.block_storage_wipes.items.len);
-    self.transaction_dirty_storage_start = index32(self.dirty_storage.items.len);
-    self.transaction_introduced_codes_start = index32(self.block_introduced_codes.items.len);
+    self.transaction_dirty_accounts_start = @intCast(self.dirty_accounts.items.len);
+    self.transaction_block_changed_accounts_start = @intCast(self.block_changed_accounts.items.len);
+    self.transaction_block_storage_wipes_start = @intCast(self.block_storage_wipes.items.len);
+    self.transaction_dirty_storage_start = @intCast(self.dirty_storage.items.len);
+    self.transaction_introduced_codes_start = @intCast(self.block_introduced_codes.items.len);
     self.changed_accounts.clearRetainingCapacity();
     self.changed_storage.clearRetainingCapacity();
     self.transaction_storage_wipes.clearRetainingCapacity();
@@ -785,9 +792,9 @@ pub fn checkpoint(self: *StatelessBlockState) Checkpoint {
     return .{
         .attempt_id = self.active_attempt_id.?,
         .scope_generation = generation,
-        .journal_len = index32(self.journal.entries.items.len),
-        .changed_accounts_len = index32(self.changed_accounts.items.len),
-        .changed_storage_len = index32(self.changed_storage.items.len),
+        .journal_len = @intCast(self.journal.entries.items.len),
+        .changed_accounts_len = @intCast(self.changed_accounts.items.len),
+        .changed_storage_len = @intCast(self.changed_storage.items.len),
         .storage_wipes_len = parent_generation,
         .logs = self.logs.checkpoint(),
     };
@@ -805,12 +812,12 @@ pub fn branchCheckpoint(self: *StatelessBlockState) Allocator.Error!BranchCheckp
         .accounts = accounts,
         .storage = storage,
         .retained_logs = try self.retained_logs.clone(self.allocator),
-        .dirty_accounts_len = index32(self.dirty_accounts.items.len),
-        .block_changed_accounts_len = index32(self.block_changed_accounts.items.len),
-        .block_storage_wipes_len = index32(self.block_storage_wipes.items.len),
-        .dirty_storage_len = index32(self.dirty_storage.items.len),
-        .block_introduced_codes_len = index32(self.block_introduced_codes.items.len),
-        .introduced_code_len = index32(self.code.introducedLen()),
+        .dirty_accounts_len = @intCast(self.dirty_accounts.items.len),
+        .block_changed_accounts_len = @intCast(self.block_changed_accounts.items.len),
+        .block_storage_wipes_len = @intCast(self.block_storage_wipes.items.len),
+        .dirty_storage_len = @intCast(self.dirty_storage.items.len),
+        .block_introduced_codes_len = @intCast(self.block_introduced_codes.items.len),
+        .introduced_code_len = @intCast(self.code.introducedLen()),
         .accepted_generation = self.accepted_generation,
     };
 }
@@ -1572,7 +1579,7 @@ noinline fn observeAccountFirst(
 ) Allocator.Error!void {
     try self.observed_accounts.ensureUnusedCapacity(self.allocator, 1);
     row.observation_generation = self.transaction_generation;
-    row.observation_index = index32(self.observed_accounts.items.len);
+    row.observation_index = @intCast(self.observed_accounts.items.len);
     self.observed_accounts.appendAssumeCapacity(.{
         .account = id,
         .original = row.current,
@@ -1608,7 +1615,7 @@ noinline fn observeStorageFirst(
     else
         self.effectiveStorage(id);
     row.observation_generation = self.transaction_generation;
-    row.observation_index = index32(self.observed_storage.items.len);
+    row.observation_index = @intCast(self.observed_storage.items.len);
     row.transaction_undo_index = std.math.maxInt(u32);
     self.observed_storage.appendAssumeCapacity(.{
         .storage = id,
@@ -1844,7 +1851,7 @@ fn appendAccountUndo(self: *StatelessBlockState, id: AccountId, row: *AccountRow
 
 fn appendStorageUndo(self: *StatelessBlockState, id: StorageId, row: *StorageRow) void {
     const observation = &self.observed_storage.items[row.observation_index];
-    const undo_index = index32(self.journal.storage.items.len);
+    const undo_index: u32 = @intCast(self.journal.storage.items.len);
     self.journal.appendStorageAssumeCapacity(.{
         .storage = id,
         .current = row.current,
@@ -2047,11 +2054,6 @@ fn recordAccountEffect(
             },
         },
     }
-}
-
-fn index32(value: usize) u32 {
-    std.debug.assert(value <= std.math.maxInt(u32));
-    return @intCast(value);
 }
 
 fn beginTestTransaction(state: *StatelessBlockState) AttemptId {

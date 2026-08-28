@@ -212,7 +212,7 @@ pub const Context = struct {
             return error.TraceCapacityExceeded;
         }
         const frame_id = self.next_frame_id;
-        const next_frame_id = std.math.add(u32, frame_id, 1) catch return error.TraceIndexOverflow;
+        const next_frame_id = frame_id + 1;
         const parent_capture = self.frame_captures.getLastOrNull();
         const parent_frame_id = if (parent_capture) |parent| parent.frame_id else null;
         const parent_return_data: trace.tape.ByteRange = if (parent_capture) |parent|

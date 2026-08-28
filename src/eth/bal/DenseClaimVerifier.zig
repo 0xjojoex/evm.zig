@@ -99,13 +99,13 @@ pub fn init(
     errdefer active_storage_ids.deinit(allocator);
 
     for (expected, 0..) |account, account_index| {
-        const account_id: AccountId = @enumFromInt(@as(u32, @intCast(account_index)));
+        const account_id: AccountId = @enumFromInt(account_index);
         std.debug.assert(bal.Address.eql(account.address, plan.accountAddress(account_id)));
         const range = plan.accountStorageRange(account_id);
         var read_index: usize = 0;
         var write_index: usize = 0;
         for (range.start..range.end()) |storage_index| {
-            const storage_id: StorageId = @enumFromInt(@as(u32, @intCast(storage_index)));
+            const storage_id: StorageId = @enumFromInt(storage_index);
             const slot = plan.storageSlot(storage_id);
             const has_read = read_index < account.storage_reads.len;
             const has_write = write_index < account.storage_changes.len;
@@ -241,7 +241,7 @@ pub fn matchesClaim(self: *DenseClaimVerifier) !bool {
         switch (state.expected) {
             .read => {},
             .write => |write_index| {
-                const storage_id: StorageId = @enumFromInt(@as(u32, @intCast(storage_index)));
+                const storage_id: StorageId = @enumFromInt(storage_index);
                 const account_id = self.plan.storageAccount(storage_id);
                 const expected = self.expected[@intFromEnum(account_id)].storage_changes[write_index];
                 if (state.change_cursor != expected.changes.len) return false;

@@ -93,7 +93,7 @@ pub fn authenticate(
     const storage_keys = keys[0..plan.storageCount()];
     const storage_results = results[0..plan.storageCount()];
     for (accounts, 0..) |account, account_index| {
-        const id: claim_plan.AccountId = @enumFromInt(@as(u32, @intCast(account_index)));
+        const id: claim_plan.AccountId = @enumFromInt(account_index);
         const order = plan.storageTrieOrder(id);
         if (order.len == 0) continue;
         const parent = switch (account.parent) {

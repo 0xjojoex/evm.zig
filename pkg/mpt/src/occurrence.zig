@@ -239,7 +239,7 @@ fn Context(
             dirty: bool,
         ) Allocator.Error!OccurrenceId {
             if (self.nodes.items.len > std.math.maxInt(u32)) return error.OutOfMemory;
-            const id: OccurrenceId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
+            const id: OccurrenceId = @enumFromInt(self.nodes.items.len);
             try self.nodes.append(self.allocator, .{
                 .kind = kind,
                 .parent = parent,

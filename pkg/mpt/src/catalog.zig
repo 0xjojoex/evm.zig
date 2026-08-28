@@ -501,7 +501,7 @@ pub const Catalog = struct {
 
         fn appendNode(self: *Builder, encoded: []const u8) BuildError!NodeId {
             if (self.nodes.items.len >= @intFromEnum(Link.@"opaque")) return error.ResourceLimitExceeded;
-            const id: NodeId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
+            const id: NodeId = @enumFromInt(self.nodes.items.len);
             const undecoded: Node = .{
                 .encoded = encoded,
                 .payload = undefined,
@@ -642,7 +642,7 @@ pub const Catalog = struct {
 
             self.work.clearRetainingCapacity();
             for (incoming, 0..) |count, index| {
-                if (count == 0) try self.work.append(self.allocator, @enumFromInt(@as(u32, @intCast(index))));
+                if (count == 0) try self.work.append(self.allocator, @enumFromInt(index));
             }
 
             var visited: usize = 0;

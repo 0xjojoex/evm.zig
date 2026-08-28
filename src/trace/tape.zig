@@ -13,7 +13,6 @@ const Allocator = std.mem.Allocator;
 
 pub const Error = Allocator.Error || error{
     TraceCapacityExceeded,
-    TraceIndexOverflow,
     TraceOperationActive,
     TraceOperationNotActive,
     TraceSpanOutstanding,
@@ -509,13 +508,13 @@ pub const TraceTape = struct {
     pub fn appendStep(self: *TraceTape, input: StepInput) Error!StepHandle {
         try self.requireRecording();
 
-        const pc = try index32(input.pc);
-        const memory_size = try index32(input.memory_size);
-        const stack_before_len = std.math.cast(u16, input.stack_len) orelse return error.TraceIndexOverflow;
-        const requested_stack_prefix_len = std.math.cast(u16, input.stack_prefix_len) orelse return error.TraceIndexOverflow;
+        const pc: u32 = @intCast(input.pc);
+        const memory_size: u32 = @intCast(input.memory_size);
+        const stack_before_len: u16 = @intCast(input.stack_len);
+        const requested_stack_prefix_len: u16 = @intCast(input.stack_prefix_len);
         const stack_prefix_len = if (requested_stack_prefix_len <= stack_before_len) requested_stack_prefix_len else 0;
-        const row_index = try index32(self.table.steps.items.len);
-        const transition_offset = try relativeIndex(
+        const row_index: u32 = @intCast(self.table.steps.items.len);
+        const transition_offset = relativeIndex(
             self.transitions.step_refs.items.len,
             self.active_mark.transitions.step_refs_len,
         );
@@ -550,8 +549,8 @@ pub const TraceTape = struct {
         if (row.outcome != .pending) return error.TraceStepAlreadyFinished;
         if (completion.outcome == .pending) return error.TraceStepNotFinished;
 
-        const pc_next = try index32(completion.pc_next);
-        const memory_after_size = try index32(completion.memory.len);
+        const pc_next: u32 = @intCast(completion.pc_next);
+        const memory_after_size: u32 = @intCast(completion.memory.len);
         const transition_index = self.active_mark.transitions.step_refs_len + @as(usize, row.transition_offset);
         std.debug.assert(transition_index < self.transitions.step_refs.items.len);
         const transition_ref = &self.transitions.step_refs.items[transition_index];
@@ -559,7 +558,7 @@ pub const TraceTape = struct {
         const keep_len = if (capture_stack) stackPrefixLen(handle.stack_prefix_len, completion) else 0;
         const appended = if (capture_stack) completion.stack[keep_len..] else &.{};
         const memory_write_input = if (self.capturesMemoryWrites()) completion.memory_write else null;
-        const append_range = try relativeRange(
+        const append_range = relativeRange(
             self.transitions.words.items.len,
             self.active_mark.transitions.words_len,
             appended.len,
@@ -567,7 +566,7 @@ pub const TraceTape = struct {
         const write_count: usize = if (memory_write_input == null) 0 else 1;
         const memory_changed = memory_after_size != handle.memory_before_size or write_count != 0;
         const return_data_changed = !std.meta.eql(completion.return_data, handle.return_data_before);
-        const write_range = try relativeMemoryWriteRange(
+        const write_range = relativeMemoryWriteRange(
             self.transitions.memory_writes.items.len,
             self.active_mark.transitions.memory_writes_len,
             write_count,
@@ -576,9 +575,9 @@ pub const TraceTape = struct {
         var write_bytes: []const u8 = &.{};
         var write_bytes_range: ByteRange = .{};
         if (memory_write_input) |memory_write| {
-            write_offset = try index32(memory_write.offset);
+            write_offset = @intCast(memory_write.offset);
             write_bytes = memory_write.bytes;
-            write_bytes_range = try relativeByteRange(
+            write_bytes_range = relativeByteRange(
                 self.transitions.bytes.items.len,
                 self.active_mark.transitions.bytes_len,
                 write_bytes.len,
@@ -591,15 +590,15 @@ pub const TraceTape = struct {
         try self.ensureTransitionCapacity(&self.transitions.memory, @intFromBool(memory_changed));
         try self.ensureTransitionCapacity(&self.transitions.return_data, @intFromBool(return_data_changed));
 
-        const stack_offset = if (capture_stack) try relativeIndex(
+        const stack_offset = if (capture_stack) relativeIndex(
             self.transitions.stack.items.len,
             self.active_mark.transitions.stack_len,
         ) else transition_arena.no_transition;
-        const memory_offset = if (memory_changed) try relativeIndex(
+        const memory_offset = if (memory_changed) relativeIndex(
             self.transitions.memory.items.len,
             self.active_mark.transitions.memory_len,
         ) else transition_arena.no_transition;
-        const return_data_offset = if (return_data_changed) try relativeIndex(
+        const return_data_offset = if (return_data_changed) relativeIndex(
             self.transitions.return_data.items.len,
             self.active_mark.transitions.return_data_len,
         ) else transition_arena.no_transition;
@@ -639,28 +638,28 @@ pub const TraceTape = struct {
         try self.requireRecording();
         const initial_stack_values = if (self.capturesStack()) input.initial_stack else &.{};
         const parent_stack_values = if (self.capturesStack()) input.parent_stack else &.{};
-        const row_index = try index32(self.table.frames.items.len);
-        const transition_offset = try relativeIndex(
+        const row_index: u32 = @intCast(self.table.frames.items.len);
+        const transition_offset = relativeIndex(
             self.transitions.frames.items.len,
             self.active_mark.transitions.frames_len,
         );
-        const initial_stack = try relativeRange(
+        const initial_stack = relativeRange(
             self.transitions.words.items.len,
             self.active_mark.transitions.words_len,
             initial_stack_values.len,
         );
-        const parent_stack = try relativeRange(
+        const parent_stack = relativeRange(
             self.transitions.words.items.len + initial_stack_values.len,
             self.active_mark.transitions.words_len,
             parent_stack_values.len,
         );
-        const initial_return_data = try relativeByteRange(
+        const initial_return_data = relativeByteRange(
             self.transitions.bytes.items.len,
             self.active_mark.transitions.bytes_len,
             input.initial_return_data.len,
         );
-        const initial_memory_size = try index32(input.initial_memory_size);
-        const parent_memory_size = try index32(input.parent_memory_size);
+        const initial_memory_size: u32 = @intCast(input.initial_memory_size);
+        const parent_memory_size: u32 = @intCast(input.parent_memory_size);
         try self.ensureTableCapacity(&self.table.frames, 1);
         try self.ensureTransitionCapacity(&self.transitions.frames, 1);
         try self.ensureTransitionCapacity(&self.transitions.words, initial_stack_values.len + parent_stack_values.len);
@@ -703,7 +702,7 @@ pub const TraceTape = struct {
         if (row.outcome != .pending) return error.TraceFrameAlreadyFinished;
         if (completion.outcome == .pending) return error.TraceFrameNotFinished;
 
-        const memory_size = try index32(completion.memory_size);
+        const memory_size: u32 = @intCast(completion.memory_size);
         const transition_index = self.active_mark.transitions.frames_len + @as(usize, row.transition_offset);
         std.debug.assert(transition_index < self.transitions.frames.items.len);
         const transition = &self.transitions.frames.items[transition_index];
@@ -791,7 +790,7 @@ pub const TraceTape = struct {
     pub fn storeReturnData(self: *TraceTape, bytes: []const u8) Error!ByteRange {
         try self.requireRecording();
         if (bytes.len == 0) return .{};
-        const range = try relativeByteRange(
+        const range = relativeByteRange(
             self.transitions.bytes.items.len,
             self.active_mark.transitions.bytes_len,
             bytes.len,
@@ -856,33 +855,25 @@ pub const TraceTape = struct {
     }
 };
 
-fn index32(value: usize) Error!u32 {
-    return std.math.cast(u32, value) orelse error.TraceIndexOverflow;
-}
-
-fn relativeRange(absolute_start: usize, operation_start: usize, len: usize) Error!WordRange {
+/// `Range.init` asserts that the offset, the length, and their sum each fit the
+/// packed handle, which is every bound this projection needs.
+fn relativeRange(absolute_start: usize, operation_start: usize, len: usize) WordRange {
     std.debug.assert(absolute_start >= operation_start);
-    const offset = absolute_start - operation_start;
-    const end = std.math.add(usize, offset, len) catch return error.TraceIndexOverflow;
-    if (end > std.math.maxInt(u32)) return error.TraceIndexOverflow;
-    return .{
-        .offset = try index32(offset),
-        .len = try index32(len),
-    };
+    return .init(absolute_start - operation_start, len);
 }
 
-fn relativeIndex(absolute_index: usize, operation_start: usize) Error!u32 {
+fn relativeIndex(absolute_index: usize, operation_start: usize) u32 {
     std.debug.assert(absolute_index >= operation_start);
-    return index32(absolute_index - operation_start);
+    return @intCast(absolute_index - operation_start);
 }
 
-fn relativeByteRange(absolute_start: usize, operation_start: usize, len: usize) Error!ByteRange {
-    const range = try relativeRange(absolute_start, operation_start, len);
+fn relativeByteRange(absolute_start: usize, operation_start: usize, len: usize) ByteRange {
+    const range = relativeRange(absolute_start, operation_start, len);
     return .{ .offset = range.offset, .len = range.len };
 }
 
-fn relativeMemoryWriteRange(absolute_start: usize, operation_start: usize, len: usize) Error!MemoryWriteRange {
-    const range = try relativeRange(absolute_start, operation_start, len);
+fn relativeMemoryWriteRange(absolute_start: usize, operation_start: usize, len: usize) MemoryWriteRange {
+    const range = relativeRange(absolute_start, operation_start, len);
     return .{ .offset = range.offset, .len = range.len };
 }
 
