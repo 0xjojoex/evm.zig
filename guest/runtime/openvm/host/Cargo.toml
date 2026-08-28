@@ -1,0 +1,16 @@
+[package]
+name = "evmz-openvm-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+openvm-sdk = { git = "https://github.com/openvm-org/openvm.git", tag = "v2.1.0-preview", default-features = false }
+openvm-sdk-config = { git = "https://github.com/openvm-org/openvm.git", tag = "v2.1.0-preview" }
+toml = "0.8.14"
+tracing-subscriber = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16

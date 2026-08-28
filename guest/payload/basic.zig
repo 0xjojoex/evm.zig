@@ -52,8 +52,8 @@ pub const BasicProof = struct {
 };
 
 pub fn evmz_guest_entry() callconv(.c) c_int {
-    var fixed = guest_allocator.fixedBufferAllocator();
-    const proof = runBasicFixture(fixed.allocator()) catch |err| {
+    var allocator_state = guest_allocator.init();
+    const proof = runBasicFixture(allocator_state.allocator()) catch |err| {
         evmz_guest_output = .{
             magic,
             0,
@@ -89,6 +89,7 @@ comptime {
         .native => {},
         .zisk => @export(&ziskMain, .{ .name = "main" }),
         .sp1 => @export(&sp1Main, .{ .name = "main" }),
+        .openvm => @export(&openvmMain, .{ .name = "main" }),
     }
 }
 
@@ -104,6 +105,12 @@ fn sp1Main() callconv(.c) c_int {
     if (status != 0) return status;
     guest_io.writeOutput(std.mem.sliceAsBytes(&evmz_guest_output));
     return 0;
+}
+
+fn openvmMain() callconv(.c) void {
+    const status = evmz_guest_entry();
+    if (status != 0) return;
+    guest_io.writeOutput(std.mem.sliceAsBytes(&evmz_guest_output));
 }
 
 pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
