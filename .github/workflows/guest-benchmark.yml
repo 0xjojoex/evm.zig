@@ -4,6 +4,16 @@ name: Guest benchmark
 on:
   workflow_call:
     inputs:
+      corpus:
+        description: Corpus selection
+        required: false
+        default: tests-zkevm
+        type: string
+      corpus_artifact:
+        description: Resolved corpus artifact for non-release inputs
+        required: false
+        default: ""
+        type: string
       release_gate:
         description: Produce release-qualified evidence
         required: true
@@ -37,12 +47,9 @@ on:
       - build.zig
       - build.zig.zon
       - src/**
-      - guest/**
       - eest/**
       - .github/actions/build-zisk-artifacts/**
       - .github/workflows/guest-benchmark.yml
-  schedule:
-    - cron: "23 2 * * *"
   workflow_dispatch:
     inputs:
       backend:
@@ -58,14 +65,17 @@ on:
 permissions:
   contents: read
 
+env:
+  CORPUS: ${{ inputs.corpus || 'tests-zkevm' }}
+
 concurrency:
   # Release callers use their run ID so backend qualifications can overlap.
-  group: guest-benchmark-${{ inputs.release_gate && github.run_id || github.event.pull_request.number || github.ref_name }}-tests-zkevm
+  group: guest-benchmark-${{ inputs.release_gate && github.run_id || github.event.pull_request.number || github.ref_name }}-${{ inputs.corpus || 'tests-zkevm' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   measure:
-    name: zisk tests-zkevm
+    name: zisk ${{ inputs.corpus || 'tests-zkevm' }}
     if: >-
       (github.event_name != 'workflow_dispatch' && github.event_name != 'workflow_call')
       || inputs.backend == 'zisk'
@@ -84,12 +94,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Download resolved corpus
+        if: env.CORPUS != 'tests-zkevm'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.corpus_artifact }}
+          path: ${{ github.workspace }}
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
           use-cache: ${{ github.event_name != 'pull_request' }}
-          cache-key: guest-benchmark-${{ github.event_name }}-tests-zkevm
+          cache-key: guest-benchmark-${{ github.event_name }}-${{ env.CORPUS }}
 
       - name: Load pinned ZisK version
         run: |
@@ -123,12 +140,14 @@ jobs:
             libsodium23
 
       - name: Install uv
+        if: env.CORPUS == 'tests-zkevm'
         uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: eest/consume/uv.lock
 
       - name: Resolve tests-zkevm through execution-specs
+        if: env.CORPUS == 'tests-zkevm'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -240,7 +259,7 @@ jobs:
         if: always() && !inputs.release_gate
         uses: actions/upload-artifact@v7
         with:
-          name: guest-zisk-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
+          name: guest-zisk-${{ env.CORPUS }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: guest-evidence
           if-no-files-found: warn
           retention-days: 14
@@ -273,10 +292,11 @@ jobs:
           key: ${{ env.ZISK_CACHE_KEY }}
 
   openvm:
-    name: openvm tests-zkevm
+    name: openvm ${{ inputs.corpus || 'tests-zkevm' }}
     if: >-
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
-      && (inputs.backend == 'openvm' || inputs.backend == 'all')
+      github.event_name == 'schedule'
+      || ((github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
+      && (inputs.backend == 'openvm' || inputs.backend == 'all'))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -294,6 +314,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Download resolved corpus
+        if: env.CORPUS != 'tests-zkevm'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.corpus_artifact }}
+          path: ${{ github.workspace }}
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -301,6 +328,7 @@ jobs:
           use-cache: false
 
       - name: Install uv
+        if: env.CORPUS == 'tests-zkevm'
         uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
@@ -319,6 +347,7 @@ jobs:
           rustup run "${OPENVM_RUST_TOOLCHAIN}" rustc -vV
 
       - name: Resolve tests-zkevm through execution-specs
+        if: env.CORPUS == 'tests-zkevm'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -393,7 +422,7 @@ jobs:
         if: always() && !inputs.release_gate
         uses: actions/upload-artifact@v7
         with:
-          name: guest-openvm-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
+          name: guest-openvm-${{ env.CORPUS }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: guest-evidence
           if-no-files-found: warn
           retention-days: 14
@@ -416,10 +445,11 @@ jobs:
           retention-days: 90
 
   sp1:
-    name: sp1 tests-zkevm
+    name: sp1 ${{ inputs.corpus || 'tests-zkevm' }}
     if: >-
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
-      && (inputs.backend == 'sp1' || inputs.backend == 'all')
+      github.event_name == 'schedule'
+      || ((github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call')
+      && (inputs.backend == 'sp1' || inputs.backend == 'all'))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
@@ -438,6 +468,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Download resolved corpus
+        if: env.CORPUS != 'tests-zkevm'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.corpus_artifact }}
+          path: ${{ github.workspace }}
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -445,6 +482,7 @@ jobs:
           use-cache: false
 
       - name: Install uv
+        if: env.CORPUS == 'tests-zkevm'
         uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
@@ -467,6 +505,7 @@ jobs:
           rustup run "${SP1_RUST_TOOLCHAIN}" rustc -vV
 
       - name: Resolve tests-zkevm through execution-specs
+        if: env.CORPUS == 'tests-zkevm'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -540,7 +579,7 @@ jobs:
         if: always() && !inputs.release_gate
         uses: actions/upload-artifact@v7
         with:
-          name: guest-sp1-tests-zkevm-${{ github.run_id }}-${{ github.run_attempt }}
+          name: guest-sp1-${{ env.CORPUS }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: guest-evidence
           if-no-files-found: warn
           retention-days: 14

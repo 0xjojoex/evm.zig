@@ -51,8 +51,8 @@ blockchain fixtures through Amsterdam. Pre-Merge reward, ommer, and PoW rules
 do not belong in BlockSTF. Transition-fork fixtures require a block-by-block
 revision adapter. Both are excluded at the upstream selection boundary.
 
-There is no repository-owned execution-fixture downloader, general recursive
-runner, worker pool, classifier, or scope reporter.
+Direct conformance has no repository-owned execution-fixture downloader,
+general recursive runner, worker pool, classifier, or scope reporter.
 
 ## Stateless zkEVM fixtures
 
@@ -68,9 +68,10 @@ oracle for valid blocks. A blockchain fixture without stateless input is an
 upstream-visible pytest skip.
 
 The custom guest and adversarial lanes need a persistent zkVM process and
-evmz-specific mutation semantics. They still use execution-specs as their only
-corpus source. `zkevm-resolve` asks the upstream `FixturesSource` implementation
-to resolve/cache the release and writes an explicit manifest for Zig:
+evmz-specific mutation semantics. Release qualification and mutations use
+execution-specs as their corpus source. `zkevm-resolve` asks the upstream
+`FixturesSource` implementation to resolve/cache the release and writes an
+explicit manifest for Zig:
 
 ```sh
 zig build zkevm-resolve
@@ -98,8 +99,8 @@ The custom `zkevm` runner remains because each worker owns one guest-host child
 and converts the ELF to a ROM once. Per-fixture pytest subprocesses would repay
 that setup for every case. Native conformance does not use this runner.
 
-`zkevm --executor zisk|sp1` strips guest framing before comparing the result,
-so every executor is judged against the same `statelessOutputBytes`. Use
+`zkevm --executor zisk|sp1|openvm` strips guest framing before comparing the
+result, so every executor is judged against the same `statelessOutputBytes`. Use
 `--evidence-dir` for aggregate evidence and `--output-folder` for ERE-compatible
 `BenchmarkRun` rows. `zkevm-input` extracts raw input or guest-framed stdin;
 `zkevm-ere` runs the native ERE adapter on one raw input.
