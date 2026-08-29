@@ -1,0 +1,82 @@
+# Daily execute-only guest metrics over one shared rolling devnet window.
+name: Guest devnet benchmark
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Guest backend
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - zisk
+          - sp1
+          - openvm
+
+permissions:
+  contents: read
+
+env:
+  CATALOG_URL: https://pub-760ad8b3dd9547539f829c1ea30f18b5.r2.dev/devnets/glamsterdam-devnet-8
+  NETWORK: glamsterdam-devnet-8
+  LATEST_BATCHES: 10
+  CORPUS_ROOT: ${{ github.workspace }}/devnet-corpus
+  RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
+  CORPUS_ARTIFACT: guest-devnet-8-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  resolve:
+    name: Resolve devnet 8 corpus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install zstd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd
+
+      - name: Resolve rolling corpus
+        run: |
+          python3 eest/scripts/fetch-devnet-batches.py \
+            --catalog-url "${CATALOG_URL}" \
+            --latest-batches "${LATEST_BATCHES}" \
+            --network "${NETWORK}" \
+            --output-root "${CORPUS_ROOT}" \
+            --resolved-manifest "${RESOLVED_MANIFEST}"
+
+      - name: Name corpus artifact
+        id: artifact
+        run: echo "name=${CORPUS_ARTIFACT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload resolved corpus
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: |
+            ${{ env.CORPUS_ROOT }}
+            ${{ env.RESOLVED_MANIFEST }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+  benchmark:
+    name: Benchmark devnet 8
+    needs: resolve
+    uses: ./.github/workflows/guest-benchmark.yml
+    with:
+      corpus: devnet-8
+      corpus_artifact: ${{ needs.resolve.outputs.artifact_name }}
+      release_gate: false
+      backend: ${{ inputs.backend || 'all' }}
+    permissions:
+      contents: read
