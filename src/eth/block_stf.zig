@@ -49,18 +49,7 @@ const TxStatus = vm.TxStatus;
 pub const ParallelStrategy = differential_executor.Strategy;
 pub const ParallelResources = differential_executor.Resources;
 
-pub const TransactionInput = struct {
-    tx: transaction.Transaction,
-    encoded: []const u8,
-
-    /// Construct an ingress value when a trusted adapter has already decoded
-    /// `encoded` into `tx`. This does not prove that both representations
-    /// describe the same transaction; prefer the raw-byte `produce` API when
-    /// the bytes are not already inside a trusted boundary.
-    pub fn initAssumeDecoded(tx: transaction.Transaction, encoded: []const u8) TransactionInput {
-        return .{ .tx = tx, .encoded = encoded };
-    }
-};
+pub const TransactionInput = transaction.DecodedTransaction;
 
 pub const ExecutionCapture = block_capture.Execution;
 pub const ObservationTarget = block_capture.ObservationTarget;
@@ -513,10 +502,11 @@ fn applyExact(
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
+    var decoded_transactions = decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
         state_backend.deinit();
         return err;
     };
+    defer decoded_transactions.deinit(arena.allocator());
 
     // Ownership transfers here; `applyAssumeDecoded` releases the backend on
     // both success and error paths.
@@ -524,7 +514,7 @@ fn applyExact(
         revision,
         Engine,
         allocator,
-        assumeDecodedBlockInput(input, state_backend, transactions),
+        assumeDecodedBlockInput(input, state_backend, decoded_transactions.transactions),
     );
 }
 
@@ -604,10 +594,11 @@ fn produceExact(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const transactions = decodeRawTransactions(scratch, input.transactions) catch |err| {
+    var decoded_transactions = decodeRawTransactions(scratch, input.transactions) catch |err| {
         state_backend.deinit();
         return err;
     };
+    defer decoded_transactions.deinit(scratch);
 
     // Ownership transfers here; `produceAssumeDecoded` releases the backend.
     return produceAssumeDecodedExact(revision, Engine, allocator, .{
@@ -616,7 +607,7 @@ fn produceExact(
         .block_header = input.block_header,
         .state_backend = state_backend,
         .prepared_code_backend = input.prepared_code_backend,
-        .transactions = transactions,
+        .transactions = decoded_transactions.transactions,
         .withdrawals = input.withdrawals,
         .parent_header = input.parent_header,
         .parent_blob_gas = input.parent_blob_gas,
@@ -1448,15 +1439,8 @@ fn transactionRoot(allocator: std.mem.Allocator, transactions: []const Transacti
 pub fn decodeRawTransactions(
     allocator: std.mem.Allocator,
     raw_transactions: []const []const u8,
-) ![]const TransactionInput {
-    const transactions = try allocator.alloc(TransactionInput, raw_transactions.len);
-    for (transactions, raw_transactions) |*decoded, encoded| {
-        decoded.* = TransactionInput.initAssumeDecoded(
-            try transaction.raw.decodeRaw(allocator, encoded),
-            encoded,
-        );
-    }
-    return transactions;
+) transaction.raw.Error!transaction.raw.DecodedBatch {
+    return transaction.raw.decodeRawBatch(allocator, raw_transactions);
 }
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;

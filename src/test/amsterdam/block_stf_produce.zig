@@ -363,7 +363,9 @@ test "BlockSTF checked produce and apply decode raw bytes once for execution and
     const hex = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83";
     var encoded: [hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&encoded, hex);
-    const decoded = try evmz.transaction.raw.decodeRaw(std.testing.allocator, &encoded);
+    var decoded_owner = try evmz.transaction.raw.decodeRaw(std.testing.allocator, &encoded);
+    defer decoded_owner.deinit(std.testing.allocator);
+    const decoded = decoded_owner.tx;
 
     var memory = state.MemoryStore.init(std.testing.allocator);
     defer memory.deinit();

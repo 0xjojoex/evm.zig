@@ -32,6 +32,7 @@ pub const AuthorizationSuccessInput = authorization.SuccessInput;
 pub const AuthorizationGasAdjustment = authorization.GasAdjustment;
 pub const FeeFields = transaction.FeeFields;
 pub const Transaction = transaction.Transaction;
+pub const DecodedTransaction = transaction.DecodedTransaction;
 pub const TransactionView = transaction.TransactionView;
 pub const Env = transaction.Env;
 pub const PreparationAccount = transaction.PreparationAccount;

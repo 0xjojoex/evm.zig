@@ -53,9 +53,10 @@ test "stateless wire v1 normalizes payload words with field-specific byte order"
     input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.prev_randao = bytes;
     input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.base_fee_per_gas = bytes;
 
-    const normalized = try wire.normalize(scratch, input);
-    try std.testing.expectEqual((@as(u256, 0x01) << 248) | 0x02, normalized.block.prev_randao);
-    try std.testing.expectEqual((@as(u256, 0x02) << 248) | 0x01, normalized.block.base_fee_per_gas);
+    var normalized = try wire.normalize(scratch, input);
+    defer normalized.deinit(scratch);
+    try std.testing.expectEqual((@as(u256, 0x01) << 248) | 0x02, normalized.input.block.prev_randao);
+    try std.testing.expectEqual((@as(u256, 0x02) << 248) | 0x01, normalized.input.block.base_fee_per_gas);
 }
 
 test "stateless wire v1 decodes and authenticates public-key inputs" {
@@ -90,10 +91,11 @@ test "stateless wire v1 reuses parity-authenticated transaction decoding" {
     input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.transactions = &transactions;
     input.public_keys = &public_keys;
 
-    const normalized = try wire.normalize(scratch, input);
-    try std.testing.expectEqual(@as(usize, 1), normalized.block.transactions.len);
-    try std.testing.expectEqualSlices(u8, &encoded, normalized.block.transactions[0].encoded);
-    try std.testing.expectEqual(recovered.sender, normalized.block.transactions[0].tx.sender);
+    var normalized = try wire.normalize(scratch, input);
+    defer normalized.deinit(scratch);
+    try std.testing.expectEqual(@as(usize, 1), normalized.input.block.transactions.len);
+    try std.testing.expectEqualSlices(u8, &encoded, normalized.input.block.transactions[0].encoded);
+    try std.testing.expectEqual(recovered.sender, normalized.input.block.transactions[0].tx.sender);
 
     var opposite_parity = encoded;
     try std.testing.expectEqual(@as(u8, 0x25), opposite_parity[43]);
@@ -109,9 +111,10 @@ test "stateless wire v1 declares Amsterdam semantics at its type boundary" {
     const scratch = arena.allocator();
 
     const input = try smoke.amsterdamSmokeInput(scratch, .{});
-    const normalized = try wire.normalize(scratch, input);
+    var normalized = try wire.normalize(scratch, input);
+    defer normalized.deinit(scratch);
     try std.testing.expectEqual(.amsterdam, wire.revision);
-    try std.testing.expect(normalized.blob_params == null);
+    try std.testing.expect(normalized.input.blob_params == null);
 }
 
 test "stateless wire v1 carries chain id without host-supplied fork configuration" {

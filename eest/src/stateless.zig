@@ -388,10 +388,11 @@ fn compareOracle(allocator: std.mem.Allocator, input_bytes: []const u8) !OracleC
     const scratch = arena.allocator();
     const input = evmz.stateless.wire.StatelessInput.decodeSchemaPrefixed(scratch, input_bytes) catch
         return .skipped;
-    const normalized = evmz.stateless.wire.v1.normalize(scratch, input) catch return .skipped;
+    var normalized = evmz.stateless.wire.v1.normalize(scratch, input) catch return .skipped;
+    defer normalized.deinit(scratch);
     const tracked = evmz.stateless.testing.TrackedValidator(evmz.eth.amsterdam).validate(
         scratch,
-        normalized,
+        normalized.input,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockTransitionFailed => return error.BlockTransitionFailed,
@@ -734,11 +735,12 @@ fn printTrace(allocator: std.mem.Allocator, input: []const u8) void {
         std.debug.print("    trace decode failed: {s}\n", .{@errorName(err)});
         return;
     };
-    const normalized = evmz.stateless.wire.v1.normalize(scratch, decoded) catch |err| {
+    var normalized = evmz.stateless.wire.v1.normalize(scratch, decoded) catch |err| {
         std.debug.print("    trace normalize failed: {s}\n", .{@errorName(err)});
         return;
     };
-    _ = evmz.stateless.testing.TrackedValidator(evmz.eth.amsterdam).validateWithCaptureOptions(scratch, normalized, .{
+    defer normalized.deinit(scratch);
+    _ = evmz.stateless.testing.TrackedValidator(evmz.eth.amsterdam).validateWithCaptureOptions(scratch, normalized.input, .{
         .observations = printer.observationTarget(),
         .steps = .{
             .tape = &tape,

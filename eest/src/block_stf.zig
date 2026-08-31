@@ -447,8 +447,9 @@ fn runPayloadExact(
     try validateChildNumber(parent.number, payload_number);
 
     const fixture_config = try parseFixtureConfig(fixture, revision, fixture_common.fixtureForkName(fixture));
-    const transactions = try parseTransactions(scratch, asArray(payload.get("transactions") orelse return error.MalformedFixture) orelse return error.MalformedFixture);
-    try validateBlobVersionedHashes(revision, params, transactions);
+    var decoded_transactions = try parseTransactions(scratch, asArray(payload.get("transactions") orelse return error.MalformedFixture) orelse return error.MalformedFixture);
+    defer decoded_transactions.deinit(scratch);
+    try validateBlobVersionedHashes(revision, params, decoded_transactions.transactions);
     const withdrawals = if (revision.isImpl(.shanghai))
         try parseWithdrawals(scratch, asArray(payload.get("withdrawals") orelse return error.MalformedFixture) orelse return error.MalformedFixture)
     else
@@ -488,7 +489,7 @@ fn runPayloadExact(
         .block_hash_source = block_hash_source,
         .block_header = block_header,
         .state_backend = .fromMemoryStore(store),
-        .transactions = transactions,
+        .transactions = decoded_transactions.transactions,
         .withdrawals = withdrawals,
         .parent_header = parent.headerContext(),
         .block_access_list = block_access_list,
@@ -544,7 +545,8 @@ fn runBlockBodyExact(
     const scratch = arena.allocator();
 
     const block_rlp = try parseBytesFromValue(scratch, entry.get("rlp") orelse return error.MalformedFixture);
-    const body = try parseBlockBody(revision, scratch, block_rlp);
+    var body = try parseBlockBody(revision, scratch, block_rlp);
+    defer body.deinit(scratch);
     const header = &body.header;
     if (!std.mem.eql(u8, &header.parent_hash, &parent.hash)) return error.ParentHashMismatch;
     try validateChildNumber(parent.number, header.number);
@@ -588,7 +590,7 @@ fn runBlockBodyExact(
         .block_hash_source = block_hash_source,
         .block_header = block_header,
         .state_backend = .fromMemoryStore(store),
-        .transactions = body.transactions,
+        .transactions = body.transactions.transactions,
         .withdrawals = body.withdrawals,
         .parent_header = parent.headerContext(),
         .block_access_list = block_access_list,
@@ -631,8 +633,14 @@ fn runBlockBodyExact(
 const ParsedBlockBody = struct {
     header: evmz.eth.ExecutionHeader,
     header_hash: [32]u8,
-    transactions: []const block_stf.TransactionInput,
+    transactions: evmz.transaction.raw.DecodedBatch,
     withdrawals: []const evmz.eth.Withdrawal,
+
+    fn deinit(self: *ParsedBlockBody, allocator: std.mem.Allocator) void {
+        self.transactions.deinit(allocator);
+        allocator.free(self.withdrawals);
+        self.* = undefined;
+    }
 };
 
 /// Parse one canonical consensus block `[header, transactions, ommers, ...]`.
@@ -655,7 +663,7 @@ fn parseBlockBody(
 
     var transactions_list = try body.nextList();
 
-    var out: std.ArrayList(block_stf.TransactionInput) = .empty;
+    var out: std.ArrayList([]const u8) = .empty;
     errdefer out.deinit(allocator);
     while (!transactions_list.isDone()) {
         const item = try transactions_list.next();
@@ -663,14 +671,12 @@ fn parseBlockBody(
             .list => item.encoded(),
             .bytes => try item.asBytes(),
         };
-        try out.append(allocator, .{
-            .tx = evmz.stateless.tx.decodeRaw(allocator, raw) catch |err| switch (err) {
-                error.UnsupportedTransactionType => return error.UnsupportedTransactionType,
-                else => return err,
-            },
-            .encoded = raw,
-        });
+        try out.append(allocator, raw);
     }
+    const raw_transactions = try out.toOwnedSlice(allocator);
+    defer allocator.free(raw_transactions);
+    var decoded_transactions = try evmz.transaction.raw.decodeRawBatch(allocator, raw_transactions);
+    errdefer decoded_transactions.deinit(allocator);
 
     var ommers = try body.nextList();
     try ommers.expectDone();
@@ -684,7 +690,7 @@ fn parseBlockBody(
     return .{
         .header = header,
         .header_hash = header_hash,
-        .transactions = try out.toOwnedSlice(allocator),
+        .transactions = decoded_transactions,
         .withdrawals = withdrawals,
     };
 }
@@ -869,19 +875,12 @@ fn fixtureRevision(fixture: *const JsonObject) !evmz.eth.Revision {
     return revision;
 }
 
-fn parseTransactions(allocator: std.mem.Allocator, array: JsonArray) ![]const block_stf.TransactionInput {
-    const out = try allocator.alloc(block_stf.TransactionInput, array.items.len);
-    for (out, array.items) |*target, value| {
-        const raw = try parseBytesFromValue(allocator, value);
-        target.* = .{
-            .tx = evmz.stateless.tx.decodeRaw(allocator, raw) catch |err| switch (err) {
-                error.UnsupportedTransactionType => return error.UnsupportedTransactionType,
-                else => return err,
-            },
-            .encoded = raw,
-        };
+fn parseTransactions(allocator: std.mem.Allocator, array: JsonArray) !evmz.transaction.raw.DecodedBatch {
+    const raw_transactions = try allocator.alloc([]const u8, array.items.len);
+    for (raw_transactions, array.items) |*raw, value| {
+        raw.* = try parseBytesFromValue(allocator, value);
     }
-    return out;
+    return evmz.transaction.raw.decodeRawBatch(allocator, raw_transactions);
 }
 
 fn parseWithdrawals(allocator: std.mem.Allocator, array: JsonArray) ![]const evmz.eth.Withdrawal {

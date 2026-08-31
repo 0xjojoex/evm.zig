@@ -233,14 +233,15 @@ pub fn Executor(comptime revision: Revision, comptime Engine: type) type {
             var state_backend = input.state_backend;
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
-            const transactions = block_stf.decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
+            var decoded_transactions = block_stf.decodeRawTransactions(arena.allocator(), input.transactions) catch |err| {
                 state_backend.deinit();
                 return err;
             };
+            defer decoded_transactions.deinit(arena.allocator());
             return self.runAssumeDecoded(block_stf.assumeDecodedBlockInput(
                 input,
                 state_backend,
-                transactions,
+                decoded_transactions.transactions,
             ));
         }
 
