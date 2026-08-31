@@ -48,6 +48,10 @@ fn execute(rom: &ZiskRom, input: Vec<u8>) -> Result<Success, String> {
                 emu.number_of_steps()
             ));
         }
+        let exit_code = emu.get_reg(10) as i32;
+        if exit_code != 0 {
+            return Err(format!("ZisK guest exited with code {exit_code}"));
+        }
 
         Ok((emu.get_output_8(), emu.number_of_steps()))
     }))

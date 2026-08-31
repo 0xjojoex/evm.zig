@@ -12,10 +12,6 @@ const Options = struct {
     host: []const u8,
     elf: []const u8,
     host_args: []const []const u8,
-    /// Canary mode for conformance deviation: passes
-    /// while the ZisK startup library still discards main's nonzero return, and
-    /// fails loudly the day it starts propagating, so the waiver gets removed.
-    expect_no_propagation: bool = false,
 };
 
 const Checker = struct {
@@ -48,20 +44,12 @@ const Checker = struct {
         checker: *Checker,
         header: *const [response_header_bytes]u8,
         payload: []const u8,
-        expect_no_propagation: bool,
     ) error{CheckFailed}!void {
         const expected_size = try checker.payloadSize(header);
         if (payload.len != expected_size) return checker.fail("ZisK host response payload length does not match its header");
         switch (header[0]) {
-            0 => if (!expect_no_propagation) {
-                return checker.fail("failure-probe guest completed successfully; the ZisK startup library did not propagate main's nonzero return");
-            },
-            1 => if (expect_no_propagation) {
-                return checker.failFmt(
-                    "ZisK host reported failure despite --expect-no-propagation; either ZisK now propagates main's nonzero return (remove the flag and clear deviation D2) or the probe run itself broke: {s}",
-                    .{payload},
-                );
-            },
+            0 => return checker.fail("failure-probe guest completed successfully; the ZisK startup library did not propagate main's nonzero return"),
+            1 => {},
             else => return checker.failFmt("invalid ZisK host status: {d}", .{header[0]}),
         }
     }
@@ -99,10 +87,7 @@ const Checker = struct {
         const term = try checker.waitForChild(io, &child);
         if (!termOk(term)) return checker.failFmt("ZisK host terminated with {f}", .{fmtTerm(term)});
 
-        try checker.validateResponse(&header, payload, options.expect_no_propagation);
-        if (options.expect_no_propagation) {
-            return "provider still discards main's nonzero return; the expected-fail canary holds";
-        }
+        try checker.validateResponse(&header, payload);
         return std.fmt.allocPrint(
             checker.allocator,
             "nonzero guest exit propagated: {s}",
@@ -166,15 +151,12 @@ fn parseOptions(init: std.process.Init, allocator: Allocator) !Options {
 
     var host: ?[]const u8 = null;
     var elf: ?[]const u8 = null;
-    var expect_no_propagation = false;
     var host_args: std.ArrayList([]const u8) = .empty;
     while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
         if (std.mem.eql(u8, arg, "--host-arg")) {
             const host_arg = args.next() orelse return error.MissingHostArgument;
             try host_args.append(allocator, host_arg[0..host_arg.len]);
-        } else if (std.mem.eql(u8, arg, "--expect-no-propagation")) {
-            expect_no_propagation = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
             std.process.exit(0);
@@ -192,12 +174,11 @@ fn parseOptions(init: std.process.Init, allocator: Allocator) !Options {
         .host = host orelse return error.MissingHost,
         .elf = elf orelse return error.MissingElf,
         .host_args = try host_args.toOwnedSlice(allocator),
-        .expect_no_propagation = expect_no_propagation,
     };
 }
 
 fn printUsage() void {
-    std.debug.print("usage: check-zisk-failure-status [--expect-no-propagation] [--host-arg ARG]... HOST ELF\n", .{});
+    std.debug.print("usage: check-zisk-failure-status [--host-arg ARG]... HOST ELF\n", .{});
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -239,32 +220,15 @@ test "reads payload length from unified response header" {
 test "accepts propagated guest failure" {
     var checker: Checker = .{ .allocator = std.testing.allocator };
     const header = responseHeader(1, 4);
-    try checker.validateResponse(&header, "boom", false);
+    try checker.validateResponse(&header, "boom");
 }
 
 test "rejects successful failure probe" {
     var checker: Checker = .{ .allocator = std.testing.allocator };
     const header = responseHeader(0, 0);
-    try std.testing.expectError(error.CheckFailed, checker.validateResponse(&header, "", false));
+    try std.testing.expectError(error.CheckFailed, checker.validateResponse(&header, ""));
     try std.testing.expectEqualStrings(
         "failure-probe guest completed successfully; the ZisK startup library did not propagate main's nonzero return",
-        checker.failure,
-    );
-}
-
-test "canary mode accepts the provider's current non-propagation" {
-    var checker: Checker = .{ .allocator = std.testing.allocator };
-    const header = responseHeader(0, 0);
-    try checker.validateResponse(&header, "", true);
-}
-
-test "canary mode fails loudly when propagation appears" {
-    var checker: Checker = .{ .allocator = std.testing.allocator };
-    defer if (!std.mem.eql(u8, checker.failure, "ZisK failure-status check failed")) std.testing.allocator.free(checker.failure);
-    const header = responseHeader(1, 4);
-    try std.testing.expectError(error.CheckFailed, checker.validateResponse(&header, "boom", true));
-    try std.testing.expectEqualStrings(
-        "ZisK host reported failure despite --expect-no-propagation; either ZisK now propagates main's nonzero return (remove the flag and clear deviation D2) or the probe run itself broke: boom",
         checker.failure,
     );
 }
