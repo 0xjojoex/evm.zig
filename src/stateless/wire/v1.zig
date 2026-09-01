@@ -14,7 +14,7 @@ const crypto = @import("../../crypto.zig");
 const Revision = @import("../../eth/revision.zig").Revision;
 const address = @import("../../address.zig");
 const input_mod = @import("../input.zig");
-const EthWithdrawal = @import("../../eth/Withdrawal.zig");
+pub const Withdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const eth_spec = @import("../../eth/spec.zig");
@@ -80,22 +80,6 @@ pub const ExecutionWitness = struct {
 
     pub fn deinit(self: *ExecutionWitness, allocator: std.mem.Allocator) void {
         Ssz.deinit(allocator, self);
-    }
-};
-
-pub const Withdrawal = struct {
-    index: u64,
-    validator_index: u64,
-    address: address.Address,
-    amount: u64,
-
-    fn toEth(self: Withdrawal) EthWithdrawal {
-        return .{
-            .index = self.index,
-            .validator_index = self.validator_index,
-            .address = self.address,
-            .amount = self.amount,
-        };
     }
 };
 
@@ -1187,7 +1171,7 @@ pub const NormalizedInput = struct {
     chain_id: u256,
     input: input_mod.Input,
     transactions: transaction_raw.DecodedBatch,
-    withdrawals: []const EthWithdrawal,
+    withdrawals: []const Withdrawal,
     execution_requests: []const []const u8,
 
     pub fn deinit(self: *NormalizedInput, allocator: std.mem.Allocator) void {
@@ -1201,8 +1185,8 @@ pub const NormalizedInput = struct {
 /// Returned semantic slices borrow decoded wire input or `NormalizedInput`.
 pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!NormalizedInput {
     const payload = input.new_payload_request.payloadView();
-    const withdrawals = try normalizeWithdrawals(allocator, payload.withdrawals);
-    errdefer allocator.free(withdrawals);
+    const withdrawals = payload.withdrawals;
+
     const execution_requests = if (input.new_payload_request.executionRequests()) |requests|
         try requests.typedOpaqueRequests(allocator)
     else
@@ -1294,13 +1278,6 @@ fn freeOpaqueRequests(allocator: std.mem.Allocator, requests: []const []const u8
         allocator.free(requests[index]);
     }
     allocator.free(requests);
-}
-
-fn normalizeWithdrawals(allocator: std.mem.Allocator, withdrawals: []const Withdrawal) Error![]const EthWithdrawal {
-    if (withdrawals.len == 0) return &.{};
-    const out = try allocator.alloc(EthWithdrawal, withdrawals.len);
-    for (out, withdrawals) |*target, source| target.* = source.toEth();
-    return out;
 }
 
 fn prefixedFixedStructListBytes(

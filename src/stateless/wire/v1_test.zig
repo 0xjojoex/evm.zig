@@ -129,7 +129,8 @@ test "stateless wire v1 carries chain id without host-supplied fork configuratio
     var decoded = try wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, encoded);
     defer decoded.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 42), decoded.chain_id);
-    const normalized = try wire.normalize(std.testing.allocator, decoded);
+    var normalized = try wire.normalize(std.testing.allocator, decoded);
+    defer normalized.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u256, 42), normalized.chain_id);
 }
 

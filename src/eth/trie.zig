@@ -4,6 +4,8 @@
 
 const std = @import("std");
 
+const ExactSlab = @import("../ExactSlab.zig");
+
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
 const rlp = @import("rlp");
@@ -66,7 +68,7 @@ pub inline fn updateCatalogHashedSorted(
     );
 }
 
-pub const Error = Allocator.Error || mpt.Error;
+pub const Error = Allocator.Error || mpt.Error || error{Overflow};
 
 pub const ProofLookupError = rlp.DecodeError || mpt.Error;
 
@@ -77,41 +79,6 @@ pub const empty_root_hash = mpt.empty_root;
 pub const Pair = mpt.Entry;
 
 const IndexKey = [1 + @sizeOf(usize)]u8;
-
-/// One parent allocation carved into typed regions. Callers sum every region
-/// with `reserve`, allocate once, then `take` them back in the same order.
-const ExactSlab = struct {
-    backing: []u8,
-    fixed: std.heap.FixedBufferAllocator,
-
-    /// Bytes needed for `count` values of `T` placed after `offset`, including
-    /// worst-case alignment padding. `take` performs the real alignment.
-    fn reserve(comptime T: type, offset: usize, count: usize) Error!usize {
-        if (count == 0) return offset;
-        const padded = std.math.add(usize, offset, @alignOf(T) - 1) catch
-            return error.ResourceLimitExceeded;
-        const bytes = std.math.mul(usize, @sizeOf(T), count) catch
-            return error.ResourceLimitExceeded;
-        return std.math.add(usize, padded, bytes) catch
-            error.ResourceLimitExceeded;
-    }
-
-    fn init(allocator: Allocator, len: usize) Allocator.Error!ExactSlab {
-        const backing = try allocator.alloc(u8, len);
-        return .{ .backing = backing, .fixed = .init(backing) };
-    }
-
-    /// Carve a region already accounted for by `reserve`, which is why the
-    /// backing buffer cannot run out.
-    fn take(self: *ExactSlab, comptime T: type, count: usize) []T {
-        return self.fixed.allocator().alloc(T, count) catch unreachable;
-    }
-
-    fn deinit(self: *ExactSlab, allocator: Allocator) void {
-        allocator.free(self.backing);
-        self.* = undefined;
-    }
-};
 
 /// Exact scratch for one ordered-trie root. Index keys and entry descriptors
 /// stay live while the MPT builder uses its separately sized flat workspace.
@@ -167,11 +134,11 @@ const WithdrawalWorkspace = struct {
     fn init(allocator: Allocator, withdrawals: []const Withdrawal) Error!WithdrawalWorkspace {
         var encoded_len: usize = 0;
         for (withdrawals) |withdrawal| {
-            encoded_len = std.math.add(
+            encoded_len = try std.math.add(
                 usize,
                 encoded_len,
                 fixedRlpEncodedLen(Withdrawal, withdrawal),
-            ) catch return error.ResourceLimitExceeded;
+            );
         }
         var slab_len: usize = 0;
         slab_len = try ExactSlab.reserve([]const u8, slab_len, withdrawals.len);

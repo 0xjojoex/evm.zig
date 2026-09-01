@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const ExactSlab = @import("../ExactSlab.zig");
 const rlp = @import("rlp");
 const transaction = @import("types.zig");
 const transaction_envelope = @import("envelope.zig");
@@ -11,7 +12,7 @@ pub const Error = std.mem.Allocator.Error || rlp.ParseError || transaction_signi
     InvalidTransactionEnvelope,
     InvalidTransactionFormat,
     UnsupportedTransactionType,
-};
+} || error{Overflow};
 
 const Counts = struct {
     access_entries: usize = 0,
@@ -20,15 +21,15 @@ const Counts = struct {
     authorizations: usize = 0,
 
     fn add(self: *Counts, other: Counts) Error!void {
-        self.access_entries = try addCount(self.access_entries, other.access_entries);
-        self.storage_keys = try addCount(self.storage_keys, other.storage_keys);
-        self.blob_hashes = try addCount(self.blob_hashes, other.blob_hashes);
-        self.authorizations = try addCount(self.authorizations, other.authorizations);
+        self.access_entries = try std.math.add(usize, self.access_entries, other.access_entries);
+        self.storage_keys = try std.math.add(usize, self.storage_keys, other.storage_keys);
+        self.blob_hashes = try std.math.add(usize, self.blob_hashes, other.blob_hashes);
+        self.authorizations = try std.math.add(usize, self.authorizations, other.authorizations);
     }
 };
 
 const Storage = struct {
-    backing: []u8,
+    slab: ExactSlab,
     transactions: []transaction.DecodedTransaction,
     access_entries: []transaction.AccessListEntry,
     storage_keys: []u256,
@@ -36,30 +37,26 @@ const Storage = struct {
     authorizations: []transaction.AuthorizationTuple,
 
     fn init(allocator: std.mem.Allocator, transaction_count: usize, counts: Counts) Error!Storage {
-        var byte_len: usize = 0;
-        try addSegmentBytes(&byte_len, transaction.DecodedTransaction, transaction_count);
-        try addSegmentBytes(&byte_len, transaction.AccessListEntry, counts.access_entries);
-        try addSegmentBytes(&byte_len, u256, counts.storage_keys);
-        try addSegmentBytes(&byte_len, u256, counts.blob_hashes);
-        try addSegmentBytes(&byte_len, transaction.AuthorizationTuple, counts.authorizations);
+        var slab_len: usize = 0;
+        slab_len = try ExactSlab.reserve(transaction.DecodedTransaction, slab_len, transaction_count);
+        slab_len = try ExactSlab.reserve(transaction.AccessListEntry, slab_len, counts.access_entries);
+        slab_len = try ExactSlab.reserve(u256, slab_len, counts.storage_keys);
+        slab_len = try ExactSlab.reserve(u256, slab_len, counts.blob_hashes);
+        slab_len = try ExactSlab.reserve(transaction.AuthorizationTuple, slab_len, counts.authorizations);
 
-        const backing = if (byte_len == 0)
-            @constCast(&[_]u8{})
-        else
-            try allocator.alloc(u8, byte_len);
-        var fixed = std.heap.FixedBufferAllocator.init(backing);
+        var slab = try ExactSlab.init(allocator, slab_len);
         return .{
-            .backing = backing,
-            .transactions = allocSegment(&fixed, transaction.DecodedTransaction, transaction_count),
-            .access_entries = allocSegment(&fixed, transaction.AccessListEntry, counts.access_entries),
-            .storage_keys = allocSegment(&fixed, u256, counts.storage_keys),
-            .blob_hashes = allocSegment(&fixed, u256, counts.blob_hashes),
-            .authorizations = allocSegment(&fixed, transaction.AuthorizationTuple, counts.authorizations),
+            .slab = slab,
+            .transactions = slab.take(transaction.DecodedTransaction, transaction_count),
+            .access_entries = slab.take(transaction.AccessListEntry, counts.access_entries),
+            .storage_keys = slab.take(u256, counts.storage_keys),
+            .blob_hashes = slab.take(u256, counts.blob_hashes),
+            .authorizations = slab.take(transaction.AuthorizationTuple, counts.authorizations),
         };
     }
 
     fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
-        allocator.free(self.backing);
+        self.slab.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -408,7 +405,7 @@ const Fill = struct {
         const start = self.authorizations;
         var count: usize = 0;
         while (!list.isDone()) {
-            count = try addCount(count, 1);
+            count = try std.math.add(usize, count, 1);
             var tuple = try list.nextList();
             const chain_id = try tuple.nextInt(u256);
             const target = Address.fromBytes((try tuple.nextBytesExact(20))[0..20].*);
@@ -497,11 +494,11 @@ fn inspectAccessList(item: rlp.Item) Error!Counts {
         var keys = try entry.nextList();
         while (!keys.isDone()) {
             _ = try keys.nextBytesExact(32);
-            counts.storage_keys = try addCount(counts.storage_keys, 1);
+            counts.storage_keys = try std.math.add(usize, counts.storage_keys, 1);
         }
         try keys.expectDone();
         try entry.expectDone();
-        counts.access_entries = try addCount(counts.access_entries, 1);
+        counts.access_entries = try std.math.add(usize, counts.access_entries, 1);
     }
     try list.expectDone();
     return counts;
@@ -512,7 +509,7 @@ fn inspectFixedList(item: rlp.Item, len: usize) Error!usize {
     var count: usize = 0;
     while (!list.isDone()) {
         _ = try list.nextBytesExact(len);
-        count = try addCount(count, 1);
+        count = try std.math.add(usize, count, 1);
     }
     try list.expectDone();
     return count;
@@ -523,26 +520,10 @@ fn inspectLists(item: rlp.Item) Error!usize {
     var count: usize = 0;
     while (!list.isDone()) {
         _ = try list.nextList();
-        count = try addCount(count, 1);
+        count = try std.math.add(usize, count, 1);
     }
     try list.expectDone();
     return count;
-}
-
-fn addCount(a: usize, b: usize) Error!usize {
-    return std.math.add(usize, a, b) catch error.InvalidTransactionFormat;
-}
-
-fn addSegmentBytes(total: *usize, comptime T: type, len: usize) Error!void {
-    if (len == 0) return;
-    const payload = std.math.mul(usize, @sizeOf(T), len) catch return error.InvalidTransactionFormat;
-    total.* = try addCount(total.*, @alignOf(T) - 1);
-    total.* = try addCount(total.*, payload);
-}
-
-fn allocSegment(fixed: *std.heap.FixedBufferAllocator, comptime T: type, len: usize) []T {
-    if (len == 0) return @constCast(&[_]T{});
-    return fixed.allocator().alloc(T, len) catch unreachable;
 }
 
 fn readWord(bytes: []const u8) u256 {
