@@ -14,7 +14,7 @@ const crypto = @import("../../crypto.zig");
 const Revision = @import("../../eth/revision.zig").Revision;
 const address = @import("../../address.zig");
 const input_mod = @import("../input.zig");
-const EthWithdrawal = @import("../../eth/Withdrawal.zig");
+pub const Withdrawal = @import("../../eth/Withdrawal.zig");
 const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const eth_spec = @import("../../eth/spec.zig");
@@ -83,22 +83,6 @@ pub const ExecutionWitness = struct {
     }
 };
 
-pub const Withdrawal = struct {
-    index: u64,
-    validator_index: u64,
-    address: address.Address,
-    amount: u64,
-
-    fn toEth(self: Withdrawal) EthWithdrawal {
-        return .{
-            .index = self.index,
-            .validator_index = self.validator_index,
-            .address = self.address,
-            .amount = self.amount,
-        };
-    }
-};
-
 pub const ExecutionRequests = struct {
     deposits: []const DepositRequest = &.{},
     withdrawals: []const WithdrawalRequest = &.{},
@@ -132,22 +116,42 @@ pub const ExecutionRequests = struct {
     }
 
     fn typedOpaqueRequests(self: ExecutionRequests, allocator: std.mem.Allocator) Error![]const []const u8 {
-        if (self.deposits.len == 0 and
-            self.withdrawals.len == 0 and
-            self.consolidations.len == 0 and
-            self.builder_deposits.len == 0 and
-            self.builder_exits.len == 0) return &.{};
-        var out: std.ArrayList([]const u8) = .empty;
+        const count = @as(usize, @intFromBool(self.deposits.len > 0)) +
+            @as(usize, @intFromBool(self.withdrawals.len > 0)) +
+            @as(usize, @intFromBool(self.consolidations.len > 0)) +
+            @as(usize, @intFromBool(self.builder_deposits.len > 0)) +
+            @as(usize, @intFromBool(self.builder_exits.len > 0));
+        if (count == 0) return &.{};
+        const out = try allocator.alloc([]const u8, count);
+        var initialized: usize = 0;
         errdefer {
-            for (out.items) |request| allocator.free(request);
-            out.deinit(allocator);
+            while (initialized > 0) {
+                initialized -= 1;
+                allocator.free(out[initialized]);
+            }
+            allocator.free(out);
         }
-        if (self.deposits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x00, DepositRequest, self.deposits));
-        if (self.withdrawals.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x01, WithdrawalRequest, self.withdrawals));
-        if (self.consolidations.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x02, ConsolidationRequest, self.consolidations));
-        if (self.builder_deposits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x03, BuilderDepositRequest, self.builder_deposits));
-        if (self.builder_exits.len > 0) try out.append(allocator, try prefixedFixedStructListBytes(allocator, 0x04, BuilderExitRequest, self.builder_exits));
-        return out.toOwnedSlice(allocator);
+        if (self.deposits.len > 0) {
+            out[initialized] = try prefixedFixedStructListBytes(allocator, 0x00, DepositRequest, self.deposits);
+            initialized += 1;
+        }
+        if (self.withdrawals.len > 0) {
+            out[initialized] = try prefixedFixedStructListBytes(allocator, 0x01, WithdrawalRequest, self.withdrawals);
+            initialized += 1;
+        }
+        if (self.consolidations.len > 0) {
+            out[initialized] = try prefixedFixedStructListBytes(allocator, 0x02, ConsolidationRequest, self.consolidations);
+            initialized += 1;
+        }
+        if (self.builder_deposits.len > 0) {
+            out[initialized] = try prefixedFixedStructListBytes(allocator, 0x03, BuilderDepositRequest, self.builder_deposits);
+            initialized += 1;
+        }
+        if (self.builder_exits.len > 0) {
+            out[initialized] = try prefixedFixedStructListBytes(allocator, 0x04, BuilderExitRequest, self.builder_exits);
+            initialized += 1;
+        }
+        return out;
     }
 };
 
@@ -1108,14 +1112,15 @@ pub fn validateStatelessResultBytesWithCapture(
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
-    const normalized = normalize(scratch, input) catch |err| switch (err) {
+    var normalized = normalize(scratch, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .status = .invalid_witness },
     };
+    defer normalized.deinit(scratch);
     const result = if (capture == null)
-        AmsterdamValidator.validate(scratch, normalized)
+        AmsterdamValidator.validate(scratch, normalized.input)
     else
-        AmsterdamCaptureValidator.validateWithCapture(scratch, normalized, capture);
+        AmsterdamCaptureValidator.validateWithCapture(scratch, normalized.input, capture);
     return result catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.BlockTransitionFailed => return error.BlockTransitionFailed,
@@ -1136,11 +1141,12 @@ fn validateStatelessUsing(
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_id, schema_id, [_]u8{0} ** 32),
     };
-    const normalized = normalize(allocator, input) catch |err| switch (err) {
+    var normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return failureResult(input.chain_id, schema_id, request_root),
     };
-    const native_result = Validator.validate(allocator, normalized) catch |err| switch (err) {
+    defer normalized.deinit(allocator);
+    const native_result = Validator.validate(allocator, normalized.input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => block_stf.Result{ .status = .invalid_witness },
     };
@@ -1159,52 +1165,77 @@ fn validateStatelessUsing(
 /// well-formed opposite-parity point, so the hint cannot simply be ignored.
 /// Recovery also authenticates the sender used by the decoded transaction, so
 /// execution reuses that prepared value instead of recovering a second time.
-/// Returned slices borrow decoded input or storage owned by `allocator`; guest
-/// callers should give it their invocation-lifetime allocator.
-pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!input_mod.Input {
+/// Owns every allocation introduced while normalizing one wire input. The
+/// semantic input borrows these buffers and the original decoded wire value.
+pub const NormalizedInput = struct {
+    chain_id: u256,
+    input: input_mod.Input,
+    transactions: transaction_raw.DecodedBatch,
+    withdrawals: []const Withdrawal,
+    execution_requests: []const []const u8,
+
+    pub fn deinit(self: *NormalizedInput, allocator: std.mem.Allocator) void {
+        self.transactions.deinit(allocator);
+        freeOpaqueRequests(allocator, self.execution_requests);
+        allocator.free(self.withdrawals);
+        self.* = undefined;
+    }
+};
+
+/// Returned semantic slices borrow decoded wire input or `NormalizedInput`.
+pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!NormalizedInput {
     const payload = input.new_payload_request.payloadView();
-    const transactions = try normalizeTransactions(
-        allocator,
-        payload.transactions,
-        input.public_keys,
-    );
-    const withdrawals = try normalizeWithdrawals(allocator, payload.withdrawals);
+    const withdrawals = payload.withdrawals;
+
     const execution_requests = if (input.new_payload_request.executionRequests()) |requests|
         try requests.typedOpaqueRequests(allocator)
     else
         &.{};
+    errdefer freeOpaqueRequests(allocator, execution_requests);
+    var transactions = try normalizeTransactions(
+        allocator,
+        payload.transactions,
+        input.public_keys,
+    );
+    errdefer transactions.deinit(allocator);
     return .{
         .chain_id = input.chain_id,
-        .blob_params = null,
-        .block = .{
-            .parent_hash = payload.parent_hash,
-            .fee_recipient = payload.fee_recipient,
-            .state_root = payload.state_root,
-            .receipts_root = payload.receipts_root,
-            .logs_bloom = payload.logs_bloom,
-            .prev_randao = evmWordFromBytes32(payload.prev_randao),
-            .number = payload.block_number,
-            .gas_limit = payload.gas_limit,
-            .gas_used = payload.gas_used,
-            .timestamp = payload.timestamp,
-            .extra_data = payload.extra_data,
-            .base_fee_per_gas = sszUint256FromBytes(payload.base_fee_per_gas),
-            .block_hash = payload.block_hash,
-            .transactions = transactions,
-            .withdrawals = withdrawals,
-            .blob_gas_used = payload.blob_gas_used,
-            .excess_blob_gas = payload.excess_blob_gas,
-            .versioned_hashes = input.new_payload_request.versionedHashes(),
-            .parent_beacon_block_root = input.new_payload_request.parentBeaconBlockRoot(),
-            .execution_requests = execution_requests,
-            .block_access_list = if (revision.isImpl(.amsterdam)) payload.block_access_list else null,
-            .slot_number = payload.slot_number,
+        .input = .{
+            .chain_id = input.chain_id,
+            .blob_params = null,
+            .block = .{
+                .parent_hash = payload.parent_hash,
+                .fee_recipient = payload.fee_recipient,
+                .state_root = payload.state_root,
+                .receipts_root = payload.receipts_root,
+                .logs_bloom = payload.logs_bloom,
+                .prev_randao = evmWordFromBytes32(payload.prev_randao),
+                .number = payload.block_number,
+                .gas_limit = payload.gas_limit,
+                .gas_used = payload.gas_used,
+                .timestamp = payload.timestamp,
+                .extra_data = payload.extra_data,
+                .base_fee_per_gas = sszUint256FromBytes(payload.base_fee_per_gas),
+                .block_hash = payload.block_hash,
+                .transactions = transactions.transactions,
+                .withdrawals = withdrawals,
+                .blob_gas_used = payload.blob_gas_used,
+                .excess_blob_gas = payload.excess_blob_gas,
+                .versioned_hashes = input.new_payload_request.versionedHashes(),
+                .parent_beacon_block_root = input.new_payload_request.parentBeaconBlockRoot(),
+                .execution_requests = execution_requests,
+                .block_access_list = if (revision.isImpl(.amsterdam)) payload.block_access_list else null,
+                .slot_number = payload.slot_number,
+            },
+            .witness = .{
+                .state = input.witness.state,
+                .codes = input.witness.codes,
+                .headers = input.witness.headers,
+            },
         },
-        .witness = .{
-            .state = input.witness.state,
-            .codes = input.witness.codes,
-            .headers = input.witness.headers,
-        },
+        .transactions = transactions,
+        .withdrawals = withdrawals,
+        .execution_requests = execution_requests,
     };
 }
 
@@ -1212,31 +1243,41 @@ fn normalizeTransactions(
     allocator: std.mem.Allocator,
     transactions: []const []const u8,
     public_keys: []const [public_key_bytes]u8,
-) Error![]const block_stf.TransactionInput {
+) Error!transaction_raw.DecodedBatch {
     if (public_keys.len != transactions.len) return error.InvalidPublicKey;
-    if (transactions.len == 0) return &.{};
+    return transaction_raw.decodeRawBatchWith(
+        allocator,
+        transactions,
+        PublicKeyResolver{ .expected = public_keys },
+    );
+}
 
-    const normalized = try allocator.alloc(block_stf.TransactionInput, transactions.len);
-    errdefer allocator.free(normalized);
-    for (normalized, transactions, public_keys) |*target, encoded, expected| {
+const PublicKeyResolver = struct {
+    expected: []const [public_key_bytes]u8,
+
+    pub fn resolve(
+        self: PublicKeyResolver,
+        allocator: std.mem.Allocator,
+        index: usize,
+        encoded: []const u8,
+    ) Error!address.Address {
         const recovered = transaction_signing.recoverSender(allocator, encoded) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidPublicKey,
         };
-        if (!std.mem.eql(u8, &recovered.public_key, &expected)) return error.InvalidPublicKey;
-        target.* = block_stf.TransactionInput.initAssumeDecoded(
-            try transaction_raw.decodeRawAssumeSender(allocator, encoded, recovered.sender),
-            encoded,
-        );
+        if (!std.mem.eql(u8, &recovered.public_key, &self.expected[index]))
+            return error.InvalidPublicKey;
+        return recovered.sender;
     }
-    return normalized;
-}
+};
 
-fn normalizeWithdrawals(allocator: std.mem.Allocator, withdrawals: []const Withdrawal) Error![]const EthWithdrawal {
-    if (withdrawals.len == 0) return &.{};
-    const out = try allocator.alloc(EthWithdrawal, withdrawals.len);
-    for (out, withdrawals) |*target, source| target.* = source.toEth();
-    return out;
+fn freeOpaqueRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
+    var index = requests.len;
+    while (index > 0) {
+        index -= 1;
+        allocator.free(requests[index]);
+    }
+    allocator.free(requests);
 }
 
 fn prefixedFixedStructListBytes(

@@ -89,6 +89,21 @@ pub const Transaction = struct {
     authorization_count: ?usize = null,
 };
 
+/// One authenticated raw envelope and its normalized borrowed transaction
+/// view. Any allocator-backed slices inside `tx` are owned by the decoder
+/// result that exposes this value; `encoded` always remains caller-owned.
+pub const DecodedTransaction = struct {
+    tx: Transaction,
+    encoded: []const u8,
+
+    /// Construct an ingress value when a trusted adapter has already decoded
+    /// `encoded` into `tx`. This does not prove that both representations
+    /// describe the same transaction.
+    pub fn initAssumeDecoded(tx: Transaction, encoded: []const u8) DecodedTransaction {
+        return .{ .tx = tx, .encoded = encoded };
+    }
+};
+
 /// Read-only projection of unvalidated transaction input. Wide nonce data must
 /// not cross the Transaction validation boundary into `Prepared`.
 pub const TransactionView = struct {
