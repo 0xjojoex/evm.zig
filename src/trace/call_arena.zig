@@ -261,7 +261,7 @@ pub const CallArena = struct {
         row.gas_used = if (event.gas_left >= row.gas)
             0
         else
-            std.math.sub(i64, row.gas, event.gas_left) catch std.math.maxInt(i64);
+            row.gas -| event.gas_left;
         self.active_rows.items.len -= 1;
     }
 

@@ -59,7 +59,7 @@ pub fn beginRoot(context: ?*Context, message: evmz.Message, gas: ExecutionGas) !
             .to = call.recipient,
             .code_address = call.recipient,
             .value = call.value,
-            .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+            .gas = std.math.lossyCast(i64, gas.regular_left),
             .input = call.input,
         },
         .create => |create| .{
@@ -69,7 +69,7 @@ pub fn beginRoot(context: ?*Context, message: evmz.Message, gas: ExecutionGas) !
             .to = create.recipient,
             .code_address = create.recipient,
             .value = create.value,
-            .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+            .gas = std.math.lossyCast(i64, gas.regular_left),
             .input = create.init_code,
         },
     });
@@ -94,7 +94,7 @@ pub fn beginSelfDestruct(
 ) !?trace.CallToken {
     const capture_value = context orelse return null;
     if (!capture_value.capturesCalls()) return null;
-    const depth = std.math.add(u16, frame_depth, 1) catch std.math.maxInt(u16);
+    const depth = frame_depth +| 1;
     return capture_value.beginCall(.{
         .depth = depth,
         .kind = .selfdestruct,

@@ -988,7 +988,7 @@ pub fn ExecutorType(
         /// Increment an account nonce, saturating at `maxInt(u64)`.
         fn incrementNonce(self: *Executor, address: Address) !void {
             const account = try self.getAccountOrLoad(address) orelse AccountState{};
-            try self.state.setNonce(stateAddress(address), std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
+            try self.state.setNonce(stateAddress(address), account.nonce +| 1);
         }
 
         /// Return this executor's `Host` adapter for interpreter frames.
@@ -2094,7 +2094,7 @@ pub fn ExecutorType(
                         .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                         .output_data = &.{},
                     },
                 };
@@ -2117,7 +2117,7 @@ pub fn ExecutorType(
                         .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                         .output_data = &.{},
                     };
                     top_frame_gas.finish(&result, top_frame_state_gas);
@@ -2154,9 +2154,9 @@ pub fn ExecutorType(
             if (!try self.transferValue(sender, recipient, value)) {
                 return .{
                     .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
-                    .gas_left = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+                    .gas_left = std.math.lossyCast(i64, gas.regular_left),
                     .gas_refund = 0,
-                    .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                    .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                     .output_data = &.{},
                 };
             }
@@ -2164,8 +2164,8 @@ pub fn ExecutorType(
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
-                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                 .recipient = recipient,
                 .sender = sender,
                 .input_data = input,
@@ -2186,9 +2186,9 @@ pub fn ExecutorType(
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
                 return .{
                     .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
-                    .gas_left = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
+                    .gas_left = std.math.lossyCast(i64, options.gas),
                     .gas_refund = 0,
-                    .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
+                    .gas_reservoir = std.math.lossyCast(i64, options.gas_reservoir),
                     .output_data = &.{},
                 };
             }
@@ -2196,8 +2196,8 @@ pub fn ExecutorType(
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
-                .gas = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, options.gas),
+                .gas_reservoir = std.math.lossyCast(i64, options.gas_reservoir),
                 .recipient = options.recipient,
                 .sender = options.sender,
                 .input_data = options.input,
@@ -2277,7 +2277,7 @@ pub fn ExecutorType(
                         .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                         .output_data = &.{},
                     },
                 };
@@ -2286,8 +2286,8 @@ pub fn ExecutorType(
             const host_result = try self.executeTransactionCreateMessage(.{
                 .depth = 0,
                 .kind = if (options.salt == null) .create else .create2,
-                .gas = std.math.cast(i64, execution_gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, execution_gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                 .recipient = options.recipient,
                 .sender = options.sender,
                 .input_data = options.init_code,
@@ -2308,8 +2308,8 @@ pub fn ExecutorType(
             return self.executeCreateMessage(.{
                 .depth = 0,
                 .kind = if (options.salt == null) .create else .create2,
-                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                 .recipient = options.recipient,
                 .sender = options.sender,
                 .input_data = options.init_code,
@@ -2367,8 +2367,8 @@ pub fn ExecutorType(
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
-                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                 .recipient = recipient,
                 .sender = sender,
                 .input_data = input,

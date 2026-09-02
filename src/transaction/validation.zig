@@ -250,11 +250,11 @@ fn effectiveBlobSchedule(spec_schedule: ?blob.BlobSchedule, params: ?blob.BlobPa
 }
 
 fn maxBlobCount(schedule: blob.BlobSchedule) usize {
-    return std.math.cast(usize, schedule.max) orelse std.math.maxInt(usize);
+    return std.math.lossyCast(usize, schedule.max);
 }
 
 fn maxBlobCountPerTransaction(schedule: blob.BlobSchedule) usize {
-    return std.math.cast(usize, schedule.max_per_transaction) orelse std.math.maxInt(usize);
+    return std.math.lossyCast(usize, schedule.max_per_transaction);
 }
 
 fn blobGasForCount(spec_schedule: ?blob.BlobSchedule, blob_count: usize) ?u256 {

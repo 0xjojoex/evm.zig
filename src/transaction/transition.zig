@@ -70,11 +70,7 @@ pub fn ImplType(
                 if (!self.chargeState(adjustment.account_state_charge)) return false;
                 if (!self.chargeRegular(adjustment.account_write_charge)) return false;
                 if (!self.chargeState(adjustment.delegation_state_charge)) return false;
-                self.regular_refund = std.math.add(
-                    u64,
-                    self.regular_refund,
-                    adjustment.regular_refund,
-                ) catch std.math.maxInt(u64);
+                self.regular_refund +|= adjustment.regular_refund;
                 return true;
             }
 
@@ -90,22 +86,18 @@ pub fn ImplType(
                 if (from_regular > self.gas.regular_left) return false;
                 self.gas.reservoir -= from_reservoir;
                 self.gas.regular_left -= from_regular;
-                self.state_spent = std.math.add(u64, self.state_spent, amount) catch std.math.maxInt(u64);
-                self.state_from_regular = std.math.add(u64, self.state_from_regular, from_regular) catch std.math.maxInt(u64);
+                self.state_spent +|= amount;
+                self.state_from_regular +|= from_regular;
                 return true;
             }
 
             fn foldInto(self: @This(), result: *execution.ExecutionResult) void {
-                const regular_refund = std.math.cast(i64, self.regular_refund) orelse std.math.maxInt(i64);
-                result.gas_refund = std.math.add(i64, result.gas_refund, regular_refund) catch std.math.maxInt(i64);
-                const state_spent = std.math.cast(i64, self.state_spent) orelse std.math.maxInt(i64);
-                result.state_gas_spent = std.math.add(i64, result.state_gas_spent, state_spent) catch std.math.maxInt(i64);
-                const state_from_regular = std.math.cast(i64, self.state_from_regular) orelse std.math.maxInt(i64);
-                result.state_gas_from_gas_left = std.math.add(
-                    i64,
-                    result.state_gas_from_gas_left,
-                    state_from_regular,
-                ) catch std.math.maxInt(i64);
+                const regular_refund = std.math.lossyCast(i64, self.regular_refund);
+                result.gas_refund +|= regular_refund;
+                const state_spent = std.math.lossyCast(i64, self.state_spent);
+                result.state_gas_spent +|= state_spent;
+                const state_from_regular = std.math.lossyCast(i64, self.state_from_regular);
+                result.state_gas_from_gas_left +|= state_from_regular;
             }
 
             fn includedOutOfGas(self: @This()) execution.ExecutionResult {
@@ -115,7 +107,7 @@ pub fn ImplType(
                     .gas_refund = 0,
                     // Pre-execution rollback refills all state gas. The
                     // regular pool is consumed by the exceptional halt.
-                    .gas_reservoir = std.math.cast(i64, self.initial.reservoir) orelse std.math.maxInt(i64),
+                    .gas_reservoir = std.math.lossyCast(i64, self.initial.reservoir),
                     .output_data = &.{},
                 };
             }

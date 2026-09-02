@@ -8,7 +8,7 @@ const std = @import("std");
 const CallFrame = Interpreter.CallFrame;
 
 fn wordToGas(word: u256) i64 {
-    return std.math.cast(i64, word) orelse std.math.maxInt(i64);
+    return std.math.lossyCast(i64, word);
 }
 
 fn nextDepth(depth: u16) u16 {

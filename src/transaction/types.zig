@@ -267,7 +267,7 @@ pub fn effectiveGasPrice(env: Env, view: TransactionView) u256 {
         .dynamic_fee, .blob, .set_code => blk: {
             const max_fee = view.fee.max_fee_per_gas orelse return view.fee.gas_price;
             const priority_fee = view.fee.max_priority_fee_per_gas orelse 0;
-            const capped_priority = std.math.add(u256, env.base_fee, priority_fee) catch std.math.maxInt(u256);
+            const capped_priority = env.base_fee +| priority_fee;
             break :blk @min(max_fee, capped_priority);
         },
     };

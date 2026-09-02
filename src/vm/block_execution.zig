@@ -41,8 +41,7 @@ pub fn advance(
         return error.BlockGasExceeded;
     if (!next.block_gas.withinLimit(env.gas_limit))
         return error.BlockGasExceeded;
-    next.tx_count = std.math.add(u64, next.tx_count, 1) catch
-        return error.Overflow;
+    next.tx_count = try std.math.add(u64, next.tx_count, 1);
     return next;
 }
 

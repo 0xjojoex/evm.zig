@@ -263,8 +263,8 @@ pub const ExecutionResult = struct {
         }
         self.gas_reservoir -= from_reservoir;
         self.gas_left -= from_regular;
-        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, from_regular) catch std.math.maxInt(i64);
-        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, gas) catch std.math.maxInt(i64);
+        self.state_gas_from_gas_left +|= from_regular;
+        self.state_gas_spent +|= gas;
     }
 };
 
@@ -283,17 +283,12 @@ pub fn finalizeStateGas(result: anytype) void {
 }
 
 fn unwindStateGas(result: anytype, restore_regular_gas: bool) void {
-    const max_i64 = @as(i64, std.math.maxInt(i64));
-    const min_i64 = @as(i64, std.math.minInt(i64));
-    const reservoir_delta = std.math.sub(i64, result.state_gas_spent, result.state_gas_from_gas_left) catch
-        if (result.state_gas_spent >= 0) max_i64 else min_i64;
+    const reservoir_delta = result.state_gas_spent -| result.state_gas_from_gas_left;
 
-    result.gas_reservoir = std.math.add(i64, result.gas_reservoir, reservoir_delta) catch
-        if (reservoir_delta >= 0) max_i64 else min_i64;
+    result.gas_reservoir +|= reservoir_delta;
 
     if (restore_regular_gas) {
-        result.gas_left = std.math.add(i64, result.gas_left, result.state_gas_from_gas_left) catch
-            if (result.state_gas_from_gas_left >= 0) max_i64 else min_i64;
+        result.gas_left +|= result.state_gas_from_gas_left;
     }
 
     result.state_gas_spent = 0;

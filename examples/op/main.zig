@@ -446,7 +446,6 @@ pub const OpExecutorError = evmz.executor.errors.Error;
 pub const OpBlockError = OpExecutorError || error{
     MissingCreateRecipient,
     Overflow,
-    TransactionCountOverflow,
 };
 
 pub const OpTransactError = OpExecutorError || error{
@@ -523,8 +522,7 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                 info.operatorFeeCharge(enveloped, variant.tx.gas_limit)
             else
                 0;
-            const rollup_charge = std.math.add(u256, l1_fee, operator_charge) catch
-                return error.Overflow;
+            const rollup_charge = try std.math.add(u256, l1_fee, operator_charge);
 
             const executable = switch (try EthereumTransition.prepare(context, variant.tx)) {
                 .rejected => |reason| return .{ .rejected = .{ .ethereum = reason } },
@@ -532,10 +530,16 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
             };
             var widened = executable;
             if (rollup_charge != 0) {
-                widened.settlement.upfront_debit = std.math.add(u256, widened.settlement.upfront_debit, rollup_charge) catch
-                    return error.Overflow;
-                widened.settlement.minimum_balance = std.math.add(u256, widened.settlement.minimum_balance, rollup_charge) catch
-                    return error.Overflow;
+                widened.settlement.upfront_debit = try std.math.add(
+                    u256,
+                    widened.settlement.upfront_debit,
+                    rollup_charge,
+                );
+                widened.settlement.minimum_balance = try std.math.add(
+                    u256,
+                    widened.settlement.minimum_balance,
+                    rollup_charge,
+                );
                 // Preparation validated only the unwidened requirement;
                 // re-check so a shortfall rejects the way op-revm's
                 // LackOfFundForMaxFee does instead of including an invalid
@@ -559,8 +563,11 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
             // cost and never credited anywhere by the engine, so the redirect
             // is one credit with no burn to undo.
             if (l1_fee != 0) try context.addBalance(rollup.l1_fee_recipient, l1_fee);
-            const base_fee_amount = std.math.mul(u256, context.input().env.base_fee, execution_result.gas.used) catch
-                return error.Overflow;
+            const base_fee_amount = try std.math.mul(
+                u256,
+                context.input().env.base_fee,
+                execution_result.gas.used,
+            );
             if (base_fee_amount != 0) try context.addBalance(rollup.base_fee_recipient, base_fee_amount);
             var operator_fee_paid: u256 = 0;
             if (op_spec.operator_fee and operator_charge != 0) {
@@ -620,9 +627,11 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                         var executed = executed_value;
                         defer executed.discardIfCurrent();
                         const view = executed.view();
-                        const transaction_count =
-                            std.math.add(u64, self.transaction_count, 1) catch
-                                return error.TransactionCountOverflow;
+                        const transaction_count = try std.math.add(
+                            u64,
+                            self.transaction_count,
+                            1,
+                        );
                         const included: OpIncludedTransaction = .{
                             .output = view.output.*,
                             .cumulative_transactions = transaction_count,

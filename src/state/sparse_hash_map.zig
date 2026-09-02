@@ -156,7 +156,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         }
 
         pub fn capacity(self: Self) Index {
-            return std.math.cast(Index, self.entries.len) orelse std.math.maxInt(Index);
+            return @intCast(self.entries.len);
         }
 
         pub fn allocationBytes(self: Self) usize {
