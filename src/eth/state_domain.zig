@@ -3,6 +3,10 @@
 //! The completed Ethereum VM selects one domain atomically. Its `Execution`
 //! namespace feeds the generic execution engine; `Lifecycle` remains at the block/STF
 //! layer for admission, witness handling, observation, and commitment.
+//!
+//! `Tracked` binds `state.TrackedState` (address-keyed, materialized on touch);
+//! `Bal` binds `eth.bal.ClaimState` (claim-indexed, declared by the block access
+//! list). Both run from a witness or an external backend.
 
 const std = @import("std");
 
@@ -141,7 +145,7 @@ pub const Tracked = struct {
     };
 };
 
-pub const BalStateless = struct {
+pub const Bal = struct {
     pub const Execution = struct {
         pub const State = ClaimState;
         pub const StateAddress = address.AddressWord;
@@ -150,7 +154,7 @@ pub const BalStateless = struct {
 
         pub fn checkSpec(comptime spec: Spec) void {
             if (!spec.block.block_access_list) {
-                @compileError("BalStateless requires a block-access-list specification");
+                @compileError("Bal requires a block-access-list specification");
             }
         }
 
@@ -227,7 +231,7 @@ pub const BalStateless = struct {
             accepted: Execution.State.AcceptedView,
             node_updates: ?*trie.NodeUpdates,
         ) CommitError![32]u8 {
-            return backend.stateRootAfterDenseCommit(allocator, accepted.commit(), node_updates) catch |err|
+            return backend.stateRootAfterClaimCommit(allocator, accepted.commit(), node_updates) catch |err|
                 return normalizeCommitError(err);
         }
 

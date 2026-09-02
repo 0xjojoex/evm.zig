@@ -154,7 +154,7 @@ pub fn Reader(comptime mode: Mode) type {
 
         /// Post-state root for a sealed dense commit view, which stays projected as
         /// ClaimPlan IDs instead of address/slot change records.
-        pub fn stateRootAfterDenseCommit(
+        pub fn stateRootAfterClaimCommit(
             self: *const WitnessStateReader,
             allocator: std.mem.Allocator,
             commit_view: anytype,

@@ -108,7 +108,7 @@ test "public executor remains bound to TrackedState" {
     try std.testing.expect(Amsterdam.Executor.State == TrackedState);
 }
 
-test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard" {
+test "claim state binds to ExecutorCore and matches checkpoint discard" {
     const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
     const bal = @import("./eth/bal/model.zig");
     const target = evmz.addr(1);
@@ -135,7 +135,7 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
         .state = .{ .reader = backing.reader() },
     });
     defer tracked.deinit();
-    const dense_facts = try ParentFacts.initCopy(
+    const claim_facts = try ParentFacts.initCopy(
         std.testing.allocator,
         &account_facts,
         &storage_facts,
@@ -143,103 +143,103 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     const claim_state = try evmz.eth.bal.ClaimState.initWithCodes(
         std.testing.allocator,
         plan,
-        dense_facts,
+        claim_facts,
         &.{},
     );
-    const DenseEngine = @import("./vm.zig").BalStatelessVm(evmz.eth.amsterdam);
-    var dense = DenseEngine.Executor.init(std.testing.allocator, .{ .state = claim_state });
-    defer dense.deinit();
+    const ClaimEngine = @import("./vm.zig").BalVm(evmz.eth.amsterdam);
+    var claim = ClaimEngine.Executor.init(std.testing.allocator, .{ .state = claim_state });
+    defer claim.deinit();
 
     const context = testExecutionContext(target, 100_000);
     var tracked_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
-    var dense_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
+    var claim_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
     const observed_tracked = tracked.observe(&tracked_observer);
-    const observed_dense = dense.observe(&dense_observer);
+    const observed_claim = claim.observe(&claim_observer);
     try observed_tracked.beginStateTransition(context);
     defer tracked.discardStateTransition();
-    try observed_dense.beginStateTransition(context);
-    defer dense.discardStateTransition();
+    try observed_claim.beginStateTransition(context);
+    defer claim.discardStateTransition();
 
     const undeclared = evmz.addr(2);
-    try dense.warmAccount(undeclared);
-    try dense.warmStorage(target, 8);
-    try std.testing.expect(!dense.state.isAccountWarm(.fromAddress(undeclared)));
-    try std.testing.expect(!dense.state.isStorageWarm(.fromAddress(target), 8));
-    try std.testing.expectError(error.UndeclaredAccount, dense.getBalance(undeclared));
-    try std.testing.expectError(error.UndeclaredStorage, dense.getStorage(target, 8));
-    try std.testing.expectError(error.UndeclaredAccount, dense.observeAccountAccess(undeclared));
+    try claim.warmAccount(undeclared);
+    try claim.warmStorage(target, 8);
+    try std.testing.expect(!claim.state.isAccountWarm(.fromAddress(undeclared)));
+    try std.testing.expect(!claim.state.isStorageWarm(.fromAddress(target), 8));
+    try std.testing.expectError(error.UndeclaredAccount, claim.getBalance(undeclared));
+    try std.testing.expectError(error.UndeclaredStorage, claim.getStorage(target, 8));
+    try std.testing.expectError(error.UndeclaredAccount, claim.observeAccountAccess(undeclared));
 
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
-    try std.testing.expectEqual(try tracked.getStorage(target, 7), try dense.getStorage(target, 7));
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
+    try std.testing.expectEqual(try tracked.getStorage(target, 7), try claim.getStorage(target, 7));
     try tracked.addBalance(target, 5);
-    try dense.addBalance(target, 5);
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
+    try claim.addBalance(target, 5);
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
 
     var tracked_checkpoint = tracked.checkpoint();
     defer tracked_checkpoint.deinit();
-    var dense_checkpoint = dense.checkpoint();
-    defer dense_checkpoint.deinit();
+    var claim_checkpoint = claim.checkpoint();
+    defer claim_checkpoint.deinit();
 
     const tracked_load = try tracked.state.loadStorage(target, 7);
-    const dense_load = try dense.state.loadStorage(.fromAddress(target), 7);
-    try std.testing.expectEqual(tracked_load, dense_load);
-    try std.testing.expectEqual(.cold, dense_load.access_status);
-    try std.testing.expect(dense.state.isStorageWarm(.fromAddress(target), 7));
+    const claim_load = try claim.state.loadStorage(.fromAddress(target), 7);
+    try std.testing.expectEqual(tracked_load, claim_load);
+    try std.testing.expectEqual(.cold, claim_load.access_status);
+    try std.testing.expect(claim.state.isStorageWarm(.fromAddress(target), 7));
     const tracked_store = try tracked.state.storeStorage(target, 7, 9);
-    const dense_store = try dense.state.storeStorage(.fromAddress(target), 7, 9);
-    try std.testing.expectEqual(tracked_store, dense_store);
-    try std.testing.expectEqual(.warm, dense_store.access_status);
-    try std.testing.expectEqual(.modified, dense_store.storage_status);
-    try std.testing.expectEqual(@as(u256, 9), try dense.getStorage(target, 7));
+    const claim_store = try claim.state.storeStorage(.fromAddress(target), 7, 9);
+    try std.testing.expectEqual(tracked_store, claim_store);
+    try std.testing.expectEqual(.warm, claim_store.access_status);
+    try std.testing.expectEqual(.modified, claim_store.storage_status);
+    try std.testing.expectEqual(@as(u256, 9), try claim.getStorage(target, 7));
 
     try tracked.addBalance(target, 7);
-    try dense.addBalance(target, 7);
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
+    try claim.addBalance(target, 7);
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
     tracked_checkpoint.restore();
-    dense_checkpoint.restore();
+    claim_checkpoint.restore();
     try std.testing.expectEqual(@as(u256, 15), try tracked.getBalance(target));
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
-    try std.testing.expectEqual(@as(u256, 3), try dense.getStorage(target, 7));
-    try std.testing.expect(!dense.state.isStorageWarm(.fromAddress(target), 7));
-    try std.testing.expectEqual(.cold, (try dense.state.loadStorage(.fromAddress(target), 7)).access_status);
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
+    try std.testing.expectEqual(@as(u256, 3), try claim.getStorage(target, 7));
+    try std.testing.expect(!claim.state.isStorageWarm(.fromAddress(target), 7));
+    try std.testing.expectEqual(.cold, (try claim.state.loadStorage(.fromAddress(target), 7)).access_status);
 
     tracked.discardStateTransition();
-    dense.discardStateTransition();
+    claim.discardStateTransition();
     try observed_tracked.beginStateTransition(context);
-    try observed_dense.beginStateTransition(context);
+    try observed_claim.beginStateTransition(context);
     try std.testing.expectEqual(@as(u256, 10), try tracked.getBalance(target));
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try tracked.getStorage(target, 7));
-    try std.testing.expectEqual(try tracked.getStorage(target, 7), try dense.getStorage(target, 7));
+    try std.testing.expectEqual(try tracked.getStorage(target, 7), try claim.getStorage(target, 7));
 
     const replacement_code = [_]u8{0x5f};
     const replacement_hash = evmz.crypto.keccak256(&replacement_code);
     try tracked.setCode(target, &replacement_code);
-    try dense.setCode(target, &replacement_code);
+    try claim.setCode(target, &replacement_code);
     try tracked.state.setTransientStorage(target, 8, 12);
-    try dense.state.setTransientStorage(.fromAddress(target), 8, 12);
+    try claim.state.setTransientStorage(.fromAddress(target), 8, 12);
     const topics = [_]u256{7};
     const data = [_]u8{8};
     try tracked.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
-    try dense.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
+    try claim.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
     _ = try tracked.state.setStorage(target, 7, 11);
-    _ = try dense.state.setStorage(.fromAddress(target), 7, 11);
+    _ = try claim.state.setStorage(.fromAddress(target), 7, 11);
 
     tracked_observer.code_hash = replacement_hash;
-    dense_observer.code_hash = replacement_hash;
+    claim_observer.code_hash = replacement_hash;
     try observed_tracked.retainStateTransition();
-    try observed_dense.retainStateTransition();
-    try std.testing.expectEqualDeep(tracked_observer.summary, dense_observer.summary);
-    try std.testing.expectEqual(@as(usize, 1), dense.logView().len());
+    try observed_claim.retainStateTransition();
+    try std.testing.expectEqualDeep(tracked_observer.summary, claim_observer.summary);
+    try std.testing.expectEqual(@as(usize, 1), claim.logView().len());
     const tracked_account_change = tracked.acceptedChanges().accounts.at(0);
-    const dense_account_change = dense.acceptedChanges().accounts.at(0);
-    try std.testing.expectEqual(tracked_account_change.address, dense_account_change.address);
-    try std.testing.expectEqualDeep(tracked_account_change.account, dense_account_change.account);
+    const claim_account_change = claim.acceptedChanges().accounts.at(0);
+    try std.testing.expectEqual(tracked_account_change.address, claim_account_change.address);
+    try std.testing.expectEqualDeep(tracked_account_change.account, claim_account_change.account);
     const tracked_storage_change = tracked.acceptedChanges().storage_writes.at(0);
-    const dense_storage_change = dense.acceptedChanges().storage_writes.at(0);
-    try std.testing.expectEqual(tracked_storage_change.address, dense_storage_change.address);
-    try std.testing.expectEqual(tracked_storage_change.key, dense_storage_change.key);
-    try std.testing.expectEqual(tracked_storage_change.value, dense_storage_change.value);
+    const claim_storage_change = claim.acceptedChanges().storage_writes.at(0);
+    try std.testing.expectEqual(tracked_storage_change.address, claim_storage_change.address);
+    try std.testing.expectEqual(tracked_storage_change.key, claim_storage_change.key);
+    try std.testing.expectEqual(tracked_storage_change.value, claim_storage_change.value);
 }
 
 test "executor prepareBytecode eagerly analyzes jumpdests" {

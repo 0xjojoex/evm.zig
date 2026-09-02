@@ -58,10 +58,10 @@ pub const VmType = vm.VmType;
 pub const Engine = vm.Engine;
 pub const EngineWithOptions = vm.EngineWithOptions;
 pub const EngineType = vm.EngineType;
-pub const BalStatelessEngine = vm.BalStatelessEngine;
-pub const BalStatelessEngineWithOptions = vm.BalStatelessEngineWithOptions;
-pub const BalStatelessVm = vm.BalStatelessVm;
-pub const BalStatelessVmWithOptions = vm.BalStatelessVmWithOptions;
+pub const BalEngine = vm.BalEngine;
+pub const BalEngineWithOptions = vm.BalEngineWithOptions;
+pub const BalVm = vm.BalVm;
+pub const BalVmWithOptions = vm.BalVmWithOptions;
 
 /// The latest exact Ethereum engine — the usual ready-to-use entry point.
 pub const Evm = Vm(eth.latest);

@@ -414,7 +414,7 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
         pub const AssumeDecodedBlockInput = AssumeDecodedBlockInputAlias;
         pub const ProduceInput = ProduceInputAlias;
         pub const AssumeDecodedProduceInput = AssumeDecodedProduceInputAlias;
-        /// Dense state is already bound to the accepted claim and therefore
+        /// Claim state is already bound to the accepted claim and therefore
         /// cannot run the tracked-state differential lane.
         pub const BalExecutor = if (bal_differential_enabled)
             differential_executor.Executor(revision, ExactVm)

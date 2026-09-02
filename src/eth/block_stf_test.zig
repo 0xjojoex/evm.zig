@@ -27,7 +27,7 @@ const Backend = @import("../backend.zig").Backend;
 
 const Log = vm.Log;
 const AssumeDecodedBlockInput = block_stf.AssumeDecodedBlockInput;
-const DenseAmsterdam = block_stf.Bind(.amsterdam, vm.BalStatelessVm(eth_spec.amsterdam));
+const DenseAmsterdam = block_stf.Bind(.amsterdam, vm.BalVm(eth_spec.amsterdam));
 const FinalizeBlockContext = block_stf.FinalizeBlockContext;
 const ObservationTarget = block_stf.ObservationTarget;
 const empty_requests_hash = block_stf.empty_requests_hash;

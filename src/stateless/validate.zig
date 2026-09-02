@@ -56,7 +56,7 @@ pub fn ValidatorWithOptions(
     comptime options: Vm.CompileOptions,
 ) type {
     requireAmsterdamSpec(spec);
-    const ExactVm = Vm.BalStatelessVmWithOptions(spec, options);
+    const ExactVm = Vm.BalVmWithOptions(spec, options);
     return ValidatorType(block_stf.Bind(.amsterdam, ExactVm));
 }
 

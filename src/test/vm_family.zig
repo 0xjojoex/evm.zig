@@ -11,13 +11,13 @@ const expectRejected = support.expectRejected;
 
 test "supported state domains analyze as complete VM products" {
     const Tracked = evmz.Vm(evmz.eth.amsterdam);
-    const Dense = evmz.BalStatelessVm(evmz.eth.amsterdam);
+    const Claim = evmz.BalVm(evmz.eth.amsterdam);
 
     analyzeEngineProduct(Tracked);
-    analyzeEngineProduct(Dense);
+    analyzeEngineProduct(Claim);
 
     std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Tracked));
-    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Dense));
+    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Claim));
 }
 
 test "exact Engine derives one coherent transaction authoring chain" {
@@ -59,21 +59,21 @@ test "exact Engine derives one coherent transaction authoring chain" {
 
 test "Amsterdam BlockSTF combines spec and state capabilities" {
     const Tracked = evmz.Vm(evmz.eth.amsterdam);
-    const Dense = evmz.BalStatelessVm(evmz.eth.amsterdam);
+    const Claim = evmz.BalVm(evmz.eth.amsterdam);
     const TrackedBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Tracked);
-    const DenseBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Dense);
+    const ClaimBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Claim);
 
     comptime {
         std.debug.assert(Tracked.StateDomain.Lifecycle.supports_block_production);
-        std.debug.assert(!Dense.StateDomain.Lifecycle.supports_block_production);
+        std.debug.assert(!Claim.StateDomain.Lifecycle.supports_block_production);
         std.debug.assert(Tracked.StateDomain.Lifecycle.supports_external_observation_capture);
-        std.debug.assert(!Dense.StateDomain.Lifecycle.supports_external_observation_capture);
+        std.debug.assert(!Claim.StateDomain.Lifecycle.supports_external_observation_capture);
         std.debug.assert(@TypeOf(TrackedBlockStf.produce) != type);
         std.debug.assert(@TypeOf(TrackedBlockStf.produceAssumeDecoded) != type);
-        std.debug.assert(@TypeOf(DenseBlockStf.produce) == type);
-        std.debug.assert(@TypeOf(DenseBlockStf.produceAssumeDecoded) == type);
+        std.debug.assert(@TypeOf(ClaimBlockStf.produce) == type);
+        std.debug.assert(@TypeOf(ClaimBlockStf.produceAssumeDecoded) == type);
         std.debug.assert(@hasDecl(TrackedBlockStf.BalExecutor, "init"));
-        std.debug.assert(!@hasDecl(DenseBlockStf.BalExecutor, "init"));
+        std.debug.assert(!@hasDecl(ClaimBlockStf.BalExecutor, "init"));
     }
 }
 

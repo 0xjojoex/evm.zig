@@ -86,26 +86,30 @@ pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: Co
     return VmType(spec, state_domain.Tracked, options_value);
 }
 
-pub fn BalStatelessVm(comptime spec: engine_spec.Spec) type {
-    return BalStatelessVmWithOptions(spec, .{});
+/// `Vm(spec)` over the claim-indexed state lane: state is declared up front by
+/// the block access list (`eth.bal.ClaimState`) instead of materialized on
+/// touch. Both this and `Vm` run from a witness; the difference is the state
+/// lane, not statelessness. Requires a spec with `block.block_access_list`.
+pub fn BalVm(comptime spec: engine_spec.Spec) type {
+    return BalVmWithOptions(spec, .{});
 }
 
-pub fn BalStatelessEngine(comptime spec: engine_spec.Spec) type {
-    return BalStatelessEngineWithOptions(spec, .{});
+pub fn BalEngine(comptime spec: engine_spec.Spec) type {
+    return BalEngineWithOptions(spec, .{});
 }
 
-pub fn BalStatelessEngineWithOptions(
+pub fn BalEngineWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return EngineType(spec, state_domain.BalStateless.Execution, options_value);
+    return EngineType(spec, state_domain.Bal.Execution, options_value);
 }
 
-pub fn BalStatelessVmWithOptions(
+pub fn BalVmWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return VmType(spec, state_domain.BalStateless, options_value);
+    return VmType(spec, state_domain.Bal, options_value);
 }
 
 pub fn VmType(

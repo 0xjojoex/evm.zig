@@ -117,14 +117,14 @@ pub const Backend = union(enum) {
 
     /// Only the claim-indexed witness lane keeps state projected as ClaimPlan IDs, so
     /// an external backend has no commit view to root.
-    pub fn stateRootAfterDenseCommit(
+    pub fn stateRootAfterClaimCommit(
         self: *Backend,
         allocator: std.mem.Allocator,
         commit_view: ClaimCommitView,
         node_updates: ?*trie.NodeUpdates,
     ) ![32]u8 {
         return switch (self.*) {
-            .catalog_witness => |*witness| witness.stateRootAfterDenseCommit(allocator, commit_view, node_updates),
+            .catalog_witness => |*witness| witness.stateRootAfterClaimCommit(allocator, commit_view, node_updates),
             .witness => error.InvalidWitness,
             .external => error.InvalidWitness,
         };
