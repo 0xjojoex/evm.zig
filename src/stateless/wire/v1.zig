@@ -1128,10 +1128,6 @@ pub fn validateStatelessResultBytesWithCapture(
     };
 }
 
-pub fn validateStateless(allocator: std.mem.Allocator, input: StatelessInput) Error!StatelessValidationResult {
-    return validateStatelessUsing(AmsterdamValidator, allocator, input);
-}
-
 fn validateStatelessUsing(
     comptime Validator: type,
     allocator: std.mem.Allocator,

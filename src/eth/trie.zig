@@ -4,7 +4,7 @@
 
 const std = @import("std");
 
-const ExactSlab = @import("../ExactSlab.zig");
+const ExactSlab = @import("stdx").ExactSlab;
 
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
@@ -900,7 +900,7 @@ fn loadCatalogAccountOrEmpty(
     return try catalog.decodedAccount(&hashedAddressKey(target)) orelse .{};
 }
 
-fn batchDeletesAccount(changes: anytype, batch: AccountBatch) bool {
+inline fn batchDeletesAccount(changes: anytype, batch: AccountBatch) bool {
     const index = batch.account_change_index orelse return false;
     return changes.accounts.at(index).account == null;
 }

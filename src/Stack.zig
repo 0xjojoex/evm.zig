@@ -39,11 +39,6 @@ pub inline fn push(self: *Stack, value: u256) void {
     self.len += 1;
 }
 
-pub inline fn replaceTop(self: *Stack, value: u256) void {
-    std.debug.assert(self.len != 0);
-    self.base[self.len - 1] = value;
-}
-
 pub inline fn pop(self: *Stack) u256 {
     std.debug.assert(self.len != 0);
     self.len -= 1;

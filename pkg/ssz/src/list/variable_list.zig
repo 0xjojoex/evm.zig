@@ -43,7 +43,7 @@ fn ListCodec(comptime ElementCodec: type, comptime limit: comptime_int, comptime
             }
             const len = std.math.mul(usize, values.len, element_size.?) catch
                 return error.EncodedLengthOverflow;
-            try validateSerializedLength(len);
+            try sequence.validateSerializedLength(len);
             return len;
         }
 
@@ -115,7 +115,7 @@ fn ListCodec(comptime ElementCodec: type, comptime limit: comptime_int, comptime
         }
 
         fn decodedCount(bytes: []const u8) Error!usize {
-            try validateSerializedLength(bytes.len);
+            try sequence.validateSerializedLength(bytes.len);
             if (ElementCodec.is_variable_size) {
                 const count = try sequence.inferCount(bytes);
                 try validateCount(count);
@@ -130,10 +130,6 @@ fn ListCodec(comptime ElementCodec: type, comptime limit: comptime_int, comptime
 
         fn validateCount(count: usize) Error!void {
             if (!progressive and schema_limit.exceededBy(count, limit)) return error.ListLimitExceeded;
-        }
-
-        fn validateSerializedLength(len: usize) Error!void {
-            if (len > std.math.maxInt(u32)) return error.EncodedLengthOverflow;
         }
     };
 }

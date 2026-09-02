@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ExactSlab = @import("../ExactSlab.zig");
+const ExactSlab = @import("stdx").ExactSlab;
 const rlp = @import("rlp");
 const transaction = @import("types.zig");
 const transaction_envelope = @import("envelope.zig");

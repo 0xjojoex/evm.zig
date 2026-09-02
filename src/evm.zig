@@ -80,7 +80,6 @@ pub const Interpreter = Evm.Interpreter;
 pub const Log = vm.Log;
 pub const Message = execution.Message;
 pub const Opcode = opcode.Opcode;
-pub const OpcodeInfo = opcode.OpInfo;
 pub const PreparedCodeBackend = prepared_code.Backend;
 pub const InMemoryPreparedPool = prepared_code.InMemoryPreparedPool;
 pub const ExecutionResourcePlan = execution_resources.Plan;

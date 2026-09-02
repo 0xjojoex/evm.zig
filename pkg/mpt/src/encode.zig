@@ -192,7 +192,7 @@ pub fn compactOutputLen(path_len: usize) UpdateError!usize {
         error.ResourceLimitExceeded;
 }
 
-pub fn bytesEncodedLenUpperBound(value_len: usize) UpdateError!usize {
+pub fn bytesEncodedLenUpperBound(value_len: usize) error{ResourceLimitExceeded}!usize {
     const prefix_len: usize = if (value_len < 56)
         1
     else
@@ -222,11 +222,11 @@ pub fn listPrefixLen(payload_len: usize) usize {
     return if (payload_len < 56) 1 else 1 + lengthByteLen(payload_len);
 }
 
-fn lengthByteLen(value: usize) usize {
+pub fn lengthByteLen(value: usize) usize {
     return (@bitSizeOf(usize) - @clz(value) + 7) / 8;
 }
 
-pub fn addEncodedLengths(lengths: []const usize) UpdateError!usize {
+pub fn addEncodedLengths(lengths: []const usize) error{ResourceLimitExceeded}!usize {
     var total: usize = 0;
     for (lengths) |len| {
         total = std.math.add(usize, total, len) catch
@@ -236,7 +236,7 @@ pub fn addEncodedLengths(lengths: []const usize) UpdateError!usize {
 }
 
 /// A fixed writer over `node_buffer` with the list prefix already written.
-pub fn listWriter(node_buffer: []u8, payload_len: usize) UpdateError!rlp.Writer {
+pub fn listWriter(node_buffer: []u8, payload_len: usize) error{ResourceLimitExceeded}!rlp.Writer {
     var prefix_buffer: [rlp.max_length_prefix_bytes]u8 = undefined;
     const prefix = rlp.listPrefix(&prefix_buffer, payload_len);
     const total_len = std.math.add(usize, prefix.len, payload_len) catch
@@ -246,7 +246,7 @@ pub fn listWriter(node_buffer: []u8, payload_len: usize) UpdateError!rlp.Writer 
     return rlp.Writer.fixed(node_buffer[prefix.len..total_len]);
 }
 
-pub fn writeBytes(writer: *rlp.Writer, value: []const u8) UpdateError!void {
+pub fn writeBytes(writer: *rlp.Writer, value: []const u8) error{ResourceLimitExceeded}!void {
     writer.bytes(value) catch |err| switch (err) {
         error.NoSpaceLeft => return error.ResourceLimitExceeded,
         error.OutOfMemory => unreachable,

@@ -34,6 +34,15 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   `zisk-3.0.0` toolchain and unaligned scalar-memory lowering for the Rust
   provider. Nonzero guest returns now propagate through the ZisK host protocol.
 
+### EVM
+
+Removed
+
+- `error.TraceIndexOverflow` from `executor.errors.Error` and the trace tape.
+  Every raising site was unreachable by construction (`pc`, `memory_size`, and
+  `stack_len` are EVM-bounded; step counts are memory-bounded), so the
+  narrowing is now a plain `@intCast`.
+
 ### RLP
 
 Added

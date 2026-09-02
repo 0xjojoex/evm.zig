@@ -1768,11 +1768,6 @@ pub fn isAccountWarm(self: *const TrackedState, address: Address) bool {
     return tx.scope.warm_accounts.contains(address);
 }
 
-pub fn warmAccountCount(self: *const TrackedState) usize {
-    const tx = self.tx orelse return 0;
-    return tx.scope.warm_accounts.count();
-}
-
 pub fn journalEntryCount(self: *const TrackedState) usize {
     const tx = self.tx orelse return 0;
     return tx.undo.entries.items.len;
@@ -1809,16 +1804,6 @@ pub fn isStorageWarm(self: *const TrackedState, address: Address, key: u256) boo
     const tx = self.tx orelse return false;
     const scope_storage = tx.scope.storage.get(.{ .address = address, .key = key }) orelse return false;
     return scope_storage.warm;
-}
-
-pub fn warmStorageCount(self: *TrackedState) usize {
-    const tx = if (self.tx) |*value| value else return 0;
-    var count: usize = 0;
-    var it = tx.scope.storage.valueIterator();
-    while (it.next()) |scope_storage| {
-        if (scope_storage.warm) count += 1;
-    }
-    return count;
 }
 
 pub fn loadStorage(self: *TrackedState, address: Address, key: u256) !Host.StorageLoadResult {

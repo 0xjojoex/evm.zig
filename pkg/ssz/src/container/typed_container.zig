@@ -6,9 +6,8 @@ const Error = @import("../error.zig").Error;
 const fixed = @import("../basic/fixed.zig");
 const int_enum = @import("../basic/int_enum.zig");
 const optional_union = @import("../union/optional_union.zig");
+const sequence = @import("../variable_sequence.zig");
 const variable_vector = @import("../vector/variable_vector.zig");
-
-const bytes_per_offset = 4;
 
 /// Return the codec for an SSZ container.
 ///
@@ -48,7 +47,7 @@ pub fn Container(comptime T: type, comptime overrides: anytype) type {
                     _ = try FieldSsz.encodedLen(@field(value, field.name));
                 }
             }
-            try validateSerializedLength(total);
+            try sequence.validateSerializedLength(total);
             return total;
         }
 
@@ -61,8 +60,8 @@ pub fn Container(comptime T: type, comptime overrides: anytype) type {
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 const FieldSsz = fieldCodec(overrides, field.name, field.type);
                 if (FieldSsz.is_variable_size) {
-                    writeOffset(out[fixed_offset..][0..bytes_per_offset], variable_offset);
-                    fixed_offset += bytes_per_offset;
+                    sequence.writeOffset(out[fixed_offset..][0..sequence.bytes_per_offset], variable_offset);
+                    fixed_offset += sequence.bytes_per_offset;
                     const encoded = try FieldSsz.encode(
                         out[variable_offset..len],
                         @field(value, field.name),
@@ -224,7 +223,7 @@ test "SSZ composite encode does not premeasure variable children while writing" 
 
 fn validateLayout(comptime T: type, comptime overrides: anytype, bytes: []const u8) Error!void {
     const fixed_section_size = comptime fixedSectionSize(T, overrides);
-    try validateSerializedLength(bytes.len);
+    try sequence.validateSerializedLength(bytes.len);
     if (bytes.len < fixed_section_size) return error.InvalidByteLength;
     if (comptime !hasVariableFields(T, overrides)) {
         if (bytes.len != fixed_section_size) return error.InvalidByteLength;
@@ -309,7 +308,7 @@ fn validateOffsets(comptime T: type, comptime overrides: anytype, bytes: []const
 
     inline for (@typeInfo(T).@"struct".fields, 0..) |field, index| {
         if (comptime fieldCodec(overrides, field.name, field.type).is_variable_size) {
-            const offset = readOffset(bytes, comptime fieldFixedOffset(T, overrides, index));
+            const offset = sequence.readOffset(bytes, comptime fieldFixedOffset(T, overrides, index));
             if (!saw_variable and offset != expected_first) return error.InvalidFirstOffset;
             if (offset < previous) return error.OffsetsNotMonotonic;
             if (offset > bytes.len) return error.OffsetOutOfBounds;
@@ -326,11 +325,11 @@ fn variableFieldBytes(
     comptime index: usize,
 ) Error![]const u8 {
     const fields = @typeInfo(T).@"struct".fields;
-    const start = readOffset(bytes, comptime fieldFixedOffset(T, overrides, index));
+    const start = sequence.readOffset(bytes, comptime fieldFixedOffset(T, overrides, index));
     var end = bytes.len;
     inline for (fields[index + 1 ..], index + 1..) |field, later_index| {
         if (comptime fieldCodec(overrides, field.name, field.type).is_variable_size) {
-            end = readOffset(bytes, comptime fieldFixedOffset(T, overrides, later_index));
+            end = sequence.readOffset(bytes, comptime fieldFixedOffset(T, overrides, later_index));
             break;
         }
     }
@@ -343,7 +342,7 @@ fn fixedSectionSize(comptime T: type, comptime overrides: anytype) usize {
     comptime var total: usize = 0;
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const FieldCodec = fieldCodec(overrides, field.name, field.type);
-        total += if (FieldCodec.is_variable_size) bytes_per_offset else FieldCodec.fixed_size.?;
+        total += if (FieldCodec.is_variable_size) sequence.bytes_per_offset else FieldCodec.fixed_size.?;
     }
     return total;
 }
@@ -354,7 +353,7 @@ fn fieldFixedOffset(comptime T: type, comptime overrides: anytype, comptime targ
     inline for (@typeInfo(T).@"struct".fields, 0..) |field, index| {
         if (index == target) return total;
         const FieldCodec = fieldCodec(overrides, field.name, field.type);
-        total += if (FieldCodec.is_variable_size) bytes_per_offset else FieldCodec.fixed_size.?;
+        total += if (FieldCodec.is_variable_size) sequence.bytes_per_offset else FieldCodec.fixed_size.?;
     }
     unreachable;
 }
@@ -431,18 +430,6 @@ fn canUseEagerFixed(comptime T: type) bool {
         },
         else => false,
     };
-}
-
-fn writeOffset(out: []u8, offset: usize) void {
-    std.mem.writeInt(u32, out[0..bytes_per_offset], @intCast(offset), .little);
-}
-
-fn readOffset(bytes: []const u8, offset: usize) usize {
-    return std.mem.readInt(u32, bytes[offset..][0..bytes_per_offset], .little);
-}
-
-fn validateSerializedLength(len: usize) Error!void {
-    if (len > std.math.maxInt(u32)) return error.EncodedLengthOverflow;
 }
 
 test "SSZ codecFor maps enums and optionals without field overrides" {

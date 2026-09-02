@@ -85,6 +85,27 @@ pub const FinalizeBlockContext = struct {
 pub const FinalizeSystemCall = struct {
     call: BlockSystemCall,
     output_prefix: u8,
+
+    /// A post-block call to a request predeploy whose output is emitted as a
+    /// typed request (EIP-7685) tagged with `request_type`.
+    pub fn request(
+        request_type: u8,
+        predeploy: Address,
+        system_address: Address,
+        gas: u64,
+        state_gas: u64,
+    ) FinalizeSystemCall {
+        return .{
+            .call = .{
+                .sender = system_address,
+                .recipient = predeploy,
+                .gas = gas,
+                .state_gas = state_gas,
+                .require_code = true,
+            },
+            .output_prefix = request_type,
+        };
+    }
 };
 
 pub const FinalizeSystemCalls = struct {

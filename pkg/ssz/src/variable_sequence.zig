@@ -73,14 +73,14 @@ pub fn elementBytes(bytes: []const u8, count: usize, index: usize) []const u8 {
     return bytes[start..end];
 }
 
-fn writeOffset(out: []u8, offset: usize) void {
+pub fn writeOffset(out: []u8, offset: usize) void {
     std.mem.writeInt(u32, out[0..bytes_per_offset], @intCast(offset), .little);
 }
 
-fn readOffset(bytes: []const u8, offset: usize) usize {
+pub fn readOffset(bytes: []const u8, offset: usize) usize {
     return std.mem.readInt(u32, bytes[offset..][0..bytes_per_offset], .little);
 }
 
-fn validateSerializedLength(len: usize) Error!void {
+pub fn validateSerializedLength(len: usize) Error!void {
     if (len > std.math.maxInt(u32)) return error.EncodedLengthOverflow;
 }

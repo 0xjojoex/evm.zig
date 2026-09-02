@@ -10,6 +10,7 @@
 //! release compatibility promise, so callers inside this repository may move
 //! with it.
 
+pub const ExactSlab = @import("ExactSlab.zig");
 pub const ScopedArenaAllocator = @import("ScopedArenaAllocator.zig");
 pub const range = @import("range.zig");
 pub const Range = @import("range.zig").Range;
