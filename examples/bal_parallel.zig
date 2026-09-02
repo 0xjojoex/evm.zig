@@ -2,7 +2,7 @@
 //!
 //! The transactions are constructed locally, so this example uses the
 //! trusted-decoded entry points. Callers receiving untrusted envelopes should
-//! use `produce` and `eth.bal.Executor.init`, which decode raw bytes internally.
+//! use `produce` and `eth.bal.Executor(.amsterdam).init`, which decode raw bytes internally.
 
 const std = @import("std");
 const evmz = @import("evmz");
@@ -27,7 +27,7 @@ const target_code = [_]u8{
     0x00, // STOP
 };
 
-const transactions = [_]evmz.eth.bal.TransactionInput{
+const transactions = [_]block_stf.TransactionInput{
     .initAssumeDecoded(.{
         .sender = sender,
         .nonce = 0,
@@ -88,7 +88,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
     const concurrent_reader = verifier_state.concurrentReader();
 
     var report = evmz.eth.bal.Report{};
-    var bal_executor = evmz.eth.bal.Executor.initAssumeDecoded(
+    var bal_executor = evmz.eth.bal.Executor(.amsterdam).initAssumeDecoded(
         io,
         allocator,
         .{
@@ -135,7 +135,7 @@ fn initState(store: *evmz.state.MemoryStore) !void {
     try (try store.getOrCreateAccount(target)).setCode(&target_code);
 }
 
-fn parentBlobGas() evmz.eth.bal.ParentBlobGas {
+fn parentBlobGas() block_stf.ParentBlobGas {
     return .{
         .parent_excess_blob_gas = 0,
         .parent_blob_gas_used = 0,
@@ -143,7 +143,7 @@ fn parentBlobGas() evmz.eth.bal.ParentBlobGas {
     };
 }
 
-fn rootChecks(output: evmz.eth.bal.DerivedBlockOutput) evmz.eth.bal.RootChecks {
+fn rootChecks(output: block_stf.DerivedBlockOutput) block_stf.RootChecks {
     return .{
         .payload_header = .{
             .state = output.state_root,

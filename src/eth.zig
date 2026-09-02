@@ -11,8 +11,6 @@
 pub const revision = @import("eth/revision.zig");
 pub const spec = @import("eth/spec.zig");
 pub const bal = @import("eth/bal.zig");
-pub const bal_diff = @import("eth/bal/diff.zig");
-pub const bal_view = @import("eth/bal/ClaimView.zig");
 pub const instruction = @import("eth/instruction.zig");
 pub const transaction = @import("eth/transaction.zig");
 pub const transaction_prepare = @import("transaction/prepare.zig");
