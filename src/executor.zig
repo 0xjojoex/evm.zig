@@ -43,6 +43,7 @@ const AccountState = evmz.state.Account;
 const BlockHashSource = evmz.BlockHashSource;
 const Bytecode = evmz.Bytecode;
 const Spec = @import("./spec.zig").Spec;
+const state_contract = @import("./state/contract.zig");
 const prepared_code = evmz.prepared_code;
 const ExecutionContext = evmz.execution.ExecutionContext;
 const ExecutionGas = evmz.execution.ExecutionGas;
@@ -149,6 +150,7 @@ pub fn ExecutorType(
     comptime options_value: CompileOptions,
 ) type {
     comptime ExecutionState.checkSpec(spec);
+    comptime state_contract.check(ExecutionState.State);
 
     return struct {
         const Executor = @This();
@@ -765,11 +767,11 @@ pub fn ExecutorType(
         /// sequential protocol-call batch.
         pub fn beginSystemCallBatch(self: *Executor) void {
             self.beginPreparedCodeExecution();
-            self.state.beginTransactionCapacityReuse();
+            if (comptime State.grows_on_touch) self.state.beginTransactionCapacityReuse();
         }
 
         pub fn endSystemCallBatch(self: *Executor) void {
-            self.state.endTransactionCapacityReuse();
+            if (comptime State.grows_on_touch) self.state.endTransactionCapacityReuse();
             self.endPreparedCodeExecution();
         }
 
@@ -848,8 +850,16 @@ pub fn ExecutorType(
             try self.state.observeAccountAccess(stateAddress(account_address));
         }
 
-        pub fn reserveAcceptedAccessHint(self: *Executor, hint: State.AccessHint) !void {
-            try self.state.reserveAcceptedAccessHint(hint);
+        /// Capacity advice for the current transaction attempt. A lane that
+        /// does not grow on touch has nothing to reserve.
+        pub fn reserveAccessHint(self: *Executor, hint: state_contract.AccessHint) !void {
+            if (comptime State.grows_on_touch) try self.state.reserveAccessHint(hint);
+        }
+
+        /// Capacity advice for the accepted branch. A lane that does not grow
+        /// on touch has nothing to reserve.
+        pub fn reserveAcceptedAccessHint(self: *Executor, hint: state_contract.AccessHint) !void {
+            if (comptime State.grows_on_touch) try self.state.reserveAcceptedAccessHint(hint);
         }
 
         /// Mark an account warm in the current transaction scope.

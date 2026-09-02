@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const checkpoint_types = @import("checkpoint.zig");
+const contract = @import("contract.zig");
 const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
@@ -87,10 +88,7 @@ retained_logs: LogBuffer,
 
 pub const AttemptId = checkpoint_types.AttemptId;
 
-pub const FinalizationRules = struct {
-    existing_account: execution.SelfDestructFinalization = .{},
-    created_account: execution.SelfDestructFinalization = .{},
-};
+pub const FinalizationRules = contract.FinalizationRules;
 
 pub const AccountValue = union(enum) {
     absent,
@@ -1198,10 +1196,10 @@ pub fn seedAccount(self: *TrackedState, address: Address, account_value: MemoryA
 }
 
 /// Advisory presize for access maps; never affects execution semantics.
-pub const AccessHint = struct {
-    accounts: usize,
-    storage_keys: usize,
-};
+pub const AccessHint = contract.AccessHint;
+/// Rows are allocated as execution touches state, so capacity hints and
+/// transaction capacity reuse are meaningful here. See `state.contract.check`.
+pub const grows_on_touch = true;
 
 pub fn reserveAccessHint(self: *TrackedState, hint: AccessHint) !void {
     const tx = self.mutableTransaction();

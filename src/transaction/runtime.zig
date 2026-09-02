@@ -60,7 +60,7 @@ pub fn initializeMessageScope(
             .create => 1,
         };
         std.debug.assert(initial_warm_set.accounts.len <= std.math.maxInt(usize) - root_accounts);
-        try executor.state.reserveAccessHint(.{
+        try executor.reserveAccessHint(.{
             .accounts = root_accounts + initial_warm_set.accounts.len,
             .storage_keys = initial_warm_set.storage_slots.len,
         });

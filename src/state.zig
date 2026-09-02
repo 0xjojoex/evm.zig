@@ -1,5 +1,7 @@
 //! Generic state vocabulary and the tracked execution lane.
 //!
+//! - `contract`: the surface the executor requires from a state lane, and the
+//!   vocabulary both lanes share at that boundary.
 //! - `Reader`: client/database read interface (root alias `evmz.StateReader`).
 //! - `TrackedState`: accepted branch, transaction rows, and scope rollback.
 //! - `checkpoint`: scope-rollback shapes shared with the claim-indexed lane.
@@ -19,6 +21,7 @@ pub const Account = @import("./state/Account.zig");
 pub const MemoryAccount = @import("./state/MemoryAccount.zig");
 pub const storage = @import("./state/storage.zig");
 pub const checkpoint = @import("./state/checkpoint.zig");
+pub const contract = @import("./state/contract.zig");
 pub const LogBuffer = @import("./state/LogBuffer.zig");
 pub const Reader = @import("./state/Reader.zig");
 pub const ConcurrentReader = @import("./state/ConcurrentReader.zig");

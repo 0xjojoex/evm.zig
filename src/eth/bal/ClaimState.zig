@@ -18,6 +18,7 @@ const Account = @import("../../state/Account.zig");
 const artifacts = @import("claim_artifacts.zig");
 const records = @import("ParentFacts.zig");
 const checkpoint_types = @import("../../state/checkpoint.zig");
+const contract = @import("../../state/contract.zig");
 const storage_status = @import("../../state/storage.zig");
 const sparse_hash_map = @import("../../state/sparse_hash_map.zig");
 const Views = @import("claim_views.zig").ViewType(ClaimState);
@@ -102,10 +103,11 @@ const ResolvedStorage = struct {
 };
 
 pub const CodeError = artifacts.CodeStore.CacheError;
-pub const AccessHint = struct {
-    accounts: usize,
-    storage_keys: usize,
-};
+pub const AccessHint = contract.AccessHint;
+pub const FinalizationRules = contract.FinalizationRules;
+/// Every row exists from admission, sized by the claim plan. There is nothing
+/// to reserve or reuse, so the executor skips its capacity hooks at comptime.
+pub const grows_on_touch = false;
 
 pub const AccountValue = union(enum) {
     absent,
@@ -577,14 +579,6 @@ fn initWithCodeStore(
         .transient_storage = TransientStorageMap.init(allocator),
     };
 }
-
-pub fn reserveAccessHint(_: *ClaimState, _: AccessHint) Allocator.Error!void {}
-
-pub fn reserveAcceptedAccessHint(_: *ClaimState, _: AccessHint) Allocator.Error!void {}
-
-pub fn beginTransactionCapacityReuse(_: *ClaimState) void {}
-
-pub fn endTransactionCapacityReuse(_: *ClaimState) void {}
 
 pub fn deinit(self: *ClaimState) void {
     std.debug.assert(!self.transaction_active);
@@ -1144,7 +1138,7 @@ pub fn wasSelfdestructed(self: *const ClaimState, target: address.AddressWord) b
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.selfdestructed;
 }
 
-pub fn finalize(self: *ClaimState, rules: anytype) Allocator.Error!void {
+pub fn finalize(self: *ClaimState, rules: FinalizationRules) Allocator.Error!void {
     self.assertTransaction();
     if (self.lifecycle_accounts.items.len == 0) return;
     for (self.lifecycle_accounts.items) |id| {
@@ -1655,7 +1649,7 @@ pub fn allocationBytes(self: *const ClaimState) usize {
         self.journal.transient.capacity * @sizeOf(Journal.TransientUndo);
 }
 
-pub fn journalLen(self: *const ClaimState) usize {
+pub fn journalEntryCount(self: *const ClaimState) usize {
     return self.journal.entries.items.len;
 }
 
@@ -2298,14 +2292,14 @@ test "scope stamps journal one row once and restore the parent stamp" {
 
     try state.writeAccount(id, .{ .present = .{ .nonce = 2 } });
     try state.writeAccount(id, .{ .present = .{ .nonce = 3 } });
-    try std.testing.expectEqual(@as(usize, 1), state.journalLen());
+    try std.testing.expectEqual(@as(usize, 1), state.journalEntryCount());
     const nested = state.checkpoint();
     try state.writeAccount(id, .{ .present = .{ .nonce = 4 } });
-    try std.testing.expectEqual(@as(usize, 2), state.journalLen());
+    try std.testing.expectEqual(@as(usize, 2), state.journalEntryCount());
     state.revertToCheckpoint(nested);
     try std.testing.expectEqual(@as(u64, 3), state.accounts[0].current.present.nonce);
     try state.writeAccount(id, .{ .present = .{ .nonce = 5 } });
-    try std.testing.expectEqual(@as(usize, 1), state.journalLen());
+    try std.testing.expectEqual(@as(usize, 1), state.journalEntryCount());
     discardTestTransaction(&state, attempt);
     try std.testing.expectEqual(@as(u64, 1), state.accounts[0].current.present.nonce);
 }
@@ -2432,10 +2426,10 @@ test "warm undo exists only for the cold to warm transition" {
     const id: AccountId = @enumFromInt(0);
 
     try std.testing.expect(try state.warmAccountId(id));
-    try std.testing.expectEqual(@as(usize, 1), state.journalLen());
+    try std.testing.expectEqual(@as(usize, 1), state.journalEntryCount());
     const nested = state.checkpoint();
     try std.testing.expect(!try state.warmAccountId(id));
-    try std.testing.expectEqual(@as(usize, 1), state.journalLen());
+    try std.testing.expectEqual(@as(usize, 1), state.journalEntryCount());
     state.revertToCheckpoint(nested);
     try std.testing.expect(state.accountWarm(id));
     discardTestTransaction(&state, attempt);
@@ -2514,7 +2508,7 @@ test "storage mutation reserves both journal entries atomically" {
     try state.journal.entries.ensureTotalCapacityPrecise(std.testing.allocator, 1);
     const attempt = beginTestTransaction(&state);
     try state.writeStorage(@enumFromInt(0), 9);
-    try std.testing.expectEqual(@as(usize, 2), state.journalLen());
+    try std.testing.expectEqual(@as(usize, 2), state.journalEntryCount());
     discardTestTransaction(&state, attempt);
 }
 
