@@ -2,7 +2,7 @@
 //!
 //! The executor's frame store retains one checkpoint per call scope regardless
 //! of which state model is compiled in, so these shapes belong to neither the
-//! tracked nor the dense lane.
+//! tracked nor the claim-indexed lane.
 
 /// Identifies one transaction attempt; scope checkpoints are only valid within
 /// the attempt that opened them.

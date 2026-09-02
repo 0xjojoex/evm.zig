@@ -1,14 +1,14 @@
-//! Borrowed projections over sealed dense stateless execution state.
+//! Borrowed projections over sealed claim-indexed execution state.
 //!
 //! Views contain no copied identities or values. `ClaimPlan` remains the sole
-//! address/slot owner and the dense state remains the lifecycle owner.
+//! address/slot owner and `ClaimState` remains the lifecycle owner.
 
 const std = @import("std");
 
-const Address = @import("../address.zig").Address;
-const Account = @import("../state/Account.zig");
-const artifacts = @import("artifacts.zig");
-const LogBuffer = @import("../state/LogBuffer.zig");
+const Address = @import("../../address.zig").Address;
+const Account = @import("../../state/Account.zig");
+const artifacts = @import("claim_artifacts.zig");
+const LogBuffer = @import("../../state/LogBuffer.zig");
 
 pub fn ViewType(comptime State: type) type {
     return struct {

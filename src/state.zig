@@ -2,15 +2,16 @@
 //!
 //! - `Reader`: client/database read interface (root alias `evmz.StateReader`).
 //! - `TrackedState`: accepted branch, transaction rows, and scope rollback.
-//! - `checkpoint`: scope-rollback shapes shared with the stateless lane.
-//! - `LogBuffer`: packed emitted logs, also shared with the stateless lane.
+//! - `checkpoint`: scope-rollback shapes shared with the claim-indexed lane.
+//! - `LogBuffer`: packed emitted logs, also shared with the claim-indexed lane.
 //! - `StateDelta`: owned block-final semantic changes, detached from execution.
 //! - `Committer`: integration-owned sink for borrowed tracked-state changes.
 //! - `RootProvider`: integration-owned post-state root over borrowed changes.
 //! - `MemoryStore`: in-memory store for seeded pre-state and test/demo commits.
 //!
-//! The dense stateless lane lives in `evmz.stateless`; `evmz.Backend` selects
-//! between the two lanes and is therefore layered above both.
+//! The claim-indexed lane, `evmz.eth.bal.ClaimState`, is the other implementation
+//! of the executor's state contract; `evmz.Backend` selects between the two lanes
+//! and is therefore layered above both.
 
 const std = @import("std");
 

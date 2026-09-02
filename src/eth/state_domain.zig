@@ -16,7 +16,7 @@ const Spec = @import("../spec.zig").Spec;
 const Reader = @import("../state/Reader.zig");
 const StateDelta = @import("../state/StateDelta.zig");
 const TrackedState = @import("../state/TrackedState.zig");
-const DenseState = @import("../stateless/BlockState.zig");
+const ClaimState = @import("bal/ClaimState.zig");
 const tracked_state_projector = @import("bal/tracked_state_projector.zig");
 const trie = @import("trie.zig");
 
@@ -143,7 +143,7 @@ pub const Tracked = struct {
 
 pub const BalStateless = struct {
     pub const Execution = struct {
-        pub const State = DenseState;
+        pub const State = ClaimState;
         pub const StateAddress = address.AddressWord;
         pub const Init = State;
         pub const default_init: ?Init = null;

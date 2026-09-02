@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-const trie = @import("../eth/trie.zig");
+const trie = @import("../trie.zig");
 const mpt = @import("mpt");
 
 const Allocator = std.mem.Allocator;

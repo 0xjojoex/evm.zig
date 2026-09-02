@@ -1,12 +1,12 @@
-//! Non-MPT artifacts owned by the dense stateless execution lane.
+//! Non-MPT artifacts owned by the claim-indexed execution lane (`ClaimState`).
 //!
 //! Parent code bytes remain borrowed from the sealed witness and are indexed
 //! once by full hash. Code created during execution is copied into stable
 //! block-lifetime storage.
 
 const std = @import("std");
-const crypto = @import("../crypto.zig");
-const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
+const crypto = @import("../../crypto.zig");
+const SparseHashMap = @import("../../state/sparse_hash_map.zig").Auto;
 
 const Allocator = std.mem.Allocator;
 const Hash = [32]u8;

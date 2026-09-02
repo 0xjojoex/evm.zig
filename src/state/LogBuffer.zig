@@ -1,6 +1,6 @@
 //! Packed log storage shared by every execution state model.
 //!
-//! Like `checkpoint`, this belongs to neither the tracked nor the dense lane.
+//! Like `checkpoint`, this belongs to neither the tracked nor the claim-indexed lane.
 //! Emitted logs are protocol output — receipts, blooms, and EIP-6110 deposit
 //! decoding read them the same way regardless of which lane produced them.
 //!

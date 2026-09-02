@@ -1,26 +1,29 @@
-//! Dense Amsterdam execution state over a validated BAL namespace.
+//! Claim-indexed Amsterdam execution state over a validated BAL namespace.
 //!
-//! This module owns no MPT topology. It takes ownership of the `ClaimPlan` and
+//! The counterpart of `state.TrackedState`: the same executor state contract,
+//! but keyed by `ClaimPlan` IDs over the closed universe the block access list
+//! declares rather than by address over an open one. Rows stay dense arrays
+//! indexed by claim id. This module owns no MPT topology. It takes ownership of the `ClaimPlan` and
 //! authenticated parent facts, then owns block-current values, rollback,
 //! warmth, observations, and dirty IDs for the complete block execution.
 
 const std = @import("std");
 
-const address = @import("../address.zig");
-const claim_plan = @import("../eth/bal/ClaimPlan.zig");
-const crypto = @import("../crypto.zig");
-const execution = @import("../execution.zig");
-const Host = @import("../Host.zig");
-const Account = @import("../state/Account.zig");
-const artifacts = @import("./artifacts.zig");
-const records = @import("./ParentFacts.zig");
-const checkpoint_types = @import("../state/checkpoint.zig");
-const storage_status = @import("../state/storage.zig");
-const sparse_hash_map = @import("../state/sparse_hash_map.zig");
-const Views = @import("./views.zig").ViewType(StatelessBlockState);
+const address = @import("../../address.zig");
+const claim_plan = @import("ClaimPlan.zig");
+const crypto = @import("../../crypto.zig");
+const execution = @import("../../execution.zig");
+const Host = @import("../../Host.zig");
+const Account = @import("../../state/Account.zig");
+const artifacts = @import("claim_artifacts.zig");
+const records = @import("ParentFacts.zig");
+const checkpoint_types = @import("../../state/checkpoint.zig");
+const storage_status = @import("../../state/storage.zig");
+const sparse_hash_map = @import("../../state/sparse_hash_map.zig");
+const Views = @import("claim_views.zig").ViewType(ClaimState);
 
 const Allocator = std.mem.Allocator;
-const StatelessBlockState = @This();
+const ClaimState = @This();
 
 const TransientStorageKey = extern struct {
     address_word: address.AddressWord,
@@ -71,7 +74,7 @@ pub const AttemptId = checkpoint_types.AttemptId;
 pub const CodeView = artifacts.CodeView;
 /// Emitted logs and their borrowed projection are lane-independent; see
 /// `state/LogBuffer.zig`.
-pub const LogBuffer = @import("../state/LogBuffer.zig");
+pub const LogBuffer = @import("../../state/LogBuffer.zig");
 pub const LogView = LogBuffer.View;
 pub const ChangesView = Views.ChangesView;
 pub const CommitView = Views.CommitView;
@@ -225,7 +228,7 @@ pub const StorageObservationRow = struct {
 pub const Checkpoint = checkpoint_types.Checkpoint;
 
 pub const BranchCheckpoint = struct {
-    owner: *const StatelessBlockState,
+    owner: *const ClaimState,
     allocator: Allocator,
     accounts: []AccountRow,
     storage: []StorageRow,
@@ -489,7 +492,7 @@ pub fn init(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
     facts: records,
-) Allocator.Error!StatelessBlockState {
+) Allocator.Error!ClaimState {
     return initWithCodes(allocator, plan, facts, &.{}) catch |err| switch (err) {
         error.CodeHashCollision => unreachable,
         error.ResourceLimitExceeded => unreachable,
@@ -502,7 +505,7 @@ pub fn initWithCodes(
     plan: claim_plan.ClaimPlan,
     facts: records,
     codes: []const []const u8,
-) artifacts.CodeStore.InitError!StatelessBlockState {
+) artifacts.CodeStore.InitError!ClaimState {
     var owned_plan = plan;
     var owned_facts = facts;
     var owns_inputs = true;
@@ -520,7 +523,7 @@ pub fn initWithParentCodes(
     plan: claim_plan.ClaimPlan,
     facts: records,
     codes: []const artifacts.ParentCode,
-) artifacts.CodeStore.InitError!StatelessBlockState {
+) artifacts.CodeStore.InitError!ClaimState {
     var owned_plan = plan;
     var owned_facts = facts;
     var owns_inputs = true;
@@ -538,7 +541,7 @@ fn initWithCodeStore(
     plan: claim_plan.ClaimPlan,
     facts: records,
     code_value: artifacts.CodeStore,
-) Allocator.Error!StatelessBlockState {
+) Allocator.Error!ClaimState {
     var owned_plan = plan;
     var owned_facts = facts;
     var code = code_value;
@@ -575,15 +578,15 @@ fn initWithCodeStore(
     };
 }
 
-pub fn reserveAccessHint(_: *StatelessBlockState, _: AccessHint) Allocator.Error!void {}
+pub fn reserveAccessHint(_: *ClaimState, _: AccessHint) Allocator.Error!void {}
 
-pub fn reserveAcceptedAccessHint(_: *StatelessBlockState, _: AccessHint) Allocator.Error!void {}
+pub fn reserveAcceptedAccessHint(_: *ClaimState, _: AccessHint) Allocator.Error!void {}
 
-pub fn beginTransactionCapacityReuse(_: *StatelessBlockState) void {}
+pub fn beginTransactionCapacityReuse(_: *ClaimState) void {}
 
-pub fn endTransactionCapacityReuse(_: *StatelessBlockState) void {}
+pub fn endTransactionCapacityReuse(_: *ClaimState) void {}
 
-pub fn deinit(self: *StatelessBlockState) void {
+pub fn deinit(self: *ClaimState) void {
     std.debug.assert(!self.transaction_active);
     self.allocator.free(self.accounts);
     self.allocator.free(self.storage);
@@ -610,7 +613,7 @@ pub fn deinit(self: *StatelessBlockState) void {
 }
 
 pub inline fn resolveAccount(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     policy: ResolutionPolicy,
 ) ResolutionError!?AccountId {
@@ -636,7 +639,7 @@ pub inline fn resolveAccount(
 }
 
 pub fn resolveStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     account: AccountId,
     slot: u256,
     policy: ResolutionPolicy,
@@ -661,7 +664,7 @@ pub fn resolveStorage(
 }
 
 fn resolveStorageKey(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
     policy: ResolutionPolicy,
@@ -671,15 +674,15 @@ fn resolveStorageKey(
     return .{ .account = account, .storage = storage };
 }
 
-pub fn beginTransaction(self: *StatelessBlockState) AttemptId {
+pub fn beginTransaction(self: *ClaimState) AttemptId {
     return self.beginTransactionMode(false);
 }
 
-pub fn beginObservedTransaction(self: *StatelessBlockState) AttemptId {
+pub fn beginObservedTransaction(self: *ClaimState) AttemptId {
     return self.beginTransactionMode(true);
 }
 
-fn beginTransactionMode(self: *StatelessBlockState, observed: bool) AttemptId {
+fn beginTransactionMode(self: *ClaimState, observed: bool) AttemptId {
     std.debug.assert(!self.transaction_active);
     std.debug.assert(self.journal.entries.items.len == 0);
     std.debug.assert(self.next_attempt_id != std.math.maxInt(u32));
@@ -708,7 +711,7 @@ fn beginTransactionMode(self: *StatelessBlockState, observed: bool) AttemptId {
     return id;
 }
 
-pub fn beginScope(self: *StatelessBlockState) void {
+pub fn beginScope(self: *ClaimState) void {
     std.debug.assert(self.transaction_active);
     std.debug.assert(!self.sealed);
     std.debug.assert(self.scope_depth == 0);
@@ -717,7 +720,7 @@ pub fn beginScope(self: *StatelessBlockState) void {
     self.scope_depth = 1;
 }
 
-pub fn closeScope(self: *StatelessBlockState) void {
+pub fn closeScope(self: *ClaimState) void {
     self.assertRootScope();
     self.active_scope_generation = 0;
     self.execution_scope_generation = 0;
@@ -728,16 +731,16 @@ pub fn closeScope(self: *StatelessBlockState) void {
 /// transaction-scoped warmth, logs, and the surrounding rollback journal.
 /// The clear may occur inside an outer checkpoint and is not journaled: rollback
 /// must not resurrect transient values whose root lifetime has ended.
-pub fn clearTransientStorage(self: *StatelessBlockState) void {
+pub fn clearTransientStorage(self: *ClaimState) void {
     self.assertTransaction();
     self.transient_storage.clearRetainingCapacity();
 }
 
-pub fn scopeActive(self: *const StatelessBlockState) bool {
+pub fn scopeActive(self: *const ClaimState) bool {
     return self.scope_depth != 0;
 }
 
-pub fn seal(self: *StatelessBlockState, id: AttemptId) void {
+pub fn seal(self: *ClaimState, id: AttemptId) void {
     self.assertCurrent(id);
     std.debug.assert(!self.scopeActive());
     std.debug.assert(!self.sealed);
@@ -747,7 +750,7 @@ pub fn seal(self: *StatelessBlockState, id: AttemptId) void {
 }
 
 /// Retain block-current values and observations; discard rollback payloads.
-pub fn retain(self: *StatelessBlockState, id: AttemptId) void {
+pub fn retain(self: *ClaimState, id: AttemptId) void {
     self.assertCurrent(id);
     std.debug.assert(self.sealed);
     std.debug.assert(!self.scopeActive());
@@ -762,7 +765,7 @@ pub fn retain(self: *StatelessBlockState, id: AttemptId) void {
 }
 
 /// Restore the block state before this transaction and discard its observations.
-pub fn discard(self: *StatelessBlockState, id: AttemptId) void {
+pub fn discard(self: *ClaimState, id: AttemptId) void {
     self.assertCurrent(id);
     std.debug.assert(!self.scopeActive());
     self.revertJournalTo(0);
@@ -782,7 +785,7 @@ pub fn discard(self: *StatelessBlockState, id: AttemptId) void {
 /// ABI has no field for it), and the block-lifetime dirty lists need no saved
 /// lengths because revert restores row flags through the journal and stale
 /// entries are compacted out at `retain`.
-pub fn checkpoint(self: *StatelessBlockState) Checkpoint {
+pub fn checkpoint(self: *ClaimState) Checkpoint {
     self.assertTransaction();
     std.debug.assert(self.scope_depth < std.math.maxInt(u32));
     const parent_generation = self.active_scope_generation;
@@ -800,7 +803,7 @@ pub fn checkpoint(self: *StatelessBlockState) Checkpoint {
     };
 }
 
-pub fn branchCheckpoint(self: *StatelessBlockState) Allocator.Error!BranchCheckpoint {
+pub fn branchCheckpoint(self: *ClaimState) Allocator.Error!BranchCheckpoint {
     std.debug.assert(!self.transaction_active);
     const accounts = try self.allocator.dupe(AccountRow, self.accounts);
     errdefer self.allocator.free(accounts);
@@ -822,7 +825,7 @@ pub fn branchCheckpoint(self: *StatelessBlockState) Allocator.Error!BranchCheckp
     };
 }
 
-pub fn restoreBranch(self: *StatelessBlockState, value: *BranchCheckpoint) void {
+pub fn restoreBranch(self: *ClaimState, value: *BranchCheckpoint) void {
     std.debug.assert(value.owner == self);
     std.debug.assert(!value.resolved);
     if (self.transaction_active) self.discard(self.active_attempt_id.?);
@@ -839,7 +842,7 @@ pub fn restoreBranch(self: *StatelessBlockState, value: *BranchCheckpoint) void 
     value.resolved = true;
 }
 
-pub fn commitCheckpoint(self: *StatelessBlockState, value: Checkpoint) void {
+pub fn commitCheckpoint(self: *ClaimState, value: Checkpoint) void {
     self.validateCheckpoint(value);
     self.active_scope_generation = value.storage_wipes_len;
     self.scope_depth -= 1;
@@ -849,7 +852,7 @@ pub fn commitCheckpoint(self: *StatelessBlockState, value: Checkpoint) void {
 /// block-lifetime dirty lists inside the reverted scope become stale
 /// (flag-false) rather than being truncated here; `retain` compacts them.
 /// Introduced codes unwind through their own journal entries.
-pub fn revertToCheckpoint(self: *StatelessBlockState, value: Checkpoint) void {
+pub fn revertToCheckpoint(self: *ClaimState, value: Checkpoint) void {
     self.validateCheckpoint(value);
     self.transaction_scope_reverted = true;
     self.revertJournalTo(value.journal_len);
@@ -865,7 +868,7 @@ pub fn revertToCheckpoint(self: *StatelessBlockState, value: Checkpoint) void {
 }
 
 pub fn readAccount(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!AccountValue {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -877,20 +880,20 @@ pub fn readAccount(
 }
 
 /// Return a materialized row without creating an execution observation.
-pub fn getAccount(self: *const StatelessBlockState, target: address.AddressWord) ?Account {
+pub fn getAccount(self: *const ClaimState, target: address.AddressWord) ?Account {
     const id = self.plan.accountIdWord(target) orelse return null;
     return accountValue(self.accounts[@intFromEnum(id)].current);
 }
 
 pub fn getAccountOrLoad(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!?Account {
     return accountValue(try self.readAccount(target));
 }
 
 pub fn accountExists(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!bool {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -900,7 +903,7 @@ pub fn accountExists(
 }
 
 pub fn getBalance(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!u256 {
     return switch (try self.readAccount(target)) {
@@ -910,7 +913,7 @@ pub fn getBalance(
 }
 
 pub fn getNonce(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!u64 {
     return switch (try self.readAccount(target)) {
@@ -920,7 +923,7 @@ pub fn getNonce(
 }
 
 pub fn setNonce(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     nonce: u64,
 ) (ResolutionError || Allocator.Error)!void {
@@ -936,7 +939,7 @@ pub fn setNonce(
 }
 
 pub fn getCodeView(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error || error{InvalidWitness})!CodeView {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -950,14 +953,14 @@ pub fn getCodeView(
 }
 
 pub fn getCode(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error || error{InvalidWitness})![]const u8 {
     return (try self.getCodeView(target)).bytes;
 }
 
 pub fn getCodeHash(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!u256 {
     return switch (try self.readAccount(target)) {
@@ -967,7 +970,7 @@ pub fn getCodeHash(
 }
 
 pub fn accountHasCode(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!bool {
     return switch (try self.readAccount(target)) {
@@ -977,7 +980,7 @@ pub fn accountHasCode(
 }
 
 pub fn setBalance(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     balance: u256,
 ) (ResolutionError || Allocator.Error)!void {
@@ -993,7 +996,7 @@ pub fn setBalance(
 }
 
 pub fn addBalance(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     value: u256,
 ) (ResolutionError || Allocator.Error || error{BalanceOverflow})!void {
@@ -1006,7 +1009,7 @@ pub fn addBalance(
 }
 
 pub fn subtractBalance(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     value: u256,
 ) (ResolutionError || Allocator.Error)!bool {
@@ -1018,7 +1021,7 @@ pub fn subtractBalance(
 }
 
 pub fn touchAccount(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -1034,7 +1037,7 @@ pub fn touchAccount(
 }
 
 pub fn setCode(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     bytes: []const u8,
 ) (ResolutionError || CodeError)!void {
@@ -1071,14 +1074,14 @@ pub fn setCode(
 }
 
 pub fn clearCode(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || CodeError)!void {
     try self.setCode(target, &.{});
 }
 
 pub fn writeAccount(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: AccountId,
     value: AccountValue,
 ) Allocator.Error!void {
@@ -1099,14 +1102,14 @@ pub fn writeAccount(
     recordAccountEffect(&self.observed_accounts.items[row.observation_index], previous, value);
 }
 
-pub fn markCreatedId(self: *StatelessBlockState, id: AccountId) Allocator.Error!void {
+pub fn markCreatedId(self: *ClaimState, id: AccountId) Allocator.Error!void {
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
     const row = try self.prepareLifecycleMutation(id);
     row.flags.created = true;
     self.observed_accounts.items[row.observation_index].effect.created_contract = true;
 }
 
-pub fn markSelfdestructedId(self: *StatelessBlockState, id: AccountId) Allocator.Error!void {
+pub fn markSelfdestructedId(self: *ClaimState, id: AccountId) Allocator.Error!void {
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
     const row = try self.prepareLifecycleMutation(id);
     row.flags.selfdestructed = true;
@@ -1114,7 +1117,7 @@ pub fn markSelfdestructedId(self: *StatelessBlockState, id: AccountId) Allocator
 }
 
 pub fn markCreatedContract(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -1123,7 +1126,7 @@ pub fn markCreatedContract(
 }
 
 pub fn markSelfdestructed(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
@@ -1131,17 +1134,17 @@ pub fn markSelfdestructed(
     try self.markSelfdestructedId(id);
 }
 
-pub fn createdInTransaction(self: *const StatelessBlockState, target: address.AddressWord) bool {
+pub fn createdInTransaction(self: *const ClaimState, target: address.AddressWord) bool {
     const id = self.plan.accountIdWord(target) orelse return false;
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.created;
 }
 
-pub fn wasSelfdestructed(self: *const StatelessBlockState, target: address.AddressWord) bool {
+pub fn wasSelfdestructed(self: *const ClaimState, target: address.AddressWord) bool {
     const id = self.plan.accountIdWord(target) orelse return false;
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.selfdestructed;
 }
 
-pub fn finalize(self: *StatelessBlockState, rules: anytype) Allocator.Error!void {
+pub fn finalize(self: *ClaimState, rules: anytype) Allocator.Error!void {
     self.assertTransaction();
     if (self.lifecycle_accounts.items.len == 0) return;
     for (self.lifecycle_accounts.items) |id| {
@@ -1179,7 +1182,7 @@ pub fn finalize(self: *StatelessBlockState, rules: anytype) Allocator.Error!void
     }
 }
 
-pub fn discardAccepted(self: *StatelessBlockState) void {
+pub fn discardAccepted(self: *ClaimState) void {
     std.debug.assert(!self.transaction_active);
     self.code.truncateIntroduced(self.allocator, 0);
     for (self.facts.accounts, self.accounts) |fact, *row| {
@@ -1202,7 +1205,7 @@ pub fn discardAccepted(self: *StatelessBlockState) void {
 }
 
 /// Hide all parent and prior-block storage without fabricating slot accesses.
-pub fn wipeStorage(self: *StatelessBlockState, id: AccountId) Allocator.Error!void {
+pub fn wipeStorage(self: *ClaimState, id: AccountId) Allocator.Error!void {
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
     const original = &self.accounts[@intFromEnum(id)];
     const first_block_wipe = !original.flags.storage_wiped;
@@ -1223,7 +1226,7 @@ pub fn wipeStorage(self: *StatelessBlockState, id: AccountId) Allocator.Error!vo
 }
 
 pub fn getStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!u256 {
@@ -1233,7 +1236,7 @@ pub fn getStorage(
 }
 
 pub fn accessStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!execution.AccessStatus {
@@ -1243,7 +1246,7 @@ pub fn accessStorage(
 }
 
 pub fn loadStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!Host.StorageLoadResult {
@@ -1257,7 +1260,7 @@ pub fn loadStorage(
 }
 
 pub fn setStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
     value: u256,
@@ -1268,7 +1271,7 @@ pub fn setStorage(
 }
 
 pub fn storeStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
     value: u256,
@@ -1283,14 +1286,14 @@ pub fn storeStorage(
 }
 
 fn accessResolvedStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     resolved: ResolvedStorage,
 ) Allocator.Error!execution.AccessStatus {
     return if (try self.warmStorageId(resolved.storage)) .cold else .warm;
 }
 
 fn readResolvedStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     resolved: ResolvedStorage,
 ) Allocator.Error!u256 {
     self.captureStorageOriginal(resolved.storage);
@@ -1299,7 +1302,7 @@ fn readResolvedStorage(
 }
 
 fn setResolvedStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     resolved: ResolvedStorage,
     value: u256,
 ) Allocator.Error!execution.StorageStatus {
@@ -1314,7 +1317,7 @@ fn setResolvedStorage(
 }
 
 pub fn originalStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
 ) (ResolutionError || Allocator.Error)!u256 {
@@ -1327,7 +1330,7 @@ pub fn originalStorage(
 }
 
 pub fn getTransientStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     key: u256,
 ) u256 {
@@ -1336,7 +1339,7 @@ pub fn getTransientStorage(
 }
 
 pub fn setTransientStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     key: u256,
     value: u256,
@@ -1356,35 +1359,35 @@ pub fn setTransientStorage(
     self.transient_storage.putAssumeCapacity(storage_key, value);
 }
 
-pub fn emitLog(self: *StatelessBlockState, event_log: Host.Log) !void {
+pub fn emitLog(self: *ClaimState, event_log: Host.Log) !void {
     self.assertTransaction();
     try self.logs.append(self.allocator, event_log);
 }
 
-pub fn logView(self: *const StatelessBlockState) LogView {
+pub fn logView(self: *const ClaimState) LogView {
     return if (self.transaction_active) self.logs.view() else self.retained_logs.view();
 }
 
-pub fn clearLogs(self: *StatelessBlockState) void {
+pub fn clearLogs(self: *ClaimState) void {
     const logs = if (self.transaction_active) &self.logs else &self.retained_logs;
     logs.clearRetainingCapacity();
 }
 
-pub fn pendingView(self: *const StatelessBlockState) PendingView {
+pub fn pendingView(self: *const ClaimState) PendingView {
     return .{ .state = self };
 }
 
-pub fn acceptedView(self: *const StatelessBlockState) AcceptedView {
+pub fn acceptedView(self: *const ClaimState) AcceptedView {
     std.debug.assert(!self.transaction_active);
     return .{ .state = self };
 }
 
-pub fn storageValueForView(self: *const StatelessBlockState, id: StorageId) u256 {
+pub fn storageValueForView(self: *const ClaimState, id: StorageId) u256 {
     return self.effectiveStorage(id);
 }
 
 pub fn acceptedAccountValueForView(
-    self: *const StatelessBlockState,
+    self: *const ClaimState,
     id: AccountId,
 ) AccountValue {
     const row = &self.accounts[@intFromEnum(id)];
@@ -1395,7 +1398,7 @@ pub fn acceptedAccountValueForView(
 }
 
 pub fn acceptedStorageValueForView(
-    self: *const StatelessBlockState,
+    self: *const ClaimState,
     id: StorageId,
 ) u256 {
     if (!self.transaction_active) return self.effectiveStorage(id);
@@ -1419,7 +1422,7 @@ pub fn acceptedStorageValueForView(
 }
 
 pub fn writeStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: StorageId,
     value: u256,
 ) Allocator.Error!void {
@@ -1473,7 +1476,7 @@ pub fn writeStorage(
 }
 
 pub fn warmAccountAddress(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     policy: ResolutionPolicy,
 ) (ResolutionError || Allocator.Error)!?bool {
@@ -1482,7 +1485,7 @@ pub fn warmAccountAddress(
 }
 
 pub fn warmStorageSlot(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     account: AccountId,
     slot: u256,
     policy: ResolutionPolicy,
@@ -1491,7 +1494,7 @@ pub fn warmStorageSlot(
     return try self.warmStorageId(id);
 }
 
-pub fn warmAccount(self: *StatelessBlockState, target: address.AddressWord) Allocator.Error!void {
+pub fn warmAccount(self: *ClaimState, target: address.AddressWord) Allocator.Error!void {
     _ = self.warmAccountAddress(target, .optional_warm_only) catch |err| switch (err) {
         error.UndeclaredAccount, error.UndeclaredStorage => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
@@ -1499,7 +1502,7 @@ pub fn warmAccount(self: *StatelessBlockState, target: address.AddressWord) Allo
 }
 
 pub fn warmStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
     slot: u256,
 ) Allocator.Error!void {
@@ -1510,26 +1513,26 @@ pub fn warmStorage(
     };
 }
 
-pub fn isAccountWarm(self: *StatelessBlockState, target: address.AddressWord) bool {
+pub fn isAccountWarm(self: *ClaimState, target: address.AddressWord) bool {
     const id = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return false;
     return self.accountWarm(id);
 }
 
-pub fn isStorageWarm(self: *StatelessBlockState, target: address.AddressWord, slot: u256) bool {
+pub fn isStorageWarm(self: *ClaimState, target: address.AddressWord, slot: u256) bool {
     const account = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return false;
     const id = (self.resolveStorage(account, slot, .optional_warm_only) catch unreachable) orelse return false;
     return self.storageWarm(id);
 }
 
 pub fn observeAccountAccess(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     target: address.AddressWord,
 ) (ResolutionError || Allocator.Error)!void {
     const id = (try self.resolveAccount(target, .required_observed)).?;
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
 }
 
-pub fn warmAccountId(self: *StatelessBlockState, id: AccountId) Allocator.Error!bool {
+pub fn warmAccountId(self: *ClaimState, id: AccountId) Allocator.Error!bool {
     self.assertTransaction();
     const row = &self.accounts[@intFromEnum(id)];
     if (row.warm_generation == self.transaction_generation) return false;
@@ -1539,7 +1542,7 @@ pub fn warmAccountId(self: *StatelessBlockState, id: AccountId) Allocator.Error!
     return true;
 }
 
-pub fn warmStorageId(self: *StatelessBlockState, id: StorageId) Allocator.Error!bool {
+pub fn warmStorageId(self: *ClaimState, id: StorageId) Allocator.Error!bool {
     self.assertTransaction();
     const row = &self.storage[@intFromEnum(id)];
     if (row.warm_generation == self.transaction_generation) return false;
@@ -1549,16 +1552,16 @@ pub fn warmStorageId(self: *StatelessBlockState, id: StorageId) Allocator.Error!
     return true;
 }
 
-pub fn accountWarm(self: *const StatelessBlockState, id: AccountId) bool {
+pub fn accountWarm(self: *const ClaimState, id: AccountId) bool {
     return self.accounts[@intFromEnum(id)].warm_generation == self.transaction_generation;
 }
 
-pub fn storageWarm(self: *const StatelessBlockState, id: StorageId) bool {
+pub fn storageWarm(self: *const ClaimState, id: StorageId) bool {
     return self.storage[@intFromEnum(id)].warm_generation == self.transaction_generation;
 }
 
 pub fn observeAccount(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: AccountId,
     observation: AccountObservation,
 ) Allocator.Error!void {
@@ -1572,7 +1575,7 @@ pub fn observeAccount(
 }
 
 noinline fn observeAccountFirst(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: AccountId,
     row: *AccountRow,
     observation: AccountObservation,
@@ -1590,7 +1593,7 @@ noinline fn observeAccountFirst(
 }
 
 pub fn observeStorage(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: StorageId,
     observation: StorageObservation,
 ) Allocator.Error!void {
@@ -1604,7 +1607,7 @@ pub fn observeStorage(
 }
 
 noinline fn observeStorageFirst(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: StorageId,
     row: *StorageRow,
     observation: StorageObservation,
@@ -1625,7 +1628,7 @@ noinline fn observeStorageFirst(
     });
 }
 
-pub fn allocationBytes(self: *const StatelessBlockState) usize {
+pub fn allocationBytes(self: *const ClaimState) usize {
     return self.accounts.len * @sizeOf(AccountRow) +
         self.storage.len * @sizeOf(StorageRow) +
         self.code.allocationBytes() +
@@ -1652,11 +1655,11 @@ pub fn allocationBytes(self: *const StatelessBlockState) usize {
         self.journal.transient.capacity * @sizeOf(Journal.TransientUndo);
 }
 
-pub fn journalLen(self: *const StatelessBlockState) usize {
+pub fn journalLen(self: *const ClaimState) usize {
     return self.journal.entries.items.len;
 }
 
-fn captureStorageOriginal(self: *StatelessBlockState, id: StorageId) void {
+fn captureStorageOriginal(self: *ClaimState, id: StorageId) void {
     const row = &self.storage[@intFromEnum(id)];
     if (row.original_generation == self.transaction_generation) return;
     const account_id = self.plan.storageAccount(id);
@@ -1668,7 +1671,7 @@ fn captureStorageOriginal(self: *StatelessBlockState, id: StorageId) void {
     row.original_generation = self.transaction_generation;
 }
 
-fn captureExecutionOriginal(self: *StatelessBlockState, id: StorageId) void {
+fn captureExecutionOriginal(self: *ClaimState, id: StorageId) void {
     const row = &self.storage[@intFromEnum(id)];
     if (row.execution_original_scope_generation == self.execution_scope_generation) return;
     std.debug.assert(self.execution_scope_generation != 0);
@@ -1676,7 +1679,7 @@ fn captureExecutionOriginal(self: *StatelessBlockState, id: StorageId) void {
     row.execution_original_scope_generation = self.execution_scope_generation;
 }
 
-fn effectiveStorage(self: *const StatelessBlockState, id: StorageId) u256 {
+fn effectiveStorage(self: *const ClaimState, id: StorageId) u256 {
     const account = &self.accounts[@intFromEnum(self.plan.storageAccount(id))];
     const row = &self.storage[@intFromEnum(id)];
     if (row.storage_generation != account.storage_generation) return 0;
@@ -1688,7 +1691,7 @@ fn effectiveStorage(self: *const StatelessBlockState, id: StorageId) u256 {
 /// that path consumes each row's flag so only the first live occurrence
 /// survives, then restores the flag on the kept entries. Wipe-only compaction
 /// preserves unique membership and filters stale generations in one pass.
-fn compactAcceptedStorageChanges(self: *StatelessBlockState) void {
+fn compactAcceptedStorageChanges(self: *ClaimState) void {
     const deduplicate = self.transaction_scope_reverted;
     var write: usize = 0;
     for (self.dirty_storage.items) |id| {
@@ -1714,7 +1717,7 @@ fn compactAcceptedStorageChanges(self: *StatelessBlockState) void {
 /// Same stale-entry compaction for the block-lifetime account lists: scope
 /// reverts leave flag-false entries behind instead of truncating, so retain
 /// filters and deduplicates them with the same consume-then-restore passes.
-fn compactAcceptedAccountChanges(self: *StatelessBlockState) void {
+fn compactAcceptedAccountChanges(self: *ClaimState) void {
     var dirty_write: usize = 0;
     for (self.dirty_accounts.items) |id| {
         const row = &self.accounts[@intFromEnum(id)];
@@ -1742,7 +1745,7 @@ fn compactAcceptedAccountChanges(self: *StatelessBlockState) void {
     self.block_changed_accounts.items.len = changed_write;
 }
 
-fn compactAcceptedStorageWipes(self: *StatelessBlockState) void {
+fn compactAcceptedStorageWipes(self: *ClaimState) void {
     var write: usize = 0;
     for (self.block_storage_wipes.items) |id| {
         const row = &self.accounts[@intFromEnum(id)];
@@ -1756,7 +1759,7 @@ fn compactAcceptedStorageWipes(self: *StatelessBlockState) void {
     self.block_storage_wipes.items.len = write;
 }
 
-fn compactTransactionStorageWipes(self: *StatelessBlockState) void {
+fn compactTransactionStorageWipes(self: *ClaimState) void {
     var write: usize = 0;
     for (self.transaction_storage_wipes.items) |id| {
         const row = &self.accounts[@intFromEnum(id)];
@@ -1771,7 +1774,7 @@ fn compactTransactionStorageWipes(self: *StatelessBlockState) void {
     self.transaction_storage_wipes.items.len = write;
 }
 
-fn compactTransactionStorageChanges(self: *StatelessBlockState) void {
+fn compactTransactionStorageChanges(self: *ClaimState) void {
     var write: usize = 0;
     for (self.changed_storage.items) |id| {
         const row = &self.storage[@intFromEnum(id)];
@@ -1784,7 +1787,7 @@ fn compactTransactionStorageChanges(self: *StatelessBlockState) void {
 }
 
 fn prepareAccountMutation(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: AccountId,
 ) Allocator.Error!*AccountRow {
     const row = &self.accounts[@intFromEnum(id)];
@@ -1815,7 +1818,7 @@ fn prepareAccountMutation(
 }
 
 fn prepareLifecycleMutation(
-    self: *StatelessBlockState,
+    self: *ClaimState,
     id: AccountId,
 ) Allocator.Error!*AccountRow {
     const row = &self.accounts[@intFromEnum(id)];
@@ -1830,7 +1833,7 @@ fn prepareLifecycleMutation(
     return mutable;
 }
 
-fn appendAccountUndo(self: *StatelessBlockState, id: AccountId, row: *AccountRow) void {
+fn appendAccountUndo(self: *ClaimState, id: AccountId, row: *AccountRow) void {
     const observation = &self.observed_accounts.items[row.observation_index];
     self.journal.appendAccountAssumeCapacity(.{
         .account = id,
@@ -1849,7 +1852,7 @@ fn appendAccountUndo(self: *StatelessBlockState, id: AccountId, row: *AccountRow
     row.journal_scope_generation = self.active_scope_generation;
 }
 
-fn appendStorageUndo(self: *StatelessBlockState, id: StorageId, row: *StorageRow) void {
+fn appendStorageUndo(self: *ClaimState, id: StorageId, row: *StorageRow) void {
     const observation = &self.observed_storage.items[row.observation_index];
     const undo_index: u32 = @intCast(self.journal.storage.items.len);
     self.journal.appendStorageAssumeCapacity(.{
@@ -1870,7 +1873,7 @@ fn appendStorageUndo(self: *StatelessBlockState, id: StorageId, row: *StorageRow
     row.journal_scope_generation = self.active_scope_generation;
 }
 
-fn revertJournalTo(self: *StatelessBlockState, target_len: u32) void {
+fn revertJournalTo(self: *ClaimState, target_len: u32) void {
     while (self.journal.entries.items.len > target_len) {
         const entry = self.journal.entries.pop().?;
         switch (entry) {
@@ -1930,7 +1933,7 @@ fn revertJournalTo(self: *StatelessBlockState, target_len: u32) void {
     }
 }
 
-fn validateCheckpoint(self: *const StatelessBlockState, value: Checkpoint) void {
+fn validateCheckpoint(self: *const ClaimState, value: Checkpoint) void {
     self.assertTransaction();
     std.debug.assert(self.scope_depth >= 1);
     std.debug.assert(value.attempt_id == self.active_attempt_id.?);
@@ -1943,12 +1946,12 @@ fn validateCheckpoint(self: *const StatelessBlockState, value: Checkpoint) void 
     std.debug.assert(value.logs.data_len <= self.logs.data.items.len);
 }
 
-fn allocateScopeGeneration(self: *StatelessBlockState) u32 {
+fn allocateScopeGeneration(self: *ClaimState) u32 {
     self.next_scope_generation = nextGeneration(self.next_scope_generation);
     return self.next_scope_generation;
 }
 
-fn finishTransaction(self: *StatelessBlockState) void {
+fn finishTransaction(self: *ClaimState) void {
     self.transaction_scope_reverted = false;
     self.transient_storage.clearRetainingCapacity();
     self.changed_accounts.clearRetainingCapacity();
@@ -1971,22 +1974,22 @@ fn finishTransaction(self: *StatelessBlockState) void {
     self.scope_depth = 0;
 }
 
-fn assertTransaction(self: *const StatelessBlockState) void {
+fn assertTransaction(self: *const ClaimState) void {
     self.assertAttempt();
     std.debug.assert(self.scope_depth != 0);
 }
 
-fn assertAttempt(self: *const StatelessBlockState) void {
+fn assertAttempt(self: *const ClaimState) void {
     std.debug.assert(self.transaction_active);
     std.debug.assert(self.active_attempt_id != null);
 }
 
-fn assertRootScope(self: *const StatelessBlockState) void {
+fn assertRootScope(self: *const ClaimState) void {
     self.assertTransaction();
     std.debug.assert(self.scope_depth == 1);
 }
 
-fn assertCurrent(self: *const StatelessBlockState, id: AttemptId) void {
+fn assertCurrent(self: *const ClaimState, id: AttemptId) void {
     self.assertAttempt();
     std.debug.assert(self.active_attempt_id.? == id);
 }
@@ -2056,19 +2059,19 @@ fn recordAccountEffect(
     }
 }
 
-fn beginTestTransaction(state: *StatelessBlockState) AttemptId {
+fn beginTestTransaction(state: *ClaimState) AttemptId {
     const attempt = state.beginObservedTransaction();
     state.beginScope();
     return attempt;
 }
 
-fn retainTestTransaction(state: *StatelessBlockState, attempt: AttemptId) void {
+fn retainTestTransaction(state: *ClaimState, attempt: AttemptId) void {
     state.closeScope();
     state.seal(attempt);
     state.retain(attempt);
 }
 
-fn discardTestTransaction(state: *StatelessBlockState, attempt: AttemptId) void {
+fn discardTestTransaction(state: *ClaimState, attempt: AttemptId) void {
     state.closeScope();
     state.discard(attempt);
 }
@@ -2078,7 +2081,7 @@ fn initTestState(
     plan: claim_plan.ClaimPlan,
     account_facts: []const records.AccountFact,
     storage_facts: []const records.StorageFact,
-) !StatelessBlockState {
+) !ClaimState {
     var owned_plan = plan;
     var owns_plan = true;
     errdefer if (owns_plan) owned_plan.deinit(allocator);
@@ -2087,9 +2090,9 @@ fn initTestState(
     return init(allocator, owned_plan, facts);
 }
 
-const bal = @import("../eth/bal/model.zig");
+const bal = @import("model.zig");
 
-test "dense state resolves required accesses and skips optional warm-only misses" {
+test "claim state resolves required accesses and skips optional warm-only misses" {
     const claims = [_]bal.AccountChanges{
         .{ .address = address.addr(1), .storage_reads = &.{7} },
         .{ .address = address.addr(2) },
@@ -2206,7 +2209,7 @@ test "observations survive nested revert while values warmth and dirty IDs rever
     try std.testing.expectEqual(@as(usize, 0), state.dirty_storage.items.len);
 }
 
-test "dense lifecycle candidates are compact and survive marker rollback" {
+test "claim state lifecycle candidates are compact and survive marker rollback" {
     const claims = [_]bal.AccountChanges{
         .{ .address = address.addr(1) },
         .{ .address = address.addr(2) },
@@ -2239,7 +2242,7 @@ test "dense lifecycle candidates are compact and survive marker rollback" {
     state.revertToCheckpoint(second_marker);
     try std.testing.expect(!state.accounts[1].flags.selfdestructed);
 
-    const policy = @import("../execution.zig").SelfDestructFinalization{
+    const policy = @import("../../execution.zig").SelfDestructFinalization{
         .delete_account = true,
     };
     try state.finalize(.{ .existing_account = policy, .created_account = policy });
@@ -2439,7 +2442,7 @@ test "warm undo exists only for the cold to warm transition" {
     try std.testing.expect(!state.accountWarm(id));
 }
 
-test "dense transient root clear does not resurrect values through nested rollback" {
+test "claim state transient root clear does not resurrect values through nested rollback" {
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
@@ -2468,7 +2471,7 @@ test "dense transient root clear does not resurrect values through nested rollba
     discardTestTransaction(&state, attempt);
 }
 
-test "dense state initialization cleans every allocation failure" {
+test "claim state initialization cleans every allocation failure" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
             const claims = [_]bal.AccountChanges{.{
@@ -2515,7 +2518,7 @@ test "storage mutation reserves both journal entries atomically" {
     discardTestTransaction(&state, attempt);
 }
 
-test "dense transaction cleans every allocation failure" {
+test "claim state transaction cleans every allocation failure" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
             const target = address.addr(1);

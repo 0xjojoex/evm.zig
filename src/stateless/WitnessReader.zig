@@ -8,10 +8,10 @@ const trie = @import("../eth/trie.zig");
 const rlp = @import("rlp");
 const Account = @import("../state/Account.zig");
 const ClaimPlan = @import("../eth/bal/ClaimPlan.zig").ClaimPlan;
-pub const ParentFacts = @import("ParentFacts.zig");
+pub const ParentFacts = @import("../eth/bal/ParentFacts.zig");
 const StateReader = @import("../state/Reader.zig");
-const StatelessArtifacts = @import("./artifacts.zig");
-const StatelessCommit = @import("./commit.zig");
+const claim_artifacts = @import("../eth/bal/claim_artifacts.zig");
+const claim_commit = @import("../eth/bal/claim_commit.zig");
 
 const Address = address.Address;
 const CatalogInitError = std.mem.Allocator.Error || error{ InvalidNode, ResourceLimitExceeded };
@@ -33,7 +33,7 @@ pub fn Reader(comptime mode: Mode) type {
 
         pub const Error = error{InvalidWitness};
         pub const RootError = std.mem.Allocator.Error || Error || error{ResourceLimitExceeded};
-        pub const CodeEntry = StatelessArtifacts.ParentCode;
+        pub const CodeEntry = claim_artifacts.ParentCode;
 
         allocator: std.mem.Allocator,
         state_root: [32]u8,
@@ -162,7 +162,7 @@ pub fn Reader(comptime mode: Mode) type {
         ) RootError![32]u8 {
             comptime std.debug.assert(mode == .catalog);
             return narrowRoot(if (node_updates) |updates|
-                StatelessCommit.stateRootAfterCatalogWithNodeUpdates(
+                claim_commit.stateRootAfterCatalogWithNodeUpdates(
                     allocator,
                     self.state_root,
                     &self.backend,
@@ -170,7 +170,7 @@ pub fn Reader(comptime mode: Mode) type {
                     updates,
                 )
             else
-                StatelessCommit.stateRootAfterCatalog(
+                claim_commit.stateRootAfterCatalog(
                     allocator,
                     self.state_root,
                     &self.backend,

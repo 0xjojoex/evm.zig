@@ -23,7 +23,7 @@ const TrackedState = evmz.state.TrackedState;
 const prepared_code = evmz.prepared_code;
 const eip7702 = executor_module.eip7702;
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
-const ParentFacts = @import("./stateless/ParentFacts.zig");
+const ParentFacts = @import("./eth/bal/ParentFacts.zig");
 
 /// Standalone-message conveniences mirroring the executor's private
 /// `runStandalone*` forms: explicit (context, message, gas) with default scope.
@@ -140,14 +140,14 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
         &account_facts,
         &storage_facts,
     );
-    const dense_state = try evmz.stateless.BlockState.initWithCodes(
+    const claim_state = try evmz.eth.bal.ClaimState.initWithCodes(
         std.testing.allocator,
         plan,
         dense_facts,
         &.{},
     );
     const DenseEngine = @import("./vm.zig").BalStatelessVm(evmz.eth.amsterdam);
-    var dense = DenseEngine.Executor.init(std.testing.allocator, .{ .state = dense_state });
+    var dense = DenseEngine.Executor.init(std.testing.allocator, .{ .state = claim_state });
     defer dense.deinit();
 
     const context = testExecutionContext(target, 100_000);

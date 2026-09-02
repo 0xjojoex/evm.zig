@@ -609,7 +609,7 @@ test "stateless validator is specialized by the complete spec" {
     comptime {
         std.debug.assert(ExactValidator.BlockStf.spec.call.base_gas == custom.call.base_gas);
         std.debug.assert(ExactValidator.BlockStf.Vm.spec.call.base_gas == custom.call.base_gas);
-        std.debug.assert(ExactValidator.BlockStf.Vm.Executor.State == @import("BlockState.zig"));
+        std.debug.assert(ExactValidator.BlockStf.Vm.Executor.State == @import("../eth/bal/ClaimState.zig"));
         std.debug.assert(Oracle.BlockStf.Vm.Executor.State == state.TrackedState);
     }
 }

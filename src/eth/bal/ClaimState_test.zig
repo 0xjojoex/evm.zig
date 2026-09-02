@@ -1,13 +1,13 @@
 const std = @import("std");
 
-const address = @import("../address.zig");
-const bal = @import("../eth/bal/model.zig");
-const claim_plan = @import("../eth/bal/ClaimPlan.zig");
-const crypto = @import("../crypto.zig");
-const trie = @import("../eth/trie.zig");
+const address = @import("../../address.zig");
+const bal = @import("model.zig");
+const claim_plan = @import("ClaimPlan.zig");
+const crypto = @import("../../crypto.zig");
+const trie = @import("../trie.zig");
 const records = @import("ParentFacts.zig");
-const StatelessCommit = @import("commit.zig");
-const StatelessBlockState = @import("BlockState.zig");
+const claim_commit = @import("claim_commit.zig");
+const ClaimState = @import("ClaimState.zig");
 
 test "sealed dense views retain effects and observations with distinct lifetimes" {
     const target = address.addr(1);
@@ -30,7 +30,7 @@ test "sealed dense views retain effects and observations with distinct lifetimes
         .value = 3,
     }};
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &storage_facts);
-    var state = try StatelessBlockState.initWithCodes(
+    var state = try ClaimState.initWithCodes(
         std.testing.allocator,
         plan,
         facts,
@@ -106,7 +106,7 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     state.discard(next_attempt);
 }
 
-test "dense introduced code is reclaimed across rollback and discard" {
+test "claim state introduced code is reclaimed across rollback and discard" {
     const targets = [_]address.Address{ address.addr(1), address.addr(2), address.addr(3) };
     const claims = [_]bal.AccountChanges{
         .{ .address = targets[0] },
@@ -120,7 +120,7 @@ test "dense introduced code is reclaimed across rollback and discard" {
         .{ .parent = .{ .absent = .empty_trie } },
     };
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     const first_code = [_]u8{ 0x60, 0x01 };
@@ -181,7 +181,7 @@ test "discarding accepted dense state reclaims code for a clean retry" {
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const account_facts = [_]records.AccountFact{.{ .parent = .{ .absent = .empty_trie } }};
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     const code = [_]u8{ 0x60, 0x01 };
@@ -212,13 +212,13 @@ test "discarding accepted dense state reclaims code for a clean retry" {
     );
 }
 
-test "dense branch restore preserves retained logs" {
+test "claim state branch restore preserves retained logs" {
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const account_facts = [_]records.AccountFact{.{ .parent = .{ .absent = .empty_trie } }};
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     const original_topics = [_]u256{1};
@@ -267,7 +267,7 @@ test "introduced code satisfies a later optional witness code read" {
         .{ .parent = .{ .absent = .empty_trie } },
     };
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     const introduced = state.beginObservedTransaction();
@@ -284,7 +284,7 @@ test "introduced code satisfies a later optional witness code read" {
     state.discard(read);
 }
 
-test "dense code reference preserves lazy invalid-witness rejection" {
+test "claim state code reference preserves lazy invalid-witness rejection" {
     const target = address.addr(1);
     const missing_hash = [_]u8{0x77} ** 32;
     const claims = [_]bal.AccountChanges{.{ .address = target }};
@@ -293,7 +293,7 @@ test "dense code reference preserves lazy invalid-witness rejection" {
         .parent = .{ .present = .{ .nonce = 1, .code_hash = missing_hash } },
     }};
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try StatelessBlockState.initWithCodes(
+    var state = try ClaimState.initWithCodes(
         std.testing.allocator,
         plan,
         facts,
@@ -323,7 +323,7 @@ test "sealed storage wipe removes stale point writes" {
         .value = 3,
     }};
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &storage_facts);
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     const attempt = state.beginObservedTransaction();
@@ -348,7 +348,7 @@ test "sealed discard preserves prior accepted storage projection" {
         .value = 3,
     }};
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &storage_facts);
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     const accepted_attempt = state.beginObservedTransaction();
@@ -406,7 +406,7 @@ test "storage wipe projections deduplicate scope reverts" {
         .parent = .{ .present = .{ .nonce = 1 } },
     }};
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     const attempt = state.beginObservedTransaction();
@@ -445,7 +445,7 @@ test "storage wipe projections deduplicate scope reverts" {
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_wipes.len());
 }
 
-test "dense commit projection matches independent roots across account lifecycles" {
+test "claim state commit projection matches independent roots across account lifecycles" {
     inline for (.{
         DenseCommitCase.update,
         DenseCommitCase.delete,
@@ -454,7 +454,7 @@ test "dense commit projection matches independent roots across account lifecycle
     }) |case| try expectDenseCommitMatchesIndependentRoot(case);
 }
 
-test "dense commit reclaims independent storage roots and error scopes" {
+test "claim state commit reclaims independent storage roots and error scopes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -465,11 +465,11 @@ test "dense commit reclaims independent storage roots and error scopes" {
         .{ .address = targets[1], .storage_reads = &.{slots[1]} },
     };
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(allocator, &claims);
-    const account_ids = [_]StatelessBlockState.AccountId{
+    const account_ids = [_]ClaimState.AccountId{
         plan.accountIdWord(.fromAddress(targets[0])).?,
         plan.accountIdWord(.fromAddress(targets[1])).?,
     };
-    const storage_ids = [_]StatelessBlockState.StorageId{
+    const storage_ids = [_]ClaimState.StorageId{
         plan.storageId(account_ids[0], slots[0]).?,
         plan.storageId(account_ids[1], slots[1]).?,
     };
@@ -479,7 +479,7 @@ test "dense commit reclaims independent storage roots and error scopes" {
     var catalog = try trie.buildWitnessCatalog(allocator, trie.empty_root_hash, indexed);
     defer catalog.deinit();
     const authenticated = try records.authenticate(allocator, plan, &catalog);
-    var state = try StatelessBlockState.init(allocator, plan, authenticated);
+    var state = try ClaimState.init(allocator, plan, authenticated);
     defer state.deinit();
 
     const attempt = state.beginObservedTransaction();
@@ -498,7 +498,7 @@ test "dense commit reclaims independent storage roots and error scopes" {
     var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
     try std.testing.expectError(
         error.InvalidNodeReference,
-        StatelessCommit.stateRootAfterCatalog(
+        claim_commit.stateRootAfterCatalog(
             commit_fixed.allocator(),
             wrong_root,
             &catalog,
@@ -507,7 +507,7 @@ test "dense commit reclaims independent storage roots and error scopes" {
     );
     try std.testing.expectEqual(@as(usize, 0), commit_fixed.end_index);
 
-    const dense = try StatelessCommit.stateRootAfterCatalog(
+    const dense = try claim_commit.stateRootAfterCatalog(
         commit_fixed.allocator(),
         trie.empty_root_hash,
         &catalog,
@@ -576,13 +576,13 @@ fn expectDenseCommitMatchesIndependentRoot(case: DenseCommitCase) !void {
     }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(allocator, &claims);
     const authenticated = try records.authenticate(allocator, plan, &catalog);
-    var state = try StatelessBlockState.init(allocator, plan, authenticated);
+    var state = try ClaimState.init(allocator, plan, authenticated);
     defer state.deinit();
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    const account_id: StatelessBlockState.AccountId = @enumFromInt(0);
-    const storage_id: StatelessBlockState.StorageId = @enumFromInt(0);
+    const account_id: ClaimState.AccountId = @enumFromInt(0);
+    const storage_id: ClaimState.StorageId = @enumFromInt(0);
     switch (case) {
         .update => {
             try state.setBalance(.fromAddress(target), 12);
@@ -604,7 +604,7 @@ fn expectDenseCommitMatchesIndependentRoot(case: DenseCommitCase) !void {
     const accepted = state.acceptedView();
     var commit_buffer: [64 * 1024]u8 = undefined;
     var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
-    const dense = try StatelessCommit.stateRootAfterCatalog(
+    const dense = try claim_commit.stateRootAfterCatalog(
         commit_fixed.allocator(),
         state_root,
         &catalog,
@@ -676,7 +676,7 @@ test "translation memo resolves alternating and evicted addresses to plan ids" {
         .{ .parent = .{ .absent = .empty_trie } },
     };
     const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try StatelessBlockState.init(std.testing.allocator, plan, facts);
+    var state = try ClaimState.init(std.testing.allocator, plan, facts);
     defer state.deinit();
 
     // A,B alternation (both entries), then C forcing eviction, then a sweep
@@ -687,7 +687,7 @@ test "translation memo resolves alternating and evicted addresses to plan ids" {
         try std.testing.expectEqual(plan.accountIdWord(.fromAddress(targets[index])).?, resolved);
     }
     try std.testing.expectEqual(
-        @as(?StatelessBlockState.AccountId, null),
+        @as(?ClaimState.AccountId, null),
         try state.resolveAccount(.fromAddress(address.addr(0xff)), .optional_warm_only),
     );
     try std.testing.expectError(

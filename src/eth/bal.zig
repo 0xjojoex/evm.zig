@@ -1,4 +1,13 @@
-//! EIP-7928 Block-Level Access List model and claim-served parallel validation.
+//! EIP-7928 Block-Level Access List model, claim-served parallel validation,
+//! and the claim-indexed execution-state lane.
+//!
+//! `ClaimState` is the second implementation of the executor's state contract
+//! (the first is `evmz.state.TrackedState`). It is keyed by `ClaimPlan` IDs
+//! over the closed universe the block access list declares, so it lives here
+//! with the claim machinery rather than under the generic `state` vocabulary.
+//! `ParentFacts`, `claim_artifacts`, `claim_views`, and `claim_commit` are its
+//! ID-native inputs, projections, and commit path.
+//!
 //! This is experimental and subject to change.
 
 const std = @import("std");
@@ -10,6 +19,12 @@ const state = @import("../state.zig");
 const Backend = @import("../backend.zig").Backend;
 
 pub const tracked_state_projector = @import("bal/tracked_state_projector.zig");
+
+pub const ClaimState = @import("bal/ClaimState.zig");
+pub const ParentFacts = @import("bal/ParentFacts.zig");
+pub const claim_artifacts = @import("bal/claim_artifacts.zig");
+pub const claim_commit = @import("bal/claim_commit.zig");
+pub const claim_views = @import("bal/claim_views.zig");
 
 pub const Address = model.Address;
 pub const BlockAccessIndex = model.BlockAccessIndex;
@@ -88,4 +103,7 @@ test "BAL executor releases an unconsumed state backend" {
 test {
     std.testing.refAllDecls(claim_plan);
     std.testing.refAllDecls(tracked_state_projector);
+    std.testing.refAllDecls(ParentFacts);
+    std.testing.refAllDecls(ClaimState);
+    _ = @import("bal/ClaimState_test.zig");
 }

@@ -11,8 +11,8 @@ const witness_reader = @import("./stateless/WitnessReader.zig");
 const trie = @import("./eth/trie.zig");
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
 const ChangesView = TrackedState.ChangesView;
-const DenseCommitView = @import("./stateless/BlockState.zig").CommitView;
-const ParentCode = @import("./stateless/artifacts.zig").ParentCode;
+const ClaimCommitView = @import("./eth/bal/ClaimState.zig").CommitView;
+const ParentCode = @import("./eth/bal/claim_artifacts.zig").ParentCode;
 
 pub const Backend = union(enum) {
     witness: witness_reader.Indexed,
@@ -115,12 +115,12 @@ pub const Backend = union(enum) {
         };
     }
 
-    /// Only the dense witness lane keeps state projected as ClaimPlan IDs, so
+    /// Only the claim-indexed witness lane keeps state projected as ClaimPlan IDs, so
     /// an external backend has no commit view to root.
     pub fn stateRootAfterDenseCommit(
         self: *Backend,
         allocator: std.mem.Allocator,
-        commit_view: DenseCommitView,
+        commit_view: ClaimCommitView,
         node_updates: ?*trie.NodeUpdates,
     ) ![32]u8 {
         return switch (self.*) {
