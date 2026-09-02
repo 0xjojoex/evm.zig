@@ -6,9 +6,8 @@
 //!   trie order; `ClaimView` and `diff` read and compare lists.
 //! - `ClaimState`: the second implementation of the executor's state contract
 //!   (the first is `evmz.state.TrackedState`), keyed by `ClaimPlan` IDs over the
-//!   closed universe the list declares. `ParentFacts`, `claim_artifacts`,
-//!   `claim_views`, and `claim_commit` are its ID-native inputs, projections,
-//!   and commit path.
+//!   closed universe the list declares. `ParentFacts`, `claim_artifacts`, and
+//!   `claim_commit` are its ID-native inputs, code store, and commit path.
 //!
 //! Driving a block over either lane belongs to `eth.block_stf`; only the
 //! BAL-parallel vocabulary and the BAL executor constructor are aliased here.
@@ -33,7 +32,6 @@ pub const ClaimState = @import("bal/ClaimState.zig");
 pub const ParentFacts = @import("bal/ParentFacts.zig");
 pub const claim_artifacts = @import("bal/claim_artifacts.zig");
 pub const claim_commit = @import("bal/claim_commit.zig");
-pub const claim_views = @import("bal/claim_views.zig");
 
 pub const Address = model.Address;
 pub const BlockAccessIndex = model.BlockAccessIndex;

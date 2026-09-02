@@ -21,9 +21,9 @@ const checkpoint_types = @import("../../state/checkpoint.zig");
 const contract = @import("../../state/contract.zig");
 const storage_status = @import("../../state/storage.zig");
 const sparse_hash_map = @import("../../state/sparse_hash_map.zig");
-const Views = @import("claim_views.zig").ViewType(ClaimState);
 
 const Allocator = std.mem.Allocator;
+const Address = address.Address;
 const ClaimState = @This();
 
 const TransientStorageKey = extern struct {
@@ -77,11 +77,6 @@ pub const CodeView = artifacts.CodeView;
 /// `state/LogBuffer.zig`.
 pub const LogBuffer = @import("../../state/LogBuffer.zig");
 pub const LogView = LogBuffer.View;
-pub const ChangesView = Views.ChangesView;
-pub const CommitView = Views.CommitView;
-pub const ObservationsView = Views.ObservationsView;
-pub const AcceptedView = Views.AcceptedView;
-pub const PendingView = Views.PendingView;
 
 pub const ResolutionPolicy = enum {
     /// State reads/writes, observed system calls, and EIP-7702 authority paths
@@ -184,7 +179,7 @@ pub const AccountRow = struct {
     current: AccountValue,
     code_ref: artifacts.CodeRef,
     flags: AccountFlags = .{},
-    lifecycle_tracked: bool = false,
+    lifecycle_listed: bool = false,
     journal_scope_generation: u32 = 0,
     warm_generation: u32 = 0,
     observation_generation: u32 = 0,
@@ -225,6 +220,358 @@ pub const StorageObservationRow = struct {
     effect_current: u256,
     observation: StorageObservation,
     effect: StorageEffect = .{},
+};
+
+// Borrowed projections over sealed rows. Views copy no identities or values:
+// `ClaimPlan` stays the sole address/slot owner and this state the lifecycle
+// owner. They read rows directly, so they live beside them (as in
+// `state.TrackedState`) rather than behind a generic view type.
+
+pub const ChangeLayer = enum { accepted, transaction };
+
+pub const AccountChange = struct {
+    address: Address,
+    account: ?Account,
+};
+
+pub const StorageChange = struct {
+    address: Address,
+    key: u256,
+    value: u256,
+};
+
+pub const AccountChanges = struct {
+    state: *const ClaimState,
+    layer: ChangeLayer,
+
+    pub fn len(self: AccountChanges) u32 {
+        return @intCast(self.ids().len);
+    }
+
+    pub fn at(self: AccountChanges, index: u32) AccountChange {
+        const id = self.ids()[index];
+        return .{
+            .address = self.state.plan.accountAddress(id),
+            .account = accountValue(switch (self.layer) {
+                .accepted => self.state.acceptedAccountValue(id),
+                .transaction => self.state.accounts[@intFromEnum(id)].current,
+            }),
+        };
+    }
+
+    fn ids(self: AccountChanges) []const AccountId {
+        return switch (self.layer) {
+            .accepted => if (self.state.transaction_active)
+                self.state.block_changed_accounts.items[0..self.state.transaction_block_changed_accounts_start]
+            else
+                self.state.block_changed_accounts.items,
+            .transaction => self.state.changed_accounts.items,
+        };
+    }
+};
+
+pub const StorageChanges = struct {
+    state: *const ClaimState,
+    layer: ChangeLayer,
+
+    pub fn len(self: StorageChanges) u32 {
+        return @intCast(self.ids().len);
+    }
+
+    pub fn at(self: StorageChanges, index: u32) StorageChange {
+        const id = self.ids()[index];
+        const account = self.state.plan.storageAccount(id);
+        return .{
+            .address = self.state.plan.accountAddress(account),
+            .key = self.state.plan.storageSlot(id),
+            .value = switch (self.layer) {
+                .accepted => self.state.acceptedStorageValue(id),
+                .transaction => self.state.effectiveStorage(id),
+            },
+        };
+    }
+
+    fn ids(self: StorageChanges) []const StorageId {
+        return switch (self.layer) {
+            .accepted => if (self.state.transaction_active)
+                self.state.dirty_storage.items[0..self.state.transaction_dirty_storage_start]
+            else
+                self.state.dirty_storage.items,
+            .transaction => self.state.changed_storage.items,
+        };
+    }
+};
+
+pub const StorageWipes = struct {
+    state: *const ClaimState,
+    layer: ChangeLayer,
+
+    pub fn len(self: StorageWipes) u32 {
+        return @intCast(self.ids().len);
+    }
+
+    pub fn at(self: StorageWipes, index: u32) Address {
+        const id = self.ids()[index];
+        return self.state.plan.accountAddress(id);
+    }
+
+    fn ids(self: StorageWipes) []const AccountId {
+        return switch (self.layer) {
+            .accepted => if (self.state.transaction_active)
+                self.state.block_storage_wipes.items[0..self.state.transaction_block_storage_wipes_start]
+            else
+                self.state.block_storage_wipes.items,
+            .transaction => self.state.transaction_storage_wipes.items,
+        };
+    }
+};
+
+pub const ChangesView = struct {
+    state: *const ClaimState,
+    layer: ChangeLayer,
+    accounts: AccountChanges,
+    storage_writes: StorageChanges,
+    storage_wipes: StorageWipes,
+
+    pub fn init(state: *const ClaimState, layer: ChangeLayer) ChangesView {
+        return .{
+            .state = state,
+            .layer = layer,
+            .accounts = .{ .state = state, .layer = layer },
+            .storage_writes = .{ .state = state, .layer = layer },
+            .storage_wipes = .{ .state = state, .layer = layer },
+        };
+    }
+
+    pub fn introducedCode(self: ChangesView, hash: [32]u8) ?artifacts.CodeView {
+        const ids = switch (self.layer) {
+            .accepted => if (self.state.transaction_active)
+                self.state.block_introduced_codes.items[0..self.state.transaction_introduced_codes_start]
+            else
+                self.state.block_introduced_codes.items,
+            .transaction => self.state.transaction_introduced_codes.items,
+        };
+        for (ids) |id| {
+            const view = self.state.code.introducedView(id);
+            if (std.mem.eql(u8, &view.code_hash, &hash)) return view;
+        }
+        return null;
+    }
+
+    pub fn hasChanges(self: ChangesView) bool {
+        return self.accounts.len() != 0 or
+            self.storage_writes.len() != 0 or
+            self.storage_wipes.len() != 0;
+    }
+};
+
+pub const AccountObservationFact = struct {
+    address: Address,
+    original: ?Account,
+    current: ?Account,
+    observation: AccountObservation,
+    effect: AccountEffect,
+};
+
+pub const StorageObservationFact = struct {
+    address: Address,
+    key: u256,
+    original: u256,
+    current: u256,
+    observation: StorageObservation,
+    effect: StorageEffect,
+};
+
+pub const StorageObservationMetadata = struct {
+    address: Address,
+    key: u256,
+    observation: StorageObservation,
+    effect: StorageEffect,
+};
+
+pub const AccountObservations = struct {
+    state: *const ClaimState,
+
+    pub fn len(self: AccountObservations) u32 {
+        return @intCast(self.state.observed_accounts.items.len);
+    }
+
+    pub fn at(self: AccountObservations, index: u32) AccountObservationFact {
+        const observed = self.state.observed_accounts.items[index];
+        return .{
+            .address = self.state.plan.accountAddress(observed.account),
+            .original = accountValue(observed.original),
+            .current = accountValue(observed.effect_current),
+            .observation = observed.observation,
+            .effect = observed.effect,
+        };
+    }
+
+    pub fn idAt(self: AccountObservations, index: u32) AccountId {
+        return self.state.observed_accounts.items[index].account;
+    }
+};
+
+pub const StorageObservations = struct {
+    state: *const ClaimState,
+
+    pub fn len(self: StorageObservations) u32 {
+        return @intCast(self.state.observed_storage.items.len);
+    }
+
+    pub fn at(self: StorageObservations, index: u32) ?StorageObservationFact {
+        const observed = self.state.observed_storage.items[index];
+        const account = self.state.plan.storageAccount(observed.storage);
+        return .{
+            .address = self.state.plan.accountAddress(account),
+            .key = self.state.plan.storageSlot(observed.storage),
+            .original = observed.original,
+            .current = observed.effect_current,
+            .observation = observed.observation,
+            .effect = observed.effect,
+        };
+    }
+
+    pub fn idAt(self: StorageObservations, index: u32) StorageId {
+        return self.state.observed_storage.items[index].storage;
+    }
+
+    pub fn metadataAt(self: StorageObservations, index: u32) StorageObservationMetadata {
+        const observed = self.state.observed_storage.items[index];
+        const account = self.state.plan.storageAccount(observed.storage);
+        return .{
+            .address = self.state.plan.accountAddress(account),
+            .key = self.state.plan.storageSlot(observed.storage),
+            .observation = observed.observation,
+            .effect = observed.effect,
+        };
+    }
+};
+
+pub const ObservationsView = struct {
+    state: *const ClaimState,
+    accounts: AccountObservations,
+    storage: StorageObservations,
+
+    pub fn init(state: *const ClaimState) ObservationsView {
+        return .{
+            .state = state,
+            .accounts = .{ .state = state },
+            .storage = .{ .state = state },
+        };
+    }
+
+    pub fn code(self: ObservationsView, hash: [32]u8) ?artifacts.CodeView {
+        return self.state.code.lookup(hash);
+    }
+};
+
+pub const AcceptedView = struct {
+    state: *const ClaimState,
+
+    pub fn hasChanges(self: AcceptedView) bool {
+        return self.changes().hasChanges();
+    }
+
+    pub fn changes(self: AcceptedView) ChangesView {
+        return ChangesView.init(self.state, .accepted);
+    }
+
+    /// Commit projection over the same sealed rows. Identity,
+    /// trie order, and parent facts stay borrowed; commit must not
+    /// reconstruct them from address/slot change records.
+    pub fn commit(self: AcceptedView) CommitView {
+        return .{ .state = self.state };
+    }
+};
+
+pub const CommitView = struct {
+    state: *const ClaimState,
+
+    pub fn accountTrieOrder(self: CommitView) []const AccountId {
+        return self.state.plan.account_trie_order;
+    }
+
+    pub fn storageTrieOrder(
+        self: CommitView,
+        account: AccountId,
+    ) []const StorageId {
+        return self.state.plan.storageTrieOrder(account);
+    }
+
+    pub fn accountTrieKey(self: CommitView, id: AccountId) [32]u8 {
+        return self.state.plan.accountTrieKey(id);
+    }
+
+    pub fn storageTrieKey(self: CommitView, id: StorageId) [32]u8 {
+        return self.state.plan.storageTrieKey(id);
+    }
+
+    pub fn accountFact(self: CommitView, id: AccountId) *const @TypeOf(self.state.facts.accounts[0]) {
+        return &self.state.facts.accounts[@intFromEnum(id)];
+    }
+
+    pub fn accountValue(self: CommitView, id: AccountId) AccountValue {
+        return self.state.accounts[@intFromEnum(id)].current;
+    }
+
+    pub fn storageValue(self: CommitView, id: StorageId) u256 {
+        return self.state.effectiveStorage(id);
+    }
+
+    pub fn accountDirty(self: CommitView, id: AccountId) bool {
+        return self.state.accounts[@intFromEnum(id)].flags.block_dirty;
+    }
+
+    pub fn accountChanged(self: CommitView, id: AccountId) bool {
+        return self.state.accounts[@intFromEnum(id)].flags.block_changed;
+    }
+
+    pub fn accountStorageDirty(self: CommitView, id: AccountId) bool {
+        return self.state.accounts[@intFromEnum(id)].flags.storage_dirty;
+    }
+
+    pub fn storageDirty(self: CommitView, id: StorageId) bool {
+        const row = &self.state.storage[@intFromEnum(id)];
+        const account = &self.state.accounts[@intFromEnum(self.state.plan.storageAccount(id))];
+        return row.flags.block_dirty and
+            row.storage_generation == account.storage_generation;
+    }
+
+    pub fn storageWiped(self: CommitView, id: AccountId) bool {
+        return self.state.accounts[@intFromEnum(id)].flags.storage_wiped;
+    }
+};
+
+pub const PendingView = struct {
+    state: *const ClaimState,
+
+    pub fn accepted(self: PendingView) AcceptedView {
+        self.assertSealed();
+        return .{ .state = self.state };
+    }
+
+    pub fn logs(self: PendingView) LogBuffer.View {
+        self.assertSealed();
+        return self.state.logs.view();
+    }
+
+    pub fn changes(self: PendingView) ChangesView {
+        self.assertSealed();
+        return ChangesView.init(self.state, .transaction);
+    }
+
+    pub fn observations(self: PendingView) ObservationsView {
+        self.assertSealed();
+        std.debug.assert(self.state.observed_attempt);
+        return ObservationsView.init(self.state);
+    }
+
+    fn assertSealed(self: PendingView) void {
+        std.debug.assert(self.state.transaction_active);
+        std.debug.assert(self.state.sealed);
+        std.debug.assert(!self.state.scopeActive());
+    }
 };
 
 pub const Checkpoint = checkpoint_types.Checkpoint;
@@ -1376,11 +1723,9 @@ pub fn acceptedView(self: *const ClaimState) AcceptedView {
     return .{ .state = self };
 }
 
-pub fn storageValueForView(self: *const ClaimState, id: StorageId) u256 {
-    return self.effectiveStorage(id);
-}
-
-pub fn acceptedAccountValueForView(
+/// Account value as the accepted branch sees it: the first-touch original
+/// while a transaction is active, else the row.
+fn acceptedAccountValue(
     self: *const ClaimState,
     id: AccountId,
 ) AccountValue {
@@ -1391,7 +1736,9 @@ pub fn acceptedAccountValueForView(
     return self.observed_accounts.items[row.observation_index].original;
 }
 
-pub fn acceptedStorageValueForView(
+/// Storage value as the accepted branch sees it, honoring a wipe generation
+/// that the active transaction may have advanced.
+fn acceptedStorageValue(
     self: *const ClaimState,
     id: StorageId,
 ) u256 {
@@ -1816,12 +2163,12 @@ fn prepareLifecycleMutation(
     id: AccountId,
 ) Allocator.Error!*AccountRow {
     const row = &self.accounts[@intFromEnum(id)];
-    const first_lifecycle = !row.lifecycle_tracked;
+    const first_lifecycle = !row.lifecycle_listed;
     if (first_lifecycle)
         try self.lifecycle_accounts.ensureUnusedCapacity(self.allocator, 1);
     const mutable = try self.prepareAccountMutation(id);
     if (first_lifecycle) {
-        mutable.lifecycle_tracked = true;
+        mutable.lifecycle_listed = true;
         self.lifecycle_accounts.appendAssumeCapacity(id);
     }
     return mutable;
@@ -1952,7 +2299,7 @@ fn finishTransaction(self: *ClaimState) void {
     self.changed_storage.clearRetainingCapacity();
     self.transaction_storage_wipes.clearRetainingCapacity();
     for (self.lifecycle_accounts.items) |id|
-        self.accounts[@intFromEnum(id)].lifecycle_tracked = false;
+        self.accounts[@intFromEnum(id)].lifecycle_listed = false;
     self.lifecycle_accounts.clearRetainingCapacity();
     self.transaction_introduced_codes.clearRetainingCapacity();
     self.observed_accounts.clearRetainingCapacity();
@@ -2236,7 +2583,7 @@ test "claim state lifecycle candidates are compact and survive marker rollback" 
     state.revertToCheckpoint(second_marker);
     try std.testing.expect(!state.accounts[1].flags.selfdestructed);
 
-    const policy = @import("../../execution.zig").SelfDestructFinalization{
+    const policy = execution.SelfDestructFinalization{
         .delete_account = true,
     };
     try state.finalize(.{ .existing_account = policy, .created_account = policy });
@@ -2245,8 +2592,8 @@ test "claim state lifecycle candidates are compact and survive marker rollback" 
 
     retainTestTransaction(&state, attempt);
     try std.testing.expectEqual(@as(usize, 0), state.lifecycle_accounts.items.len);
-    try std.testing.expect(!state.accounts[0].lifecycle_tracked);
-    try std.testing.expect(!state.accounts[1].lifecycle_tracked);
+    try std.testing.expect(!state.accounts[0].lifecycle_listed);
+    try std.testing.expect(!state.accounts[1].lifecycle_listed);
 }
 
 test "execution original survives checkpoints and refreshes across execution scopes" {
@@ -2379,8 +2726,8 @@ test "retained storage wipe compacts invalidated accepted slot IDs" {
     try std.testing.expectEqualSlices(StorageId, &.{second}, state.dirty_storage.items);
     try std.testing.expect(!state.storage[@intFromEnum(first)].flags.block_dirty);
     try std.testing.expect(state.storage[@intFromEnum(second)].flags.block_dirty);
-    try std.testing.expectEqual(@as(u256, 0), state.storageValueForView(first));
-    try std.testing.expectEqual(@as(u256, 11), state.storageValueForView(second));
+    try std.testing.expectEqual(@as(u256, 0), state.effectiveStorage(first));
+    try std.testing.expectEqual(@as(u256, 11), state.effectiveStorage(second));
 }
 
 test "scope revert then redirty retains one accepted storage ID" {
@@ -2411,7 +2758,7 @@ test "scope revert then redirty retains one accepted storage ID" {
     retainTestTransaction(&state, attempt);
     try std.testing.expectEqualSlices(StorageId, &.{storage_id}, state.dirty_storage.items);
     try std.testing.expect(state.storage[0].flags.block_dirty);
-    try std.testing.expectEqual(@as(u256, 10), state.storageValueForView(storage_id));
+    try std.testing.expectEqual(@as(u256, 10), state.effectiveStorage(storage_id));
 }
 
 test "warm undo exists only for the cold to warm transition" {

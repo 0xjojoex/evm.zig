@@ -1,4 +1,4 @@
-//! ID-native post-state commit for the dense Amsterdam execution lane.
+//! ID-native post-state commit for the claim-indexed execution lane.
 //!
 //! The sealed execution state stays projected as ClaimPlan IDs, pre-hashed
 //! trie order, authenticated parent facts, and final dirty values. Generic
@@ -11,12 +11,11 @@ const mpt = @import("mpt");
 
 const Allocator = std.mem.Allocator;
 
-/// Comptime contract for the dense commit view this lane consumes. The
-/// canonical implementation is `views.zig` `CommitView`; a conforming view
-/// projects sealed rows by dense ID with no address/slot identity:
+/// The sealed projection this lane commits from. It exposes rows by claim ID
+/// with no address/slot identity:
 ///
-/// - `accountTrieOrder()` / `storageTrieOrder(account_id)`: dense IDs
-///   pre-sorted by hashed trie key; commit iterates them verbatim.
+/// - `accountTrieOrder()` / `storageTrieOrder(account_id)`: IDs pre-sorted by
+///   hashed trie key; commit iterates them verbatim.
 /// - `accountDirty(id)` / `storageDirty(id)` / `accountStorageDirty(id)`:
 ///   whether the row (or any of an account's slots) needs a trie write.
 /// - `accountTrieKey(id)` / `storageTrieKey(id)`: pre-hashed trie keys.
@@ -24,28 +23,9 @@ const Allocator = std.mem.Allocator;
 ///   absent from present-with-storage-root.
 /// - `accountChanged(id)` + `accountValue(id)`: final execution value;
 ///   `storageWiped(account_id)` + `storageValue(storage_id)`: final slots.
-pub fn assertCommitView(comptime View: type) void {
-    for ([_][]const u8{
-        "accountTrieOrder",
-        "storageTrieOrder",
-        "accountDirty",
-        "storageDirty",
-        "accountStorageDirty",
-        "accountTrieKey",
-        "storageTrieKey",
-        "accountFact",
-        "accountChanged",
-        "accountValue",
-        "storageValue",
-        "storageWiped",
-    }) |method| {
-        if (!std.meta.hasMethod(View, method)) @compileError(
-            "dense commit view " ++ @typeName(View) ++ " is missing '" ++ method ++ "'",
-        );
-    }
-}
+const CommitView = @import("ClaimState.zig").CommitView;
 
-/// Commit sealed dense rows without projecting them back through generic
+/// Commit sealed rows without projecting them back through generic
 /// address/slot changes. Parent facts and catalog topology remain borrowed;
 /// this stage removes identity reconstruction and feeds pre-hashed sorted
 /// updates into the existing catalog occurrence updater.
@@ -53,7 +33,7 @@ pub fn stateRootAfterCatalog(
     allocator: Allocator,
     root_hash: mpt.Root,
     catalog: *const trie.WitnessCatalog,
-    commit: anytype,
+    commit: CommitView,
 ) trie.UpdateError![32]u8 {
     return stateRootAfterCatalogWithNodeUpdates(allocator, root_hash, catalog, commit, {});
 }
@@ -62,10 +42,9 @@ pub fn stateRootAfterCatalogWithNodeUpdates(
     allocator: Allocator,
     root_hash: mpt.Root,
     catalog: *const trie.WitnessCatalog,
-    commit: anytype,
+    commit: CommitView,
     node_updates: anytype,
 ) trie.UpdateError![32]u8 {
-    comptime assertCommitView(@TypeOf(commit));
     try catalog.validateStateRoot(root_hash);
     var workspace = DenseCommitWorkspace.init(allocator);
     defer workspace.deinit();
@@ -142,7 +121,7 @@ pub fn stateRootAfterCatalogWithNodeUpdates(
 fn storageRootAfterCatalog(
     workspace: *DenseCommitWorkspace,
     catalog: *const trie.WitnessCatalog,
-    commit: anytype,
+    commit: CommitView,
     account_id: anytype,
     parent_root: [32]u8,
     node_updates: anytype,

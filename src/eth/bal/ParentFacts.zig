@@ -7,9 +7,12 @@
 
 const std = @import("std");
 
+const address = @import("../../address.zig");
+const bal = @import("model.zig");
 const claim_plan = @import("ClaimPlan.zig");
 const trie = @import("../trie.zig");
 const mpt = @import("mpt");
+const rlp = @import("rlp");
 
 const Allocator = std.mem.Allocator;
 const ParentFacts = @This();
@@ -144,8 +147,6 @@ test "catalog records bind typed account and storage facts without another topol
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const address = @import("../../address.zig");
-    const bal = @import("model.zig");
     const target = address.addr(1);
     const slot: u256 = 7;
     const storage_key = trie.hashedStorageKey(slot);
@@ -180,8 +181,6 @@ test "catalog records bind typed account and storage facts without another topol
 }
 
 test "catalog records inherit absence without resolving storage" {
-    const address = @import("../../address.zig");
-    const bal = @import("model.zig");
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(2), .storage_reads = &.{7} }};
     var plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     defer plan.deinit(std.testing.allocator);
@@ -197,8 +196,6 @@ test "catalog records inherit absence without resolving storage" {
 }
 
 test "authentication workspace is transient and facts reclaim in LIFO order" {
-    const address = @import("../../address.zig");
-    const bal = @import("model.zig");
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(2), .storage_reads = &.{7} }};
     var plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     defer plan.deinit(std.testing.allocator);
@@ -218,8 +215,6 @@ test "authentication workspace is transient and facts reclaim in LIFO order" {
 test "catalog records clean every allocation failure position" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
-            const address = @import("../../address.zig");
-            const bal = @import("model.zig");
             const target = address.addr(1);
             const account_value = try trie.accountValueFrom(allocator, .{ .balance = 1 });
             defer allocator.free(account_value);
@@ -242,7 +237,6 @@ test "catalog records clean every allocation failure position" {
 }
 
 fn testLeafNode(allocator: Allocator, key: [32]u8, value: []const u8) ![]u8 {
-    const rlp = @import("rlp");
     var compact: [33]u8 = undefined;
     compact[0] = 0x20;
     @memcpy(compact[1..], &key);

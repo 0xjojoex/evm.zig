@@ -12,6 +12,8 @@ pub const ParentFacts = @import("../eth/bal/ParentFacts.zig");
 const StateReader = @import("../state/Reader.zig");
 const claim_artifacts = @import("../eth/bal/claim_artifacts.zig");
 const claim_commit = @import("../eth/bal/claim_commit.zig");
+const ClaimState = @import("../eth/bal/ClaimState.zig");
+const TrackedState = @import("../state/TrackedState.zig");
 
 const Address = address.Address;
 const CatalogInitError = std.mem.Allocator.Error || error{ InvalidNode, ResourceLimitExceeded };
@@ -152,12 +154,12 @@ pub fn Reader(comptime mode: Mode) type {
             return narrowRoot(self.rootAfterChanges(scratch, changes, node_updates));
         }
 
-        /// Post-state root for a sealed dense commit view, which stays projected as
+        /// Post-state root for a sealed claim commit view, which stays projected as
         /// ClaimPlan IDs instead of address/slot change records.
         pub fn stateRootAfterClaimCommit(
             self: *const WitnessStateReader,
             allocator: std.mem.Allocator,
-            commit_view: anytype,
+            commit_view: ClaimState.CommitView,
             node_updates: ?*trie.NodeUpdates,
         ) RootError![32]u8 {
             comptime std.debug.assert(mode == .catalog);
@@ -328,7 +330,6 @@ pub fn Reader(comptime mode: Mode) type {
 }
 
 test "witness state reader derives root directly from tracked changes" {
-    const TrackedState = @import("../state/TrackedState.zig");
     var state = TrackedState.init(std.testing.allocator);
     defer state.deinit();
     const attempt = state.beginTransaction();
