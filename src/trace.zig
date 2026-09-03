@@ -101,7 +101,6 @@ pub const SlotValueRead = struct {
 
 pub const StateRead = union(enum) {
     account_exists: AccountExistsRead,
-    account_has_storage: AccountExistsRead,
     balance: AccountValueRead,
     nonce: NonceRead,
     code: CodeRead,

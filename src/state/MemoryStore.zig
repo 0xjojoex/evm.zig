@@ -32,7 +32,7 @@ const ChangesView = TrackedState.ChangesView;
 /// can observe it.
 ///
 /// The predicate is `trie.Account.hasNoState`, not EIP-161 emptiness, so a
-/// storage-only EIP-7610 account is committed under either policy.
+/// storage-only account is committed under either policy.
 pub const EmptyAccountPolicy = enum {
     /// Spurious Dragon onward. EIP-161 removed the empty account and EIP-7523
     /// retires the concept, so it owns no leaf.
@@ -72,7 +72,6 @@ pub fn reader(self: *MemoryStore) StateReader {
         .loadAccount = loadAccount,
         .loadCode = loadCode,
         .getStorage = getStorage,
-        .accountHasStorage = accountHasStorage,
     } };
 }
 
@@ -339,17 +338,6 @@ fn getStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
     return account.getStorage(key);
 }
 
-fn accountHasStorage(ptr: *anyopaque, address: Address) !bool {
-    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    const account = self.accounts.getPtr(address) orelse return false;
-    var storage = account.storage;
-    var values = storage.valueIterator();
-    while (values.next()) |value| {
-        if (value.* != 0) return true;
-    }
-    return false;
-}
-
 fn accountStorageRoot(allocator: std.mem.Allocator, account: *const MemoryAccount) ![32]u8 {
     var pairs: std.ArrayList(trie.Pair) = .empty;
     defer pairs.deinit(allocator);
@@ -385,24 +373,10 @@ test "memory store exposes state reader" {
     const state_reader = memory.reader();
     try std.testing.expect(try state_reader.accountExists(address));
     try std.testing.expectEqual(@as(u256, 0xaa), try state_reader.getStorage(address, 7));
-    try std.testing.expect(try state_reader.accountHasStorage(address));
 
     const loaded = (try state_reader.loadAccount(address)).?;
     try std.testing.expectEqual(@as(u256, 99), loaded.balance);
     try std.testing.expectEqualSlices(u8, &.{0x5f}, try state_reader.loadCode(loaded.code_hash));
-}
-
-test "memory store storage presence ignores zero-valued entries" {
-    const address = addr(0xabc);
-    var memory = MemoryStore.init(std.testing.allocator);
-    defer memory.deinit();
-
-    const account = try memory.getOrCreateAccount(address);
-    try account.storage.put(1, 0);
-    try std.testing.expect(!try memory.reader().accountHasStorage(address));
-
-    try account.storage.put(2, 1);
-    try std.testing.expect(try memory.reader().accountHasStorage(address));
 }
 
 test "memory store computes full state root" {

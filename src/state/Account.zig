@@ -3,8 +3,7 @@
 //! Code bytes are content-addressed by `code_hash`; storage is addressed by
 //! account and slot. Neither belongs inside this value.
 //!
-//! Two different questions about "nothing here" run through the state layers,
-//! and they do not agree. Keeping them apart is load-bearing:
+//! Two different questions about "nothing here" run through the state layers:
 //!
 //!   - **EIP-161 empty / dead** - zero nonce, zero balance, empty code, with
 //!     storage deliberately ignored. Drives account existence, `EXTCODEHASH`
@@ -16,10 +15,8 @@
 //!     is what decides whether the trie stores a leaf. See
 //!     `trie.Account.hasNoState` and `MemoryStore.EmptyAccountPolicy`.
 //!
-//! The gap between them is exactly the EIP-7610 residue: an account with
-//! storage but no nonce, balance, or code is dead for every execution query
-//! yet still owns a trie leaf, so `createCollision` must refuse to build over
-//! it even though reads report it absent.
+//! A storage-only account is therefore dead for execution queries while still
+//! owning a trie leaf.
 
 const std = @import("std");
 
@@ -33,10 +30,7 @@ code_hash: [32]u8 = crypto.keccak256_empty,
 
 /// EIP-161 emptiness: nonce, balance, and code only.
 ///
-/// Storage is excluded on purpose, unlike `trie.Account.hasNoState`. That gap
-/// is the EIP-7610 residue, so a caller that needs leaf presence rather than
-/// liveness - `createCollision` is the only one - has to ask `accountHasStorage`
-/// separately instead of reading absence as "nothing is there".
+/// Storage is excluded on purpose, unlike `trie.Account.hasNoState`.
 ///
 /// This is the value half only. Whether an empty account is *dropped* is a fork
 /// question owned by the state lanes; see `Spec.retains_empty_accounts`.

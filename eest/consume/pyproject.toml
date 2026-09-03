@@ -20,5 +20,5 @@ py-modules = [
 ]
 
 [tool.uv.sources]
-ethereum-execution = { git = "https://github.com/ethereum/execution-specs", rev = "3d473e865a6ff78321e8b7b015b0e9a4bb8da892" }
-ethereum-execution-testing = { git = "https://github.com/ethereum/execution-specs", rev = "3d473e865a6ff78321e8b7b015b0e9a4bb8da892", subdirectory = "packages/testing" }
+ethereum-execution = { git = "https://github.com/ethereum/execution-specs", rev = "8ca2f4ceefd83100a4d21d0c33747114278a0bc2" }
+ethereum-execution-testing = { git = "https://github.com/ethereum/execution-specs", rev = "8ca2f4ceefd83100a4d21d0c33747114278a0bc2", subdirectory = "packages/testing" }

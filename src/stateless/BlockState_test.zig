@@ -330,7 +330,6 @@ test "sealed storage wipe removes stale point writes" {
     state.beginScope();
     _ = try state.setStorage(.fromAddress(target), 7, 9);
     try state.wipeStorage(@enumFromInt(0));
-    try std.testing.expect(!try state.accountHasStorage(.fromAddress(target)));
     state.closeScope();
     state.seal(attempt);
     try std.testing.expectEqual(@as(u32, 0), state.pendingView().changes().storage_writes.len());

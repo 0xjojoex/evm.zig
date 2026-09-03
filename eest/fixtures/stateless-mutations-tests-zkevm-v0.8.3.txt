@@ -1,4 +1,4 @@
-# Bounded canonical inputs for the required stateless mutation-rejection gate.
+# Bounded tests-zkevm@v0.8.3 inputs for the required stateless mutation-rejection gate.
 # Paths are relative to the fixture root resolved by execution-specs.
 blockchain_tests/for_amsterdam/amsterdam/eip7708_eth_transfer_logs/eip_mainnet/simple_transfer_mainnet.json
 blockchain_tests/for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_value.json

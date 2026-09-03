@@ -244,7 +244,6 @@ pub fn Reader(comptime mode: Mode) type {
             .loadCode = loadCode,
             .loadCodeValidatesHash = true,
             .getStorage = getStorage,
-            .accountHasStorage = accountHasStorage,
         };
 
         fn context(ptr: *anyopaque) *WitnessStateReader {
@@ -295,11 +294,6 @@ pub fn Reader(comptime mode: Mode) type {
         fn decodeStorageValue(encoded: []const u8) rlp.ParseError!u256 {
             return trie.decodeStorageValue(encoded);
         }
-
-        fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
-            const account = try context(ptr).loadMptAccount(target) orelse return false;
-            return !std.mem.eql(u8, &account.storage_root, &trie.empty_root_hash);
-        }
     };
 }
 
@@ -339,7 +333,6 @@ test "witness state reader returns empty state for empty root" {
     try std.testing.expect(!try state_reader.accountExists(target));
     try std.testing.expect(try state_reader.loadAccount(target) == null);
     try std.testing.expectEqual(@as(u256, 0), try state_reader.getStorage(target, 1));
-    try std.testing.expect(!try state_reader.accountHasStorage(target));
 }
 
 test "witness state reader loads account and code" {
@@ -371,7 +364,6 @@ test "witness state reader loads account and code" {
     try std.testing.expectEqual(@as(u64, 7), loaded.nonce);
     try std.testing.expectEqual(@as(u256, 99), loaded.balance);
     try std.testing.expectEqualSlices(u8, &code, try state_reader.loadCode(loaded.code_hash));
-    try std.testing.expect(!try state_reader.accountHasStorage(target));
 }
 
 test "witness state reader reads storage through account storage root" {
@@ -394,7 +386,6 @@ test "witness state reader reads storage through account storage root" {
     var witness = try Indexed.initFromNodes(scratch, state_root, &nodes, &.{});
     defer witness.deinit();
     const state_reader = witness.reader();
-    try std.testing.expect(try state_reader.accountHasStorage(target));
     try std.testing.expectEqual(@as(u256, 42), try state_reader.getStorage(target, 3));
     try std.testing.expectEqual(@as(u256, 0), try state_reader.getStorage(target, 4));
 

@@ -21,7 +21,6 @@ const TestReader = struct {
             .loadAccount = loadAccount,
             .loadCode = loadCode,
             .getStorage = getStorage,
-            .accountHasStorage = accountHasStorage,
         } };
     }
 
@@ -49,10 +48,6 @@ const TestReader = struct {
         const self = cast(ptr);
         if (!Address.eql(self.account_address, address) or key != self.storage_key) return 0;
         return self.storage_value;
-    }
-
-    fn accountHasStorage(ptr: *anyopaque, address: Address) !bool {
-        return accountExists(ptr, address);
     }
 };
 
@@ -531,7 +526,6 @@ test "selfdestruct finalization deletes account and masks accepted storage" {
 
     try std.testing.expect(state.getAccount(addr(1)) == null);
     try std.testing.expectEqual(@as(u256, 0), try state.getStorage(addr(1), 2));
-    try std.testing.expect(!try state.accountHasStorage(addr(1)));
     try std.testing.expect(!state.wasSelfdestructed(addr(1)));
 
     state.revertToCheckpoint(before_finalize);
@@ -549,7 +543,6 @@ test "selfdestruct finalization deletes account and masks accepted storage" {
 
     try std.testing.expect(state.getAccount(addr(1)) == null);
     try std.testing.expectEqual(@as(u256, 0), try state.getStorage(addr(1), 2));
-    try std.testing.expect(!try state.accountHasStorage(addr(1)));
     const accepted_after_delete = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 1), accepted_after_delete.accounts.len());
     try std.testing.expect(accepted_after_delete.accounts.at(0).account == null);
@@ -614,7 +607,6 @@ test "created-account finalization removes an empty reset account" {
 
     try std.testing.expectEqual(@as(u256, 11), try state.getStorage(addr(2), 7));
     try std.testing.expectEqual(@as(u256, 0), try state.getStorage(addr(2), 8));
-    try std.testing.expect(try state.accountHasStorage(addr(2)));
 }
 
 test "created-account finalization preserves a balance-only account" {
@@ -685,18 +677,6 @@ test "sparse lifecycle candidates are compact and survive marker rollback" {
 
     try state.markSelfdestructed(addr(1));
     try std.testing.expectEqual(@as(usize, 1), state.tx.?.lifecycle_accounts.items.len);
-}
-
-test "storage presence conservatively preserves a partially cleared base" {
-    var backing = TestReader{};
-    var state = TrackedState.initWithStateReader(std.testing.allocator, backing.reader());
-    defer state.deinit();
-
-    _ = state.beginTransaction();
-    state.beginScope();
-    try std.testing.expectEqual(.deleted, try state.setStorage(addr(1), 2, 0));
-
-    try std.testing.expect(try state.accountHasStorage(addr(1)));
 }
 
 test "pending changes are transaction local and accepted changes accumulate" {

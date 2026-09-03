@@ -3297,31 +3297,3 @@ test "pre-Spurious-Dragon retains empty accounts as real state" {
     }
     try std.testing.expect(try executor.state.accountExists(seeded_empty));
 }
-
-test "EIP-7610 storage-only accounts collide even though EIP-161 calls them dead" {
-    const London = evmz.t.Vm(.london) orelse return error.SkipZigTest;
-    const target = evmz.addr(0x7610);
-    var executor = London.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-
-    // Zero nonce, zero balance, no code, but storage: EIP-161 emptiness ignores
-    // storage, so this reads as absent, while the state trie still keeps the
-    // leaf because its storage root is non-empty.
-    var seeded = evmz.state.MemoryAccount.init(std.testing.allocator);
-    try seeded.storage.put(1, 1);
-    try executor.state.seedAccount(target, seeded);
-
-    const attempt = executor.state.beginTransaction();
-    executor.state.beginScope();
-    defer {
-        executor.state.closeScope();
-        executor.state.seal(attempt);
-        executor.state.discard(attempt);
-    }
-    // Dead for existence, code hash, and CALL gas; still present for the
-    // EIP-7610 creation predicate. `expectCreationCollision` in executor.zig
-    // covers the collision itself across every revision.
-    try std.testing.expect(!try executor.state.accountExists(target));
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getCodeHash(target));
-    try std.testing.expect(try executor.state.accountHasStorage(target));
-}

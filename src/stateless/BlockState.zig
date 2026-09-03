@@ -1320,27 +1320,6 @@ pub fn originalStorage(
     return self.storage[@intFromEnum(resolved.storage)].execution_original;
 }
 
-pub fn accountHasStorage(
-    self: *StatelessBlockState,
-    target: address.AddressWord,
-) (ResolutionError || Allocator.Error)!bool {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(id, .{ .accessed = true, .existence_read = true });
-    const row = &self.accounts[@intFromEnum(id)];
-    const range = self.plan.accountStorageRange(id);
-    const begin: usize = range.start;
-    const end: usize = range.end();
-    for (self.storage[begin..end]) |storage_row| {
-        if (storage_row.storage_generation == row.storage_generation and storage_row.current != 0)
-            return true;
-    }
-    if (row.flags.storage_wiped) return false;
-    return switch (self.facts.accounts[@intFromEnum(id)].parent) {
-        .absent => false,
-        .present => |parent| !std.mem.eql(u8, &parent.storage_root, &trie.empty_root_hash),
-    };
-}
-
 pub fn getTransientStorage(
     self: *StatelessBlockState,
     target: address.AddressWord,
@@ -2016,8 +1995,7 @@ fn accountExecutionValue(fact: records.AccountFact) AccountValue {
         .absent => .absent,
         .present => |parent| blk: {
             // Dropping `storage_root` is the point: liveness here is EIP-161,
-            // which ignores storage. `createCollision` asks `accountHasStorage`
-            // for the EIP-7610 residue instead.
+            // which ignores storage.
             const account: Account = .{
                 .nonce = parent.nonce,
                 .balance = parent.balance,
