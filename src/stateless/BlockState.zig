@@ -16,7 +16,6 @@ const artifacts = @import("./artifacts.zig");
 const records = @import("./ParentFacts.zig");
 const checkpoint_types = @import("../state/checkpoint.zig");
 const storage_status = @import("../state/storage.zig");
-const trie = @import("../eth/trie.zig");
 const sparse_hash_map = @import("../state/sparse_hash_map.zig");
 const Views = @import("./views.zig").ViewType(StatelessBlockState);
 

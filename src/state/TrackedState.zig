@@ -2423,11 +2423,6 @@ fn sealedTransaction(state: *const TrackedState) *const Transaction {
     return tx;
 }
 
-fn transactionShadowsStorage(tx: *const Transaction, key: StorageKey) bool {
-    const row = tx.storage.get(key) orelse return false;
-    return row.current != null;
-}
-
 inline fn accountObservation(
     tx: *Transaction,
     row: *const AccountRow,
