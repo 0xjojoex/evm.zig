@@ -26,9 +26,9 @@ permissions:
   contents: read
 
 env:
-  # ERE 0.16.2 server images, pinned by digest so VK provenance is immutable.
-  ERE_ZISK_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:4d00a96890a26dc54b523e537e9c1b25a26cf18d166bd3614fc97bbd09317091
-  ERE_ZISK_VERSION: 1.1.0-alpha
+  # Backend-version-matched ERE server images, pinned by digest so VK provenance is immutable.
+  ERE_ZISK_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:077e3e8e4ef8925e71e8111870dbdf4ef5c33c7869cfbf41e5d6005244132b8c
+  ERE_ZISK_VERSION: 1.2.0-alpha
   ERE_SP1_IMAGE: ghcr.io/eth-act/ere/ere-server-sp1@sha256:561ba9d13e0f4f198c57ad8c76b8320f691635275f6567bcb27b36d4e4159af4
   ERE_OPENVM_IMAGE: ghcr.io/eth-act/ere/ere-server-openvm@sha256:d56f5f59f1560bc2b58e84165accb8dc6586596ca1b9ff53b99862560f7b563c
 
