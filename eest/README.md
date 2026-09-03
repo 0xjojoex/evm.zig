@@ -85,7 +85,7 @@ For an exact corpus:
 
 ```sh
 zig build zkevm-resolve -- \
-  --input=tests-zkevm@v0.8.3 \
+  --input=tests-zkevm@vX.Y.Z \
   --manifest=/tmp/tests-zkevm.json
 zig build zkevm -- --corpus-manifest /tmp/tests-zkevm.json
 ```
@@ -110,7 +110,7 @@ and guest startup failures always fail. Strict evidence also requires an exact
 release and index hash.
 
 `zkevm-mutations` starts from the bounded paths in
-`fixtures/stateless-mutations-tests-zkevm-v0.8.3.txt`, applies structured
+`fixtures/stateless-mutations-tests-zkevm.txt`, applies structured
 schema-v1 SSZ mutations, and requires the intended typed BlockSTF status. This
 is an evmz-specific existence gate for witness rejection paths, not a second
 general fixture consumer or a coverage proof.

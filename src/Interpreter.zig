@@ -432,7 +432,11 @@ pub const CallFrame = struct {
         self.gas_reservoir = child.gas_reservoir;
         self.state_gas_spent +|= child.state_gas_spent;
         self.state_gas_from_gas_left +|= child.state_gas_from_gas_left;
-        if (!succeeded) self.refillStateGas(state_gas_charged);
+        if (succeeded) {
+            self.repayStateGasSpill();
+        } else {
+            self.refillStateGas(state_gas_charged);
+        }
         if (!gas_charged) return false;
         // EIP-2200: child call-frame refunds only survive committed frames.
         if (succeeded) self.gas_refund += child.gas_refund;
@@ -472,7 +476,7 @@ pub const CallFrame = struct {
 
     /// Refill state gas in LIFO order: gas spilled from `gas_left` is restored
     /// first, then the reservoir is credited.
-    pub fn refillStateGas(self: *CallFrame, gas: i64) void {
+    pub inline fn refillStateGas(self: *CallFrame, gas: i64) void {
         if (gas <= 0) return;
         const to_regular = @min(self.state_gas_from_gas_left, gas);
         self.gas_left = std.math.add(i64, self.gas_left, to_regular) catch std.math.maxInt(i64);
@@ -480,6 +484,17 @@ pub const CallFrame = struct {
         const to_reservoir = gas - to_regular;
         self.gas_reservoir = std.math.add(i64, self.gas_reservoir, to_reservoir) catch std.math.maxInt(i64);
         self.state_gas_spent = std.math.sub(i64, self.state_gas_spent, gas) catch std.math.minInt(i64);
+    }
+
+    /// Repay merged state-gas spill from reservoir credit after a successful child.
+    inline fn repayStateGasSpill(self: *CallFrame) void {
+        std.debug.assert(self.gas_reservoir >= 0);
+        std.debug.assert(self.state_gas_from_gas_left >= 0);
+        const repayment = @min(self.gas_reservoir, self.state_gas_from_gas_left);
+        self.gas_left += repayment;
+        self.gas_reservoir -= repayment;
+        self.state_gas_from_gas_left -= repayment;
+        std.debug.assert(self.gas_reservoir == 0 or self.state_gas_from_gas_left == 0);
     }
 
     /// Terminal EVM transition. Fault halts consume all remaining gas;
@@ -1201,6 +1216,45 @@ test "interpreter state gas charges reservoir before gas left and refills LIFO" 
     try std.testing.expectEqual(@as(i64, 1), frame.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 4), frame.state_gas_spent);
     try std.testing.expectEqual(@as(i64, 0), frame.state_gas_from_gas_left);
+}
+
+test "successful child merge repays state gas spill from reservoir" {
+    var host: Host = undefined;
+    var msg = evmz.t.defaultMessage();
+    msg.gas = 100;
+    var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        .host = &host,
+        .execution_context = &test_execution_context,
+        .msg = &msg,
+    });
+    defer owned.deinit();
+
+    owned.frame.state = .running;
+    owned.frame.gas_left = 90;
+    owned.frame.state_gas_spent = 10;
+    owned.frame.state_gas_from_gas_left = 10;
+    owned.frame.suspendWith(.{ .call = .{
+        .msg = msg,
+        .continuation = .{
+            .gas_limit = 20,
+            .out_offset = 0,
+            .out_size = 0,
+        },
+    } });
+
+    try owned.frame.resumeWithCall(.{
+        .outcome = .{ .status = .success, .cause = .none },
+        .output_data = &.{},
+        .gas_left = 20,
+        .gas_refund = 0,
+        .gas_reservoir = 7,
+        .state_gas_spent = -7,
+    });
+
+    try std.testing.expectEqual(@as(i64, 97), owned.frame.gas_left);
+    try std.testing.expectEqual(@as(i64, 0), owned.frame.gas_reservoir);
+    try std.testing.expectEqual(@as(i64, 3), owned.frame.state_gas_spent);
+    try std.testing.expectEqual(@as(i64, 3), owned.frame.state_gas_from_gas_left);
 }
 
 test "interpreter state gas charge is atomic on out of gas" {
