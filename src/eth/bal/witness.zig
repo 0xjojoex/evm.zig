@@ -88,7 +88,6 @@ const ProbeReader = struct {
             .loadAccount = loadAccount,
             .loadCode = loadCode,
             .getStorage = getStorage,
-            .accountHasStorage = accountHasStorage,
         } };
     }
 
@@ -123,12 +122,6 @@ const ProbeReader = struct {
         self.loaded_slots[self.loaded_slot_count] = .{ .address = account_address, .key = key };
         self.loaded_slot_count += 1;
         return 0;
-    }
-
-    fn accountHasStorage(ptr: *anyopaque, account_address: Address) !bool {
-        _ = ptr;
-        _ = account_address;
-        return false;
     }
 };
 

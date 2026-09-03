@@ -166,8 +166,7 @@ pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
             .backend_commit = backend_commit orelse return error.MissingBackendCommit,
             .backend_toolchain = backend_toolchain orelse return error.MissingBackendToolchain,
         };
-    } else if (corpus_manifest != null or
-        known_failures != null or
+    } else if (known_failures != null or
         source_ref != null or
         stateless_schema != null or
         zig_version != null or

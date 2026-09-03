@@ -175,10 +175,9 @@ pub const Account = struct {
     /// The account holds no state at all, so the trie stores no leaf for it.
     ///
     /// Deliberately not named `isEmpty`: this is stricter than EIP-161
-    /// emptiness, which ignores storage. An EIP-7610 storage-only account is
-    /// EIP-161-empty yet still keeps a leaf here, which is exactly why
-    /// creation has to collide with one. The EIP-161 predicate lives at the
-    /// execution layer instead - see `Spec.retains_empty_accounts`.
+    /// emptiness, which ignores storage. A storage-only account is EIP-161-empty
+    /// yet still keeps a leaf here. The EIP-161 predicate lives at the execution
+    /// layer instead - see `Spec.retains_empty_accounts`.
     pub fn hasNoState(self: Account) bool {
         return self.nonce == 0 and
             self.balance == 0 and

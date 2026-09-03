@@ -290,7 +290,7 @@ test "Amsterdam nested CREATE records its target before state-charge OOG" {
     try std.testing.expect(observations.found);
 }
 
-test "Amsterdam root CREATE records and charges a storage-only target before collision" {
+test "Amsterdam root CREATE records and charges a storage-only target as new" {
     const sender = evmz.addr(0xaaaa);
     const create_address = evmz.address.create(sender, 0);
     var observations = AccountObservation{ .address = create_address };

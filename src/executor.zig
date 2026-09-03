@@ -1824,13 +1824,7 @@ pub fn ExecutorType(
             if (try self.state.getAccountOrLoad(stateAddress(address))) |account| {
                 if (account.nonce != 0) return true;
             }
-            // EIP-7610 clarifies this rule retroactively for every Ethereum
-            // revision: storage-only destinations also collide. Absence cannot
-            // short-circuit that. EIP-161 deadness ignores storage, so a
-            // storage-bearing account reads as absent, yet the state trie keeps
-            // its leaf and creating over it would strand the storage.
-            return (try self.state.accountHasCode(stateAddress(address))) or
-                (try self.state.accountHasStorage(stateAddress(address)));
+            return self.state.accountHasCode(stateAddress(address));
         }
 
         /// Host.call resolver for direct `Interpreter.execute()` users. Top-level call
@@ -2537,14 +2531,28 @@ test "CREATE final stabilization reuses already-stable output" {
     try std.testing.expect(result.output_data.ptr == executor.lastOutputData().ptr);
 }
 
-test "EIP-7610 creation collision applies retroactively to every revision" {
+test "EIP-684 creation collision ignores storage-only destinations" {
     const target = evmz.addr(0x1234);
 
     // Sweeps only the fork set compiled into this build; ci's `all` lane
-    // restores the full retroactive matrix.
+    // restores the full revision matrix.
     inline for (evmz.t.enabled_revisions) |revision| {
-        try expectCreationCollision(revision, target);
+        try expectNoCreationCollision(revision, target);
     }
+}
+
+test "EIP-684 creation collision checks nonce and code" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const nonce_target = evmz.addr(0x1001);
+    const code_target = evmz.addr(0x1002);
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+
+    try evmz.t.seedExecutorAccount(&executor, nonce_target, .{ .nonce = 1 });
+    try evmz.t.seedExecutorAccount(&executor, code_target, .{ .code = &.{0x00} });
+
+    try std.testing.expect(try executor.createCollision(nonce_target));
+    try std.testing.expect(try executor.createCollision(code_target));
 }
 
 test "interior checkpoint guard restores unresolved state and preserves commits" {
@@ -2687,14 +2695,14 @@ test "nested runtime error restores its transferred checkpoint once" {
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 }
 
-fn expectCreationCollision(comptime revision: evmz.eth.Revision, target: Address) !void {
+fn expectNoCreationCollision(comptime revision: evmz.eth.Revision, target: Address) !void {
     const Exact = evmz.Vm(evmz.eth.specAt(revision));
     var executor = Exact.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     var target_account = evmz.state.MemoryAccount.init(std.testing.allocator);
     try target_account.storage.put(1, 1);
     try executor.state.seedAccount(target, target_account);
-    try std.testing.expect(try executor.createCollision(target));
+    try std.testing.expect(!try executor.createCollision(target));
 }
 
 test "nested call runtime owns its segment and keeps capture indices global" {

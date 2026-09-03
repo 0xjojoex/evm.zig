@@ -1890,53 +1890,6 @@ pub fn originalStorage(self: *TrackedState, address: Address, key: u256) !u256 {
     return scope_storage.execution_original.?;
 }
 
-pub fn accountHasStorage(self: *TrackedState, address: Address) !bool {
-    return switch (try self.storagePresence(address)) {
-        .empty => false,
-        // Point writes cannot prove they cleared the reader's final base slot.
-        // CREATE collision checks must therefore treat unknown as occupied.
-        .nonempty, .unknown => true,
-    };
-}
-
-const StoragePresence = enum { empty, nonempty, unknown };
-
-fn storagePresence(self: *TrackedState, address: Address) !StoragePresence {
-    var has_zero_override = false;
-    if (self.tx) |*tx| {
-        if (transactionStorageWiped(tx, address)) return .empty;
-        var tx_it = tx.storage.iterator();
-        while (tx_it.next()) |entry| {
-            if (!Address.eql(entry.key_ptr.address, address)) continue;
-            const current = entry.value_ptr.current orelse continue;
-            if (current != 0) return .nonempty;
-            const accepted_row = self.accepted.storage.get(entry.key_ptr.*);
-            if (entry.value_ptr.mutation.dirty or
-                (accepted_row != null and accepted_row.?.changed))
-            {
-                has_zero_override = true;
-            }
-        }
-    }
-
-    const accepted_wiped = acceptedStorageWiped(&self.accepted, address);
-    var accepted_it = self.accepted.storage.iterator();
-    while (accepted_it.next()) |entry| {
-        if (!Address.eql(entry.key_ptr.address, address)) continue;
-        if (self.tx) |*tx| {
-            if (transactionShadowsStorage(tx, entry.key_ptr.*)) continue;
-        }
-        if (accepted_wiped and !entry.value_ptr.changed) continue;
-        if (entry.value_ptr.value != 0) return .nonempty;
-        if (entry.value_ptr.changed) has_zero_override = true;
-    }
-    if (accepted_wiped) return .empty;
-
-    const reader = self.reader orelse return .empty;
-    if (!try reader.accountHasStorage(address)) return .empty;
-    return if (has_zero_override) .unknown else .nonempty;
-}
-
 pub fn getTransientStorage(self: *TrackedState, address: Address, key: u256) !u256 {
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
@@ -2468,11 +2421,6 @@ fn sealedTransaction(state: *const TrackedState) *const Transaction {
     std.debug.assert(tx.sealed);
     std.debug.assert(!tx.scope.active);
     return tx;
-}
-
-fn transactionShadowsStorage(tx: *const Transaction, key: StorageKey) bool {
-    const row = tx.storage.get(key) orelse return false;
-    return row.current != null;
 }
 
 inline fn accountObservation(

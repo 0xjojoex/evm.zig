@@ -598,7 +598,7 @@ wheels = [
 [[package]]
 name = "ethereum-execution"
 version = "2.19.0"
-source = { git = "https://github.com/ethereum/execution-specs?rev=3d473e865a6ff78321e8b7b015b0e9a4bb8da892#3d473e865a6ff78321e8b7b015b0e9a4bb8da892" }
+source = { git = "https://github.com/ethereum/execution-specs?rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2#8ca2f4ceefd83100a4d21d0c33747114278a0bc2" }
 dependencies = [
     { name = "cryptography" },
     { name = "ethereum-rlp" },
@@ -614,7 +614,7 @@ dependencies = [
 [[package]]
 name = "ethereum-execution-testing"
 version = "1.0.0"
-source = { git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=3d473e865a6ff78321e8b7b015b0e9a4bb8da892#3d473e865a6ff78321e8b7b015b0e9a4bb8da892" }
+source = { git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2#8ca2f4ceefd83100a4d21d0c33747114278a0bc2" }
 dependencies = [
     { name = "ckzg" },
     { name = "click" },
@@ -656,14 +656,15 @@ dependencies = [
 
 [[package]]
 name = "ethereum-hive"
-version = "0.1.0a5"
+version = "0.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
+    { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/a8/95676acd86095a5dcf5dacfa5a991175b3a547dcd5729735fea777b8feec/ethereum_hive-0.1.0a5.tar.gz", hash = "sha256:bf91d3144c263a1a6407c931b3864ab3edd40bc5c34b812e571e7c49cc70f9eb", size = 75064, upload-time = "2026-03-11T07:36:24.532Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/06/583cb86c2fef9e0da8bb8d4165c9dde076a8c9e1f940327dbbb64bf68dfc/ethereum_hive-0.1.0.tar.gz", hash = "sha256:7f047fc03f15fc43081432c4adca362e9dffd6bf2faad163f707c7221148d61b", size = 79244, upload-time = "2026-08-31T07:44:36.736Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/73/95/986727018ac0401562d91961e2f46462ed65a08e2d5162a255d9f871a7ad/ethereum_hive-0.1.0a5-py3-none-any.whl", hash = "sha256:3225747ed83a9124a697db0ab8d736c4820117462e64aa3395bbc1588c4d40d0", size = 37589, upload-time = "2026-03-11T07:36:23.286Z" },
+    { url = "https://files.pythonhosted.org/packages/93/2f/461e38bd697e90f6e7a2199193eedd3653e69ca331cc98431653b46ad156/ethereum_hive-0.1.0-py3-none-any.whl", hash = "sha256:5a511ef89bab8b4740ed501ce7c3d244085f687c5001d9fa1ecc2ab01ad14b51", size = 41184, upload-time = "2026-08-31T07:44:35.636Z" },
 ]
 
 [[package]]
@@ -703,8 +704,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ethereum-execution", git = "https://github.com/ethereum/execution-specs?rev=3d473e865a6ff78321e8b7b015b0e9a4bb8da892" },
-    { name = "ethereum-execution-testing", git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=3d473e865a6ff78321e8b7b015b0e9a4bb8da892" },
+    { name = "ethereum-execution", git = "https://github.com/ethereum/execution-specs?rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2" },
+    { name = "ethereum-execution-testing", git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2" },
 ]
 
 [[package]]

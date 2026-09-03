@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
         addStep(b, eest_exe, "zkevm-mutations", "Run typed stateless mutation rejection fixtures", &.{
             "zkevm-mutations",
             "--manifest",
-            "fixtures/stateless-mutations-tests-zkevm-v0.8.2.txt",
+            "fixtures/stateless-mutations-tests-zkevm-v0.8.3.txt",
         });
         addStep(b, eest_exe, "zkevm-input", "Extract one EEST zkEVM stateless input for a zkVM guest", &.{"zkevm-input"});
         addStep(b, eest_exe, "zkevm-ere", "Run raw ERE stateless input through native adapter", &.{"zkevm-ere"});
@@ -135,8 +135,8 @@ fn hasFixturePath(args: ?[]const []const u8) bool {
     return false;
 }
 
-const default_execution_input = "tests-glamsterdam-devnet@v8.1.1";
-const default_zkevm_input = "tests-zkevm@v0.8.2";
+const default_execution_input = "tests-glamsterdam-devnet@v8.1.3";
+const default_zkevm_input = "tests-zkevm@v0.8.3";
 
 const direct_selection =
     "state_test or (blockchain_test and " ++

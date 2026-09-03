@@ -21,7 +21,6 @@ pub const VTable = struct {
     loadCode: *const fn (ptr: *anyopaque, code_hash: [32]u8) anyerror![]const u8,
     loadCodeValidatesHash: bool = false,
     getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
-    accountHasStorage: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
 };
 
 pub fn accountExists(self: Reader, address: Address) !bool {
@@ -46,10 +45,6 @@ pub fn getStorage(self: Reader, address: Address, key: u256) !u256 {
     return self.vtable.getStorage(self.ptr, address, key);
 }
 
-pub fn accountHasStorage(self: Reader, address: Address) !bool {
-    return self.vtable.accountHasStorage(self.ptr, address);
-}
-
 pub fn empty() Reader {
     return .{ .ptr = &empty_context, .vtable = &empty_vtable };
 }
@@ -61,7 +56,6 @@ const empty_vtable = VTable{
     .loadAccount = emptyLoadAccount,
     .loadCode = emptyLoadCode,
     .getStorage = emptyGetStorage,
-    .accountHasStorage = emptyAccountHasStorage,
 };
 
 fn emptyAccountExists(ptr: *anyopaque, address: Address) !bool {
@@ -89,12 +83,6 @@ fn emptyGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
     return 0;
 }
 
-fn emptyAccountHasStorage(ptr: *anyopaque, address: Address) !bool {
-    _ = ptr;
-    _ = address;
-    return false;
-}
-
 test "empty state reader returns empty state" {
     const addr = @import("../address.zig").addr;
     const reader = Reader.empty();
@@ -102,5 +90,4 @@ test "empty state reader returns empty state" {
     try std.testing.expectEqual(@as(?Account, null), try reader.loadAccount(addr(1)));
     try std.testing.expectEqualSlices(u8, &.{}, try reader.loadCode(crypto.keccak256_empty));
     try std.testing.expectEqual(@as(u256, 0), try reader.getStorage(addr(1), 1));
-    try std.testing.expect(!try reader.accountHasStorage(addr(1)));
 }

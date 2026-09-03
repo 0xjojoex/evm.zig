@@ -419,7 +419,6 @@ test "existence-only semantic access does not require account fields" {
                 .loadAccount = loadAccount,
                 .loadCode = loadCode,
                 .getStorage = getStorage,
-                .accountHasStorage = accountHasStorage,
             } };
         }
 
@@ -439,10 +438,6 @@ test "existence-only semantic access does not require account fields" {
 
         fn getStorage(_: *anyopaque, _: Address, _: u256) !u256 {
             return 0;
-        }
-
-        fn accountHasStorage(_: *anyopaque, _: Address) !bool {
-            return false;
         }
     };
 

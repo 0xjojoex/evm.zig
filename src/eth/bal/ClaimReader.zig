@@ -11,13 +11,6 @@
 //! `EXTCODESIZE` already treat absent and EIP-161-empty accounts identically,
 //! so the claim never needs an indexed lifecycle fact to separate them.
 //!
-//! Aliveness has no storage exception. EIP-7523 retires the empty account, and
-//! EIP-161 emptiness ignores storage, so the residual EIP-7610 storage-only
-//! accounts must be alive through another field - on Mainnet, balance - and
-//! already satisfy the rule. Whole-storage presence stays parent-stable while
-//! an address remains eligible for the EIP-7610 predicate, so
-//! `accountHasStorage` delegates to the authenticated base reader.
-//!
 //! This lane is speculative: its output is gated by the observed BAL hash
 //! matching the claimed BAL commitment and by the block's roots. A claim that
 //! violates these Amsterdam invariants can only produce a mismatch, never a
@@ -68,7 +61,6 @@ const vtable = Reader.VTable{
     .loadAccount = loadAccount,
     .loadCode = loadCode,
     .getStorage = getStorage,
-    .accountHasStorage = accountHasStorage,
 };
 
 fn context(ptr: *anyopaque) *ClaimReader {
@@ -134,17 +126,6 @@ fn getStorage(ptr: *anyopaque, target: Address, key: u256) !u256 {
     };
 }
 
-/// Only `createCollision` consults whole-storage presence, and only for an
-/// address whose nonce is zero and whose code is empty. Such an address cannot
-/// have executed `SSTORE`, cannot have been delegated to without a nonce bump,
-/// and cannot have been created over, so no earlier block position can have
-/// changed its storage. Parent state is therefore already exact.
-fn accountHasStorage(ptr: *anyopaque, target: Address) !bool {
-    const self = context(ptr);
-    _ = self.claim.account(target) orelse return self.fail(.account_not_covered);
-    return self.base.accountHasStorage(target);
-}
-
 fn fail(self: *ClaimReader, failure: StrategyFailure) Error {
     self.strategy_failure = failure;
     return switch (failure) {
@@ -177,7 +158,6 @@ const TestBase = struct {
             .loadAccount = testLoadAccount,
             .loadCode = testLoadCode,
             .getStorage = testGetStorage,
-            .accountHasStorage = testAccountHasStorage,
         } };
     }
 
@@ -211,15 +191,6 @@ const TestBase = struct {
             if (entry.key == key) return entry.value;
         }
         return 0;
-    }
-
-    fn testAccountHasStorage(ptr: *anyopaque, target: Address) !bool {
-        const self = from(ptr);
-        if (!Address.eql(self.target, target)) return false;
-        for (self.storage) |entry| {
-            if (entry.value != 0) return true;
-        }
-        return false;
     }
 };
 
@@ -369,42 +340,6 @@ test "ClaimReader resolves an emptied account to absent" {
     var after = ClaimReader.init(base.reader(), &view, 1);
     try std.testing.expect(!(try after.reader().accountExists(target)));
     try std.testing.expectEqual(@as(?Account, null), try after.reader().loadAccount(target));
-}
-
-test "ClaimReader answers whole-storage presence from parent state" {
-    const target = address.addr(1);
-    const clear_changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 0 }};
-    const clear_only_slots = [_]bal.SlotChanges{.{ .slot = 1, .changes = &clear_changes }};
-    const claim = [_]bal.AccountChanges{.{ .address = target, .storage_changes = &clear_only_slots }};
-    try bal.validate(&claim, .{});
-
-    var view = try ClaimView.initAssumeValidated(std.testing.allocator, &claim);
-    defer view.deinit(std.testing.allocator);
-
-    // An EIP-7610 leaf: no nonce, no code, storage present. It must also carry
-    // a balance, because EIP-7523 forbids an EIP-161-empty account in
-    // post-merge state and EIP-161 emptiness ignores storage.
-    const base_storage = [_]TestStorage{.{ .key = 8, .value = 10 }};
-    var storage_only = TestBase{
-        .target = target,
-        .account = .{ .balance = 1 },
-        .storage = &base_storage,
-    };
-    var positioned = ClaimReader.init(storage_only.reader(), &view, 1);
-    try std.testing.expect(try positioned.reader().accountHasStorage(target));
-    // Alive through balance, so `createCollision` still reaches the storage
-    // predicate without an aliveness exception.
-    try std.testing.expect(try positioned.reader().accountExists(target));
-
-    var empty_base = TestBase{ .target = target };
-    var absent = ClaimReader.init(empty_base.reader(), &view, 1);
-    try std.testing.expect(!(try absent.reader().accountHasStorage(target)));
-
-    var uncovered = ClaimReader.init(storage_only.reader(), &view, 1);
-    try std.testing.expectError(
-        error.BlockAccessListAccountNotCovered,
-        uncovered.reader().accountHasStorage(address.addr(2)),
-    );
 }
 
 test "ClaimReader resolves an untouched empty leaf to absent" {
