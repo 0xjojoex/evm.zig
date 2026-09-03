@@ -459,9 +459,9 @@ jobs:
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
       ZIG_VERSION: 0.16.0
-      SP1_VERSION: v6.4.0
-      SP1_COMMIT: f66b4bff51d0ccff51d152e0f7f66b2ffedf3529
-      SP1_PROVIDER_COMMIT: 7929b001303feb6803ce1214557d5ab1f17eee84
+      SP1_VERSION: v6.6.0
+      SP1_COMMIT: f5a5bbf6a1cf6007315b410d88678d96fb399fb5
+      SP1_PROVIDER_COMMIT: b4f72fe1de5d6d26b3d3f531fcabd137b03e3338
       SP1_RUST_TOOLCHAIN: succinct
 
     steps:
@@ -567,7 +567,7 @@ jobs:
           {
             echo "SP1 ${SP1_VERSION} (${SP1_COMMIT})"
             echo "SP1 fixture workers 4"
-            echo "ERE v0.16.3 provider with SP1 patch ${SP1_PROVIDER_COMMIT}"
+            echo "ERE v0.18.0 provider with SP1 patch ${SP1_PROVIDER_COMMIT}"
             sha256sum "${SP1_HOST}" "${SP1_ELF}"
           } | tee guest-evidence/runtime.txt
 

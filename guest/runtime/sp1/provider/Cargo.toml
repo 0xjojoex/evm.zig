@@ -10,18 +10,18 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.3" }
+ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.18.0" }
 
 # Match ERE's SP1 guests until the standards-conformance fixes in SP1 #2865
 # are released upstream.
 [patch.crates-io]
-sp1-lib = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
+sp1-lib = { git = "https://github.com/han0110/sp1", rev = "b4f72fe1de5d6d26b3d3f531fcabd137b03e3338" }
 
 [patch."https://github.com/succinctlabs/sp1.git"]
-sp1-lib = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
-sp1-primitives = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
-sp1-zkvm = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84" }
-sp1-libzkevm = { git = "https://github.com/han0110/sp1", rev = "7929b001303feb6803ce1214557d5ab1f17eee84", package = "libzkevm" }
+sp1-lib = { git = "https://github.com/han0110/sp1", rev = "b4f72fe1de5d6d26b3d3f531fcabd137b03e3338" }
+sp1-primitives = { git = "https://github.com/han0110/sp1", rev = "b4f72fe1de5d6d26b3d3f531fcabd137b03e3338" }
+sp1-zkvm = { git = "https://github.com/han0110/sp1", rev = "b4f72fe1de5d6d26b3d3f531fcabd137b03e3338" }
+sp1-libzkevm = { git = "https://github.com/han0110/sp1", rev = "b4f72fe1de5d6d26b3d3f531fcabd137b03e3338", package = "libzkevm" }
 
 [profile.release]
 opt-level = 3

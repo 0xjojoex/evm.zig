@@ -29,8 +29,10 @@ env:
   # Backend-version-matched ERE server images, pinned by digest so VK provenance is immutable.
   ERE_ZISK_IMAGE: ghcr.io/eth-act/ere/ere-server-zisk@sha256:077e3e8e4ef8925e71e8111870dbdf4ef5c33c7869cfbf41e5d6005244132b8c
   ERE_ZISK_VERSION: 1.2.0-alpha
-  ERE_SP1_IMAGE: ghcr.io/eth-act/ere/ere-server-sp1@sha256:561ba9d13e0f4f198c57ad8c76b8320f691635275f6567bcb27b36d4e4159af4
-  ERE_OPENVM_IMAGE: ghcr.io/eth-act/ere/ere-server-openvm@sha256:d56f5f59f1560bc2b58e84165accb8dc6586596ca1b9ff53b99862560f7b563c
+  ERE_SP1_IMAGE: ghcr.io/eth-act/ere/ere-server-sp1@sha256:9956c21bcd724f7b8aa9849b42a6b0bf73cf98311757b135a8aa356a4c173005
+  ERE_SP1_VERSION: v6.6.0
+  ERE_OPENVM_IMAGE: ghcr.io/eth-act/ere/ere-server-openvm@sha256:a242d103890be2f1bddd92bf84eb8c7e617a05b62160c6b0f943f511a7d1bc60
+  ERE_OPENVM_VERSION: v2.1.0-preview
 
 jobs:
   qualify:
@@ -97,13 +99,16 @@ jobs:
           jq -e '.schema_version == 2 and .gate.strict == true and .gate.passed == true' "${evidence}"
           test "$(jq -er .backend "${evidence}")" = "${BACKEND}"
           test "$(jq -er .source_ref "${evidence}")" = "${SOURCE_COMMIT}"
-          if [[ "${BACKEND}" == zisk ]]; then
-            backend_version="$(jq -er .guest.backend_version "${evidence}")"
-            [[ "${backend_version}" == "${ERE_ZISK_VERSION}" ]] || {
-              echo "ZisK ${backend_version} requires a version-matched ERE keygen image; pinned image contains ${ERE_ZISK_VERSION}" >&2
-              exit 1
-            }
-          fi
+          case "${BACKEND}" in
+            zisk) expected_version="${ERE_ZISK_VERSION}" ;;
+            sp1) expected_version="${ERE_SP1_VERSION}" ;;
+            openvm) expected_version="${ERE_OPENVM_VERSION}" ;;
+          esac
+          backend_version="$(jq -er .guest.backend_version "${evidence}")"
+          [[ "${backend_version}" == "${expected_version}" ]] || {
+            echo "${BACKEND} ${backend_version} requires a version-matched ERE keygen image; pinned image contains ${expected_version}" >&2
+            exit 1
+          }
 
           elf_name="$(jq -er '.guest.elf_name | select(type == "string" and length > 0)' "${evidence}")"
           test "$(basename "${elf_name}")" = "${elf_name}"
