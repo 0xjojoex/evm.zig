@@ -2,6 +2,7 @@
 
 const std = @import("std");
 
+const Checkpoint = @import("../state/checkpoint.zig").Checkpoint;
 const Status = @import("../evm.zig").interpreter.Status;
 
 /// Owns one interior call/create checkpoint until it is resolved or
@@ -11,10 +12,10 @@ pub fn Guard(comptime State: type) type {
         const Self = @This();
 
         state: *State,
-        checkpoint_state: State.Checkpoint,
+        checkpoint_state: Checkpoint,
         open: bool = true,
 
-        pub fn init(state: *State, checkpoint_state: State.Checkpoint) Self {
+        pub fn init(state: *State, checkpoint_state: Checkpoint) Self {
             return .{ .state = state, .checkpoint_state = checkpoint_state };
         }
 

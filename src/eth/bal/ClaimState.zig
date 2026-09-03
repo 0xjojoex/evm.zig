@@ -574,7 +574,7 @@ pub const PendingView = struct {
     }
 };
 
-pub const Checkpoint = checkpoint_types.Checkpoint;
+const Checkpoint = checkpoint_types.Checkpoint;
 
 pub const BranchCheckpoint = struct {
     owner: *const ClaimState,
@@ -1121,11 +1121,9 @@ pub fn discard(self: *ClaimState, id: AttemptId) void {
     self.finishTransaction();
 }
 
-/// The returned value is the complete scope record: `storage_wipes_len`
-/// carries the parent scope generation (the borrowed `checkpoint.Checkpoint`
-/// ABI has no field for it), and the block-lifetime dirty lists need no saved
-/// lengths because revert restores row flags through the journal and stale
-/// entries are compacted out at `retain`.
+/// The returned value is the complete scope record. The block-lifetime dirty
+/// and wipe lists need no saved lengths because revert restores row flags
+/// through the journal and stale entries are compacted out at `retain`.
 pub fn checkpoint(self: *ClaimState) Checkpoint {
     self.assertTransaction();
     std.debug.assert(self.scope_depth < std.math.maxInt(u32));
@@ -1136,10 +1134,11 @@ pub fn checkpoint(self: *ClaimState) Checkpoint {
     return .{
         .attempt_id = self.active_attempt_id.?,
         .scope_generation = generation,
+        .parent_scope_generation = parent_generation,
         .journal_len = @intCast(self.journal.entries.items.len),
         .changed_accounts_len = @intCast(self.changed_accounts.items.len),
         .changed_storage_len = @intCast(self.changed_storage.items.len),
-        .storage_wipes_len = parent_generation,
+        .storage_wipes_len = 0,
         .logs = self.logs.checkpoint(),
     };
 }
@@ -1185,7 +1184,7 @@ pub fn restoreBranch(self: *ClaimState, value: *BranchCheckpoint) void {
 
 pub fn commitCheckpoint(self: *ClaimState, value: Checkpoint) void {
     self.validateCheckpoint(value);
-    self.active_scope_generation = value.storage_wipes_len;
+    self.active_scope_generation = @intCast(value.parent_scope_generation);
     self.scope_depth -= 1;
 }
 
@@ -1204,7 +1203,7 @@ pub fn revertToCheckpoint(self: *ClaimState, value: Checkpoint) void {
         .topics_len = value.logs.topics_len,
         .data_len = value.logs.data_len,
     });
-    self.active_scope_generation = value.storage_wipes_len;
+    self.active_scope_generation = @intCast(value.parent_scope_generation);
     self.scope_depth -= 1;
 }
 

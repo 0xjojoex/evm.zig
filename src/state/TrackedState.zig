@@ -972,7 +972,7 @@ pub const Journal = struct {
     }
 };
 
-pub const Checkpoint = checkpoint_types.Checkpoint;
+const Checkpoint = checkpoint_types.Checkpoint;
 
 const AcceptedBranchCheckpoint = struct {
     generation: u64,
@@ -1421,6 +1421,7 @@ pub fn checkpoint(self: *TrackedState) Checkpoint {
     return .{
         .attempt_id = tx.id,
         .scope_generation = tx.scope.generation,
+        .parent_scope_generation = tx.scope.generation,
         .journal_len = tx.undo.len(),
         .changed_accounts_len = @intCast(tx.changed_accounts.items.len),
         .changed_storage_len = @intCast(tx.changed_storage.items.len),

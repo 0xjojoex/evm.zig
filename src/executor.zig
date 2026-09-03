@@ -23,6 +23,7 @@ const std = @import("std");
 
 const evmz = @import("./evm.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
+const Checkpoint = @import("./state/checkpoint.zig").Checkpoint;
 const checkpoint_guard = @import("./executor/checkpoint.zig");
 const frame_io = @import("./frame_io.zig");
 const FrameStore = @import("./executor/FrameStore.zig");
@@ -658,7 +659,7 @@ pub fn ExecutorType(
         /// Treat this token as move-only.
         pub const ExecutionCheckpoint = struct {
             executor: *Executor,
-            journal_checkpoint: State.Checkpoint,
+            journal_checkpoint: Checkpoint,
             id: usize,
             parent_id: usize,
             open: bool = true,
@@ -1104,7 +1105,7 @@ pub fn ExecutorType(
         };
 
         const ChildCall = struct {
-            checkpoint_state: State.Checkpoint,
+            checkpoint_state: Checkpoint,
             bytecode: Bytecode.View,
         };
 
@@ -1119,7 +1120,7 @@ pub fn ExecutorType(
         };
 
         const ChildCreate = struct {
-            checkpoint_state: State.Checkpoint,
+            checkpoint_state: Checkpoint,
             /// Consumed synchronously while the originating CREATE action or
             /// root message remains alive. Address, kind, and init code are
             /// projections of this message and must not be duplicated here.
@@ -1186,7 +1187,7 @@ pub fn ExecutorType(
                 self: *CallRuntime,
                 msg: *const Host.Message,
                 bytecode: Bytecode.View,
-                checkpoint_state: State.Checkpoint,
+                checkpoint_state: Checkpoint,
                 call_capture: ?evmz.trace.CallToken,
             ) !void {
                 try self.pushFrame(msg, bytecode, .{
