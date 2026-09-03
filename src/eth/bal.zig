@@ -4,7 +4,7 @@
 //! - model (`model.zig`): list shape, validation, encoding, item costs.
 //! - `ClaimPlan`: one validated list projected to dense account/storage IDs in
 //!   trie order; `ClaimView` and `diff` read and compare lists.
-//! - `ClaimState`: the second implementation of the executor's state contract
+//! - `ClaimState`: the second implementation of the executor's state lane surface
 //!   (the first is `evmz.state.TrackedState`), keyed by `ClaimPlan` IDs over the
 //!   closed universe the list declares. `ParentFacts`, `claim_artifacts`, and
 //!   `claim_commit` are its ID-native inputs, code store, and commit path.

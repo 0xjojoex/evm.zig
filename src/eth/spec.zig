@@ -131,64 +131,80 @@ const semantics = struct {
         return delegation_code.delegationTarget(code) != null;
     }
 
-    fn legacyIntrinsicBase(_: tx_gas.IntrinsicGasOptions) ?u64 {
+    fn legacyIntrinsicBase(_: tx_gas.IntrinsicGasOptions) error{Overflow}!u64 {
         return eth_gas.transaction_cost;
     }
 
-    fn amsterdamIntrinsicBase(options: tx_gas.IntrinsicGasOptions) ?u64 {
+    fn amsterdamIntrinsicBase(options: tx_gas.IntrinsicGasOptions) error{Overflow}!u64 {
         var gas: u64 = eip8037.tx_base_cost;
         if (options.is_create) {
-            gas = std.math.add(u64, gas, eip8038.create_access_cost) catch return null;
+            gas = try std.math.add(u64, gas, eip8038.create_access_cost);
         } else if (!options.is_self_transfer) {
-            gas = std.math.add(u64, gas, eip8038.cold_account_access_cost) catch return null;
+            gas = try std.math.add(u64, gas, eip8038.cold_account_access_cost);
         }
         if (options.value != 0 and !options.is_create and !options.is_self_transfer) {
-            gas = std.math.add(u64, gas, eip8037.tx_value_cost) catch return null;
+            gas = try std.math.add(u64, gas, eip8037.tx_value_cost);
         }
         return gas;
     }
 
-    fn calldataBeforeIstanbul(input: []const u8) ?u64 {
+    fn calldataBeforeIstanbul(input: []const u8) error{Overflow}!u64 {
         return calldataCost(input, eth_gas.tx_data_nonzero_cost);
     }
 
-    fn calldataSinceIstanbul(input: []const u8) ?u64 {
+    fn calldataSinceIstanbul(input: []const u8) error{Overflow}!u64 {
         return calldataCost(input, eth_gas.eip2028_tx_data_nonzero_cost);
     }
 
-    fn calldataCost(input: []const u8, nonzero_cost: u64) ?u64 {
+    fn calldataCost(input: []const u8, nonzero_cost: u64) error{Overflow}!u64 {
         var gas: u64 = 0;
         for (input) |byte| {
-            gas = std.math.add(u64, gas, if (byte == 0) eth_gas.tx_data_zero_cost else nonzero_cost) catch return null;
+            gas = try std.math.add(
+                u64,
+                gas,
+                if (byte == 0) eth_gas.tx_data_zero_cost else nonzero_cost,
+            );
         }
         return gas;
     }
 
-    fn noAccessListData(_: tx_gas.AccessListCounts) ?u64 {
+    fn noAccessListData(_: tx_gas.AccessListCounts) error{Overflow}!u64 {
         return 0;
     }
 
-    fn amsterdamAccessListData(counts: tx_gas.AccessListCounts) ?u64 {
+    fn amsterdamAccessListData(counts: tx_gas.AccessListCounts) error{Overflow}!u64 {
         return eth_tx.accessListDataCost(counts);
     }
 
-    fn noFloor(_: tx_gas.FloorGasInput) ?u64 {
+    fn noFloor(_: tx_gas.FloorGasInput) error{Overflow}!?u64 {
         return null;
     }
 
-    fn pragueFloor(input: tx_gas.FloorGasInput) ?u64 {
-        const tokens = eth_tx.calldataTokenCount(input.input) orelse return null;
-        const data_cost = std.math.mul(u64, tokens, eip7623.total_cost_floor_per_token) catch return null;
-        return std.math.add(u64, eth_gas.transaction_cost, data_cost) catch null;
+    fn pragueFloor(input: tx_gas.FloorGasInput) error{Overflow}!?u64 {
+        const tokens = try eth_tx.calldataTokenCount(input.input);
+        const data_cost = try std.math.mul(
+            u64,
+            tokens,
+            eip7623.total_cost_floor_per_token,
+        );
+        return try std.math.add(u64, eth_gas.transaction_cost, data_cost);
     }
 
-    fn amsterdamFloor(input: tx_gas.FloorGasInput) ?u64 {
-        const bytes = std.math.cast(u64, input.input.len) orelse return null;
+    fn amsterdamFloor(input: tx_gas.FloorGasInput) error{Overflow}!?u64 {
+        const bytes = std.math.cast(u64, input.input.len) orelse return error.Overflow;
         // EIP-7976 charges every byte as four floor tokens, so zero and
         // non-zero bytes both cost 64 gas on the floor path.
-        const data_cost = std.math.mul(u64, bytes, eip7976.floor_cost_per_nonzero_byte) catch return null;
-        var gas = std.math.add(u64, amsterdamIntrinsicBase(input.options) orelse return null, data_cost) catch return null;
-        gas = std.math.add(u64, gas, amsterdamAccessListData(input.options.access_list_counts) orelse return null) catch return null;
+        const data_cost = try std.math.mul(
+            u64,
+            bytes,
+            eip7976.floor_cost_per_nonzero_byte,
+        );
+        var gas = try std.math.add(u64, try amsterdamIntrinsicBase(input.options), data_cost);
+        gas = try std.math.add(
+            u64,
+            gas,
+            try amsterdamAccessListData(input.options.access_list_counts),
+        );
         return gas;
     }
 
@@ -352,21 +368,22 @@ const semantics = struct {
         return code.len > 0 and code[0] == 0xef;
     }
 
-    fn legacyDepositRegularGas(runtime_size: i64) ?i64 {
-        return std.math.mul(i64, runtime_size, eth_gas.code_deposit_byte_cost) catch null;
+    fn legacyDepositRegularGas(runtime_size: i64) error{Overflow}!i64 {
+        return std.math.mul(i64, runtime_size, eth_gas.code_deposit_byte_cost);
     }
 
-    fn amsterdamDepositRegularGas(runtime_size: i64) ?i64 {
-        const words = @divFloor(runtime_size + 31, 32);
-        return std.math.mul(i64, words, eip8037.code_deposit_word_cost) catch null;
+    fn amsterdamDepositRegularGas(runtime_size: i64) error{Overflow}!i64 {
+        const padded_size = try std.math.add(i64, runtime_size, 31);
+        const words = @divFloor(padded_size, 32);
+        return std.math.mul(i64, words, eip8037.code_deposit_word_cost);
     }
 
-    fn noDepositStateGas(_: i64) ?i64 {
+    fn noDepositStateGas(_: i64) error{Overflow}!i64 {
         return 0;
     }
 
-    fn amsterdamDepositStateGas(runtime_size: i64) ?i64 {
-        return std.math.mul(i64, runtime_size, eip8037.cost_per_state_byte) catch null;
+    fn amsterdamDepositStateGas(runtime_size: i64) error{Overflow}!i64 {
+        return std.math.mul(i64, runtime_size, eip8037.cost_per_state_byte);
     }
 
     fn preShanghaiInitcodeWordGas(is_create2: bool) i64 {

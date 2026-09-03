@@ -1,6 +1,6 @@
 //! Claim-indexed Amsterdam execution state over a validated BAL namespace.
 //!
-//! The counterpart of `state.TrackedState`: the same executor state contract,
+//! The counterpart of `state.TrackedState`: the same executor state-lane surface,
 //! but keyed by `ClaimPlan` IDs over the closed universe the block access list
 //! declares rather than by address over an open one. Rows stay dense arrays
 //! indexed by claim id. This module owns no MPT topology. It takes ownership of the `ClaimPlan` and
@@ -18,7 +18,7 @@ const Account = @import("../../state/Account.zig");
 const artifacts = @import("claim_artifacts.zig");
 const records = @import("ParentFacts.zig");
 const checkpoint_types = @import("../../state/checkpoint.zig");
-const contract = @import("../../state/contract.zig");
+const state_types = @import("../../state.zig");
 const storage_status = @import("../../state/storage.zig");
 const sparse_hash_map = @import("../../state/sparse_hash_map.zig");
 
@@ -98,8 +98,8 @@ const ResolvedStorage = struct {
 };
 
 pub const CodeError = artifacts.CodeStore.CacheError;
-pub const AccessHint = contract.AccessHint;
-pub const FinalizationRules = contract.FinalizationRules;
+pub const AccessHint = state_types.AccessHint;
+pub const FinalizationRules = state_types.FinalizationRules;
 /// Every row exists from admission, sized by the claim plan. There is nothing
 /// to reserve or reuse, so the executor skips its capacity hooks at comptime.
 pub const grows_on_touch = false;

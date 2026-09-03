@@ -795,7 +795,7 @@ test "transaction STF uses comptime transaction gas policy" {
     default_execution.discard();
 
     const Overrides = struct {
-        fn intrinsicBaseGas(_: transaction.IntrinsicGasOptions) ?u64 {
+        fn intrinsicBaseGas(_: transaction.IntrinsicGasOptions) error{Overflow}!u64 {
             return 42_000;
         }
     };

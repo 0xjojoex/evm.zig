@@ -45,25 +45,28 @@ pub const TransactionSpec = struct {
     blob_schedule: ?tx_blob.BlobSchedule,
     /// EIP-3860 initcode ceiling for create transactions; maxInt is uncapped.
     max_initcode_size: usize,
-    /// Base intrinsic gas for the transaction shape; null on overflow.
-    intrinsicBaseGas: *const fn (tx_gas.IntrinsicGasOptions) ?u64,
+    /// Base intrinsic gas for the transaction shape; returns `error.Overflow`
+    /// when the exact cost is unrepresentable.
+    intrinsicBaseGas: *const fn (tx_gas.IntrinsicGasOptions) error{Overflow}!u64,
     /// Additional intrinsic gas for create transactions (EIP-2).
     create_intrinsic_gas: u64,
-    /// Intrinsic calldata pricing; null on overflow.
-    calldataGas: *const fn ([]const u8) ?u64,
+    /// Intrinsic calldata pricing; returns `error.Overflow` when the exact cost
+    /// is unrepresentable.
+    calldataGas: *const fn ([]const u8) error{Overflow}!u64,
     /// Per-address access-list intrinsic gas (EIP-2930).
     access_list_address_gas: u64,
     /// Per-storage-key access-list intrinsic gas (EIP-2930).
     storage_key_gas: u64,
-    /// Access-list data pricing beyond the per-entry charges; null on
-    /// overflow.
-    accessListDataGas: *const fn (tx_gas.AccessListCounts) ?u64,
+    /// Access-list data pricing beyond the per-entry charges; returns
+    /// `error.Overflow` when the exact cost is unrepresentable.
+    accessListDataGas: *const fn (tx_gas.AccessListCounts) error{Overflow}!u64,
     /// Per-word intrinsic initcode charge for create transactions (EIP-3860).
     initcode_word_gas: u64,
     /// Per-authorization intrinsic gas (EIP-7702).
     authorization_intrinsic_gas: u64,
-    /// Calldata floor on gas used (EIP-7623); null when no floor applies.
-    floorGas: *const fn (tx_gas.FloorGasInput) ?u64,
+    /// Calldata floor on gas used (EIP-7623). A null payload only means no
+    /// floor applies; `error.Overflow` means the exact floor is unrepresentable.
+    floorGas: *const fn (tx_gas.FloorGasInput) error{Overflow}!?u64,
     /// Cap on the regular-gas budget derived from the transaction gas limit
     /// (EIP-7825); null is uncapped.
     regular_gas_cap: ?u64,
@@ -237,10 +240,12 @@ pub const CreateSpec = struct {
     code_size_limit: ?usize,
     /// Rejects runtime code by content (EIP-3541 leading 0xEF).
     rejectsCode: *const fn ([]const u8) bool,
-    /// Code-deposit charge from runtime size; null on overflow.
-    depositRegularGas: *const fn (i64) ?i64,
-    /// Code-deposit state-gas charge (Amsterdam); null on overflow.
-    depositStateGas: *const fn (i64) ?i64,
+    /// Code-deposit charge from runtime size; returns `error.Overflow` when the
+    /// exact cost is unrepresentable.
+    depositRegularGas: *const fn (i64) error{Overflow}!i64,
+    /// Code-deposit state-gas charge (Amsterdam); returns `error.Overflow` when
+    /// the exact cost is unrepresentable.
+    depositStateGas: *const fn (i64) error{Overflow}!i64,
     /// Frontier quirk: deposit out-of-gas keeps the account with empty code
     /// instead of failing the create.
     deposit_regular_gas_oog_commits: bool,

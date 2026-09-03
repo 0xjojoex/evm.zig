@@ -43,7 +43,6 @@ const AccountState = evmz.state.Account;
 const BlockHashSource = evmz.BlockHashSource;
 const Bytecode = evmz.Bytecode;
 const Spec = @import("./spec.zig").Spec;
-const state_contract = @import("./state/contract.zig");
 const prepared_code = evmz.prepared_code;
 const ExecutionContext = evmz.execution.ExecutionContext;
 const ExecutionGas = evmz.execution.ExecutionGas;
@@ -149,8 +148,10 @@ pub fn ExecutorType(
     comptime ExecutionState: type,
     comptime options_value: CompileOptions,
 ) type {
-    comptime ExecutionState.checkSpec(spec);
-    comptime state_contract.check(ExecutionState.State);
+    comptime {
+        ExecutionState.checkSpec(spec);
+        evmz.state.checkLane(ExecutionState.State);
+    }
 
     return struct {
         const Executor = @This();
@@ -852,13 +853,13 @@ pub fn ExecutorType(
 
         /// Capacity advice for the current transaction attempt. A lane that
         /// does not grow on touch has nothing to reserve.
-        pub fn reserveAccessHint(self: *Executor, hint: state_contract.AccessHint) !void {
+        pub fn reserveAccessHint(self: *Executor, hint: evmz.state.AccessHint) !void {
             if (comptime State.grows_on_touch) try self.state.reserveAccessHint(hint);
         }
 
         /// Capacity advice for the accepted branch. A lane that does not grow
         /// on touch has nothing to reserve.
-        pub fn reserveAcceptedAccessHint(self: *Executor, hint: state_contract.AccessHint) !void {
+        pub fn reserveAcceptedAccessHint(self: *Executor, hint: evmz.state.AccessHint) !void {
             if (comptime State.grows_on_touch) try self.state.reserveAcceptedAccessHint(hint);
         }
 
@@ -1763,7 +1764,7 @@ pub fn ExecutorType(
                 create_checkpoint.restore();
                 return self.createFailureFromResult(result, .out_of_gas, .code_store_out_of_gas);
             };
-            const deposit_regular_cost = spec.create.depositRegularGas(runtime_size) orelse {
+            const deposit_regular_cost = spec.create.depositRegularGas(runtime_size) catch {
                 create_checkpoint.restore();
                 return self.createFailureFromResult(result, .out_of_gas, .code_store_out_of_gas);
             };
@@ -1780,7 +1781,7 @@ pub fn ExecutorType(
 
             var deposit_result = result;
             deposit_result.gas_left -= deposit_regular_cost;
-            const deposit_state_gas = spec.create.depositStateGas(runtime_size) orelse {
+            const deposit_state_gas = spec.create.depositStateGas(runtime_size) catch {
                 create_checkpoint.restore();
                 return self.createFailureFromResult(deposit_result, .out_of_gas, .code_store_out_of_gas);
             };

@@ -25,17 +25,30 @@ pub const initcode_word_cost: u64 = 2;
 pub const max_initcode_size: usize = 49_152;
 
 /// Compute EIP-7623 calldata token total.
-pub fn calldataTokenCount(input: []const u8) ?u64 {
+pub fn calldataTokenCount(input: []const u8) error{Overflow}!u64 {
     const zero_count = tx_gas.countZeroBytes(input);
-    const total = std.math.cast(u64, input.len) orelse return null;
-    const nonzero_tokens = std.math.mul(u64, total - zero_count, eip7623.tokens_per_nonzero_byte) catch return null;
-    return std.math.add(u64, zero_count, nonzero_tokens) catch null;
+    const total = std.math.cast(u64, input.len) orelse return error.Overflow;
+    const nonzero_tokens = try std.math.mul(
+        u64,
+        total - zero_count,
+        eip7623.tokens_per_nonzero_byte,
+    );
+    return std.math.add(u64, zero_count, nonzero_tokens);
 }
 
-pub fn accessListDataCost(counts: tx.AccessListCounts) ?u64 {
-    const address_count = std.math.cast(u64, counts.addresses) orelse return null;
-    const storage_key_count = std.math.cast(u64, counts.storage_keys) orelse return null;
-    const address_cost = std.math.mul(u64, address_count, access_list_address_data_gas) catch return null;
-    const storage_key_cost = std.math.mul(u64, storage_key_count, access_list_storage_key_data_gas) catch return null;
-    return std.math.add(u64, address_cost, storage_key_cost) catch null;
+pub fn accessListDataCost(counts: tx.AccessListCounts) error{Overflow}!u64 {
+    const address_count = std.math.cast(u64, counts.addresses) orelse return error.Overflow;
+    const storage_key_count = std.math.cast(u64, counts.storage_keys) orelse
+        return error.Overflow;
+    const address_cost = try std.math.mul(
+        u64,
+        address_count,
+        access_list_address_data_gas,
+    );
+    const storage_key_cost = try std.math.mul(
+        u64,
+        storage_key_count,
+        access_list_storage_key_data_gas,
+    );
+    return std.math.add(u64, address_cost, storage_key_cost);
 }

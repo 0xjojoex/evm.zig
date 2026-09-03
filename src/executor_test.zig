@@ -2406,21 +2406,29 @@ test "exact spec drives create runtime prefix rejection" {
 }
 
 test "exact spec drives create deposit gas" {
-    const Shanghai = evmz.t.Vm(.shanghai) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const overrides = struct {
-        fn createDepositRegularGas(runtime_size: i64) ?i64 {
+        fn expensiveDepositRegularGas(runtime_size: i64) error{Overflow}!i64 {
             _ = runtime_size;
             return 1_000_000;
         }
+
+        fn overflowingDepositRegularGas(runtime_size: i64) error{Overflow}!i64 {
+            _ = runtime_size;
+            return error.Overflow;
+        }
     };
-    const ExpensiveDeposit = evmz.t.CustomVm(.shanghai, .{
-        .create = .{ .depositRegularGas = overrides.createDepositRegularGas },
-    }) orelse return error.SkipZigTest;
+    const ExpensiveDeposit = evmz.t.CustomVm(.latest, .{
+        .create = .{ .depositRegularGas = overrides.expensiveDepositRegularGas },
+    }).?;
+    const OverflowingDeposit = evmz.t.CustomVm(.latest, .{
+        .create = .{ .depositRegularGas = overrides.overflowingDepositRegularGas },
+    }).?;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     const init_code = initCodeReturningRuntimeSize(1);
 
-    var default_executor = Shanghai.Executor.init(std.testing.allocator, .{});
+    var default_executor = Latest.Executor.init(std.testing.allocator, .{});
     defer default_executor.deinit();
     try putFundedSender(&default_executor, sender);
 
@@ -2444,6 +2452,22 @@ test "exact spec drives create deposit gas" {
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, custom_result.status());
     try std.testing.expectEqual(evmz.execution.TerminalCause.code_store_out_of_gas, custom_result.outcome.cause);
     try std.testing.expect(custom_result.checkpoint_reverted);
+
+    var overflow_executor = OverflowingDeposit.Executor.init(std.testing.allocator, .{});
+    defer overflow_executor.deinit();
+    try putFundedSender(&overflow_executor, sender);
+
+    const overflow_result = (try runStandalone(&overflow_executor, execution_context, .{ .create = .{
+        .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
+        .init_code = &init_code,
+    } }, .legacy(100_000)));
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, overflow_result.status());
+    try std.testing.expectEqual(
+        evmz.execution.TerminalCause.code_store_out_of_gas,
+        overflow_result.outcome.cause,
+    );
+    try std.testing.expect(overflow_result.checkpoint_reverted);
 }
 
 test "exact spec drives created account initial nonce" {

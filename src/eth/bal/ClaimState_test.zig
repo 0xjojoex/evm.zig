@@ -8,10 +8,10 @@ const trie = @import("../trie.zig");
 const records = @import("ParentFacts.zig");
 const claim_commit = @import("claim_commit.zig");
 const ClaimState = @import("ClaimState.zig");
-const contract = @import("../../state/contract.zig");
+const state_types = @import("../../state.zig");
 
-test "claim lane satisfies the contract" {
-    contract.check(ClaimState);
+test "claim state satisfies the state lane surface" {
+    state_types.checkLane(ClaimState);
 }
 
 test "sealed dense views retain effects and observations with distinct lifetimes" {
