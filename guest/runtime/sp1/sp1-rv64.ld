@@ -1,5 +1,5 @@
 /*
- * Adapted from SP1 v6.4.0 zkevm/zkvm.ld.
+ * Adapted from SP1 v6.6.0 zkevm/zkvm.ld.
  * SP1 owns _start; Zig exports main and shares SP1's platform heap.
  */
 OUTPUT_FORMAT("elf64-littleriscv")

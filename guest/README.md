@@ -48,12 +48,12 @@ an existing checkout of the pinned commit. The provider is built with
 The pinned CI build uses this target policy. A provider built without it produces
 a different guest ELF and verification key.
 
-SP1 uses the repo-owned ERE v0.16.3 platform provider. Install the matching
-SP1 v6.4.0 toolchain once:
+SP1 uses the repo-owned ERE v0.18.0 platform provider. Install the matching
+SP1 v6.6.0 toolchain once:
 
 ```sh
 curl -L https://sp1up.succinct.xyz | bash
-~/.sp1/bin/sp1up -v v6.4.0
+~/.sp1/bin/sp1up -v v6.6.0
 ```
 
 The guest build compiles ERE's SP1 platform and its `libzkevm` accelerator ABI
@@ -69,7 +69,7 @@ zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
 ```
 
 `-Dsp1-staticlib=/path/to/provider.a` remains available as an explicit archive
-override. The SP1 host driver is locked to `sp1-core-executor` 6.4.0. It
+override. The SP1 host driver is locked to `sp1-core-executor` 6.6.0. It
 reports deterministic execute-only instruction cycles — not proof cycles or
 proving time.
 
@@ -86,7 +86,7 @@ zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dstateless-schema=0x1501
 ```
 
-The build links OpenVM's official startup and ERE v0.16.3's
+The build links OpenVM's official startup and ERE v0.18.0's
 `ere-platform-openvm` implementation of the accelerator ABI. The repo-owned
 Rust crate only bridges Zig input and output to that platform. Its build checks
 the startup, I/O, and accelerator symbols before linking.
@@ -156,7 +156,7 @@ separate reporting script or stored release baseline.
 `Guest release` qualifies and signs one selected backend against the strict
 corpus. ZisK, SP1, and OpenVM runs may execute in parallel; only their short
 draft updates are serialized. Each run verifies its tested ELF, generates the
-VK with the digest-pinned ERE 0.16.3 server image, and signs the ELF, VK, and
+VK with its digest-pinned ERE v0.18.0 server image, and signs the ELF, VK, and
 backend manifest. The manifest records the source, qualification run, keygen
 image, compatibility identity, and hashes of the ELF, VK, evidence, and report.
 Its signature is the completed-slot marker.

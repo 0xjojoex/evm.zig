@@ -25,8 +25,8 @@ evmz-guest-host-protocol = { path = "host-protocol" }
 openvm-sdk = { git = "https://github.com/han0110/openvm.git", rev = "a391b22ebb5305fa52d3394abfd0810df4baff90", default-features = false }
 openvm-sdk-config = { git = "https://github.com/han0110/openvm.git", rev = "a391b22ebb5305fa52d3394abfd0810df4baff90" }
 
-sp1-core-executor = { git = "https://github.com/succinctlabs/sp1", tag = "v6.4.0" }
+sp1-core-executor = { git = "https://github.com/succinctlabs/sp1", tag = "v6.6.0" }
 
-zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
-zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
-ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "9a5a1ac594b9b6e527fc6f54ff4313f75c4acf93" }
+zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3" }
+zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3" }
+ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3" }

@@ -345,7 +345,7 @@ const Checker = struct {
     }
 };
 
-/// Instruction families rejected by the conservative guest gate. ZisK v1.1's
+/// Instruction families rejected by the conservative guest gate. ZisK's
 /// target deliberately emits `rev8`, so that one encoding has a narrow waiver;
 /// atomic and floating-point instructions remain forbidden.
 fn forbiddenInstruction(instruction: u32, allow_rev8: bool) ?[]const u8 {
