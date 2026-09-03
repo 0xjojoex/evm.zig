@@ -636,16 +636,14 @@ fn storageRootAfterChanges(
         );
 }
 
-/// Comptime contract for `TrackedState.ChangesView`, kept structural here so
-/// this Ethereum codec layer does not import the executor state graph. The
-/// tracked view exposes three indexed lists (`len() u32` + `at(u32)`):
+/// Comptime contract for a changes view, kept structural so this Ethereum
+/// codec layer does not import the executor state graph. Any producer that
+/// exposes three indexed lists (`len() u32` + `at(u32)`) qualifies:
 /// `accounts` (post-state account values or deletes), `storage_writes`
 /// (slot writes tagged by account address), and `storage_wipes` (accounts
-/// whose entire storage clears before writes apply).
-fn assertTrackedChangesView(comptime View: type) void {
-    if (!@hasDecl(View, "is_tracked_changes_view") or !View.is_tracked_changes_view) {
-        @compileError("tracked state root requires state/TrackedState.zig ChangesView");
-    }
+/// whose entire storage clears before writes apply). `TrackedState.ChangesView`
+/// is the live producer; `StateDelta.View` is the detached one.
+fn assertChangesView(comptime View: type) void {
     for ([_][]const u8{ "accounts", "storage_writes", "storage_wipes" }) |list_name| {
         if (!@hasField(View, list_name)) @compileError(
             "changes view " ++ @typeName(View) ++ " is missing list '" ++ list_name ++ "'",
@@ -672,7 +670,7 @@ pub fn stateRootAfterChangesFromNodes(
     nodes: []const []const u8,
     changes: anytype,
 ) UpdateError![32]u8 {
-    comptime assertTrackedChangesView(@TypeOf(changes));
+    comptime assertChangesView(@TypeOf(changes));
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -698,7 +696,7 @@ pub fn stateRootAfterChangesWithNodeUpdates(
     node_updates: anytype,
 ) UpdateError![32]u8 {
     comptime assertStateSource(@TypeOf(source));
-    comptime assertTrackedChangesView(@TypeOf(changes));
+    comptime assertChangesView(@TypeOf(changes));
     var scratch_arena: mpt.ScopedArenaAllocator = .init(allocator);
     defer scratch_arena.deinit();
 

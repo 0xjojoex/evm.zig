@@ -498,7 +498,7 @@ fn expectMatchesGeneric(
     claim: bal.BlockAccessList,
     batches: []const TestBatch,
 ) !void {
-    const Projector = @import("tracked_state_projector.zig");
+    const Projector = @import("projector.zig");
     const allocator = std.testing.allocator;
     try bal.validate(claim, .{ .transaction_count = 4 });
     var plan = try ClaimPlan.initAssumeValidated(allocator, claim);

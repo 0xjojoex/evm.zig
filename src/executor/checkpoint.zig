@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const Checkpoint = @import("../state/Checkpoint.zig");
+const Checkpoint = @import("../state.zig").Checkpoint;
 const Status = @import("../evm.zig").interpreter.Status;
 
 /// Owns one journal checkpoint from open until it is committed, restored, or

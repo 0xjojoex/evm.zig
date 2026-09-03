@@ -14,11 +14,22 @@ const execution = @import("../execution.zig");
 const Host = @import("../Host.zig");
 const range = @import("stdx").range;
 const Account = @import("./Account.zig");
-const Checkpoint = @import("./Checkpoint.zig");
 const MemoryAccount = @import("./MemoryAccount.zig");
 const StateReader = @import("./Reader.zig");
 const storage = @import("./storage.zig");
 const sparse_hash_map = @import("./sparse_hash_map.zig");
+
+const Checkpoint = state_types.Checkpoint;
+const AccountObservation = state_types.AccountObservation;
+const AccountEffect = state_types.AccountEffect;
+const AttemptId = Checkpoint.AttemptId;
+const FinalizationRules = state_types.FinalizationRules;
+const StorageObservation = state_types.StorageObservation;
+const StorageEffect = state_types.StorageEffect;
+const CodeView = state_types.CodeView;
+const AccountChange = state_types.AccountChange;
+const StorageChange = state_types.StorageChange;
+const ChangeLayer = state_types.ChangeLayer;
 
 const TrackedState = @This();
 const StorageKey = storage.Key;
@@ -86,10 +97,6 @@ cached_tx: ?Transaction,
 transaction_reuse_active: bool,
 retained_logs: LogBuffer,
 
-pub const AttemptId = Checkpoint.AttemptId;
-
-pub const FinalizationRules = state_types.FinalizationRules;
-
 pub const AccountValue = union(enum) {
     absent,
     exists_only,
@@ -114,37 +121,6 @@ const AcceptedStorageRow = struct {
     changed: bool = false,
 };
 
-pub const AccountObservation = packed struct {
-    listed: bool = false,
-    accessed: bool = false,
-    semantic_access: bool = false,
-    existence_read: bool = false,
-    value_read: bool = false,
-    code_read: bool = false,
-};
-
-/// Checkpoint-resolved account effects used by observation projectors.
-/// Access flags live separately because reads survive inner rollback.
-pub const AccountEffect = packed struct {
-    balance_written: bool = false,
-    nonce_written: bool = false,
-    code_written: bool = false,
-    created_contract: bool = false,
-    selfdestruct: bool = false,
-    account_deleted: bool = false,
-    storage_wiped: bool = false,
-
-    pub fn any(self: AccountEffect) bool {
-        return self.balance_written or
-            self.nonce_written or
-            self.code_written or
-            self.created_contract or
-            self.selfdestruct or
-            self.account_deleted or
-            self.storage_wiped;
-    }
-};
-
 pub const AccountMutation = packed struct {
     touched: bool = false,
     dirty: bool = false,
@@ -159,16 +135,6 @@ pub const AccountRow = struct {
     current: ?AccountValue = null,
     observation_id: ?AccountObservationId = null,
     mutation: AccountMutation = .{},
-};
-
-pub const StorageObservation = packed struct {
-    listed: bool = false,
-    accessed: bool = false,
-    value_read: bool = false,
-};
-
-pub const StorageEffect = packed struct {
-    written: bool = false,
 };
 
 pub const StorageMutation = packed struct {
@@ -186,7 +152,7 @@ const AccountObservationRow = struct {
     account: AccountId,
     /// Last field-level state before a lifecycle deletion hides it.
     effect_current: ?AccountValue = null,
-    observation: AccountObservation = .{ .listed = true },
+    observation: AccountObservation = .{},
     effect: AccountEffect = .{},
 };
 
@@ -194,7 +160,7 @@ const StorageObservationRow = struct {
     storage: StorageId,
     /// Last semantic value before an address-level lifecycle wipe hides it.
     effect_current: ?u256 = null,
-    observation: StorageObservation = .{ .listed = true },
+    observation: StorageObservation = .{},
     effect: StorageEffect = .{},
 };
 
@@ -320,29 +286,6 @@ pub const CodeCache = struct {
         self.chunks.deinit(allocator);
         self.* = undefined;
     }
-};
-
-/// Canonical code resolved for execution. The borrowed bytes remain stable for
-/// the lifetime of the tracked state, including across cache growth.
-pub const CodeView = struct {
-    code_hash: CodeHash,
-    bytes: []const u8,
-};
-
-pub const AccountChange = struct {
-    address: Address,
-    account: ?Account,
-};
-
-pub const StorageChange = struct {
-    address: Address,
-    key: u256,
-    value: u256,
-};
-
-const ChangeLayer = enum {
-    accepted,
-    transaction,
 };
 
 pub const AccountChanges = struct {
@@ -477,8 +420,6 @@ pub const StorageWipes = struct {
 /// Borrowed semantic delta. Ordering is unspecified; consumers own sorting,
 /// allocation, persistence batches, and any retained representation.
 pub const ChangesView = struct {
-    pub const is_tracked_changes_view = true;
-
     handle: *const anyopaque,
     layer: ChangeLayer,
     accounts: AccountChanges,

@@ -882,15 +882,7 @@ test "captured tail memory exhaustion remains a resource error" {
         .PUSH1, 0x2a, .PUSH1, 0x20, .MSTORE,
         .STOP,
     });
-    const no_growth_allocator: std.mem.Allocator = .{
-        .ptr = undefined,
-        .vtable = &.{
-            .alloc = std.mem.Allocator.noAlloc,
-            .resize = std.mem.Allocator.noResize,
-            .remap = std.mem.Allocator.noRemap,
-            .free = std.mem.Allocator.noFree,
-        },
-    };
+    const no_growth_allocator = @import("stdx").no_growth_allocator;
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;

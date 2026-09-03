@@ -8,6 +8,7 @@
 const std = @import("std");
 pub const step_table = @import("step_table.zig");
 pub const transition_arena = @import("transition_arena.zig");
+const no_growth_allocator = @import("stdx").no_growth_allocator;
 
 const Allocator = std.mem.Allocator;
 
@@ -452,16 +453,6 @@ pub const TraceTape = struct {
         idle,
         recording,
         outstanding,
-    };
-
-    const no_growth_allocator: Allocator = .{
-        .ptr = undefined,
-        .vtable = &.{
-            .alloc = Allocator.noAlloc,
-            .resize = Allocator.noResize,
-            .remap = Allocator.noRemap,
-            .free = Allocator.noFree,
-        },
     };
 
     pub fn initGrowable(allocator: Allocator) TraceTape {

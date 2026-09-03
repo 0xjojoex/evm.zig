@@ -23,7 +23,8 @@ const std = @import("std");
 
 const evmz = @import("./evm.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
-const Checkpoint = @import("./state/Checkpoint.zig");
+const Checkpoint = @import("state.zig").Checkpoint;
+const LogBuffer = @import("./state/LogBuffer.zig");
 const CheckpointGuard = @import("./executor/checkpoint.zig").Guard;
 const frame_io = @import("./frame_io.zig");
 const FrameStore = @import("./executor/FrameStore.zig");
@@ -267,11 +268,11 @@ pub fn ExecutorType(
         /// Callback-scoped semantic view of one sealed transition.
         /// State attempt identity and resolution remain private to Executor.
         pub const Observation = struct {
-            log_view: State.LogView,
+            log_view: LogBuffer.View,
             changes_view: State.ChangesView,
             observations_view: State.ObservationsView,
 
-            pub fn logs(self: Observation) State.LogView {
+            pub fn logs(self: Observation) LogBuffer.View {
                 return self.log_view;
             }
 
@@ -553,7 +554,7 @@ pub fn ExecutorType(
 
                 pub const View = struct {
                     output: *const Output,
-                    logs: State.LogView,
+                    logs: LogBuffer.View,
                 };
 
                 /// Borrow family output and logs while this result is unresolved.
@@ -571,7 +572,7 @@ pub fn ExecutorType(
                 }
 
                 /// Borrow transaction logs while this result is unresolved.
-                pub fn logs(self: Execution) State.LogView {
+                pub fn logs(self: Execution) LogBuffer.View {
                     _ = self.state();
                     return self.executor.state.pendingView().logs();
                 }
@@ -862,7 +863,7 @@ pub fn ExecutorType(
             try self.state.clearCode(stateAddress(address));
         }
 
-        pub fn logView(self: *const Executor) State.LogView {
+        pub fn logView(self: *const Executor) LogBuffer.View {
             return self.state.logView();
         }
 
@@ -936,7 +937,7 @@ pub fn ExecutorType(
         pub const ResolvedCode = struct {
             address: Address,
             delegated: bool,
-            original_view: State.CodeView,
+            original_view: evmz.state.CodeView,
         };
 
         /// Resolve canonical code first, then consult the executor-owned derived
@@ -946,7 +947,7 @@ pub fn ExecutorType(
             return self.resolveExecutionCodeView(try self.state.getCodeView(stateAddress(address)));
         }
 
-        pub fn resolveExecutionCodeView(self: *Executor, code: State.CodeView) !Bytecode.View {
+        pub fn resolveExecutionCodeView(self: *Executor, code: evmz.state.CodeView) !Bytecode.View {
             std.debug.assert(self.prepared_code_execution != null);
             const execution = &self.prepared_code_execution.?;
             return execution.resolve(code.code_hash, code.bytes, .{
@@ -970,7 +971,7 @@ pub fn ExecutorType(
             };
         }
 
-        pub fn resolvedCodeView(self: *Executor, resolved: ResolvedCode) !State.CodeView {
+        pub fn resolvedCodeView(self: *Executor, resolved: ResolvedCode) !evmz.state.CodeView {
             if (resolved.delegated) return self.state.getCodeView(stateAddress(resolved.address));
             return resolved.original_view;
         }

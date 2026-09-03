@@ -17,7 +17,6 @@ const Host = @import("../../Host.zig");
 const Account = @import("../../state/Account.zig");
 const artifacts = @import("claim_artifacts.zig");
 const records = @import("ParentFacts.zig");
-const Checkpoint = @import("../../state/Checkpoint.zig");
 const state_types = @import("../../state.zig");
 const storage_status = @import("../../state/storage.zig");
 const sparse_hash_map = @import("../../state/sparse_hash_map.zig");
@@ -47,14 +46,18 @@ const TransientStorageKey = extern struct {
                 a.slot_words[3] == b.slot_words[3];
         }
     };
-};
 
-comptime {
-    // `HashContext.hash` digests every byte while `eql` compares fields. Interior
-    // padding would let two equal keys hash differently, and the map would miss a
-    // present entry instead of failing loudly.
-    std.debug.assert(std.meta.hasUniqueRepresentation(TransientStorageKey));
-}
+    comptime {
+        // `HashContext.hash` digests every byte while `eql` compares fields. Interior
+        // padding would let two equal keys hash differently, and the map would miss a
+        // present entry instead of failing loudly.
+        std.debug.assert(std.meta.hasUniqueRepresentation(TransientStorageKey));
+        // Transient keys stay inside one transaction-owned map. Word storage carries
+        // one boundary conversion through every hash/equality probe and drops padding.
+        std.debug.assert(@sizeOf(TransientStorageKey) == 56);
+        std.debug.assert(@alignOf(TransientStorageKey) == 8);
+    }
+};
 
 const TransientStorageMap = sparse_hash_map.WithContext(
     TransientStorageKey,
@@ -62,17 +65,9 @@ const TransientStorageMap = sparse_hash_map.WithContext(
     TransientStorageKey.HashContext,
 );
 
-comptime {
-    // Transient keys stay inside one transaction-owned map. Word storage carries
-    // one boundary conversion through every hash/equality probe and drops padding.
-    std.debug.assert(@sizeOf(TransientStorageKey) == 56);
-    std.debug.assert(@alignOf(TransientStorageKey) == 8);
-}
-
 pub const AccountId = claim_plan.AccountId;
 pub const StorageId = claim_plan.StorageId;
 pub const AttemptId = Checkpoint.AttemptId;
-pub const CodeView = artifacts.CodeView;
 /// Emitted logs and their borrowed projection are lane-independent; see
 /// `state/LogBuffer.zig`.
 pub const LogBuffer = @import("../../state/LogBuffer.zig");
@@ -98,8 +93,18 @@ const ResolvedStorage = struct {
 };
 
 pub const CodeError = artifacts.CodeStore.CacheError;
-pub const AccessHint = state_types.AccessHint;
-pub const FinalizationRules = state_types.FinalizationRules;
+const Checkpoint = state_types.Checkpoint;
+const CodeView = state_types.CodeView;
+const AccessHint = state_types.AccessHint;
+const FinalizationRules = state_types.FinalizationRules;
+const AccountObservation = state_types.AccountObservation;
+const StorageObservation = state_types.StorageObservation;
+const AccountEffect = state_types.AccountEffect;
+const StorageEffect = state_types.StorageEffect;
+const ChangeLayer = state_types.ChangeLayer;
+const AccountChange = state_types.AccountChange;
+const StorageChange = state_types.StorageChange;
+
 /// Every row exists from admission, sized by the claim plan. There is nothing
 /// to reserve or reuse, so the executor skips its capacity hooks at comptime.
 pub const grows_on_touch = false;
@@ -122,56 +127,6 @@ pub const AccountFlags = packed struct {
 
 pub const StorageFlags = packed struct {
     block_dirty: bool = false,
-    _padding: u7 = 0,
-};
-
-pub const AccountObservation = packed struct {
-    accessed: bool = false,
-    semantic_access: bool = false,
-    existence_read: bool = false,
-    value_read: bool = false,
-    code_read: bool = false,
-    _padding: u3 = 0,
-
-    fn merge(self: *AccountObservation, other: AccountObservation) void {
-        self.accessed = self.accessed or other.accessed;
-        self.semantic_access = self.semantic_access or other.semantic_access;
-        self.existence_read = self.existence_read or other.existence_read;
-        self.value_read = self.value_read or other.value_read;
-        self.code_read = self.code_read or other.code_read;
-    }
-};
-
-pub const StorageObservation = packed struct {
-    accessed: bool = false,
-    value_read: bool = false,
-    _padding: u6 = 0,
-
-    fn merge(self: *StorageObservation, other: StorageObservation) void {
-        self.accessed = self.accessed or other.accessed;
-        self.value_read = self.value_read or other.value_read;
-    }
-};
-
-pub const AccountEffect = packed struct {
-    balance_written: bool = false,
-    nonce_written: bool = false,
-    code_written: bool = false,
-    account_deleted: bool = false,
-    created_contract: bool = false,
-    selfdestruct: bool = false,
-    storage_wiped: bool = false,
-    _padding: u1 = 0,
-
-    pub fn any(self: AccountEffect) bool {
-        return self.balance_written or self.nonce_written or
-            self.code_written or self.account_deleted or
-            self.created_contract or self.selfdestruct or self.storage_wiped;
-    }
-};
-
-pub const StorageEffect = packed struct {
-    written: bool = false,
     _padding: u7 = 0,
 };
 
@@ -220,24 +175,6 @@ pub const StorageObservationRow = struct {
     effect_current: u256,
     observation: StorageObservation,
     effect: StorageEffect = .{},
-};
-
-// Borrowed projections over sealed rows. Views copy no identities or values:
-// `ClaimPlan` stays the sole address/slot owner and this state the lifecycle
-// owner. They read rows directly, so they live beside them (as in
-// `state.TrackedState`) rather than behind a generic view type.
-
-pub const ChangeLayer = enum { accepted, transaction };
-
-pub const AccountChange = struct {
-    address: Address,
-    account: ?Account,
-};
-
-pub const StorageChange = struct {
-    address: Address,
-    key: u256,
-    value: u256,
 };
 
 pub const AccountChanges = struct {
@@ -343,7 +280,7 @@ pub const ChangesView = struct {
         };
     }
 
-    pub fn introducedCode(self: ChangesView, hash: [32]u8) ?artifacts.CodeView {
+    pub fn introducedCode(self: ChangesView, hash: [32]u8) ?CodeView {
         const ids = switch (self.layer) {
             .accepted => if (self.state.transaction_active)
                 self.state.block_introduced_codes.items[0..self.state.transaction_introduced_codes_start]
@@ -461,7 +398,7 @@ pub const ObservationsView = struct {
         };
     }
 
-    pub fn code(self: ObservationsView, hash: [32]u8) ?artifacts.CodeView {
+    pub fn code(self: ObservationsView, hash: [32]u8) ?CodeView {
         return self.state.code.lookup(hash);
     }
 };

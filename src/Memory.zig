@@ -261,15 +261,7 @@ test "unrepresentable expansion is distinct from allocation failure" {
 }
 
 test "bounded memory reuses reserved capacity and rejects growth" {
-    const no_growth_allocator: Allocator = .{
-        .ptr = undefined,
-        .vtable = &.{
-            .alloc = Allocator.noAlloc,
-            .resize = Allocator.noResize,
-            .remap = Allocator.noRemap,
-            .free = Allocator.noFree,
-        },
-    };
+    const no_growth_allocator = @import("stdx").no_growth_allocator;
 
     var storage: Storage = .empty;
     try Memory.reserveCapacity(&storage, std.testing.allocator, 64);

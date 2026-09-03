@@ -21,7 +21,7 @@ const Reader = @import("../state/Reader.zig");
 const StateDelta = @import("../state/StateDelta.zig");
 const TrackedState = @import("../state/TrackedState.zig");
 const ClaimState = @import("bal/ClaimState.zig");
-const tracked_state_projector = @import("bal/tracked_state_projector.zig");
+const projector = @import("bal/projector.zig");
 const trie = @import("trie.zig");
 
 pub const AdmissionInput = struct {
@@ -88,7 +88,7 @@ pub const Tracked = struct {
     pub const Lifecycle = struct {
         pub const supports_block_production = true;
         pub const supports_external_observation_capture = true;
-        pub const BalClaimVerifier = tracked_state_projector.ClaimVerifier;
+        pub const BalClaimVerifier = projector.ClaimVerifier;
 
         pub fn initBalClaimVerifier(
             allocator: std.mem.Allocator,

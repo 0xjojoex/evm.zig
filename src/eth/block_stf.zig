@@ -15,7 +15,7 @@ const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const bal_differential = @import("bal/differential.zig");
 const differential_executor = @import("bal/differential/block_executor.zig");
-const tracked_state_projector = @import("bal/tracked_state_projector.zig");
+const projector = @import("bal/projector.zig");
 const block_admission = @import("block_admission.zig");
 const block_capture = @import("block_capture.zig");
 const block_rules = @import("block_rules.zig");
@@ -1146,7 +1146,7 @@ fn executeBlock(
     const BalFold = if (verifies_bal_claim)
         Engine.StateDomain.Lifecycle.BalClaimVerifier
     else
-        tracked_state_projector.BlockBuilder;
+        projector.BlockBuilder;
     var bal_fold = if (comptime verifies_bal_claim)
         try Engine.StateDomain.Lifecycle.initBalClaimVerifier(
             allocator,
@@ -1154,7 +1154,7 @@ fn executeBlock(
             bal_claim.accounts().?,
         )
     else
-        tracked_state_projector.BlockBuilder.init(allocator);
+        projector.BlockBuilder.init(allocator);
     defer bal_fold.deinit();
     var observation_sink = StateObservationSink(Engine.StateDomain.Lifecycle, BalFold){
         .bal_fold = if (block_access_list_enabled) &bal_fold else null,

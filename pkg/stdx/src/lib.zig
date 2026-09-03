@@ -10,7 +10,18 @@
 //! release compatibility promise, so callers inside this repository may move
 //! with it.
 
+const std = @import("std");
 pub const ExactSlab = @import("ExactSlab.zig");
 pub const ScopedArenaAllocator = @import("ScopedArenaAllocator.zig");
 pub const range = @import("range.zig");
 pub const Range = @import("range.zig").Range;
+
+pub const no_growth_allocator: std.mem.Allocator = .{
+    .ptr = undefined,
+    .vtable = &.{
+        .alloc = std.mem.Allocator.noAlloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = std.mem.Allocator.noFree,
+    },
+};

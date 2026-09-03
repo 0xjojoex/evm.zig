@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const crypto = @import("../../crypto.zig");
+const CodeView = @import("../../state.zig").CodeView;
 const SparseHashMap = @import("../../state/sparse_hash_map.zig").Auto;
 
 const Allocator = std.mem.Allocator;
@@ -23,11 +24,6 @@ pub const ParentCode = struct {
     fn hashOrder(target: Hash, item: ParentCode) std.math.Order {
         return std.mem.order(u8, &target, &item.hash);
     }
-};
-
-pub const CodeView = struct {
-    code_hash: Hash,
-    bytes: []const u8,
 };
 
 pub const IntroducedCodeId = enum(u32) { _ };

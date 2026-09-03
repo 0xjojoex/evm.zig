@@ -11,6 +11,7 @@ const std = @import("std");
 
 const trie = @import("trie.zig");
 const TrackedState = @import("../state/TrackedState.zig");
+const StateDelta = @import("../state/StateDelta.zig");
 const MemoryAccount = @import("../state/MemoryAccount.zig");
 const address = @import("../address.zig");
 const crypto = @import("../crypto.zig");
@@ -785,6 +786,31 @@ test "MPT batch inserts before deletes to avoid unnecessary sibling witness" {
     };
     const expected = try root(scratch, &expected_pairs);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "MPT state root is the same through a detached delta" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var state = TrackedState.init(scratch);
+    defer state.deinit();
+    const attempt = state.beginTransaction();
+    state.beginScope();
+    try state.setBalance(address.addr(0x1000), 20);
+    _ = try state.setStorage(address.addr(0x1000), 1, 7);
+    try state.setBalance(address.addr(0x2000), 5);
+    state.closeScope();
+    state.seal(attempt);
+    state.retain(attempt);
+    const live = state.acceptedView().changes();
+
+    var delta = try StateDelta.init(scratch, live);
+    defer delta.deinit();
+
+    const from_live = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, live);
+    const from_delta = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, delta.view());
+    try std.testing.expectEqualSlices(u8, &from_live, &from_delta);
 }
 
 test "MPT state root consumes tracked changes" {

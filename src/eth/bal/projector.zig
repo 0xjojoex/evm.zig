@@ -1,18 +1,26 @@
-//! BAL adapter over one sealed tracked-state observation view.
+//! Address-keyed BAL adapter over one sealed observation view.
 //!
-//! The tracked rows are the checkpoint-resolved source. This module owns BAL
-//! grouping, sorting, allocation, and detached ownership.
+//! The view is consumed structurally, so either execution state lane feeds
+//! this: the checkpoint-resolved rows are the source either way. This module
+//! owns BAL grouping, sorting, allocation, and detached ownership.
+//!
+//! `bal.DenseClaimVerifier` is the dense-ID counterpart; `ClaimVerifier` here
+//! is the address-keyed one, and `eth.state_domain` binds whichever the lane
+//! in play can key.
 
 const std = @import("std");
 const address = @import("../../address.zig");
-const State = @import("../../state/TrackedState.zig");
-const Account = @import("../../state/Account.zig");
-const MemoryAccount = @import("../../state/MemoryAccount.zig");
-const StateReader = @import("../../state/Reader.zig");
 const bal = @import("model.zig");
 const observation = @import("observation.zig");
 const shard_fold = @import("shard_fold.zig");
 const ShardFold = shard_fold.ShardFold;
+
+// Test-only: the tracked lane is one concrete view source the tests drive
+// through. Nothing above the tests names a lane.
+const TrackedState = @import("../../state/TrackedState.zig");
+const Account = @import("../../state/Account.zig");
+const MemoryAccount = @import("../../state/MemoryAccount.zig");
+const StateReader = @import("../../state/Reader.zig");
 
 const Address = address.Address;
 const Allocator = std.mem.Allocator;
@@ -441,7 +449,7 @@ test "existence-only semantic access does not require account fields" {
         }
     };
 
-    var state = State.initWithStateReader(std.testing.allocator, Reader.reader());
+    var state = TrackedState.initWithStateReader(std.testing.allocator, Reader.reader());
     defer state.deinit();
     const target = address.addr(1);
     const attempt = state.beginObservedTransaction();
@@ -461,7 +469,7 @@ test "existence-only semantic access does not require account fields" {
 }
 
 test "gas-only storage access does not require storage values" {
-    var state = State.init(std.testing.allocator);
+    var state = TrackedState.init(std.testing.allocator);
     defer state.deinit();
     const attempt = state.beginObservedTransaction();
     state.beginScope();
@@ -522,7 +530,7 @@ test "block builder coalesces transitions at one access index" {
     const allocator = std.testing.allocator;
     const target = address.addr(1);
 
-    var state = State.init(allocator);
+    var state = TrackedState.init(allocator);
     defer state.deinit();
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;

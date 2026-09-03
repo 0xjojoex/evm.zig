@@ -13,7 +13,7 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const Host = @import("../Host.zig");
-const Checkpoint = @import("./Checkpoint.zig");
+const Checkpoint = @import("../state.zig").Checkpoint;
 const range = @import("stdx").range;
 
 const Allocator = std.mem.Allocator;

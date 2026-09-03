@@ -18,7 +18,7 @@ const std = @import("std");
 const Executor = @import("../../../executor.zig");
 const bal = @import("../model.zig");
 const ClaimView = @import("../ClaimView.zig");
-const tracked_state_projector = @import("../tracked_state_projector.zig");
+const projector = @import("../projector.zig");
 const accumulator_types = @import("accumulator.zig");
 const lane_types = @import("lane.zig");
 const report_types = @import("report.zig");
@@ -144,7 +144,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             });
             defer execution.deinit();
 
-            var observation_builder = tracked_state_projector.BlockBuilder.init(self.allocator);
+            var observation_builder = projector.BlockBuilder.init(self.allocator);
             defer observation_builder.deinit();
             var observation_collector = Lane.ObservationCollector{
                 .allocator = self.allocator,
@@ -434,7 +434,7 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
             });
             defer execution.deinit();
 
-            var observation_builder = tracked_state_projector.BlockBuilder.init(self.allocator);
+            var observation_builder = projector.BlockBuilder.init(self.allocator);
             defer observation_builder.deinit();
             var observation_collector = Lane.ObservationCollector{
                 .allocator = self.allocator,

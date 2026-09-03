@@ -42,7 +42,7 @@ fn executeStandalone(
 fn accountChange(
     changes: evmz.state.TrackedState.ChangesView,
     target: evmz.Address,
-) ?evmz.state.TrackedState.AccountChange {
+) ?evmz.state.AccountChange {
     var index: u32 = 0;
     while (index < changes.accounts.len()) : (index += 1) {
         const change = changes.accounts.at(index);
@@ -55,7 +55,7 @@ fn storageChange(
     changes: evmz.state.TrackedState.ChangesView,
     target: evmz.Address,
     key: u256,
-) ?evmz.state.TrackedState.StorageChange {
+) ?evmz.state.StorageChange {
     var index: u32 = 0;
     while (index < changes.storage_writes.len()) : (index += 1) {
         const change = changes.storage_writes.at(index);
@@ -154,7 +154,7 @@ test "Executor runs low-level standalone call" {
     const changes = executor.acceptedChanges();
     try std.testing.expectEqual(@as(u32, 1), changes.storage_writes.len());
     try std.testing.expectEqual(
-        evmz.state.TrackedState.StorageChange{
+        evmz.state.StorageChange{
             .address = contract,
             .key = 0,
             .value = 0x2a,

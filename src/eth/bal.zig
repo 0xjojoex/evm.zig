@@ -24,7 +24,7 @@ const trie = @import("trie.zig");
 const state = @import("../state.zig");
 const Backend = @import("../backend.zig").Backend;
 
-pub const tracked_state_projector = @import("bal/tracked_state_projector.zig");
+pub const projector = @import("bal/projector.zig");
 
 pub const ClaimView = @import("bal/ClaimView.zig");
 pub const diff = @import("bal/diff.zig");
@@ -107,7 +107,7 @@ test "BAL executor releases an unconsumed state backend" {
 
 test {
     std.testing.refAllDecls(claim_plan);
-    std.testing.refAllDecls(tracked_state_projector);
+    std.testing.refAllDecls(projector);
     std.testing.refAllDecls(ParentFacts);
     std.testing.refAllDecls(ClaimState);
     _ = @import("bal/ClaimState_test.zig");

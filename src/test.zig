@@ -1,6 +1,4 @@
 test {
-    // Stage 0: the debug lane is reachable for tests but is
-    // deliberately not exported from `evm.zig` or `Vm(spec)` yet.
     _ = @import("./debug.zig");
     // Only debug_cli consumes the disassembler, and that binary is not part of
     // the test build, so nothing else reaches these tests.

@@ -7,20 +7,12 @@
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
-const Account = @import("Account.zig");
+const state = @import("../state.zig");
 
 const Allocator = std.mem.Allocator;
-
-pub const AccountChange = struct {
-    address: Address,
-    account: ?Account,
-};
-
-pub const StorageChange = struct {
-    address: Address,
-    key: u256,
-    value: u256,
-};
+const AccountChange = state.AccountChange;
+const StorageChange = state.StorageChange;
+const CodeView = state.CodeView;
 
 pub const Code = struct {
     code_hash: [32]u8,
@@ -126,11 +118,6 @@ pub const View = struct {
             self.storage_writes.len() != 0 or
             self.storage_wipes.len() != 0;
     }
-};
-
-pub const CodeView = struct {
-    code_hash: [32]u8,
-    bytes: []const u8,
 };
 
 pub const AccountChanges = struct {

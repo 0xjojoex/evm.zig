@@ -16,9 +16,9 @@ const crypto = @import("../../crypto.zig");
 const Allocator = std.mem.Allocator;
 
 const shard_fold = @import("../../eth/bal/shard_fold.zig");
-const tracked_state_projector = @import("../../eth/bal/tracked_state_projector.zig");
-const materialize = tracked_state_projector.materialize;
-const BlockBuilder = tracked_state_projector.BlockBuilder;
+const projector = @import("../../eth/bal/projector.zig");
+const materialize = projector.materialize;
+const BlockBuilder = projector.BlockBuilder;
 const State = @import("../../state/TrackedState.zig");
 const MemoryAccount = @import("../../state/MemoryAccount.zig");
 
