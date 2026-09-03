@@ -55,9 +55,6 @@ const ActiveStorage = struct {
 };
 
 comptime {
-    // A 60M-gas BAL can carry 30,000 account/slot identities; the verifier
-    // allocates one state and one active row per identity. Growing a row is a
-    // peak-memory and guest-step change, not a local implementation detail.
     std.debug.assert(@sizeOf(AccountState) <= 20);
     std.debug.assert(@sizeOf(StorageState) <= 20);
     std.debug.assert(@sizeOf(ActiveAccount) <= 208);

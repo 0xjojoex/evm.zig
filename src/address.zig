@@ -13,6 +13,11 @@ const ssz = @import("ssz");
 pub const Address = extern struct {
     bytes: [20]u8,
 
+    comptime {
+        std.debug.assert(@sizeOf(Address) == 20);
+        std.debug.assert(@alignOf(Address) == 1);
+    }
+
     pub const len: usize = 20;
 
     pub const zero: Address = .{ .bytes = @splat(0) };
@@ -138,6 +143,11 @@ pub const Address = extern struct {
 pub const AddressWord = extern struct {
     words: [3]u64,
 
+    comptime {
+        std.debug.assert(@sizeOf(AddressWord) == 24);
+        std.debug.assert(@alignOf(AddressWord) == 8);
+    }
+
     pub inline fn fromAddress(value: Address) AddressWord {
         return .{ .words = .{
             std.mem.readInt(u64, value.bytes[0..8], .little),
@@ -176,16 +186,6 @@ pub const AddressWord = extern struct {
             a.words[2] == b.words[2];
     }
 };
-
-comptime {
-    // Canonical addresses are stored in protocol records at high cardinality.
-    // If those consumers stop requiring canonical bytes, introduce a role-specific
-    // representation rather than widening this type.
-    std.debug.assert(@sizeOf(Address) == 20);
-    std.debug.assert(@alignOf(Address) == 1);
-    std.debug.assert(@sizeOf(AddressWord) == 24);
-    std.debug.assert(@alignOf(AddressWord) == 8);
-}
 
 pub const addr = Address.addr;
 

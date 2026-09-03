@@ -235,9 +235,9 @@ test "claim state branch restore preserves retained logs" {
     state.seal(accepted);
     state.retain(accepted);
 
-    var checkpoint_value = try state.branchCheckpoint();
-    defer checkpoint_value.deinit();
-    var restore_value = try checkpoint_value.clone();
+    var snapshot = try state.branchSnapshot();
+    defer snapshot.deinit();
+    var restore_value = try snapshot.clone();
     defer restore_value.deinit();
 
     const replacement_topics = [_]u256{3};

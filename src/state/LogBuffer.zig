@@ -1,6 +1,6 @@
 //! Packed log storage shared by every execution state model.
 //!
-//! Like `checkpoint`, this belongs to neither the tracked nor the claim-indexed lane.
+//! Like `Checkpoint`, this belongs to neither the tracked nor the claim-indexed lane.
 //! Emitted logs are protocol output — receipts, blooms, and EIP-6110 deposit
 //! decoding read them the same way regardless of which lane produced them.
 //!
@@ -13,7 +13,7 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const Host = @import("../Host.zig");
-const checkpoint_types = @import("./checkpoint.zig");
+const Checkpoint = @import("./Checkpoint.zig");
 const range = @import("stdx").range;
 
 const Allocator = std.mem.Allocator;
@@ -29,9 +29,11 @@ pub const Row = struct {
     address: Address,
     topics: TopicRange,
     data: range.Bytes,
-};
 
-pub const Checkpoint = checkpoint_types.LogCheckpoint;
+    comptime {
+        std.debug.assert(@sizeOf(Row) == 36);
+    }
+};
 
 pub const AppendError = Allocator.Error || error{TooManyLogTopics};
 
@@ -55,7 +57,7 @@ pub fn clone(self: *const LogBuffer, allocator: Allocator) Allocator.Error!LogBu
     return result;
 }
 
-pub fn checkpoint(self: *const LogBuffer) Checkpoint {
+pub fn checkpoint(self: *const LogBuffer) Checkpoint.Log {
     return .{
         .rows_len = @intCast(self.rows.items.len),
         .topics_len = @intCast(self.topics.items.len),
@@ -63,7 +65,7 @@ pub fn checkpoint(self: *const LogBuffer) Checkpoint {
     };
 }
 
-pub fn truncate(self: *LogBuffer, value: Checkpoint) void {
+pub fn truncate(self: *LogBuffer, value: Checkpoint.Log) void {
     std.debug.assert(value.rows_len <= self.rows.items.len);
     std.debug.assert(value.topics_len <= self.topics.items.len);
     std.debug.assert(value.data_len <= self.data.items.len);
@@ -152,10 +154,6 @@ pub const View = struct {
         };
     }
 };
-
-comptime {
-    std.debug.assert(@sizeOf(Row) == 36);
-}
 
 test "packed log buffer owns callback bytes and truncates to checkpoint" {
     var logs: LogBuffer = .{};

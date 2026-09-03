@@ -27,7 +27,7 @@ pub const RootAccessReservation = enum { none, reserve };
 pub fn begin(executor: anytype, mode: Mode) !void {
     std.debug.assert(executor.attempt == null);
     std.debug.assert(executor.execution_context == null);
-    std.debug.assert(executor.checkpoint_top == 0);
+    std.debug.assert(!executor.state.hasOpenCheckpoint());
     std.debug.assert(!executor.state.scopeActive());
 
     if (mode.captureContext()) |capture| std.debug.assert(capture.isActive());
@@ -98,7 +98,7 @@ pub fn beginExecution(
 ) !void {
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
-    std.debug.assert(executor.checkpoint_top == 0);
+    std.debug.assert(!executor.state.hasOpenCheckpoint());
     std.debug.assert(!executor.state.scopeActive());
 
     executor.execution_context = request.context;
@@ -115,7 +115,7 @@ pub fn beginExecution(
 pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) !void {
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
-    std.debug.assert(executor.checkpoint_top == 0);
+    std.debug.assert(!executor.state.hasOpenCheckpoint());
     std.debug.assert(!executor.state.scopeActive());
 
     executor.execution_context = context;
@@ -183,7 +183,7 @@ pub fn runPrelude(
 ) @TypeOf(executor.executeTransactionRequest(request)) {
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
-    std.debug.assert(executor.checkpoint_top == 0);
+    std.debug.assert(!executor.state.hasOpenCheckpoint());
     std.debug.assert(!executor.state.scopeActive());
 
     executor.execution_context = request.context;

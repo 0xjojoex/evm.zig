@@ -130,7 +130,7 @@ fn applyFinalizeBlockMode(
     try out.ensureTotalCapacity(allocator, calls.len);
     if (calls.len == 0) return try out.toOwnedSlice(allocator);
 
-    var phase_start = try executor.branchCheckpoint();
+    var phase_start = try executor.branchSnapshot();
     defer phase_start.deinit();
     errdefer executor.restoreBranch(&phase_start);
 
@@ -173,7 +173,7 @@ fn applySystemCalls(
 ) !void {
     if (calls.len == 0) return;
 
-    var phase_start = try executor.branchCheckpoint();
+    var phase_start = try executor.branchSnapshot();
     defer phase_start.deinit();
     errdefer executor.restoreBranch(&phase_start);
 

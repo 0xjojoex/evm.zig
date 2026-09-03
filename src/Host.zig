@@ -151,7 +151,7 @@ pub const Result = struct {
 
 /// Resolve an opcode-local terminal call/create attempt without invoking the
 /// host. The supplied child gas is returned in full, matching EVM prechecks.
-pub fn precheckResult(msg: Message) ?Result {
+pub fn precheckResult(msg: *const Message) ?Result {
     const cause = msg.precheck_failure orelse return null;
     return .{
         .outcome = .{ .status = .invalid, .cause = cause },

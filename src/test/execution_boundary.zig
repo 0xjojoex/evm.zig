@@ -256,7 +256,7 @@ test "checkpoint nests LIFO and deinit restores an open token" {
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 7));
 }
 
-test "successive checkpoints receive distinct ids" {
+test "successive checkpoints receive distinct scope generations" {
     const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
@@ -266,14 +266,14 @@ test "successive checkpoints receive distinct ids" {
     defer executor.discardStateTransition();
 
     var first = executor.checkpoint();
-    const first_id = first.id;
+    const first_generation = first.checkpoint_state.scope_generation;
     _ = try executor.state.setStorage(contract, 7, 1);
     first.commit();
     first.deinit();
 
     var current = executor.checkpoint();
     defer current.deinit();
-    try std.testing.expect(first_id != current.id);
+    try std.testing.expect(first_generation != current.checkpoint_state.scope_generation);
     _ = try executor.state.setStorage(contract, 7, 2);
 
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));

@@ -748,7 +748,7 @@ test "checkpoint rollback truncates dense change ids" {
     try std.testing.expectEqual(addr(2), changes.storage_writes.at(0).address);
 }
 
-test "accepted branch checkpoint restores cumulative state and is reusable" {
+test "accepted branch snapshot restores cumulative state and is reusable" {
     var state = TrackedState.init(std.testing.allocator);
     defer state.deinit();
 
@@ -768,8 +768,8 @@ test "accepted branch checkpoint restores cumulative state and is reusable" {
     state.seal(baseline);
     state.retain(baseline);
 
-    var checkpoint_state = try state.branchCheckpoint();
-    defer checkpoint_state.deinit();
+    var snapshot = try state.branchSnapshot();
+    defer snapshot.deinit();
 
     const destroyed = state.beginTransaction();
     state.beginScope();
@@ -784,7 +784,7 @@ test "accepted branch checkpoint restores cumulative state and is reusable" {
     try std.testing.expect(state.getAccount(addr(1)) == null);
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_wipes.len());
 
-    var first_restore = try checkpoint_state.clone();
+    var first_restore = try snapshot.clone();
     defer first_restore.deinit();
     state.restoreBranch(&first_restore);
     try std.testing.expectEqual(@as(u64, 1), state.generation);
@@ -804,51 +804,14 @@ test "accepted branch checkpoint restores cumulative state and is reusable" {
     state.retain(later);
     try std.testing.expectEqual(@as(u256, 33), try state.getBalance(addr(2)));
 
-    var second_restore = try checkpoint_state.clone();
+    var second_restore = try snapshot.clone();
     defer second_restore.deinit();
     state.restoreBranch(&second_restore);
     try std.testing.expectEqual(@as(u256, 0), try state.getBalance(addr(2)));
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
 }
 
-test "transaction branch checkpoint reuses the scope journal" {
-    var state = TrackedState.init(std.testing.allocator);
-    defer state.deinit();
-
-    const attempt = state.beginTransaction();
-    state.beginScope();
-    try state.setBalance(addr(1), 11);
-    try state.emitLog(.{
-        .address = addr(1),
-        .topics = &.{1},
-        .data = &.{0x11},
-    });
-
-    var checkpoint_state = try state.branchCheckpoint();
-    defer checkpoint_state.deinit();
-    try state.setBalance(addr(1), 22);
-    try std.testing.expectEqual(.added, try state.setStorage(addr(1), 2, 33));
-    try state.emitLog(.{
-        .address = addr(1),
-        .topics = &.{2},
-        .data = &.{0x22},
-    });
-
-    state.restoreBranch(&checkpoint_state);
-    try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
-    try std.testing.expectEqual(@as(u256, 0), try state.getStorage(addr(1), 2));
-    try std.testing.expectEqual(@as(usize, 1), state.logView().len());
-
-    state.closeScope();
-    state.seal(attempt);
-    state.retain(attempt);
-    const changes = state.acceptedView().changes();
-    try std.testing.expectEqual(@as(u32, 1), changes.accounts.len());
-    try std.testing.expectEqual(@as(u256, 11), changes.accounts.at(0).account.?.balance);
-    try std.testing.expectEqual(@as(u32, 0), changes.storage_writes.len());
-}
-
-test "accepted branch checkpoint clone failure leaves current state unchanged" {
+test "accepted branch snapshot clone failure leaves current state unchanged" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var state = TrackedState.init(failing_allocator.allocator());
     defer state.deinit();
@@ -859,8 +822,8 @@ test "accepted branch checkpoint clone failure leaves current state unchanged" {
     state.closeScope();
     state.seal(baseline);
     state.retain(baseline);
-    var checkpoint_state = try state.branchCheckpoint();
-    defer checkpoint_state.deinit();
+    var snapshot = try state.branchSnapshot();
+    defer snapshot.deinit();
 
     const later = state.beginTransaction();
     state.beginScope();
@@ -870,13 +833,13 @@ test "accepted branch checkpoint clone failure leaves current state unchanged" {
     state.retain(later);
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
-    try std.testing.expectError(error.OutOfMemory, checkpoint_state.clone());
+    try std.testing.expectError(error.OutOfMemory, snapshot.clone());
     try std.testing.expect(failing_allocator.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 2), state.generation);
     try std.testing.expectEqual(@as(u256, 22), try state.getBalance(addr(1)));
 
     failing_allocator.fail_index = std.math.maxInt(usize);
-    var restore = try checkpoint_state.clone();
+    var restore = try snapshot.clone();
     defer restore.deinit();
     state.restoreBranch(&restore);
     try std.testing.expectEqual(@as(u64, 1), state.generation);
@@ -894,8 +857,8 @@ test "accepted branch restore does not allocate after capture" {
     state.closeScope();
     state.seal(baseline);
     state.retain(baseline);
-    var checkpoint_state = try state.branchCheckpoint();
-    defer checkpoint_state.deinit();
+    var snapshot = try state.branchSnapshot();
+    defer snapshot.deinit();
 
     const later = state.beginTransaction();
     state.beginScope();
@@ -905,7 +868,7 @@ test "accepted branch restore does not allocate after capture" {
     state.retain(later);
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
-    state.restoreBranch(&checkpoint_state);
+    state.restoreBranch(&snapshot);
     try std.testing.expect(!failing_allocator.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 1), state.generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));

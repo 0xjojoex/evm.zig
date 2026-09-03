@@ -23,8 +23,8 @@ const std = @import("std");
 
 const evmz = @import("./evm.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
-const Checkpoint = @import("./state/checkpoint.zig").Checkpoint;
-const checkpoint_guard = @import("./executor/checkpoint.zig");
+const Checkpoint = @import("./state/Checkpoint.zig");
+const CheckpointGuard = @import("./executor/checkpoint.zig").Guard;
 const frame_io = @import("./frame_io.zig");
 const FrameStore = @import("./executor/FrameStore.zig");
 const HostCallbacks = @import("./executor/host.zig").Callbacks;
@@ -165,7 +165,7 @@ pub fn ExecutorType(
 
         pub const StateAddress = ExecutionState.StateAddress;
 
-        pub const BranchCheckpoint = State.BranchCheckpoint;
+        pub const BranchSnapshot = State.BranchSnapshot;
 
         pub const Init = ExecutorInitType(ExecutionState);
 
@@ -188,8 +188,6 @@ pub fn ExecutorType(
         next_transaction_generation: u64 = 0,
         active_block_execution_generation: ?u64 = null,
         next_block_execution_generation: u64 = 0,
-        checkpoint_top: usize = 0,
-        next_checkpoint_id: usize = 0,
         block_hash_source: ?BlockHashSource = null,
         reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
         prepared_code_backend: ?prepared_code.Backend,
@@ -217,7 +215,7 @@ pub fn ExecutorType(
         pub fn deinit(self: *Executor) void {
             std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.frame_store.len() == 0);
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             std.debug.assert(self.prepared_code_execution_depth == 0);
             std.debug.assert(self.prepared_code_execution == null);
@@ -239,7 +237,7 @@ pub fn ExecutorType(
         /// attempts, `transaction/runtime.zig` resolves `transaction` ones
         /// through an `Executed` handle.
         const Attempt = struct {
-            id: State.AttemptId,
+            id: Checkpoint.AttemptId,
             mode: InstrumentationMode,
             owner: Owner,
 
@@ -255,17 +253,16 @@ pub fn ExecutorType(
                 nonce_advanced: bool = false,
                 payload_started: bool = false,
             };
-        };
 
-        /// The family row inside the live attempt. Callers that may run under a
-        /// manual attempt must test `hasCurrentTransaction` first.
-        fn transactionAttempt(self: *Executor) *Attempt.Transaction {
-            const attempt = if (self.attempt) |*value| value else unreachable;
-            return switch (attempt.owner) {
-                .manual => unreachable,
-                .transaction => |*value| value,
-            };
-        }
+            /// The family row inside the live attempt. Callers that may run under a
+            /// manual attempt must test `hasCurrentTransaction` first.
+            fn transaction(self: *Attempt) *Transaction {
+                return switch (self.owner) {
+                    .manual => unreachable,
+                    .transaction => |*value| value,
+                };
+            }
+        };
 
         /// Callback-scoped semantic view of one sealed transition.
         /// State attempt identity and resolution remain private to Executor.
@@ -293,7 +290,7 @@ pub fn ExecutorType(
             mode: InstrumentationMode,
         ) !void {
             std.debug.assert(self.execution_context == null);
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(self.attempt == null);
             assertExecutionMode(mode);
             const state_attempt_id = if (mode.observesState())
@@ -400,7 +397,7 @@ pub fn ExecutorType(
         }
 
         pub fn advanceTransactionNonce(self: *Executor, message: Message) !void {
-            const runtime_state = self.transactionAttempt();
+            const runtime_state = self.attempt.?.transaction();
             std.debug.assert(runtime_state.phase == .active);
             std.debug.assert(!runtime_state.nonce_advanced);
             std.debug.assert(!runtime_state.payload_started);
@@ -457,7 +454,7 @@ pub fn ExecutorType(
         }
 
         fn commitTransactionWithObserver(self: *Executor, observer: anytype) !void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             try self.finalizeTransactionState();
             try self.resolveManualTransaction(observer);
@@ -474,18 +471,10 @@ pub fn ExecutorType(
         }
 
         fn retainStateTransitionWithObserver(self: *Executor, observer: anytype) !void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             if (self.execution_context == null) return;
             try self.resolveManualTransaction(observer);
-        }
-
-        /// Restore a caller-owned branch checkpoint and discard the transition.
-        pub fn rollbackTransaction(self: *Executor, checkpoint_state: *BranchCheckpoint) void {
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(!self.hasCurrentTransaction());
-            self.restoreBranch(checkpoint_state);
-            self.discardStateTransition();
         }
 
         /// Discard the active manual transition and close its execution scope.
@@ -494,7 +483,7 @@ pub fn ExecutorType(
         /// no-op after the transition has already been committed, retained, or
         /// discarded.
         pub fn discardStateTransition(self: *Executor) void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             if (self.execution_context == null) {
                 std.debug.assert(self.attempt == null);
@@ -531,7 +520,7 @@ pub fn ExecutorType(
         /// Close whichever execution scope belongs to a resolved transaction
         /// attempt, or clear an execution-less attempt's retained journal.
         fn closeTransactionLifetime(self: *Executor) void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(self.hasCurrentTransaction());
             std.debug.assert(!self.state.scopeActive());
             self.execution_context = null;
@@ -633,13 +622,13 @@ pub fn ExecutorType(
                 /// This is the idempotent cleanup operation for `defer`.
                 pub fn discardIfCurrent(self: Execution) void {
                     if (!self.executor.hasCurrentTransaction()) return;
-                    const current = self.executor.transactionAttempt();
+                    const current = self.executor.attempt.?.transaction();
                     if (current.generation != self.generation or current.phase != .pending) return;
                     self.discard();
                 }
 
                 fn state(self: Execution) *Attempt.Transaction {
-                    const state_value = self.executor.transactionAttempt();
+                    const state_value = self.executor.attempt.?.transaction();
                     std.debug.assert(state_value.generation == self.generation);
                     std.debug.assert(state_value.phase == .pending);
                     return state_value;
@@ -647,83 +636,27 @@ pub fn ExecutorType(
             };
         }
 
-        // Checkpoints. `ExecutionCheckpoint` is the public id-nested token; `CheckpointGuard`
-        // is the interior one whose ownership migrates into a frame-store row.
-
-        /// Scope-bound execution checkpoint paired with one trace/BAL lifecycle.
-        ///
-        /// This journal-backed token must be opened and closed inside one active
-        /// transaction scope. It never finalizes or closes that scope. The owning
-        /// transaction runtime can span prelude writes and payload execution;
-        /// broader block phases still use their own STF/backend lifetime.
-        /// Treat this token as move-only.
-        pub const ExecutionCheckpoint = struct {
-            executor: *Executor,
-            journal_checkpoint: Checkpoint,
-            id: usize,
-            parent_id: usize,
-            open: bool = true,
-
-            pub fn commit(self: *ExecutionCheckpoint) void {
-                self.validateClose();
-                self.executor.state.commitCheckpoint(self.journal_checkpoint);
-                self.finishClose();
-            }
-
-            pub fn restore(self: *ExecutionCheckpoint) void {
-                self.validateClose();
-                self.executor.state.revertToCheckpoint(self.journal_checkpoint);
-                self.finishClose();
-            }
-
-            pub fn deinit(self: *ExecutionCheckpoint) void {
-                if (self.open) {
-                    std.debug.assert(self.executor.checkpoint_top == self.id);
-                    self.executor.state.revertToCheckpoint(self.journal_checkpoint);
-                    self.finishClose();
-                }
-                self.* = undefined;
-            }
-
-            fn validateClose(self: *const ExecutionCheckpoint) void {
-                std.debug.assert(self.open);
-                std.debug.assert(self.executor.checkpoint_top == self.id);
-            }
-
-            fn finishClose(self: *ExecutionCheckpoint) void {
-                self.open = false;
-                self.executor.checkpoint_top = self.parent_id;
-            }
-        };
+        /// Caller-owned journal checkpoint. Opened only inside an active
+        /// transaction scope; it never finalizes or closes that scope, so the
+        /// owning runtime can span prelude writes and payload execution.
+        pub const ExecutionCheckpoint = CheckpointGuard(State);
 
         /// Open one journal-backed checkpoint inside the active execution scope.
         pub fn checkpoint(self: *Executor) ExecutionCheckpoint {
             self.requireTransactionScope();
-            std.debug.assert(self.next_checkpoint_id < std.math.maxInt(usize));
-            const id = self.next_checkpoint_id + 1;
-            const parent_id = self.checkpoint_top;
-            const journal_checkpoint = self.state.checkpoint();
-            self.next_checkpoint_id = id;
-            self.checkpoint_top = id;
-            return .{
-                .executor = self,
-                .journal_checkpoint = journal_checkpoint,
-                .id = id,
-                .parent_id = parent_id,
-            };
+            return .begin(&self.state);
         }
 
-        /// Capture the mutable branch independently from execution checkpoints.
-        pub fn branchCheckpoint(self: *Executor) !BranchCheckpoint {
-            return self.state.branchCheckpoint();
+        /// Copy the accepted branch so a later `restoreBranch` can roll back
+        /// across whole transactions. Allocates; only valid between them.
+        pub fn branchSnapshot(self: *Executor) !BranchSnapshot {
+            return self.state.branchSnapshot();
         }
 
-        /// Restore the mutable branch independently from execution checkpoints.
-        pub fn restoreBranch(self: *Executor, checkpoint_state: *BranchCheckpoint) void {
-            self.state.restoreBranch(checkpoint_state);
+        /// Swap a snapshot back in, discarding any transaction in flight.
+        pub fn restoreBranch(self: *Executor, snapshot: *BranchSnapshot) void {
+            self.state.restoreBranch(snapshot);
         }
-
-        const CheckpointGuard = checkpoint_guard.Guard(State);
 
         // Ambient per-execution state. Each of these is saved and restored by hand at
         // every entrypoint that owns it, rather than inherited from a scope value.
@@ -949,7 +882,7 @@ pub fn ExecutorType(
 
         /// Drop the cumulative accepted branch and clear any open context.
         pub fn discardAccepted(self: *Executor) void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             self.state.discardAccepted();
             self.execution_context = null;
@@ -1390,7 +1323,7 @@ pub fn ExecutorType(
                 defer self.executor.trace_depth = previous_depth;
 
                 const call_capture = try trace_capture.beginCall(self.capture_context, msg);
-                if (Host.precheckResult(msg.*)) |result| {
+                if (Host.precheckResult(msg)) |result| {
                     if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                     return result;
                 }
@@ -1400,7 +1333,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCall(msg, child.bytecode, child.checkpoint_state, call_capture);
@@ -1416,7 +1349,7 @@ pub fn ExecutorType(
                 defer self.executor.trace_depth = previous_depth;
 
                 const call_capture = try trace_capture.beginCall(self.capture_context, msg);
-                if (Host.precheckResult(msg.*)) |result| {
+                if (Host.precheckResult(msg)) |result| {
                     if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                     return result;
                 }
@@ -1432,7 +1365,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCreate(child, call_capture);
@@ -1448,10 +1381,10 @@ pub fn ExecutorType(
                 const control = self.frames.control(frame_index).*;
                 const frame_kind = control.kind;
                 const call_capture = control.call_capture;
-                var frame_checkpoint: ?CheckpointGuard = switch (frame_kind) {
+                var frame_checkpoint: ?ExecutionCheckpoint = switch (frame_kind) {
                     .root_call => null,
-                    .call => |checkpoint_state| CheckpointGuard.init(&self.executor.state, checkpoint_state),
-                    .create => |child| CheckpointGuard.init(&self.executor.state, child.checkpoint_state),
+                    .call => |checkpoint_state| ExecutionCheckpoint.init(&self.executor.state, checkpoint_state),
+                    .create => |child| ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state),
                 };
                 defer if (frame_checkpoint) |*guard| guard.deinit();
 
@@ -1508,7 +1441,7 @@ pub fn ExecutorType(
             if (resolved.delegated) try self.traceAccountAccess(resolved.address);
             const code = try self.resolvedCodeView(resolved);
 
-            var call_checkpoint = CheckpointGuard.begin(&self.state);
+            var call_checkpoint = ExecutionCheckpoint.begin(&self.state);
             defer call_checkpoint.deinit();
 
             if (msg.value > 0 and (msg.kind == .call or msg.kind == .callcode)) {
@@ -1555,7 +1488,7 @@ pub fn ExecutorType(
             const bytecode = try self.resolveExecutionCodeView(code);
             call_checkpoint.disarm();
             return .{ .child = .{
-                .checkpoint_state = call_checkpoint.checkpoint_state,
+                .checkpoint_state = call_checkpoint.checkpoint,
                 .bytecode = bytecode,
             } };
         }
@@ -1655,7 +1588,7 @@ pub fn ExecutorType(
             return switch (try begin(self, &msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
-                    var child_checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -1706,7 +1639,7 @@ pub fn ExecutorType(
 
         fn beginPreparedCreate(self: *Executor, msg: *const Host.Message) !StartedCreate {
             const create_address = msg.recipient;
-            var create_checkpoint = CheckpointGuard.begin(&self.state);
+            var create_checkpoint = ExecutionCheckpoint.begin(&self.state);
             defer create_checkpoint.deinit();
 
             if (try self.createCollision(create_address)) {
@@ -1732,7 +1665,7 @@ pub fn ExecutorType(
 
             create_checkpoint.disarm();
             return .{ .child = .{
-                .checkpoint_state = create_checkpoint.checkpoint_state,
+                .checkpoint_state = create_checkpoint.checkpoint,
                 .source_msg = msg,
             } };
         }
@@ -1741,7 +1674,7 @@ pub fn ExecutorType(
             self: *Executor,
             child: FrameStore.CreateControl,
             frame_result: FrameResult,
-            create_checkpoint: *CheckpointGuard,
+            create_checkpoint: *ExecutionCheckpoint,
         ) !Host.Result {
             const result = frame_result.executionResult();
             const output = result.output_data;
@@ -1854,7 +1787,7 @@ pub fn ExecutorType(
 
             const capture_value = self.currentCaptureContext();
             const call_capture = try trace_capture.beginCall(capture_value, &msg);
-            const result = Host.precheckResult(msg) orelse if (msg.kind == .create or msg.kind == .create2) result: {
+            const result = Host.precheckResult(&msg) orelse if (msg.kind == .create or msg.kind == .create2) result: {
                 // Direct Host callers may still submit an over-depth message.
                 // Opcode-generated terminal attempts were resolved above.
                 if (msg.depth > Host.max_call_depth) {
@@ -1864,7 +1797,7 @@ pub fn ExecutorType(
             } else switch (try self.beginCall(&msg)) {
                 .immediate => |immediate| immediate,
                 .child => |child| blk: {
-                    var child_checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -2583,14 +2516,14 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
     }
 
     {
-        var checkpoint = Executor.CheckpointGuard.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
         defer checkpoint.deinit();
         try executor.state.addBalance(address, 7);
     }
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(address));
 
     {
-        var checkpoint = Executor.CheckpointGuard.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
         defer checkpoint.deinit();
         try executor.state.addBalance(address, 9);
         checkpoint.commit();

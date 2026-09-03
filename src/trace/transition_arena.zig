@@ -40,15 +40,15 @@ pub const ReturnDataTransition = struct {
     after: ByteRange = .{},
 };
 
-pub const StateCheckpoint = struct {
+pub const FrameCursor = struct {
     stack: WordRange = .{},
     return_data: ByteRange = .{},
     memory_size: u32 = 0,
 };
 
 pub const FrameTransition = struct {
-    initial: StateCheckpoint = .{},
-    parent: StateCheckpoint = .{},
+    initial: FrameCursor = .{},
+    parent: FrameCursor = .{},
     final_return_data: ByteRange = .{},
     final_memory_size: u32 = 0,
 };

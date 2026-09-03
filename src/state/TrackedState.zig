@@ -7,7 +7,6 @@
 //! transaction sidecar; normal execution does not allocate or journal them.
 
 const std = @import("std");
-const checkpoint_types = @import("checkpoint.zig");
 const state_types = @import("../state.zig");
 const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
@@ -15,6 +14,7 @@ const execution = @import("../execution.zig");
 const Host = @import("../Host.zig");
 const range = @import("stdx").range;
 const Account = @import("./Account.zig");
+const Checkpoint = @import("./Checkpoint.zig");
 const MemoryAccount = @import("./MemoryAccount.zig");
 const StateReader = @import("./Reader.zig");
 const storage = @import("./storage.zig");
@@ -86,7 +86,7 @@ cached_tx: ?Transaction,
 transaction_reuse_active: bool,
 retained_logs: LogBuffer,
 
-pub const AttemptId = checkpoint_types.AttemptId;
+pub const AttemptId = Checkpoint.AttemptId;
 
 pub const FinalizationRules = state_types.FinalizationRules;
 
@@ -266,6 +266,10 @@ pub const Accepted = struct {
 pub const CodeEntry = struct {
     chunk: u32,
     bytes: ByteRange,
+
+    comptime {
+        std.debug.assert(@sizeOf(CodeEntry) == 12);
+    }
 
     pub fn slice(self: CodeEntry, cache: *const CodeCache) []const u8 {
         const chunk = cache.chunks.items[self.chunkIndex()];
@@ -702,7 +706,13 @@ pub const PendingView = struct {
 };
 
 pub const Scope = struct {
+    /// Generation of the innermost open checkpoint, or of the scope root when
+    /// none is open. Every checkpoint allocates a fresh value, so closing one
+    /// out of LIFO order fails `validateCheckpoint`.
     generation: u64,
+    next_generation: u64,
+    /// Open nested checkpoints; zero at the scope root.
+    depth: u32,
     active: bool,
     warm_accounts: AddressSet,
     storage: ScopeStorageMap,
@@ -711,11 +721,19 @@ pub const Scope = struct {
     fn init(allocator: std.mem.Allocator) Scope {
         return .{
             .generation = 0,
+            .next_generation = 0,
+            .depth = 0,
             .active = false,
             .warm_accounts = AddressSet.init(allocator),
             .storage = ScopeStorageMap.init(allocator),
             .transient_storage = TransientStorageMap.init(allocator),
         };
+    }
+
+    fn allocateGeneration(self: *Scope) u64 {
+        std.debug.assert(self.next_generation != std.math.maxInt(u64));
+        self.next_generation += 1;
+        return self.next_generation;
     }
 
     fn deinit(self: *Scope) void {
@@ -761,6 +779,10 @@ pub const Journal = struct {
         warm_account: AccountId,
         warm_storage: StorageId,
         transient_storage: TransientUndoId,
+
+        comptime {
+            std.debug.assert(@sizeOf(Journal.Entry) == 8);
+        }
     };
 
     pub const AccountUndo = struct {
@@ -972,60 +994,37 @@ pub const Journal = struct {
     }
 };
 
-const Checkpoint = checkpoint_types.Checkpoint;
-
-const AcceptedBranchCheckpoint = struct {
-    generation: u64,
-    accepted: Accepted,
-    retained_logs: LogBuffer,
-};
-
-pub const BranchCheckpoint = struct {
+/// Heap copy of the accepted branch. Capture allocates; restore is
+/// allocation-free and swaps the copy back in. Only valid between
+/// transactions.
+pub const BranchSnapshot = struct {
     owner: *const TrackedState,
     allocator: std.mem.Allocator,
     epoch: u64,
+    generation: u64,
+    accepted: Accepted,
+    retained_logs: LogBuffer,
     resolved: bool = false,
-    payload: union(enum) {
-        accepted: AcceptedBranchCheckpoint,
-        transaction: Checkpoint,
-    },
 
-    pub fn clone(self: *const BranchCheckpoint) !BranchCheckpoint {
+    pub fn clone(self: *const BranchSnapshot) !BranchSnapshot {
         std.debug.assert(!self.resolved);
-        return switch (self.payload) {
-            .transaction => |checkpoint_state| .{
-                .owner = self.owner,
-                .allocator = self.allocator,
-                .epoch = self.epoch,
-                .payload = .{ .transaction = checkpoint_state },
-            },
-            .accepted => |*accepted_checkpoint| blk: {
-                var accepted = try accepted_checkpoint.accepted.clone(self.allocator);
-                errdefer accepted.deinit(self.allocator);
-                var retained_logs = try accepted_checkpoint.retained_logs.clone(self.allocator);
-                errdefer retained_logs.deinit(self.allocator);
-                break :blk .{
-                    .owner = self.owner,
-                    .allocator = self.allocator,
-                    .epoch = self.epoch,
-                    .payload = .{ .accepted = .{
-                        .generation = accepted_checkpoint.generation,
-                        .accepted = accepted,
-                        .retained_logs = retained_logs,
-                    } },
-                };
-            },
+        var accepted = try self.accepted.clone(self.allocator);
+        errdefer accepted.deinit(self.allocator);
+        var retained_logs = try self.retained_logs.clone(self.allocator);
+        errdefer retained_logs.deinit(self.allocator);
+        return .{
+            .owner = self.owner,
+            .allocator = self.allocator,
+            .epoch = self.epoch,
+            .generation = self.generation,
+            .accepted = accepted,
+            .retained_logs = retained_logs,
         };
     }
 
-    pub fn deinit(self: *BranchCheckpoint) void {
-        switch (self.payload) {
-            .accepted => |*accepted| {
-                accepted.accepted.deinit(self.allocator);
-                accepted.retained_logs.deinit(self.allocator);
-            },
-            .transaction => {},
-        }
+    pub fn deinit(self: *BranchSnapshot) void {
+        self.accepted.deinit(self.allocator);
+        self.retained_logs.deinit(self.allocator);
         self.* = undefined;
     }
 };
@@ -1095,6 +1094,8 @@ pub const Transaction = struct {
         self.introduced_code.clearRetainingCapacity();
         self.scope.clearRetainingCapacity();
         self.scope.generation = 0;
+        self.scope.next_generation = 0;
+        self.scope.depth = 0;
         self.undo.clearRetainingCapacity();
         self.logs.clearRetainingCapacity();
         self.id = id;
@@ -1261,8 +1262,8 @@ pub fn beginScope(self: *TrackedState) void {
     std.debug.assert(!tx.scope.active);
     std.debug.assert(tx.undo.isEmpty());
 
-    std.debug.assert(tx.scope.generation != std.math.maxInt(u64));
-    tx.scope.generation += 1;
+    tx.scope.generation = tx.scope.allocateGeneration();
+    tx.scope.depth = 0;
     tx.scope.active = true;
     tx.logs.clearRetainingCapacity();
 }
@@ -1270,6 +1271,7 @@ pub fn beginScope(self: *TrackedState) void {
 pub fn closeScope(self: *TrackedState) void {
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
+    std.debug.assert(tx.scope.depth == 0);
     tx.undo.truncate(0);
     tx.scope.clearRetainingCapacity();
 }
@@ -1354,16 +1356,8 @@ pub fn acceptedView(self: *const TrackedState) AcceptedView {
     return .{ .handle = self };
 }
 
-pub fn branchCheckpoint(self: *TrackedState) !BranchCheckpoint {
-    if (self.tx != null) {
-        return .{
-            .owner = self,
-            .allocator = self.allocator,
-            .epoch = self.epoch,
-            .payload = .{ .transaction = self.checkpoint() },
-        };
-    }
-
+pub fn branchSnapshot(self: *TrackedState) !BranchSnapshot {
+    std.debug.assert(self.tx == null);
     var accepted = try self.accepted.clone(self.allocator);
     errdefer accepted.deinit(self.allocator);
     var retained_logs = try self.retained_logs.clone(self.allocator);
@@ -1372,30 +1366,21 @@ pub fn branchCheckpoint(self: *TrackedState) !BranchCheckpoint {
         .owner = self,
         .allocator = self.allocator,
         .epoch = self.epoch,
-        .payload = .{ .accepted = .{
-            .generation = self.generation,
-            .accepted = accepted,
-            .retained_logs = retained_logs,
-        } },
+        .generation = self.generation,
+        .accepted = accepted,
+        .retained_logs = retained_logs,
     };
 }
 
-pub fn restoreBranch(self: *TrackedState, checkpoint_state: *BranchCheckpoint) void {
-    std.debug.assert(checkpoint_state.owner == self);
-    std.debug.assert(checkpoint_state.epoch == self.epoch);
-    std.debug.assert(!checkpoint_state.resolved);
-    switch (checkpoint_state.payload) {
-        .transaction => |checkpoint_state_value| {
-            self.revertToCheckpoint(checkpoint_state_value);
-        },
-        .accepted => |*accepted_checkpoint| {
-            self.discardActive();
-            std.mem.swap(Accepted, &self.accepted, &accepted_checkpoint.accepted);
-            std.mem.swap(LogBuffer, &self.retained_logs, &accepted_checkpoint.retained_logs);
-            self.generation = accepted_checkpoint.generation;
-        },
-    }
-    checkpoint_state.resolved = true;
+pub fn restoreBranch(self: *TrackedState, snapshot: *BranchSnapshot) void {
+    std.debug.assert(snapshot.owner == self);
+    std.debug.assert(snapshot.epoch == self.epoch);
+    std.debug.assert(!snapshot.resolved);
+    self.discardActive();
+    std.mem.swap(Accepted, &self.accepted, &snapshot.accepted);
+    std.mem.swap(LogBuffer, &self.retained_logs, &snapshot.retained_logs);
+    self.generation = snapshot.generation;
+    snapshot.resolved = true;
 }
 
 pub fn pendingView(self: *const TrackedState) PendingView {
@@ -1415,13 +1400,23 @@ pub fn scopeActive(self: *const TrackedState) bool {
     return tx.scope.active;
 }
 
+/// True while a nested checkpoint is open inside the scope root.
+pub fn hasOpenCheckpoint(self: *const TrackedState) bool {
+    const tx = self.tx orelse return false;
+    return tx.scope.depth != 0;
+}
+
 pub fn checkpoint(self: *TrackedState) Checkpoint {
     const tx = self.mutableTransaction();
     std.debug.assert(tx.scope.active);
+    std.debug.assert(tx.scope.depth != std.math.maxInt(u32));
+    const parent_generation = tx.scope.generation;
+    tx.scope.generation = tx.scope.allocateGeneration();
+    tx.scope.depth += 1;
     return .{
         .attempt_id = tx.id,
         .scope_generation = tx.scope.generation,
-        .parent_scope_generation = tx.scope.generation,
+        .parent_scope_generation = parent_generation,
         .journal_len = tx.undo.len(),
         .changed_accounts_len = @intCast(tx.changed_accounts.items.len),
         .changed_storage_len = @intCast(tx.changed_storage.items.len),
@@ -1432,6 +1427,7 @@ pub fn checkpoint(self: *TrackedState) Checkpoint {
 
 pub fn commitCheckpoint(self: *TrackedState, checkpoint_state: Checkpoint) void {
     self.validateCheckpoint(checkpoint_state);
+    self.closeCheckpoint(checkpoint_state);
 }
 
 pub fn revertToCheckpoint(self: *TrackedState, checkpoint_state: Checkpoint) void {
@@ -1445,6 +1441,14 @@ pub fn revertToCheckpoint(self: *TrackedState, checkpoint_state: Checkpoint) voi
     tx.changed_storage.items.len = checkpoint_state.changed_storage_len;
     tx.storage_wipes.items.len = checkpoint_state.storage_wipes_len;
     tx.logs.truncate(checkpoint_state.logs);
+    self.closeCheckpoint(checkpoint_state);
+}
+
+fn closeCheckpoint(self: *TrackedState, checkpoint_state: Checkpoint) void {
+    const tx = &self.tx.?;
+    std.debug.assert(tx.scope.depth != 0);
+    tx.scope.generation = checkpoint_state.parent_scope_generation;
+    tx.scope.depth -= 1;
 }
 
 fn validateCheckpoint(self: *TrackedState, checkpoint_state: Checkpoint) void {
@@ -2020,6 +2024,7 @@ pub fn finalize(self: *TrackedState, rules: FinalizationRules) !void {
         row.mutation.created = false;
         row.mutation.selfdestructed = false;
     }
+    self.commitCheckpoint(checkpoint_state);
 }
 
 pub fn discardAccepted(self: *TrackedState) void {
@@ -2464,11 +2469,6 @@ fn appendStorageUndo(self: *TrackedState, storage_id: StorageId, row: *const Sto
         .previous_current = row.current,
         .previous_mutation = row.mutation,
     }, observation_undo);
-}
-
-comptime {
-    std.debug.assert(@sizeOf(CodeEntry) == 12);
-    std.debug.assert(@sizeOf(Journal.Entry) == 8);
 }
 
 test {

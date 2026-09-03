@@ -59,10 +59,13 @@ pub const Row = struct {
     input: ByteRange,
     output: ByteRange = .{},
     status: Status = .running,
-
     // Low 31 bits count children while constructing the flat tree. The high
     // bit retains whether this frame restored its own execution checkpoint.
     construction_state: u32 = 0,
+
+    comptime {
+        std.debug.assert(@sizeOf(Row) == 144);
+    }
 
     const checkpoint_reverted_mask: u32 = 1 << 31;
     const child_count_mask: u32 = checkpoint_reverted_mask - 1;
@@ -81,12 +84,6 @@ pub const Row = struct {
         };
     }
 };
-
-comptime {
-    if (@sizeOf(usize) == 8 and @sizeOf(Row) != 144) {
-        @compileError("call capture Row size changed; rerun retained-tree memory and timing benches");
-    }
-}
 
 pub const Start = struct {
     depth: u16,

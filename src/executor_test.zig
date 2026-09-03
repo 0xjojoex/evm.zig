@@ -2093,30 +2093,6 @@ test "transaction payload resolves only its inner checkpoint" {
     }
 }
 
-test "rollback transaction restores branch checkpoint and closes execution context" {
-    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    const execution_context = testExecutionContext(sender, 100_000);
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-
-    try evmz.t.seedExecutorAccount(&executor, contract, .{});
-
-    try executor.beginTransaction(execution_context, sender, contract);
-    var pre_execution = try executor.branchCheckpoint();
-    defer pre_execution.deinit();
-
-    try std.testing.expectEqual(execution_values.StorageStatus.added, try executor.state.setStorage(contract, 7, 2));
-    try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
-
-    executor.rollbackTransaction(&pre_execution);
-
-    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 7));
-    try std.testing.expectEqual(@as(usize, 0), executor.state.journalEntryCount());
-    try std.testing.expect(executor.execution_context == null);
-}
-
 test "executor executes top-level create transaction" {
     const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);

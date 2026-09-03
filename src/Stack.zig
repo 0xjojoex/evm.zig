@@ -16,9 +16,7 @@ len: u16 = 0,
 const Stack = @This();
 
 comptime {
-    if (@sizeOf(usize) == 8 and @sizeOf(Stack) != 16) {
-        @compileError("Stack view must stay compact; rerun VM-loop canary benches");
-    }
+    std.debug.assert(@sizeOf(Stack) == 16);
 }
 
 pub fn init(words: []u256, base_word: u32) Stack {

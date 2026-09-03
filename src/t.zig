@@ -383,7 +383,7 @@ pub const MockHost = struct {
     }
 
     fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
-        if (Host.precheckResult(msg)) |result| return result;
+        if (Host.precheckResult(&msg)) |result| return result;
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.call_error) |err| return err;
         return .{

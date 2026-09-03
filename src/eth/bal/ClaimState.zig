@@ -17,7 +17,7 @@ const Host = @import("../../Host.zig");
 const Account = @import("../../state/Account.zig");
 const artifacts = @import("claim_artifacts.zig");
 const records = @import("ParentFacts.zig");
-const checkpoint_types = @import("../../state/checkpoint.zig");
+const Checkpoint = @import("../../state/Checkpoint.zig");
 const state_types = @import("../../state.zig");
 const storage_status = @import("../../state/storage.zig");
 const sparse_hash_map = @import("../../state/sparse_hash_map.zig");
@@ -71,7 +71,7 @@ comptime {
 
 pub const AccountId = claim_plan.AccountId;
 pub const StorageId = claim_plan.StorageId;
-pub const AttemptId = checkpoint_types.AttemptId;
+pub const AttemptId = Checkpoint.AttemptId;
 pub const CodeView = artifacts.CodeView;
 /// Emitted logs and their borrowed projection are lane-independent; see
 /// `state/LogBuffer.zig`.
@@ -574,9 +574,7 @@ pub const PendingView = struct {
     }
 };
 
-const Checkpoint = checkpoint_types.Checkpoint;
-
-pub const BranchCheckpoint = struct {
+pub const BranchSnapshot = struct {
     owner: *const ClaimState,
     allocator: Allocator,
     accounts: []AccountRow,
@@ -591,7 +589,7 @@ pub const BranchCheckpoint = struct {
     accepted_generation: u64,
     resolved: bool = false,
 
-    pub fn clone(self: *const BranchCheckpoint) Allocator.Error!BranchCheckpoint {
+    pub fn clone(self: *const BranchSnapshot) Allocator.Error!BranchSnapshot {
         std.debug.assert(!self.resolved);
         const accounts = try self.allocator.dupe(AccountRow, self.accounts);
         errdefer self.allocator.free(accounts);
@@ -613,7 +611,7 @@ pub const BranchCheckpoint = struct {
         };
     }
 
-    pub fn deinit(self: *BranchCheckpoint) void {
+    pub fn deinit(self: *BranchSnapshot) void {
         self.allocator.free(self.accounts);
         self.allocator.free(self.storage);
         self.retained_logs.deinit(self.allocator);
@@ -1081,6 +1079,11 @@ pub fn scopeActive(self: *const ClaimState) bool {
     return self.scope_depth != 0;
 }
 
+/// True while a nested checkpoint is open inside the scope root.
+pub fn hasOpenCheckpoint(self: *const ClaimState) bool {
+    return self.scope_depth > 1;
+}
+
 pub fn seal(self: *ClaimState, id: AttemptId) void {
     self.assertCurrent(id);
     std.debug.assert(!self.scopeActive());
@@ -1143,7 +1146,7 @@ pub fn checkpoint(self: *ClaimState) Checkpoint {
     };
 }
 
-pub fn branchCheckpoint(self: *ClaimState) Allocator.Error!BranchCheckpoint {
+pub fn branchSnapshot(self: *ClaimState) Allocator.Error!BranchSnapshot {
     std.debug.assert(!self.transaction_active);
     const accounts = try self.allocator.dupe(AccountRow, self.accounts);
     errdefer self.allocator.free(accounts);
@@ -1165,7 +1168,7 @@ pub fn branchCheckpoint(self: *ClaimState) Allocator.Error!BranchCheckpoint {
     };
 }
 
-pub fn restoreBranch(self: *ClaimState, value: *BranchCheckpoint) void {
+pub fn restoreBranch(self: *ClaimState, value: *BranchSnapshot) void {
     std.debug.assert(value.owner == self);
     std.debug.assert(!value.resolved);
     if (self.transaction_active) self.discard(self.active_attempt_id.?);

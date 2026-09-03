@@ -286,12 +286,12 @@ pub const TraceCursor = struct {
     }
 
     pub fn enterFrame(self: *TraceCursor, frame: FrameRow) void {
-        self.restoreCheckpoint(self.frameTransition(frame).initial);
+        self.restoreCursor(self.frameTransition(frame).initial);
         self.frame_id = frame.frame_id;
     }
 
     pub fn leaveFrame(self: *TraceCursor, frame: FrameRow) void {
-        self.restoreCheckpoint(self.frameTransition(frame).parent);
+        self.restoreCursor(self.frameTransition(frame).parent);
         self.frame_id = frame.parent_frame_id;
     }
 
@@ -401,14 +401,14 @@ pub const TraceCursor = struct {
         return self.span.transitions.frames[index];
     }
 
-    fn restoreCheckpoint(self: *TraceCursor, checkpoint: transition_arena.StateCheckpoint) void {
+    fn restoreCursor(self: *TraceCursor, cursor: transition_arena.FrameCursor) void {
         if (self.span.profile.stack == .full) {
-            self.replaceStack(self.wordsFor(checkpoint.stack));
+            self.replaceStack(self.wordsFor(cursor.stack));
         } else {
             self.stack_len = 0;
         }
-        self.memory_size = checkpoint.memory_size;
-        self.return_data = checkpoint.return_data;
+        self.memory_size = cursor.memory_size;
+        self.return_data = cursor.return_data;
         self.last_memory_writes = .{};
     }
 
