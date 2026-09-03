@@ -465,7 +465,7 @@ fn GetPtrBench(comptime Map: type, comptime Key: type) type {
                 if (self.map.getPtr(self.keys[index & mask])) |row| {
                     const current = row.current orelse continue;
                     acc +%= switch (current) {
-                        .loaded => |account| account.nonce,
+                        .present => |account| account.nonce,
                         .absent, .exists_only => 0,
                     };
                 }
@@ -617,7 +617,7 @@ fn fillStorageMap(map: anytype, keys: []const StorageKey) void {
 fn fillAddressMap(map: anytype, keys: []const Address) void {
     for (keys, 0..) |key, index| {
         map.putAssumeCapacityNoClobber(key, .{
-            .current = .{ .loaded = .{ .nonce = @intCast(index + 1) } },
+            .current = .{ .present = .{ .nonce = @intCast(index + 1) } },
         });
     }
 }

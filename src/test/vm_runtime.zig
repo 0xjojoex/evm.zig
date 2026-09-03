@@ -87,7 +87,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
                 if (!evmz.Address.eql(fact.address, self.address)) continue;
                 try std.testing.expect(fact.observation.code_read);
                 const loaded_account = switch (fact.current orelse return error.ExpectedLoadedAccount) {
-                    .loaded => |value| value,
+                    .present => |value| value,
                     .absent, .exists_only => return error.ExpectedLoadedAccount,
                 };
                 try std.testing.expectEqualSlices(u8, &self.code_hash, &loaded_account.code_hash);

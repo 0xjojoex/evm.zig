@@ -139,7 +139,7 @@ pub const LaneTransition = struct {
 fn accountOrZero(value: anytype) Account {
     if (@TypeOf(value) == ?Account) return value orelse .{};
     return switch (value orelse .absent) {
-        .loaded => |account| account,
+        .present => |account| account,
         .absent => .{},
         .exists_only => unreachable,
     };

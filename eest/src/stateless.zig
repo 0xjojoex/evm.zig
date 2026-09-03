@@ -842,7 +842,7 @@ const GasTracePrinter = struct {
 
     fn account(value: ?evmz.state.TrackedState.AccountValue) evmz.state.Account {
         return switch (value orelse .absent) {
-            .loaded => |loaded| loaded,
+            .present => |present| present,
             .absent => .{},
             .exists_only => unreachable,
         };

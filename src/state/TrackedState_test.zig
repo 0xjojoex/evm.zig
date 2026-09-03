@@ -67,8 +67,8 @@ test "normal transaction does not materialize observation state" {
     try std.testing.expect(!tx.observe);
     try std.testing.expectEqual(@as(usize, 0), tx.observed_accounts.items.len);
     try std.testing.expectEqual(@as(usize, 0), tx.observed_storage.items.len);
-    try std.testing.expectEqual(@as(usize, 0), tx.undo.account_observation_undo.items.len);
-    try std.testing.expectEqual(@as(usize, 0), tx.undo.storage_observation_undo.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tx.journal.account_observations.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tx.journal.storage_observations.items.len);
     try std.testing.expect(tx.accounts.get(addr(1)).?.observation_id == null);
     try std.testing.expect(tx.storage.get(.{ .address = addr(1), .key = 2 }).?.observation_id == null);
 }
@@ -116,7 +116,7 @@ test "tracked rows survive scope rollback while current mutations revert" {
     const observed = state.tx.?.observed_storage.items[@intFromEnum(row.observation_id.?)];
     try std.testing.expect(observed.observation.accessed);
     try std.testing.expect(observed.observation.value_read);
-    try std.testing.expect(!row.mutation.dirty);
+    try std.testing.expect(!row.flags.dirty);
     const scope_row = state.tx.?.scope.storage.get(.{ .address = addr(1), .key = 2 }).?;
     try std.testing.expect(!scope_row.warm);
 }
@@ -141,7 +141,7 @@ test "execution original refreshes across scopes while transaction original rema
 
     state.seal(attempt);
     state.retain(attempt);
-    try std.testing.expectEqual(@as(u64, 1), state.generation);
+    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getStorage(addr(1), 2));
 }
 
@@ -157,7 +157,7 @@ test "discard drops account writes without advancing accepted generation" {
     state.seal(attempt);
     state.discard(attempt);
 
-    try std.testing.expectEqual(@as(u64, 0), state.generation);
+    try std.testing.expectEqual(@as(u64, 0), state.accepted_generation);
     _ = state.beginTransaction();
     try std.testing.expectEqual(@as(u256, 10), try state.getBalance(addr(1)));
 }
@@ -211,14 +211,14 @@ test "retained account writes advance accepted state" {
     const unchanged = state.tx.?.accounts.get(addr(1)).?;
     const observed = state.tx.?.observed_accounts.items[@intFromEnum(unchanged.observation_id.?)];
     try std.testing.expect(observed.observation.value_read);
-    try std.testing.expect(!unchanged.mutation.dirty);
+    try std.testing.expect(!unchanged.flags.dirty);
 
     try state.setBalance(addr(1), 99);
     try state.setNonce(addr(1), 8);
     state.seal(attempt);
     state.retain(attempt);
 
-    try std.testing.expectEqual(@as(u64, 1), state.generation);
+    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 99), try state.getBalance(addr(1)));
     try std.testing.expectEqual(@as(u64, 8), try state.getNonce(addr(1)));
     const changes = state.acceptedView().changes();
@@ -266,10 +266,10 @@ test "account mutation rolls back but observation and row survive" {
 
     const row = state.tx.?.accounts.get(addr(1)).?;
     try std.testing.expectEqual(@as(u64, 3), switch (row.current.?) {
-        .loaded => |account| account.nonce,
+        .present => |account| account.nonce,
         else => unreachable,
     });
-    try std.testing.expect(!row.mutation.dirty);
+    try std.testing.expect(!row.flags.dirty);
     try std.testing.expectEqual(@as(u64, 3), try state.getNonce(addr(1)));
 }
 
@@ -329,8 +329,8 @@ test "transient root clear does not resurrect values through nested rollback" {
 
     state.revertToCheckpoint(group_checkpoint);
     try std.testing.expectEqual(@as(u256, 0), try state.getTransientStorage(addr(1), 4));
-    try std.testing.expectEqual(@as(usize, 0), state.tx.?.undo.entries.items.len);
-    try std.testing.expectEqual(@as(usize, 0), state.tx.?.undo.transient_undo.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.tx.?.journal.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.tx.?.journal.transient.items.len);
 }
 
 test "compact journal order unwinds typed undo arenas" {
@@ -347,17 +347,17 @@ test "compact journal order unwinds typed undo arenas" {
     try std.testing.expectEqual(.modified, try state.setStorage(addr(1), 2, 9));
     try state.setTransientStorage(addr(1), 4, 12);
 
-    const undo = &state.tx.?.undo;
-    try std.testing.expectEqual(@as(usize, 4), undo.entries.items.len);
-    try std.testing.expectEqual(@as(usize, 1), undo.account_undo.items.len);
-    try std.testing.expectEqual(@as(usize, 1), undo.storage_undo.items.len);
-    try std.testing.expectEqual(@as(usize, 1), undo.transient_undo.items.len);
+    const journal = &state.tx.?.journal;
+    try std.testing.expectEqual(@as(usize, 4), journal.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), journal.accounts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), journal.storage.items.len);
+    try std.testing.expectEqual(@as(usize, 1), journal.transient.items.len);
 
     state.revertToCheckpoint(checkpoint);
-    try std.testing.expectEqual(@as(usize, 0), undo.entries.items.len);
-    try std.testing.expectEqual(@as(usize, 0), undo.account_undo.items.len);
-    try std.testing.expectEqual(@as(usize, 0), undo.storage_undo.items.len);
-    try std.testing.expectEqual(@as(usize, 0), undo.transient_undo.items.len);
+    try std.testing.expectEqual(@as(usize, 0), journal.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), journal.accounts.items.len);
+    try std.testing.expectEqual(@as(usize, 0), journal.storage.items.len);
+    try std.testing.expectEqual(@as(usize, 0), journal.transient.items.len);
     try std.testing.expectEqual(@as(u256, 10), try state.getBalance(addr(1)));
     try std.testing.expectEqual(@as(u256, 7), try state.getStorage(addr(1), 2));
     try std.testing.expect(!state.tx.?.scope.warm_accounts.contains(addr(1)));
@@ -484,7 +484,7 @@ test "pending and accepted views expose native tracked state" {
     state.seal(attempt);
 
     const pending = state.pendingView();
-    try std.testing.expectEqual(@as(u64, 0), state.generation);
+    try std.testing.expectEqual(@as(u64, 0), state.accepted_generation);
     try std.testing.expectEqual(@as(usize, 1), pending.logs().len());
     const event_log = pending.logs().get(0);
     try std.testing.expectEqual(addr(1), event_log.address);
@@ -493,7 +493,7 @@ test "pending and accepted views expose native tracked state" {
 
     state.retain(attempt);
     const accepted = state.acceptedView();
-    try std.testing.expectEqual(@as(u64, 1), state.generation);
+    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expect(accepted.hasChanges());
     try std.testing.expectEqual(@as(usize, 1), state.logView().len());
     try std.testing.expectEqual(addr(1), state.logView().get(0).address);
@@ -787,7 +787,7 @@ test "accepted branch snapshot restores cumulative state and is reusable" {
     var first_restore = try snapshot.clone();
     defer first_restore.deinit();
     state.restoreBranch(&first_restore);
-    try std.testing.expectEqual(@as(u64, 1), state.generation);
+    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
     try std.testing.expectEqual(@as(u256, 22), try state.getStorage(addr(1), 2));
     try std.testing.expectEqualSlices(u8, &baseline_code, try state.getCode(addr(1)));
@@ -835,14 +835,14 @@ test "accepted branch snapshot clone failure leaves current state unchanged" {
     failing_allocator.fail_index = failing_allocator.alloc_index;
     try std.testing.expectError(error.OutOfMemory, snapshot.clone());
     try std.testing.expect(failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 2), state.generation);
+    try std.testing.expectEqual(@as(u64, 2), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 22), try state.getBalance(addr(1)));
 
     failing_allocator.fail_index = std.math.maxInt(usize);
     var restore = try snapshot.clone();
     defer restore.deinit();
     state.restoreBranch(&restore);
-    try std.testing.expectEqual(@as(u64, 1), state.generation);
+    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
 }
 
@@ -870,6 +870,6 @@ test "accepted branch restore does not allocate after capture" {
     failing_allocator.fail_index = failing_allocator.alloc_index;
     state.restoreBranch(&snapshot);
     try std.testing.expect(!failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 1), state.generation);
+    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(addr(1)));
 }

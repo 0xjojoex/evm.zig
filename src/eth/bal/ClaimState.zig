@@ -1,36 +1,75 @@
 //! Claim-indexed Amsterdam execution state over a validated BAL namespace.
 //!
-//! The counterpart of `state.TrackedState`: the same executor state-lane surface,
-//! but keyed by `ClaimPlan` IDs over the closed universe the block access list
-//! declares rather than by address over an open one. Rows stay dense arrays
-//! indexed by claim id. This module owns no MPT topology. It takes ownership of the `ClaimPlan` and
-//! authenticated parent facts, then owns block-current values, rollback,
-//! warmth, observations, and dirty IDs for the complete block execution.
+//! The counterpart of `state.TrackedState`: the same executor state-lane
+//! surface, but keyed by `ClaimPlan` IDs over the closed universe the block
+//! access list declares rather than by address over an open one. Rows are
+//! dense arrays indexed by claim ID and exist from admission. This module owns
+//! no MPT topology. It takes ownership of the `ClaimPlan` and authenticated
+//! parent facts, then owns block-current values, rollback, warmth,
+//! observations, and dirty IDs for the complete block execution.
 
 const std = @import("std");
 
-const address = @import("../../address.zig");
-const claim_plan = @import("ClaimPlan.zig");
 const crypto = @import("../../crypto.zig");
 const execution = @import("../../execution.zig");
 const Host = @import("../../Host.zig");
-const Account = @import("../../state/Account.zig");
-const artifacts = @import("claim_artifacts.zig");
-const records = @import("ParentFacts.zig");
 const state_types = @import("../../state.zig");
-const storage_status = @import("../../state/storage.zig");
+const Account = @import("../../state/Account.zig");
 const sparse_hash_map = @import("../../state/sparse_hash_map.zig");
+const artifacts = @import("claim_artifacts.zig");
+const claim_plan = @import("ClaimPlan.zig");
+const ParentFacts = @import("ParentFacts.zig");
 
 const Allocator = std.mem.Allocator;
-const Address = address.Address;
-const ClaimState = @This();
+const Address = @import("../../address.zig").Address;
+const AddressWord = @import("../../address.zig").AddressWord;
+const storageStatus = @import("../../state/storage.zig").status;
+
+const LogBuffer = @import("../../state/LogBuffer.zig");
+const LogView = LogBuffer.View;
+const AccessHint = state_types.AccessHint;
+const Checkpoint = state_types.Checkpoint;
+const AttemptId = Checkpoint.AttemptId;
+const FinalizationRules = state_types.FinalizationRules;
+const CodeView = state_types.CodeView;
+const AccountObservation = state_types.AccountObservation;
+const StorageObservation = state_types.StorageObservation;
+const AccountEffect = state_types.AccountEffect;
+const StorageEffect = state_types.StorageEffect;
+const ChangeLayer = state_types.ChangeLayer;
+const AccountChange = state_types.AccountChange;
+const StorageChange = state_types.StorageChange;
+const CodeHash = [32]u8;
+
+pub const AccountId = claim_plan.AccountId;
+pub const StorageId = claim_plan.StorageId;
+pub const CodeError = artifacts.CodeStore.CacheError;
+
+pub const ResolutionPolicy = enum {
+    /// State reads/writes, observed system calls, and EIP-7702 authority paths
+    /// after preliminary tuple validation all feed BAL reconstruction.
+    required_observed,
+    /// EIP-2930 list warming and delegated-target warming do not themselves
+    /// emit BAL accesses; a later real access resolves through the required path.
+    optional_warm_only,
+};
+
+pub const ResolutionError = error{
+    UndeclaredAccount,
+    UndeclaredStorage,
+};
+
+const ResolvedStorage = struct {
+    account: AccountId,
+    storage: StorageId,
+};
 
 const TransientStorageKey = extern struct {
-    address_word: address.AddressWord,
+    address_word: AddressWord,
     slot_words: [4]u64,
 
-    fn init(target: address.AddressWord, slot: u256) TransientStorageKey {
-        return .{ .address_word = target, .slot_words = @bitCast(slot) };
+    fn init(address: AddressWord, key: u256) TransientStorageKey {
+        return .{ .address_word = address, .slot_words = @bitCast(key) };
     }
 
     const HashContext = struct {
@@ -39,7 +78,7 @@ const TransientStorageKey = extern struct {
         }
 
         pub inline fn eql(_: HashContext, a: TransientStorageKey, b: TransientStorageKey) bool {
-            return address.AddressWord.eql(a.address_word, b.address_word) and
+            return AddressWord.eql(a.address_word, b.address_word) and
                 a.slot_words[0] == b.slot_words[0] and
                 a.slot_words[1] == b.slot_words[1] and
                 a.slot_words[2] == b.slot_words[2] and
@@ -65,49 +104,78 @@ const TransientStorageMap = sparse_hash_map.WithContext(
     TransientStorageKey.HashContext,
 );
 
-pub const AccountId = claim_plan.AccountId;
-pub const StorageId = claim_plan.StorageId;
-pub const AttemptId = Checkpoint.AttemptId;
-/// Emitted logs and their borrowed projection are lane-independent; see
-/// `state/LogBuffer.zig`.
-pub const LogBuffer = @import("../../state/LogBuffer.zig");
-pub const LogView = LogBuffer.View;
-
-pub const ResolutionPolicy = enum {
-    /// State reads/writes, observed system calls, and EIP-7702 authority paths
-    /// after preliminary tuple validation all feed BAL reconstruction.
-    required_observed,
-    /// EIP-2930 list warming and delegated-target warming do not themselves
-    /// emit BAL accesses; a later real access resolves through the required path.
-    optional_warm_only,
-};
-
-pub const ResolutionError = error{
-    UndeclaredAccount,
-    UndeclaredStorage,
-};
-
-const ResolvedStorage = struct {
-    account: AccountId,
-    storage: StorageId,
-};
-
-pub const CodeError = artifacts.CodeStore.CacheError;
-const Checkpoint = state_types.Checkpoint;
-const CodeView = state_types.CodeView;
-const AccessHint = state_types.AccessHint;
-const FinalizationRules = state_types.FinalizationRules;
-const AccountObservation = state_types.AccountObservation;
-const StorageObservation = state_types.StorageObservation;
-const AccountEffect = state_types.AccountEffect;
-const StorageEffect = state_types.StorageEffect;
-const ChangeLayer = state_types.ChangeLayer;
-const AccountChange = state_types.AccountChange;
-const StorageChange = state_types.StorageChange;
+const ClaimState = @This();
 
 /// Every row exists from admission, sized by the claim plan. There is nothing
 /// to reserve or reuse, so the executor skips its capacity hooks at comptime.
+/// See `state.checkLane`.
 pub const grows_on_touch = false;
+
+allocator: Allocator,
+plan: claim_plan.ClaimPlan,
+facts: ParentFacts,
+accounts: []AccountRow,
+storage: []StorageRow,
+code: artifacts.CodeStore,
+transient_storage: TransientStorageMap,
+logs: LogBuffer = .{},
+retained_logs: LogBuffer = .{},
+dirty_accounts: std.ArrayList(AccountId) = .empty,
+block_changed_accounts: std.ArrayList(AccountId) = .empty,
+block_storage_wipes: std.ArrayList(AccountId) = .empty,
+dirty_storage: std.ArrayList(StorageId) = .empty,
+changed_accounts: std.ArrayList(AccountId) = .empty,
+changed_storage: std.ArrayList(StorageId) = .empty,
+transaction_storage_wipes: std.ArrayList(AccountId) = .empty,
+lifecycle_accounts: std.ArrayList(AccountId) = .empty,
+block_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
+transaction_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
+observed_accounts: std.ArrayList(AccountObservationRow) = .empty,
+observed_storage: std.ArrayList(StorageObservationRow) = .empty,
+journal: Journal = .{},
+transaction_generation: u32 = 0,
+accepted_generation: u64 = 0,
+next_attempt_id: u32 = 0,
+active_attempt_id: ?AttemptId = null,
+observed_attempt: bool = false,
+sealed: bool = false,
+next_scope_generation: u32 = 0,
+active_scope_generation: u32 = 0,
+execution_scope_generation: u32 = 0,
+scope_depth: u32 = 0,
+transaction_active: bool = false,
+/// Set by `revertToCheckpoint`; only then can block or transaction ID lists
+/// hold stale or duplicate entries, so revert-free transactions skip their
+/// compaction passes.
+transaction_scope_reverted: bool = false,
+/// Admitted hot-translation execution state: two remembered address→ID
+/// entries and one (account, slot)→ID entry. `ClaimPlan` is immutable for the
+/// whole block, so a remembered entry can never go stale and
+/// revert/retain/discard must not touch it. Full-key equality decides a hit.
+/// An account miss falls back to `ClaimPlan`'s deterministic linear-probe
+/// table and evicts an account memo entry round-robin; a storage miss binary
+/// searches the account's slot window and replaces the one storage memo entry.
+/// Two account entries cover the caller/callee alternation of nested calls,
+/// which a single entry misses on every step. Every dynamic
+/// translation — CALL-family targets, dynamic-address opcodes, storage
+/// owners, and system calls — passes through `resolveAccount`/
+/// `resolveStorage`, so these entries cover the complete translation domain.
+/// Memo keys are pre-assembled address words: the probe is assembled once per
+/// resolution and then compares in registers, instead of paying an align-1
+/// byte ladder on every hit.
+translation_account_keys: [2]AddressWord = undefined,
+translation_account_ids: [2]AccountId = undefined,
+translation_account_valid: [2]bool = .{ false, false },
+translation_account_victim: u1 = 0,
+translation_storage_slot: u256 = undefined,
+translation_storage_account: AccountId = undefined,
+translation_storage_id: StorageId = undefined,
+translation_storage_valid: bool = false,
+transaction_dirty_accounts_start: u32 = 0,
+transaction_block_changed_accounts_start: u32 = 0,
+transaction_block_storage_wipes_start: u32 = 0,
+transaction_dirty_storage_start: u32 = 0,
+transaction_introduced_codes_start: u32 = 0,
 
 pub const AccountValue = union(enum) {
     absent,
@@ -134,6 +202,8 @@ pub const AccountRow = struct {
     current: AccountValue,
     code_ref: artifacts.CodeRef,
     flags: AccountFlags = .{},
+    /// Outside `flags` on purpose: membership in `lifecycle_accounts` is not
+    /// journaled and is cleared once per transaction.
     lifecycle_listed: bool = false,
     journal_scope_generation: u32 = 0,
     warm_generation: u32 = 0,
@@ -160,18 +230,20 @@ pub const StorageRow = struct {
     storage_generation: u32 = 0,
 };
 
-pub const AccountObservationRow = struct {
+const AccountObservationRow = struct {
     account: AccountId,
     original: AccountValue,
     original_storage_generation: u32,
+    /// Last field-level state before a lifecycle deletion hides it.
     effect_current: AccountValue,
     observation: AccountObservation,
     effect: AccountEffect = .{},
 };
 
-pub const StorageObservationRow = struct {
+const StorageObservationRow = struct {
     storage: StorageId,
     original: u256,
+    /// Last semantic value before an address-level lifecycle wipe hides it.
     effect_current: u256,
     observation: StorageObservation,
     effect: StorageEffect = .{},
@@ -263,6 +335,8 @@ pub const StorageWipes = struct {
     }
 };
 
+/// Borrowed semantic delta. Ordering is unspecified; consumers own sorting,
+/// allocation, persistence batches, and any retained representation.
 pub const ChangesView = struct {
     state: *const ClaimState,
     layer: ChangeLayer,
@@ -270,7 +344,7 @@ pub const ChangesView = struct {
     storage_writes: StorageChanges,
     storage_wipes: StorageWipes,
 
-    pub fn init(state: *const ClaimState, layer: ChangeLayer) ChangesView {
+    fn init(state: *const ClaimState, layer: ChangeLayer) ChangesView {
         return .{
             .state = state,
             .layer = layer,
@@ -280,7 +354,7 @@ pub const ChangesView = struct {
         };
     }
 
-    pub fn introducedCode(self: ChangesView, hash: [32]u8) ?CodeView {
+    pub fn introducedCode(self: ChangesView, code_hash: CodeHash) ?CodeView {
         const ids = switch (self.layer) {
             .accepted => if (self.state.transaction_active)
                 self.state.block_introduced_codes.items[0..self.state.transaction_introduced_codes_start]
@@ -290,7 +364,7 @@ pub const ChangesView = struct {
         };
         for (ids) |id| {
             const view = self.state.code.introducedView(id);
-            if (std.mem.eql(u8, &view.code_hash, &hash)) return view;
+            if (std.mem.eql(u8, &view.code_hash, &code_hash)) return view;
         }
         return null;
     }
@@ -326,6 +400,8 @@ pub const StorageObservationMetadata = struct {
     effect: StorageEffect,
 };
 
+/// Dense transaction-local account facts. Ordering is internal; projectors own
+/// sorting and any retained representation.
 pub const AccountObservations = struct {
     state: *const ClaimState,
 
@@ -334,7 +410,7 @@ pub const AccountObservations = struct {
     }
 
     pub fn at(self: AccountObservations, index: u32) AccountObservationFact {
-        const observed = self.state.observed_accounts.items[index];
+        const observed = &self.state.observed_accounts.items[index];
         return .{
             .address = self.state.plan.accountAddress(observed.account),
             .original = accountValue(observed.original),
@@ -349,6 +425,8 @@ pub const AccountObservations = struct {
     }
 };
 
+/// Dense transaction-local storage observations. Every observed slot carries a
+/// complete value fact because rows exist from admission.
 pub const StorageObservations = struct {
     state: *const ClaimState,
 
@@ -357,7 +435,7 @@ pub const StorageObservations = struct {
     }
 
     pub fn at(self: StorageObservations, index: u32) ?StorageObservationFact {
-        const observed = self.state.observed_storage.items[index];
+        const observed = &self.state.observed_storage.items[index];
         const account = self.state.plan.storageAccount(observed.storage);
         return .{
             .address = self.state.plan.accountAddress(account),
@@ -374,7 +452,7 @@ pub const StorageObservations = struct {
     }
 
     pub fn metadataAt(self: StorageObservations, index: u32) StorageObservationMetadata {
-        const observed = self.state.observed_storage.items[index];
+        const observed = &self.state.observed_storage.items[index];
         const account = self.state.plan.storageAccount(observed.storage);
         return .{
             .address = self.state.plan.accountAddress(account),
@@ -385,12 +463,15 @@ pub const StorageObservations = struct {
     }
 };
 
+/// Borrowed checkpoint-resolved semantic observations from one sealed
+/// transaction. BAL indices, output ordering, and detached ownership remain
+/// projector policy.
 pub const ObservationsView = struct {
     state: *const ClaimState,
     accounts: AccountObservations,
     storage: StorageObservations,
 
-    pub fn init(state: *const ClaimState) ObservationsView {
+    fn init(state: *const ClaimState) ObservationsView {
         return .{
             .state = state,
             .accounts = .{ .state = state },
@@ -398,11 +479,13 @@ pub const ObservationsView = struct {
         };
     }
 
-    pub fn code(self: ObservationsView, hash: [32]u8) ?CodeView {
-        return self.state.code.lookup(hash);
+    pub fn code(self: ObservationsView, code_hash: CodeHash) ?CodeView {
+        return self.state.code.lookup(code_hash);
     }
 };
 
+/// Borrowed cumulative branch facts. Projectors own output policy and
+/// allocation; this view only exposes the accepted state representation.
 pub const AcceptedView = struct {
     state: *const ClaimState,
 
@@ -429,10 +512,7 @@ pub const CommitView = struct {
         return self.state.plan.account_trie_order;
     }
 
-    pub fn storageTrieOrder(
-        self: CommitView,
-        account: AccountId,
-    ) []const StorageId {
+    pub fn storageTrieOrder(self: CommitView, account: AccountId) []const StorageId {
         return self.state.plan.storageTrieOrder(account);
     }
 
@@ -444,7 +524,7 @@ pub const CommitView = struct {
         return self.state.plan.storageTrieKey(id);
     }
 
-    pub fn accountFact(self: CommitView, id: AccountId) *const @TypeOf(self.state.facts.accounts[0]) {
+    pub fn accountFact(self: CommitView, id: AccountId) *const ParentFacts.AccountFact {
         return &self.state.facts.accounts[@intFromEnum(id)];
     }
 
@@ -480,37 +560,37 @@ pub const CommitView = struct {
     }
 };
 
+/// Borrowed sealed transaction plus the cumulative branch it would extend.
+/// The view does not own or resolve the transaction lifecycle.
 pub const PendingView = struct {
     state: *const ClaimState,
 
     pub fn accepted(self: PendingView) AcceptedView {
-        self.assertSealed();
+        self.state.assertSealed();
         return .{ .state = self.state };
     }
 
-    pub fn logs(self: PendingView) LogBuffer.View {
-        self.assertSealed();
+    pub fn logs(self: PendingView) LogView {
+        self.state.assertSealed();
         return self.state.logs.view();
     }
 
+    /// Transaction-local changes relative to the accepted branch.
     pub fn changes(self: PendingView) ChangesView {
-        self.assertSealed();
+        self.state.assertSealed();
         return ChangesView.init(self.state, .transaction);
     }
 
     pub fn observations(self: PendingView) ObservationsView {
-        self.assertSealed();
+        self.state.assertSealed();
         std.debug.assert(self.state.observed_attempt);
         return ObservationsView.init(self.state);
     }
-
-    fn assertSealed(self: PendingView) void {
-        std.debug.assert(self.state.transaction_active);
-        std.debug.assert(self.state.sealed);
-        std.debug.assert(!self.state.scopeActive());
-    }
 };
 
+/// Heap copy of every row plus the block-lifetime list lengths. Capture
+/// allocates; restore is allocation-free and copies the rows back. Only valid
+/// between transactions.
 pub const BranchSnapshot = struct {
     owner: *const ClaimState,
     allocator: Allocator,
@@ -573,7 +653,7 @@ const Journal = struct {
         introduced_code,
 
         comptime {
-            std.debug.assert(@sizeOf(Entry) <= 8);
+            std.debug.assert(@sizeOf(Entry) == 8);
         }
     };
 
@@ -641,6 +721,12 @@ const Journal = struct {
         self.transient.clearRetainingCapacity();
     }
 
+    /// Every payload list is cleared together with `entries`, so the entry
+    /// list alone decides emptiness.
+    fn isEmpty(self: *const Journal) bool {
+        return self.entries.items.len == 0;
+    }
+
     fn ensureAccount(self: *Journal, allocator: Allocator, observed: bool) !void {
         try self.entries.ensureUnusedCapacity(allocator, 1);
         try self.accounts.ensureUnusedCapacity(allocator, 1);
@@ -706,76 +792,10 @@ const Journal = struct {
     }
 };
 
-allocator: Allocator,
-plan: claim_plan.ClaimPlan,
-facts: records,
-accounts: []AccountRow,
-storage: []StorageRow,
-code: artifacts.CodeStore,
-transient_storage: TransientStorageMap,
-logs: LogBuffer = .{},
-retained_logs: LogBuffer = .{},
-dirty_accounts: std.ArrayList(AccountId) = .empty,
-block_changed_accounts: std.ArrayList(AccountId) = .empty,
-block_storage_wipes: std.ArrayList(AccountId) = .empty,
-dirty_storage: std.ArrayList(StorageId) = .empty,
-changed_accounts: std.ArrayList(AccountId) = .empty,
-changed_storage: std.ArrayList(StorageId) = .empty,
-transaction_storage_wipes: std.ArrayList(AccountId) = .empty,
-lifecycle_accounts: std.ArrayList(AccountId) = .empty,
-block_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
-transaction_introduced_codes: std.ArrayList(artifacts.IntroducedCodeId) = .empty,
-observed_accounts: std.ArrayList(AccountObservationRow) = .empty,
-observed_storage: std.ArrayList(StorageObservationRow) = .empty,
-journal: Journal = .{},
-transaction_generation: u32 = 0,
-accepted_generation: u64 = 0,
-next_attempt_id: u32 = 0,
-active_attempt_id: ?AttemptId = null,
-observed_attempt: bool = false,
-sealed: bool = false,
-next_scope_generation: u32 = 0,
-active_scope_generation: u32 = 0,
-execution_scope_generation: u32 = 0,
-scope_depth: u32 = 0,
-transaction_active: bool = false,
-/// Set by `revertToCheckpoint`; only then can block or transaction ID lists
-/// hold stale or duplicate entries, so revert-free transactions skip their
-/// compaction passes.
-transaction_scope_reverted: bool = false,
-/// Admitted hot-translation execution state: two remembered address→ID
-/// entries and one (account, slot)→ID entry. `ClaimPlan` is immutable for the
-/// whole block, so a remembered entry can never go stale and
-/// revert/retain/discard must not touch it. Full-key equality decides a hit.
-/// An account miss falls back to `ClaimPlan`'s deterministic linear-probe
-/// table and evicts an account memo entry round-robin; a storage miss binary
-/// searches the account's slot window and replaces the one storage memo entry.
-/// Two account entries cover the caller/callee alternation of nested calls,
-/// which a single entry misses on every step. Every dynamic
-/// translation — CALL-family targets, dynamic-address opcodes, storage
-/// owners, and system calls — passes through `resolveAccount`/
-/// `resolveStorage`, so these entries cover the complete translation domain.
-/// Memo keys are pre-assembled address words: the probe is assembled once per
-/// resolution and then compares in registers, instead of paying an align-1
-/// byte ladder on every hit.
-translation_account_keys: [2]address.AddressWord = undefined,
-translation_account_ids: [2]AccountId = undefined,
-translation_account_valid: [2]bool = .{ false, false },
-translation_account_victim: u1 = 0,
-translation_storage_slot: u256 = undefined,
-translation_storage_account: AccountId = undefined,
-translation_storage_id: StorageId = undefined,
-translation_storage_valid: bool = false,
-transaction_dirty_accounts_start: u32 = 0,
-transaction_block_changed_accounts_start: u32 = 0,
-transaction_block_storage_wipes_start: u32 = 0,
-transaction_dirty_storage_start: u32 = 0,
-transaction_introduced_codes_start: u32 = 0,
-
 pub fn init(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    facts: records,
+    facts: ParentFacts,
 ) Allocator.Error!ClaimState {
     return initWithCodes(allocator, plan, facts, &.{}) catch |err| switch (err) {
         error.CodeHashCollision => unreachable,
@@ -787,7 +807,7 @@ pub fn init(
 pub fn initWithCodes(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    facts: records,
+    facts: ParentFacts,
     codes: []const []const u8,
 ) artifacts.CodeStore.InitError!ClaimState {
     var owned_plan = plan;
@@ -805,7 +825,7 @@ pub fn initWithCodes(
 pub fn initWithParentCodes(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    facts: records,
+    facts: ParentFacts,
     codes: []const artifacts.ParentCode,
 ) artifacts.CodeStore.InitError!ClaimState {
     var owned_plan = plan;
@@ -823,7 +843,7 @@ pub fn initWithParentCodes(
 fn initWithCodeStore(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    facts: records,
+    facts: ParentFacts,
     code_value: artifacts.CodeStore,
 ) Allocator.Error!ClaimState {
     var owned_plan = plan;
@@ -890,19 +910,19 @@ pub fn deinit(self: *ClaimState) void {
 
 pub inline fn resolveAccount(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
     policy: ResolutionPolicy,
 ) ResolutionError!?AccountId {
     inline for (0..2) |entry| {
         if (self.translation_account_valid[entry] and
-            address.AddressWord.eql(self.translation_account_keys[entry], target))
+            AddressWord.eql(self.translation_account_keys[entry], address))
         {
             return self.translation_account_ids[entry];
         }
     }
-    if (self.plan.accountIdWord(target)) |id| {
+    if (self.plan.accountIdWord(address)) |id| {
         const victim = self.translation_account_victim;
-        self.translation_account_keys[victim] = target;
+        self.translation_account_keys[victim] = address;
         self.translation_account_ids[victim] = id;
         self.translation_account_valid[victim] = true;
         self.translation_account_victim +%= 1;
@@ -917,18 +937,18 @@ pub inline fn resolveAccount(
 pub fn resolveStorage(
     self: *ClaimState,
     account: AccountId,
-    slot: u256,
+    key: u256,
     policy: ResolutionPolicy,
 ) ResolutionError!?StorageId {
     if (self.translation_storage_valid and
         self.translation_storage_account == account and
-        self.translation_storage_slot == slot)
+        self.translation_storage_slot == key)
     {
         return self.translation_storage_id;
     }
-    if (self.plan.storageId(account, slot)) |id| {
+    if (self.plan.storageId(account, key)) |id| {
         self.translation_storage_account = account;
-        self.translation_storage_slot = slot;
+        self.translation_storage_slot = key;
         self.translation_storage_id = id;
         self.translation_storage_valid = true;
         return id;
@@ -941,12 +961,12 @@ pub fn resolveStorage(
 
 fn resolveStorageKey(
     self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
+    address: AddressWord,
+    key: u256,
     policy: ResolutionPolicy,
 ) ResolutionError!?ResolvedStorage {
-    const account = (try self.resolveAccount(target, policy)) orelse return null;
-    const storage = (try self.resolveStorage(account, slot, policy)) orelse return null;
+    const account = (try self.resolveAccount(address, policy)) orelse return null;
+    const storage = (try self.resolveStorage(account, key, policy)) orelse return null;
     return .{ .account = account, .storage = storage };
 }
 
@@ -958,15 +978,15 @@ pub fn beginObservedTransaction(self: *ClaimState) AttemptId {
     return self.beginTransactionMode(true);
 }
 
-fn beginTransactionMode(self: *ClaimState, observed: bool) AttemptId {
+fn beginTransactionMode(self: *ClaimState, observe: bool) AttemptId {
     std.debug.assert(!self.transaction_active);
-    std.debug.assert(self.journal.entries.items.len == 0);
+    std.debug.assert(self.journal.isEmpty());
     std.debug.assert(self.next_attempt_id != std.math.maxInt(u32));
     self.next_attempt_id += 1;
     const id: AttemptId = @enumFromInt(self.next_attempt_id);
     self.transaction_generation = nextGeneration(self.transaction_generation);
     self.active_attempt_id = id;
-    self.observed_attempt = observed;
+    self.observed_attempt = observe;
     self.sealed = false;
     self.transaction_active = true;
     self.transaction_dirty_accounts_start = @intCast(self.dirty_accounts.items.len);
@@ -1021,10 +1041,53 @@ pub fn hasOpenCheckpoint(self: *const ClaimState) bool {
     return self.scope_depth > 1;
 }
 
+/// The returned value is the complete scope record. The block-lifetime dirty
+/// and wipe lists need no saved lengths because revert restores row flags
+/// through the journal and stale entries are compacted out at `retain`.
+pub fn checkpoint(self: *ClaimState) Checkpoint {
+    self.assertTransaction();
+    std.debug.assert(self.scope_depth != std.math.maxInt(u32));
+    const parent_generation = self.active_scope_generation;
+    const generation = self.allocateScopeGeneration();
+    self.scope_depth += 1;
+    self.active_scope_generation = generation;
+    return .{
+        .attempt_id = self.active_attempt_id.?,
+        .scope_generation = generation,
+        .parent_scope_generation = parent_generation,
+        .journal_len = @intCast(self.journal.entries.items.len),
+        .changed_accounts_len = @intCast(self.changed_accounts.items.len),
+        .changed_storage_len = @intCast(self.changed_storage.items.len),
+        .storage_wipes_len = 0,
+        .logs = self.logs.checkpoint(),
+    };
+}
+
+pub fn commitCheckpoint(self: *ClaimState, checkpoint_state: Checkpoint) void {
+    self.validateCheckpoint(checkpoint_state);
+    self.active_scope_generation = @intCast(checkpoint_state.parent_scope_generation);
+    self.scope_depth -= 1;
+}
+
+/// Journal unwind restores row values and flags, so entries appended to the
+/// block-lifetime dirty lists inside the reverted scope become stale
+/// (flag-false) rather than being truncated here; `retain` compacts them.
+/// Introduced codes unwind through their own journal entries.
+pub fn revertToCheckpoint(self: *ClaimState, checkpoint_state: Checkpoint) void {
+    self.validateCheckpoint(checkpoint_state);
+    self.transaction_scope_reverted = true;
+    self.revertJournalTo(checkpoint_state.journal_len);
+    self.changed_accounts.items.len = checkpoint_state.changed_accounts_len;
+    self.changed_storage.items.len = checkpoint_state.changed_storage_len;
+    self.logs.truncate(checkpoint_state.logs);
+    self.active_scope_generation = @intCast(checkpoint_state.parent_scope_generation);
+    self.scope_depth -= 1;
+}
+
 pub fn seal(self: *ClaimState, id: AttemptId) void {
     self.assertCurrent(id);
-    std.debug.assert(!self.scopeActive());
     std.debug.assert(!self.sealed);
+    std.debug.assert(!self.scopeActive());
     self.compactTransactionStorageChanges();
     if (self.transaction_scope_reverted) self.compactTransactionStorageWipes();
     self.sealed = true;
@@ -1061,28 +1124,6 @@ pub fn discard(self: *ClaimState, id: AttemptId) void {
     self.finishTransaction();
 }
 
-/// The returned value is the complete scope record. The block-lifetime dirty
-/// and wipe lists need no saved lengths because revert restores row flags
-/// through the journal and stale entries are compacted out at `retain`.
-pub fn checkpoint(self: *ClaimState) Checkpoint {
-    self.assertTransaction();
-    std.debug.assert(self.scope_depth < std.math.maxInt(u32));
-    const parent_generation = self.active_scope_generation;
-    const generation = self.allocateScopeGeneration();
-    self.scope_depth += 1;
-    self.active_scope_generation = generation;
-    return .{
-        .attempt_id = self.active_attempt_id.?,
-        .scope_generation = generation,
-        .parent_scope_generation = parent_generation,
-        .journal_len = @intCast(self.journal.entries.items.len),
-        .changed_accounts_len = @intCast(self.changed_accounts.items.len),
-        .changed_storage_len = @intCast(self.changed_storage.items.len),
-        .storage_wipes_len = 0,
-        .logs = self.logs.checkpoint(),
-    };
-}
-
 pub fn branchSnapshot(self: *ClaimState) Allocator.Error!BranchSnapshot {
     std.debug.assert(!self.transaction_active);
     const accounts = try self.allocator.dupe(AccountRow, self.accounts);
@@ -1105,124 +1146,83 @@ pub fn branchSnapshot(self: *ClaimState) Allocator.Error!BranchSnapshot {
     };
 }
 
-pub fn restoreBranch(self: *ClaimState, value: *BranchSnapshot) void {
-    std.debug.assert(value.owner == self);
-    std.debug.assert(!value.resolved);
+pub fn restoreBranch(self: *ClaimState, snapshot: *BranchSnapshot) void {
+    std.debug.assert(snapshot.owner == self);
+    std.debug.assert(!snapshot.resolved);
     if (self.transaction_active) self.discard(self.active_attempt_id.?);
-    @memcpy(self.accounts, value.accounts);
-    @memcpy(self.storage, value.storage);
-    self.dirty_accounts.items.len = value.dirty_accounts_len;
-    self.block_changed_accounts.items.len = value.block_changed_accounts_len;
-    self.block_storage_wipes.items.len = value.block_storage_wipes_len;
-    self.dirty_storage.items.len = value.dirty_storage_len;
-    self.block_introduced_codes.items.len = value.block_introduced_codes_len;
-    self.code.truncateIntroduced(self.allocator, value.introduced_code_len);
-    std.mem.swap(LogBuffer, &self.retained_logs, &value.retained_logs);
-    self.accepted_generation = value.accepted_generation;
-    value.resolved = true;
+    @memcpy(self.accounts, snapshot.accounts);
+    @memcpy(self.storage, snapshot.storage);
+    self.dirty_accounts.items.len = snapshot.dirty_accounts_len;
+    self.block_changed_accounts.items.len = snapshot.block_changed_accounts_len;
+    self.block_storage_wipes.items.len = snapshot.block_storage_wipes_len;
+    self.dirty_storage.items.len = snapshot.dirty_storage_len;
+    self.block_introduced_codes.items.len = snapshot.block_introduced_codes_len;
+    self.code.truncateIntroduced(self.allocator, snapshot.introduced_code_len);
+    std.mem.swap(LogBuffer, &self.retained_logs, &snapshot.retained_logs);
+    self.accepted_generation = snapshot.accepted_generation;
+    snapshot.resolved = true;
 }
 
-pub fn commitCheckpoint(self: *ClaimState, value: Checkpoint) void {
-    self.validateCheckpoint(value);
-    self.active_scope_generation = @intCast(value.parent_scope_generation);
-    self.scope_depth -= 1;
+pub fn acceptedView(self: *const ClaimState) AcceptedView {
+    std.debug.assert(!self.transaction_active);
+    return .{ .state = self };
 }
 
-/// Journal unwind restores row values and flags, so entries appended to the
-/// block-lifetime dirty lists inside the reverted scope become stale
-/// (flag-false) rather than being truncated here; `retain` compacts them.
-/// Introduced codes unwind through their own journal entries.
-pub fn revertToCheckpoint(self: *ClaimState, value: Checkpoint) void {
-    self.validateCheckpoint(value);
-    self.transaction_scope_reverted = true;
-    self.revertJournalTo(value.journal_len);
-    self.changed_accounts.items.len = value.changed_accounts_len;
-    self.changed_storage.items.len = value.changed_storage_len;
-    self.logs.truncate(.{
-        .rows_len = value.logs.rows_len,
-        .topics_len = value.logs.topics_len,
-        .data_len = value.logs.data_len,
-    });
-    self.active_scope_generation = @intCast(value.parent_scope_generation);
-    self.scope_depth -= 1;
+/// Every accessor asserts the sealed transaction itself; the view is only a
+/// handle.
+pub fn pendingView(self: *const ClaimState) PendingView {
+    return .{ .state = self };
 }
 
-pub fn readAccount(
-    self: *ClaimState,
-    target: address.AddressWord,
-) (ResolutionError || Allocator.Error)!AccountValue {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    // Block-system-call admission may inspect code presence before opening the
-    // managed system-call attempt. The actual call records the BAL access.
-    if (self.transaction_active)
-        try self.observeAccount(id, .{ .accessed = true, .value_read = true });
-    return self.accounts[@intFromEnum(id)].current;
+pub fn logView(self: *const ClaimState) LogView {
+    return if (self.transaction_active) self.logs.view() else self.retained_logs.view();
 }
 
 /// Return a materialized row without creating an execution observation.
-pub fn getAccount(self: *const ClaimState, target: address.AddressWord) ?Account {
-    const id = self.plan.accountIdWord(target) orelse return null;
+pub fn getAccount(self: *const ClaimState, address: AddressWord) ?Account {
+    const id = self.plan.accountIdWord(address) orelse return null;
     return accountValue(self.accounts[@intFromEnum(id)].current);
 }
 
 pub fn getAccountOrLoad(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error)!?Account {
-    return accountValue(try self.readAccount(target));
+    return accountValue(try self.readAccount(address, .{ .accessed = true, .value_read = true }));
 }
 
 pub fn accountExists(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error)!bool {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    if (self.transaction_active)
-        try self.observeAccount(id, .{ .accessed = true, .existence_read = true });
-    return self.accounts[@intFromEnum(id)].current == .present;
+    return (try self.readAccount(address, .{ .accessed = true, .existence_read = true })) == .present;
 }
 
 pub fn getBalance(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error)!u256 {
-    return switch (try self.readAccount(target)) {
+    return switch (try self.readAccount(address, .{ .accessed = true, .value_read = true })) {
         .absent => 0,
-        .present => |account_value| account_value.balance,
+        .present => |account| account.balance,
     };
 }
 
 pub fn getNonce(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error)!u64 {
-    return switch (try self.readAccount(target)) {
+    return switch (try self.readAccount(address, .{ .accessed = true, .value_read = true })) {
         .absent => 0,
-        .present => |account_value| account_value.nonce,
+        .present => |account| account.nonce,
     };
-}
-
-pub fn setNonce(
-    self: *ClaimState,
-    target: address.AddressWord,
-    nonce: u64,
-) (ResolutionError || Allocator.Error)!void {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    const current = self.accounts[@intFromEnum(id)].current;
-    var account_value = switch (current) {
-        .absent => Account{},
-        .present => |value| value,
-    };
-    if (current == .present and account_value.nonce == nonce) return;
-    account_value.nonce = nonce;
-    try self.writeAccount(id, .{ .present = account_value });
 }
 
 pub fn getCodeView(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error || error{InvalidWitness})!CodeView {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
+    const id = (try self.resolveAccount(address, .required_observed)).?;
     if (self.transaction_active)
         try self.observeAccount(id, .{ .accessed = true, .code_read = true });
     const row = self.accounts[@intFromEnum(id)];
@@ -1234,101 +1234,101 @@ pub fn getCodeView(
 
 pub fn getCode(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error || error{InvalidWitness})![]const u8 {
-    return (try self.getCodeView(target)).bytes;
+    return (try self.getCodeView(address)).bytes;
 }
 
 pub fn getCodeHash(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error)!u256 {
-    return switch (try self.readAccount(target)) {
+    return switch (try self.readAccount(address, .{ .accessed = true, .value_read = true })) {
         .absent => 0,
-        .present => |value| std.mem.readInt(u256, &value.code_hash, .big),
+        .present => |account| std.mem.readInt(u256, &account.code_hash, .big),
     };
 }
 
 pub fn accountHasCode(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || Allocator.Error)!bool {
-    return switch (try self.readAccount(target)) {
+    return switch (try self.readAccount(address, .{ .accessed = true, .value_read = true })) {
         .absent => false,
-        .present => |value| !std.mem.eql(u8, &value.code_hash, &crypto.keccak256_empty),
+        .present => |account| !std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty),
     };
 }
 
 pub fn setBalance(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
     balance: u256,
 ) (ResolutionError || Allocator.Error)!void {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
+    const id = (try self.resolveAccount(address, .required_observed)).?;
     const current = self.accounts[@intFromEnum(id)].current;
-    var account_value = switch (current) {
+    var account = switch (current) {
         .absent => Account{},
         .present => |value| value,
     };
-    if (current == .present and account_value.balance == balance) return;
-    account_value.balance = balance;
-    try self.writeAccount(id, .{ .present = account_value });
+    if (current == .present and account.balance == balance) return;
+    account.balance = balance;
+    try self.writeAccount(id, .{ .present = account });
 }
 
 pub fn addBalance(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
     value: u256,
 ) (ResolutionError || Allocator.Error || error{BalanceOverflow})!void {
     if (value == 0) return;
-    const balance = try self.getBalance(target);
+    const balance = try self.getBalance(address);
     try self.setBalance(
-        target,
+        address,
         std.math.add(u256, balance, value) catch return error.BalanceOverflow,
     );
 }
 
 pub fn subtractBalance(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
     value: u256,
 ) (ResolutionError || Allocator.Error)!bool {
     if (value == 0) return true;
-    const balance = try self.getBalance(target);
+    const balance = try self.getBalance(address);
     if (balance < value) return false;
-    try self.setBalance(target, balance - value);
+    try self.setBalance(address, balance - value);
     return true;
 }
 
-pub fn touchAccount(
+pub fn setNonce(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
+    nonce: u64,
 ) (ResolutionError || Allocator.Error)!void {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(id, .{ .accessed = true });
-    const row = &self.accounts[@intFromEnum(id)];
-    if (row.flags.touched) return;
-    const mutable = try self.prepareAccountMutation(id);
-    if (mutable.current == .absent) {
-        mutable.current = .{ .present = .{} };
-        self.observed_accounts.items[mutable.observation_index].effect_current = mutable.current;
-    }
-    mutable.flags.touched = true;
+    const id = (try self.resolveAccount(address, .required_observed)).?;
+    const current = self.accounts[@intFromEnum(id)].current;
+    var account = switch (current) {
+        .absent => Account{},
+        .present => |value| value,
+    };
+    if (current == .present and account.nonce == nonce) return;
+    account.nonce = nonce;
+    try self.writeAccount(id, .{ .present = account });
 }
 
 pub fn setCode(
     self: *ClaimState,
-    target: address.AddressWord,
-    bytes: []const u8,
+    address: AddressWord,
+    code_bytes: []const u8,
 ) (ResolutionError || CodeError)!void {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
+    const id = (try self.resolveAccount(address, .required_observed)).?;
     try self.observeAccount(id, .{
         .accessed = true,
         .semantic_access = true,
         .value_read = true,
     });
     const introduced_len = self.code.introducedLen();
-    const cached = try self.code.cacheIntroduced(self.allocator, bytes);
+    const cached = try self.code.cacheIntroduced(self.allocator, code_bytes);
     errdefer self.code.truncateIntroduced(self.allocator, introduced_len);
     if (cached.newly_introduced != null) {
         try self.block_introduced_codes.ensureUnusedCapacity(self.allocator, 1);
@@ -1338,7 +1338,7 @@ pub fn setCode(
     }
     const row = try self.prepareAccountMutation(id);
     const previous = row.current;
-    var account_value = switch (previous) {
+    var account = switch (previous) {
         .absent => Account{},
         .present => |value| value,
     };
@@ -1347,39 +1347,246 @@ pub fn setCode(
         self.transaction_introduced_codes.appendAssumeCapacity(introduced);
         self.journal.entries.appendAssumeCapacity(.introduced_code);
     }
-    account_value.code_hash = cached.view.code_hash;
-    row.current = .{ .present = account_value };
+    account.code_hash = cached.view.code_hash;
+    row.current = .{ .present = account };
     row.code_ref = cached.ref;
     recordAccountEffect(&self.observed_accounts.items[row.observation_index], previous, row.current);
 }
 
 pub fn clearCode(
     self: *ClaimState,
-    target: address.AddressWord,
+    address: AddressWord,
 ) (ResolutionError || CodeError)!void {
-    try self.setCode(target, &.{});
+    try self.setCode(address, &.{});
 }
 
-pub fn writeAccount(
+pub fn touchAccount(
     self: *ClaimState,
-    id: AccountId,
-    value: AccountValue,
-) Allocator.Error!void {
-    self.assertTransaction();
-    try self.observeAccount(id, .{
-        .accessed = true,
-        .semantic_access = true,
-        .value_read = true,
-    });
+    address: AddressWord,
+) (ResolutionError || Allocator.Error)!void {
+    const id = (try self.resolveAccount(address, .required_observed)).?;
+    try self.observeAccount(id, .{ .accessed = true });
+    if (self.accounts[@intFromEnum(id)].flags.touched) return;
     const row = try self.prepareAccountMutation(id);
-    const previous = row.current;
-    const previous_hash = accountCodeHash(previous);
-    const current_hash = accountCodeHash(value);
-    if (!std.mem.eql(u8, &previous_hash, &current_hash)) {
-        row.code_ref = self.code.bind(current_hash);
+    if (row.current == .absent) {
+        row.current = .{ .present = .{} };
+        self.observed_accounts.items[row.observation_index].effect_current = row.current;
     }
-    row.current = value;
-    recordAccountEffect(&self.observed_accounts.items[row.observation_index], previous, value);
+    row.flags.touched = true;
+}
+
+/// Record an account access after instruction gas/admission has succeeded.
+/// This does not load account metadata or alter warmth.
+pub fn observeAccountAccess(
+    self: *ClaimState,
+    address: AddressWord,
+) (ResolutionError || Allocator.Error)!void {
+    const id = (try self.resolveAccount(address, .required_observed)).?;
+    try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
+}
+
+pub fn warmAccount(self: *ClaimState, address: AddressWord) Allocator.Error!void {
+    _ = self.warmAccountAddress(address, .optional_warm_only) catch |err| switch (err) {
+        error.UndeclaredAccount, error.UndeclaredStorage => unreachable,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+}
+
+pub fn isAccountWarm(self: *ClaimState, address: AddressWord) bool {
+    const id = (self.resolveAccount(address, .optional_warm_only) catch unreachable) orelse return false;
+    return self.accountWarm(id);
+}
+
+pub fn warmAccountAddress(
+    self: *ClaimState,
+    address: AddressWord,
+    policy: ResolutionPolicy,
+) (ResolutionError || Allocator.Error)!?bool {
+    const id = (try self.resolveAccount(address, policy)) orelse return null;
+    return try self.warmAccountId(id);
+}
+
+pub fn warmStorageSlot(
+    self: *ClaimState,
+    account: AccountId,
+    key: u256,
+    policy: ResolutionPolicy,
+) (ResolutionError || Allocator.Error)!?bool {
+    const id = (try self.resolveStorage(account, key, policy)) orelse return null;
+    return try self.warmStorageId(id);
+}
+
+pub fn warmAccountId(self: *ClaimState, id: AccountId) Allocator.Error!bool {
+    self.assertTransaction();
+    const row = &self.accounts[@intFromEnum(id)];
+    if (row.warm_generation == self.transaction_generation) return false;
+    try self.journal.ensureWarm(self.allocator);
+    self.journal.entries.appendAssumeCapacity(.{ .warm_account = id });
+    row.warm_generation = self.transaction_generation;
+    return true;
+}
+
+pub fn warmStorageId(self: *ClaimState, id: StorageId) Allocator.Error!bool {
+    self.assertTransaction();
+    const row = &self.storage[@intFromEnum(id)];
+    if (row.warm_generation == self.transaction_generation) return false;
+    try self.journal.ensureWarm(self.allocator);
+    self.journal.entries.appendAssumeCapacity(.{ .warm_storage = id });
+    row.warm_generation = self.transaction_generation;
+    return true;
+}
+
+pub fn accountWarm(self: *const ClaimState, id: AccountId) bool {
+    return self.accounts[@intFromEnum(id)].warm_generation == self.transaction_generation;
+}
+
+pub fn storageWarm(self: *const ClaimState, id: StorageId) bool {
+    return self.storage[@intFromEnum(id)].warm_generation == self.transaction_generation;
+}
+
+pub fn getStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+) (ResolutionError || Allocator.Error)!u256 {
+    const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    return self.readResolvedStorage(resolved);
+}
+
+pub fn accessStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+) (ResolutionError || Allocator.Error)!execution.AccessStatus {
+    const resolved = (try self.resolveStorageKey(address, key, .optional_warm_only)) orelse
+        return .cold;
+    return self.accessResolvedStorage(resolved);
+}
+
+pub fn loadStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+) (ResolutionError || Allocator.Error)!Host.StorageLoadResult {
+    const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    const access_status = try self.accessResolvedStorage(resolved);
+    return .{
+        .value = try self.readResolvedStorage(resolved),
+        .access_status = access_status,
+    };
+}
+
+pub fn setStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+    value: u256,
+) (ResolutionError || Allocator.Error)!execution.StorageStatus {
+    const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    return self.setResolvedStorage(resolved, value);
+}
+
+pub fn storeStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+    value: u256,
+) (ResolutionError || Allocator.Error)!Host.StorageStoreResult {
+    const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    const access_status = try self.accessResolvedStorage(resolved);
+    return .{
+        .storage_status = try self.setResolvedStorage(resolved, value),
+        .access_status = access_status,
+    };
+}
+
+pub fn originalStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+) (ResolutionError || Allocator.Error)!u256 {
+    const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
+    try self.observeAccount(resolved.account, .{ .accessed = true });
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    self.captureExecutionOriginal(resolved.storage);
+    return self.storage[@intFromEnum(resolved.storage)].execution_original;
+}
+
+pub fn warmStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+) Allocator.Error!void {
+    const account = (self.resolveAccount(address, .optional_warm_only) catch unreachable) orelse return;
+    _ = self.warmStorageSlot(account, key, .optional_warm_only) catch |err| switch (err) {
+        error.UndeclaredAccount, error.UndeclaredStorage => unreachable,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+}
+
+pub fn isStorageWarm(self: *ClaimState, address: AddressWord, key: u256) bool {
+    const account = (self.resolveAccount(address, .optional_warm_only) catch unreachable) orelse return false;
+    const id = (self.resolveStorage(account, key, .optional_warm_only) catch unreachable) orelse return false;
+    return self.storageWarm(id);
+}
+
+pub fn getTransientStorage(self: *ClaimState, address: AddressWord, key: u256) u256 {
+    self.assertTransaction();
+    return self.transient_storage.get(.init(address, key)) orelse 0;
+}
+
+pub fn setTransientStorage(
+    self: *ClaimState,
+    address: AddressWord,
+    key: u256,
+    value: u256,
+) !void {
+    self.assertTransaction();
+    const storage_key = TransientStorageKey.init(address, key);
+    const previous_entry = self.transient_storage.get(storage_key);
+    const previous = previous_entry orelse 0;
+    if (previous == value) return;
+    if (previous_entry == null) try self.transient_storage.ensureUnusedCapacity(1);
+    try self.journal.appendTransient(self.allocator, .{
+        .key = storage_key,
+        .previous = previous,
+    });
+    // Zero is transient storage's semantic absence. Retain the row until the
+    // transaction-wide clear so checkpoint rollback never repairs probe clusters.
+    self.transient_storage.putAssumeCapacity(storage_key, value);
+}
+
+pub fn emitLog(self: *ClaimState, event_log: Host.Log) !void {
+    self.assertTransaction();
+    try self.logs.append(self.allocator, event_log);
+}
+
+pub fn clearLogs(self: *ClaimState) void {
+    const logs = if (self.transaction_active) &self.logs else &self.retained_logs;
+    logs.clearRetainingCapacity();
+}
+
+pub fn markCreatedContract(
+    self: *ClaimState,
+    address: AddressWord,
+) (ResolutionError || Allocator.Error)!void {
+    const id = (try self.resolveAccount(address, .required_observed)).?;
+    if (self.accounts[@intFromEnum(id)].flags.created) return;
+    try self.markCreatedId(id);
+}
+
+pub fn markSelfdestructed(
+    self: *ClaimState,
+    address: AddressWord,
+) (ResolutionError || Allocator.Error)!void {
+    const id = (try self.resolveAccount(address, .required_observed)).?;
+    if (self.accounts[@intFromEnum(id)].flags.selfdestructed) return;
+    try self.markSelfdestructedId(id);
 }
 
 pub fn markCreatedId(self: *ClaimState, id: AccountId) Allocator.Error!void {
@@ -1396,31 +1603,13 @@ pub fn markSelfdestructedId(self: *ClaimState, id: AccountId) Allocator.Error!vo
     self.observed_accounts.items[row.observation_index].effect.selfdestruct = true;
 }
 
-pub fn markCreatedContract(
-    self: *ClaimState,
-    target: address.AddressWord,
-) (ResolutionError || Allocator.Error)!void {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    if (self.accounts[@intFromEnum(id)].flags.created) return;
-    try self.markCreatedId(id);
-}
-
-pub fn markSelfdestructed(
-    self: *ClaimState,
-    target: address.AddressWord,
-) (ResolutionError || Allocator.Error)!void {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    if (self.accounts[@intFromEnum(id)].flags.selfdestructed) return;
-    try self.markSelfdestructedId(id);
-}
-
-pub fn createdInTransaction(self: *const ClaimState, target: address.AddressWord) bool {
-    const id = self.plan.accountIdWord(target) orelse return false;
+pub fn createdInTransaction(self: *const ClaimState, address: AddressWord) bool {
+    const id = self.plan.accountIdWord(address) orelse return false;
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.created;
 }
 
-pub fn wasSelfdestructed(self: *const ClaimState, target: address.AddressWord) bool {
-    const id = self.plan.accountIdWord(target) orelse return false;
+pub fn wasSelfdestructed(self: *const ClaimState, address: AddressWord) bool {
+    const id = self.plan.accountIdWord(address) orelse return false;
     return self.transaction_active and self.accounts[@intFromEnum(id)].flags.selfdestructed;
 }
 
@@ -1429,30 +1618,32 @@ pub fn finalize(self: *ClaimState, rules: FinalizationRules) Allocator.Error!voi
     if (self.lifecycle_accounts.items.len == 0) return;
     for (self.lifecycle_accounts.items) |id| {
         const index = @intFromEnum(id);
-        const row_value = self.accounts[index];
-        if (!row_value.flags.created and !row_value.flags.selfdestructed) continue;
-        if (!row_value.flags.selfdestructed) {
+        const flags = self.accounts[index].flags;
+        if (!flags.created and !flags.selfdestructed) continue;
+        if (!flags.selfdestructed) {
             const row = try self.prepareAccountMutation(id);
             row.flags.created = false;
             continue;
         }
 
-        const policy = if (row_value.flags.created)
+        const policy = if (flags.created)
             rules.created_account
         else
             rules.existing_account;
         if (policy.clear_storage) try self.wipeStorage(id);
         if (policy.reset_account) {
-            var account_value = switch (self.accounts[index].current) {
+            var account = switch (self.accounts[index].current) {
                 .absent => Account{},
-                .present => |account| account,
+                .present => |value| value,
             };
-            account_value.nonce = 0;
-            account_value.code_hash = crypto.keccak256_empty;
-            try self.writeAccount(id, if (account_value.balance == 0)
+            account.nonce = 0;
+            account.code_hash = crypto.keccak256_empty;
+            // A reset account holding no balance is EIP-161 empty: drop the leaf
+            // instead of keeping a zero account the state root would not carry.
+            try self.writeAccount(id, if (account.balance == 0)
                 .absent
             else
-                .{ .present = account_value });
+                .{ .present = account });
         } else if (policy.delete_account) {
             try self.writeAccount(id, .absent);
         }
@@ -1484,6 +1675,37 @@ pub fn discardAccepted(self: *ClaimState) void {
     self.accepted_generation += 1;
 }
 
+pub fn journalEntryCount(self: *const ClaimState) usize {
+    return self.journal.entries.items.len;
+}
+
+pub fn allocationBytes(self: *const ClaimState) usize {
+    return self.accounts.len * @sizeOf(AccountRow) +
+        self.storage.len * @sizeOf(StorageRow) +
+        self.code.allocationBytes() +
+        self.transient_storage.allocationBytes() +
+        self.logs.allocationBytes() +
+        self.retained_logs.allocationBytes() +
+        self.dirty_accounts.capacity * @sizeOf(AccountId) +
+        self.block_changed_accounts.capacity * @sizeOf(AccountId) +
+        self.block_storage_wipes.capacity * @sizeOf(AccountId) +
+        self.dirty_storage.capacity * @sizeOf(StorageId) +
+        self.changed_accounts.capacity * @sizeOf(AccountId) +
+        self.changed_storage.capacity * @sizeOf(StorageId) +
+        self.transaction_storage_wipes.capacity * @sizeOf(AccountId) +
+        self.lifecycle_accounts.capacity * @sizeOf(AccountId) +
+        self.block_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
+        self.transaction_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
+        self.observed_accounts.capacity * @sizeOf(AccountObservationRow) +
+        self.observed_storage.capacity * @sizeOf(StorageObservationRow) +
+        self.journal.entries.capacity * @sizeOf(Journal.Entry) +
+        self.journal.accounts.capacity * @sizeOf(Journal.AccountUndo) +
+        self.journal.storage.capacity * @sizeOf(Journal.StorageUndo) +
+        self.journal.account_observations.capacity * @sizeOf(Journal.AccountObservationUndo) +
+        self.journal.storage_observations.capacity * @sizeOf(Journal.StorageObservationUndo) +
+        self.journal.transient.capacity * @sizeOf(Journal.TransientUndo);
+}
+
 /// Hide all parent and prior-block storage without fabricating slot accesses.
 pub fn wipeStorage(self: *ClaimState, id: AccountId) Allocator.Error!void {
     try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
@@ -1505,200 +1727,26 @@ pub fn wipeStorage(self: *ClaimState, id: AccountId) Allocator.Error!void {
     self.observed_accounts.items[row.observation_index].effect.storage_wiped = true;
 }
 
-pub fn getStorage(
+pub fn writeAccount(
     self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
-) (ResolutionError || Allocator.Error)!u256 {
-    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
-    try self.observeAccount(resolved.account, .{ .accessed = true });
-    return self.readResolvedStorage(resolved);
-}
-
-pub fn accessStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
-) (ResolutionError || Allocator.Error)!execution.AccessStatus {
-    const resolved = (try self.resolveStorageKey(target, slot, .optional_warm_only)) orelse
-        return .cold;
-    return self.accessResolvedStorage(resolved);
-}
-
-pub fn loadStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
-) (ResolutionError || Allocator.Error)!Host.StorageLoadResult {
-    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
-    try self.observeAccount(resolved.account, .{ .accessed = true });
-    const access_status = try self.accessResolvedStorage(resolved);
-    return .{
-        .value = try self.readResolvedStorage(resolved),
-        .access_status = access_status,
-    };
-}
-
-pub fn setStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
-    value: u256,
-) (ResolutionError || Allocator.Error)!execution.StorageStatus {
-    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
-    try self.observeAccount(resolved.account, .{ .accessed = true });
-    return self.setResolvedStorage(resolved, value);
-}
-
-pub fn storeStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
-    value: u256,
-) (ResolutionError || Allocator.Error)!Host.StorageStoreResult {
-    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
-    try self.observeAccount(resolved.account, .{ .accessed = true });
-    const access_status = try self.accessResolvedStorage(resolved);
-    return .{
-        .storage_status = try self.setResolvedStorage(resolved, value),
-        .access_status = access_status,
-    };
-}
-
-fn accessResolvedStorage(
-    self: *ClaimState,
-    resolved: ResolvedStorage,
-) Allocator.Error!execution.AccessStatus {
-    return if (try self.warmStorageId(resolved.storage)) .cold else .warm;
-}
-
-fn readResolvedStorage(
-    self: *ClaimState,
-    resolved: ResolvedStorage,
-) Allocator.Error!u256 {
-    self.captureStorageOriginal(resolved.storage);
-    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
-    return self.effectiveStorage(resolved.storage);
-}
-
-fn setResolvedStorage(
-    self: *ClaimState,
-    resolved: ResolvedStorage,
-    value: u256,
-) Allocator.Error!execution.StorageStatus {
-    self.captureStorageOriginal(resolved.storage);
-    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
-    self.captureExecutionOriginal(resolved.storage);
-    const row = &self.storage[@intFromEnum(resolved.storage)];
-    const current = self.effectiveStorage(resolved.storage);
-    const status = storage_status.status(row.execution_original, current, value);
-    if (current != value) try self.writeStorage(resolved.storage, value);
-    return status;
-}
-
-pub fn originalStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
-) (ResolutionError || Allocator.Error)!u256 {
-    const resolved = (try self.resolveStorageKey(target, slot, .required_observed)).?;
-    try self.observeAccount(resolved.account, .{ .accessed = true });
-    self.captureStorageOriginal(resolved.storage);
-    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
-    self.captureExecutionOriginal(resolved.storage);
-    return self.storage[@intFromEnum(resolved.storage)].execution_original;
-}
-
-pub fn getTransientStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    key: u256,
-) u256 {
-    self.assertTransaction();
-    return self.transient_storage.get(.init(target, key)) orelse 0;
-}
-
-pub fn setTransientStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    key: u256,
-    value: u256,
-) !void {
-    self.assertTransaction();
-    const storage_key = TransientStorageKey.init(target, key);
-    const previous_entry = self.transient_storage.get(storage_key);
-    const previous = previous_entry orelse 0;
-    if (previous == value) return;
-    if (previous_entry == null) try self.transient_storage.ensureUnusedCapacity(1);
-    try self.journal.appendTransient(self.allocator, .{
-        .key = storage_key,
-        .previous = previous,
-    });
-    // Zero is transient storage's semantic absence. Retain the row until the
-    // transaction-wide clear so checkpoint rollback never repairs probe clusters.
-    self.transient_storage.putAssumeCapacity(storage_key, value);
-}
-
-pub fn emitLog(self: *ClaimState, event_log: Host.Log) !void {
-    self.assertTransaction();
-    try self.logs.append(self.allocator, event_log);
-}
-
-pub fn logView(self: *const ClaimState) LogView {
-    return if (self.transaction_active) self.logs.view() else self.retained_logs.view();
-}
-
-pub fn clearLogs(self: *ClaimState) void {
-    const logs = if (self.transaction_active) &self.logs else &self.retained_logs;
-    logs.clearRetainingCapacity();
-}
-
-pub fn pendingView(self: *const ClaimState) PendingView {
-    return .{ .state = self };
-}
-
-pub fn acceptedView(self: *const ClaimState) AcceptedView {
-    std.debug.assert(!self.transaction_active);
-    return .{ .state = self };
-}
-
-/// Account value as the accepted branch sees it: the first-touch original
-/// while a transaction is active, else the row.
-fn acceptedAccountValue(
-    self: *const ClaimState,
     id: AccountId,
-) AccountValue {
-    const row = &self.accounts[@intFromEnum(id)];
-    if (!self.transaction_active or
-        row.transaction_dirty_generation != self.transaction_generation) return row.current;
-    std.debug.assert(row.observation_generation == self.transaction_generation);
-    return self.observed_accounts.items[row.observation_index].original;
-}
-
-/// Storage value as the accepted branch sees it, honoring a wipe generation
-/// that the active transaction may have advanced.
-fn acceptedStorageValue(
-    self: *const ClaimState,
-    id: StorageId,
-) u256 {
-    if (!self.transaction_active) return self.effectiveStorage(id);
-    const account = self.plan.storageAccount(id);
-    const account_row = &self.accounts[@intFromEnum(account)];
-    const account_generation = if (account_row.observation_generation == self.transaction_generation)
-        self.observed_accounts.items[account_row.observation_index].original_storage_generation
-    else
-        account_row.storage_generation;
-    const row = &self.storage[@intFromEnum(id)];
-    const changed = row.transaction_dirty_generation == self.transaction_generation;
-    const value = if (changed)
-        self.journal.storage.items[row.transaction_undo_index].current
-    else
-        row.current;
-    const storage_generation = if (changed)
-        self.journal.storage.items[row.transaction_undo_index].storage_generation
-    else
-        row.storage_generation;
-    return if (storage_generation == account_generation) value else 0;
+    value: AccountValue,
+) Allocator.Error!void {
+    self.assertTransaction();
+    try self.observeAccount(id, .{
+        .accessed = true,
+        .semantic_access = true,
+        .value_read = true,
+    });
+    const row = try self.prepareAccountMutation(id);
+    const previous = row.current;
+    const previous_hash = accountCodeHash(previous);
+    const current_hash = accountCodeHash(value);
+    if (!std.mem.eql(u8, &previous_hash, &current_hash)) {
+        row.code_ref = self.code.bind(current_hash);
+    }
+    row.current = value;
+    recordAccountEffect(&self.observed_accounts.items[row.observation_index], previous, value);
 }
 
 pub fn writeStorage(
@@ -1755,91 +1803,8 @@ pub fn writeStorage(
     observation.effect.written = true;
 }
 
-pub fn warmAccountAddress(
-    self: *ClaimState,
-    target: address.AddressWord,
-    policy: ResolutionPolicy,
-) (ResolutionError || Allocator.Error)!?bool {
-    const id = (try self.resolveAccount(target, policy)) orelse return null;
-    return try self.warmAccountId(id);
-}
-
-pub fn warmStorageSlot(
-    self: *ClaimState,
-    account: AccountId,
-    slot: u256,
-    policy: ResolutionPolicy,
-) (ResolutionError || Allocator.Error)!?bool {
-    const id = (try self.resolveStorage(account, slot, policy)) orelse return null;
-    return try self.warmStorageId(id);
-}
-
-pub fn warmAccount(self: *ClaimState, target: address.AddressWord) Allocator.Error!void {
-    _ = self.warmAccountAddress(target, .optional_warm_only) catch |err| switch (err) {
-        error.UndeclaredAccount, error.UndeclaredStorage => unreachable,
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-}
-
-pub fn warmStorage(
-    self: *ClaimState,
-    target: address.AddressWord,
-    slot: u256,
-) Allocator.Error!void {
-    const account = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return;
-    _ = self.warmStorageSlot(account, slot, .optional_warm_only) catch |err| switch (err) {
-        error.UndeclaredAccount, error.UndeclaredStorage => unreachable,
-        error.OutOfMemory => return error.OutOfMemory,
-    };
-}
-
-pub fn isAccountWarm(self: *ClaimState, target: address.AddressWord) bool {
-    const id = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return false;
-    return self.accountWarm(id);
-}
-
-pub fn isStorageWarm(self: *ClaimState, target: address.AddressWord, slot: u256) bool {
-    const account = (self.resolveAccount(target, .optional_warm_only) catch unreachable) orelse return false;
-    const id = (self.resolveStorage(account, slot, .optional_warm_only) catch unreachable) orelse return false;
-    return self.storageWarm(id);
-}
-
-pub fn observeAccountAccess(
-    self: *ClaimState,
-    target: address.AddressWord,
-) (ResolutionError || Allocator.Error)!void {
-    const id = (try self.resolveAccount(target, .required_observed)).?;
-    try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
-}
-
-pub fn warmAccountId(self: *ClaimState, id: AccountId) Allocator.Error!bool {
-    self.assertTransaction();
-    const row = &self.accounts[@intFromEnum(id)];
-    if (row.warm_generation == self.transaction_generation) return false;
-    try self.journal.ensureWarm(self.allocator);
-    self.journal.entries.appendAssumeCapacity(.{ .warm_account = id });
-    row.warm_generation = self.transaction_generation;
-    return true;
-}
-
-pub fn warmStorageId(self: *ClaimState, id: StorageId) Allocator.Error!bool {
-    self.assertTransaction();
-    const row = &self.storage[@intFromEnum(id)];
-    if (row.warm_generation == self.transaction_generation) return false;
-    try self.journal.ensureWarm(self.allocator);
-    self.journal.entries.appendAssumeCapacity(.{ .warm_storage = id });
-    row.warm_generation = self.transaction_generation;
-    return true;
-}
-
-pub fn accountWarm(self: *const ClaimState, id: AccountId) bool {
-    return self.accounts[@intFromEnum(id)].warm_generation == self.transaction_generation;
-}
-
-pub fn storageWarm(self: *const ClaimState, id: StorageId) bool {
-    return self.storage[@intFromEnum(id)].warm_generation == self.transaction_generation;
-}
-
+/// Merge `observation` into the row's observation, creating it on first touch
+/// in this transaction. Every attempt observes; there is no opt-out.
 pub fn observeAccount(
     self: *ClaimState,
     id: AccountId,
@@ -1908,35 +1873,256 @@ noinline fn observeStorageFirst(
     });
 }
 
-pub fn allocationBytes(self: *const ClaimState) usize {
-    return self.accounts.len * @sizeOf(AccountRow) +
-        self.storage.len * @sizeOf(StorageRow) +
-        self.code.allocationBytes() +
-        self.transient_storage.allocationBytes() +
-        self.logs.allocationBytes() +
-        self.retained_logs.allocationBytes() +
-        self.dirty_accounts.capacity * @sizeOf(AccountId) +
-        self.block_changed_accounts.capacity * @sizeOf(AccountId) +
-        self.block_storage_wipes.capacity * @sizeOf(AccountId) +
-        self.dirty_storage.capacity * @sizeOf(StorageId) +
-        self.changed_accounts.capacity * @sizeOf(AccountId) +
-        self.changed_storage.capacity * @sizeOf(StorageId) +
-        self.transaction_storage_wipes.capacity * @sizeOf(AccountId) +
-        self.lifecycle_accounts.capacity * @sizeOf(AccountId) +
-        self.block_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
-        self.transaction_introduced_codes.capacity * @sizeOf(artifacts.IntroducedCodeId) +
-        self.observed_accounts.capacity * @sizeOf(AccountObservationRow) +
-        self.observed_storage.capacity * @sizeOf(StorageObservationRow) +
-        self.journal.entries.capacity * @sizeOf(Journal.Entry) +
-        self.journal.accounts.capacity * @sizeOf(Journal.AccountUndo) +
-        self.journal.storage.capacity * @sizeOf(Journal.StorageUndo) +
-        self.journal.account_observations.capacity * @sizeOf(Journal.AccountObservationUndo) +
-        self.journal.storage_observations.capacity * @sizeOf(Journal.StorageObservationUndo) +
-        self.journal.transient.capacity * @sizeOf(Journal.TransientUndo);
+fn assertTransaction(self: *const ClaimState) void {
+    self.assertAttempt();
+    std.debug.assert(self.scope_depth != 0);
 }
 
-pub fn journalEntryCount(self: *const ClaimState) usize {
-    return self.journal.entries.items.len;
+fn assertAttempt(self: *const ClaimState) void {
+    std.debug.assert(self.transaction_active);
+    std.debug.assert(self.active_attempt_id != null);
+}
+
+fn assertRootScope(self: *const ClaimState) void {
+    self.assertTransaction();
+    std.debug.assert(self.scope_depth == 1);
+}
+
+fn assertSealed(self: *const ClaimState) void {
+    std.debug.assert(self.transaction_active);
+    std.debug.assert(self.sealed);
+    std.debug.assert(!self.scopeActive());
+}
+
+fn assertCurrent(self: *const ClaimState, id: AttemptId) void {
+    self.assertAttempt();
+    std.debug.assert(self.active_attempt_id.? == id);
+}
+
+fn validateCheckpoint(self: *const ClaimState, checkpoint_state: Checkpoint) void {
+    self.assertTransaction();
+    std.debug.assert(self.scope_depth >= 1);
+    std.debug.assert(checkpoint_state.attempt_id == self.active_attempt_id.?);
+    std.debug.assert(checkpoint_state.scope_generation == self.active_scope_generation);
+    std.debug.assert(checkpoint_state.journal_len <= self.journal.entries.items.len);
+    std.debug.assert(checkpoint_state.changed_accounts_len <= self.changed_accounts.items.len);
+    std.debug.assert(checkpoint_state.changed_storage_len <= self.changed_storage.items.len);
+    std.debug.assert(checkpoint_state.logs.rows_len <= self.logs.rows.items.len);
+    std.debug.assert(checkpoint_state.logs.topics_len <= self.logs.topics.items.len);
+    std.debug.assert(checkpoint_state.logs.data_len <= self.logs.data.items.len);
+}
+
+fn finishTransaction(self: *ClaimState) void {
+    self.transaction_scope_reverted = false;
+    self.transient_storage.clearRetainingCapacity();
+    self.changed_accounts.clearRetainingCapacity();
+    self.changed_storage.clearRetainingCapacity();
+    self.transaction_storage_wipes.clearRetainingCapacity();
+    for (self.lifecycle_accounts.items) |id|
+        self.accounts[@intFromEnum(id)].lifecycle_listed = false;
+    self.lifecycle_accounts.clearRetainingCapacity();
+    self.transaction_introduced_codes.clearRetainingCapacity();
+    self.observed_accounts.clearRetainingCapacity();
+    self.observed_storage.clearRetainingCapacity();
+    self.logs.clearRetainingCapacity();
+    self.journal.clearRetainingCapacity();
+    self.transaction_active = false;
+    self.active_attempt_id = null;
+    self.observed_attempt = false;
+    self.sealed = false;
+    self.active_scope_generation = 0;
+    self.execution_scope_generation = 0;
+    self.scope_depth = 0;
+}
+
+fn revertJournalTo(self: *ClaimState, target_len: u32) void {
+    while (self.journal.entries.items.len > target_len) {
+        const entry = self.journal.entries.pop().?;
+        switch (entry) {
+            .account, .observed_account => |undo_id| {
+                std.debug.assert(@intFromEnum(undo_id) + 1 == self.journal.accounts.items.len);
+                const undo = self.journal.accounts.pop().?;
+                const row = &self.accounts[@intFromEnum(undo.account)];
+                row.current = undo.current;
+                row.code_ref = undo.code_ref;
+                row.flags = undo.flags;
+                row.journal_scope_generation = undo.journal_scope_generation;
+                row.storage_generation = undo.storage_generation;
+                row.storage_wipe_transaction_generation = undo.storage_wipe_transaction_generation;
+                row.transaction_dirty_generation = undo.transaction_dirty_generation;
+                if (entry == .observed_account) {
+                    const observation_undo = self.journal.account_observations.pop().?;
+                    const observation = &self.observed_accounts.items[observation_undo.observation];
+                    observation.effect_current = observation_undo.effect_current;
+                    observation.effect = observation_undo.effect;
+                }
+            },
+            .storage, .observed_storage => |undo_id| {
+                std.debug.assert(@intFromEnum(undo_id) + 1 == self.journal.storage.items.len);
+                const undo = self.journal.storage.pop().?;
+                const row = &self.storage[@intFromEnum(undo.storage)];
+                row.current = undo.current;
+                row.flags = undo.flags;
+                row.journal_scope_generation = undo.journal_scope_generation;
+                row.storage_generation = undo.storage_generation;
+                row.transaction_dirty_generation = undo.transaction_dirty_generation;
+                row.transaction_undo_index = undo.transaction_undo_index;
+                if (entry == .observed_storage) {
+                    const observation_undo = self.journal.storage_observations.pop().?;
+                    const observation = &self.observed_storage.items[observation_undo.observation];
+                    observation.effect_current = observation_undo.effect_current;
+                    observation.effect = observation_undo.effect;
+                }
+            },
+            .warm_account => |id| self.accounts[@intFromEnum(id)].warm_generation = 0,
+            .warm_storage => |id| self.storage[@intFromEnum(id)].warm_generation = 0,
+            .transient_storage => |undo_id| {
+                std.debug.assert(@intFromEnum(undo_id) + 1 == self.journal.transient.items.len);
+                const undo = self.journal.transient.pop().?;
+                self.transient_storage.putAssumeCapacity(undo.key, undo.previous);
+            },
+            .introduced_code => {
+                const block_id = self.block_introduced_codes.pop().?;
+                const transaction_id = self.transaction_introduced_codes.pop().?;
+                std.debug.assert(block_id == transaction_id);
+                std.debug.assert(@intFromEnum(block_id) + 1 == self.code.introducedLen());
+                self.code.truncateIntroduced(self.allocator, @intFromEnum(block_id));
+            },
+        }
+    }
+}
+
+fn readAccount(
+    self: *ClaimState,
+    address: AddressWord,
+    observation: AccountObservation,
+) (ResolutionError || Allocator.Error)!AccountValue {
+    const id = (try self.resolveAccount(address, .required_observed)).?;
+    // Block-system-call admission may inspect code presence before opening the
+    // managed system-call attempt. The actual call records the BAL access.
+    if (self.transaction_active) try self.observeAccount(id, observation);
+    return self.accounts[@intFromEnum(id)].current;
+}
+
+/// Account value as the accepted branch sees it: the first-touch original
+/// while a transaction is active, else the row.
+fn acceptedAccountValue(self: *const ClaimState, id: AccountId) AccountValue {
+    const row = &self.accounts[@intFromEnum(id)];
+    if (!self.transaction_active or
+        row.transaction_dirty_generation != self.transaction_generation) return row.current;
+    std.debug.assert(row.observation_generation == self.transaction_generation);
+    return self.observed_accounts.items[row.observation_index].original;
+}
+
+/// Storage value as the accepted branch sees it, honoring a wipe generation
+/// that the active transaction may have advanced.
+fn acceptedStorageValue(self: *const ClaimState, id: StorageId) u256 {
+    if (!self.transaction_active) return self.effectiveStorage(id);
+    const account = self.plan.storageAccount(id);
+    const account_row = &self.accounts[@intFromEnum(account)];
+    const account_generation = if (account_row.observation_generation == self.transaction_generation)
+        self.observed_accounts.items[account_row.observation_index].original_storage_generation
+    else
+        account_row.storage_generation;
+    const row = &self.storage[@intFromEnum(id)];
+    const changed = row.transaction_dirty_generation == self.transaction_generation;
+    const value = if (changed)
+        self.journal.storage.items[row.transaction_undo_index].current
+    else
+        row.current;
+    const storage_generation = if (changed)
+        self.journal.storage.items[row.transaction_undo_index].storage_generation
+    else
+        row.storage_generation;
+    return if (storage_generation == account_generation) value else 0;
+}
+
+fn accountExecutionValue(fact: ParentFacts.AccountFact) AccountValue {
+    return switch (fact.parent) {
+        .absent => .absent,
+        .present => |parent| blk: {
+            // Dropping `storage_root` is the point: liveness here is EIP-161,
+            // which ignores storage.
+            const account: Account = .{
+                .nonce = parent.nonce,
+                .balance = parent.balance,
+                .code_hash = parent.code_hash,
+            };
+            break :blk if (account.isEip161Empty()) .absent else .{ .present = account };
+        },
+    };
+}
+
+fn accountCodeHash(value: AccountValue) CodeHash {
+    return switch (value) {
+        .absent => crypto.keccak256_empty,
+        .present => |account| account.code_hash,
+    };
+}
+
+fn accountValue(value: AccountValue) ?Account {
+    return switch (value) {
+        .absent => null,
+        .present => |account| account,
+    };
+}
+
+fn recordAccountEffect(
+    observation: *AccountObservationRow,
+    previous: AccountValue,
+    current: AccountValue,
+) void {
+    observation.effect_current = current;
+    switch (current) {
+        .absent => observation.effect.account_deleted = previous == .present,
+        .present => |value| switch (previous) {
+            .absent => {
+                observation.effect.balance_written = value.balance != 0;
+                observation.effect.nonce_written = value.nonce != 0;
+                observation.effect.code_written = !std.mem.eql(
+                    u8,
+                    &value.code_hash,
+                    &crypto.keccak256_empty,
+                );
+            },
+            .present => |old| {
+                observation.effect.balance_written = observation.effect.balance_written or
+                    old.balance != value.balance;
+                observation.effect.nonce_written = observation.effect.nonce_written or
+                    old.nonce != value.nonce;
+                observation.effect.code_written = observation.effect.code_written or
+                    !std.mem.eql(u8, &old.code_hash, &value.code_hash);
+            },
+        },
+    }
+}
+
+fn accessResolvedStorage(
+    self: *ClaimState,
+    resolved: ResolvedStorage,
+) Allocator.Error!execution.AccessStatus {
+    return if (try self.warmStorageId(resolved.storage)) .cold else .warm;
+}
+
+fn readResolvedStorage(self: *ClaimState, resolved: ResolvedStorage) Allocator.Error!u256 {
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    return self.effectiveStorage(resolved.storage);
+}
+
+fn setResolvedStorage(
+    self: *ClaimState,
+    resolved: ResolvedStorage,
+    value: u256,
+) Allocator.Error!execution.StorageStatus {
+    self.captureStorageOriginal(resolved.storage);
+    try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
+    self.captureExecutionOriginal(resolved.storage);
+    const row = &self.storage[@intFromEnum(resolved.storage)];
+    const current = self.effectiveStorage(resolved.storage);
+    const status = storageStatus(row.execution_original, current, value);
+    if (current != value) try self.writeStorage(resolved.storage, value);
+    return status;
 }
 
 fn captureStorageOriginal(self: *ClaimState, id: StorageId) void {
@@ -1964,6 +2150,131 @@ fn effectiveStorage(self: *const ClaimState, id: StorageId) u256 {
     const row = &self.storage[@intFromEnum(id)];
     if (row.storage_generation != account.storage_generation) return 0;
     return row.current;
+}
+
+/// Reserve, journal, and list the row for its first change at every layer;
+/// the caller applies the change to the returned row.
+fn prepareAccountMutation(self: *ClaimState, id: AccountId) Allocator.Error!*AccountRow {
+    const row = &self.accounts[@intFromEnum(id)];
+    const needs_undo = row.journal_scope_generation != self.active_scope_generation;
+    const first_dirty = !row.flags.block_dirty;
+    const first_block_change = !row.flags.block_changed;
+    const first_transaction_dirty =
+        row.transaction_dirty_generation != self.transaction_generation;
+    if (needs_undo) try self.journal.ensureAccount(self.allocator, true);
+    if (first_dirty) try self.dirty_accounts.ensureUnusedCapacity(self.allocator, 1);
+    if (first_block_change)
+        try self.block_changed_accounts.ensureUnusedCapacity(self.allocator, 1);
+    if (first_transaction_dirty) try self.changed_accounts.ensureUnusedCapacity(self.allocator, 1);
+    if (needs_undo) self.appendAccountUndo(id, row);
+    if (first_dirty) {
+        row.flags.block_dirty = true;
+        self.dirty_accounts.appendAssumeCapacity(id);
+    }
+    if (first_block_change) {
+        row.flags.block_changed = true;
+        self.block_changed_accounts.appendAssumeCapacity(id);
+    }
+    if (first_transaction_dirty) {
+        row.transaction_dirty_generation = self.transaction_generation;
+        self.changed_accounts.appendAssumeCapacity(id);
+    }
+    return row;
+}
+
+/// Lifecycle marks are dirty changes here: the row is listed for `finalize`
+/// on top of the full `prepareAccountMutation` bookkeeping.
+fn prepareLifecycleMutation(self: *ClaimState, id: AccountId) Allocator.Error!*AccountRow {
+    const row = &self.accounts[@intFromEnum(id)];
+    const first_lifecycle = !row.lifecycle_listed;
+    if (first_lifecycle)
+        try self.lifecycle_accounts.ensureUnusedCapacity(self.allocator, 1);
+    const mutable = try self.prepareAccountMutation(id);
+    if (first_lifecycle) {
+        mutable.lifecycle_listed = true;
+        self.lifecycle_accounts.appendAssumeCapacity(id);
+    }
+    return mutable;
+}
+
+/// Journal the row once per scope generation; the caller reserved capacity.
+fn appendAccountUndo(self: *ClaimState, id: AccountId, row: *AccountRow) void {
+    const observation = &self.observed_accounts.items[row.observation_index];
+    self.journal.appendAccountAssumeCapacity(.{
+        .account = id,
+        .current = row.current,
+        .code_ref = row.code_ref,
+        .flags = row.flags,
+        .journal_scope_generation = row.journal_scope_generation,
+        .storage_generation = row.storage_generation,
+        .storage_wipe_transaction_generation = row.storage_wipe_transaction_generation,
+        .transaction_dirty_generation = row.transaction_dirty_generation,
+    }, .{
+        .observation = row.observation_index,
+        .effect_current = observation.effect_current,
+        .effect = observation.effect,
+    });
+    row.journal_scope_generation = self.active_scope_generation;
+}
+
+fn appendStorageUndo(self: *ClaimState, id: StorageId, row: *StorageRow) void {
+    const observation = &self.observed_storage.items[row.observation_index];
+    const undo_index: u32 = @intCast(self.journal.storage.items.len);
+    self.journal.appendStorageAssumeCapacity(.{
+        .storage = id,
+        .current = row.current,
+        .flags = row.flags,
+        .journal_scope_generation = row.journal_scope_generation,
+        .storage_generation = row.storage_generation,
+        .transaction_dirty_generation = row.transaction_dirty_generation,
+        .transaction_undo_index = row.transaction_undo_index,
+    }, .{
+        .observation = row.observation_index,
+        .effect_current = observation.effect_current,
+        .effect = observation.effect,
+    });
+    if (row.transaction_undo_index == std.math.maxInt(u32))
+        row.transaction_undo_index = undo_index;
+    row.journal_scope_generation = self.active_scope_generation;
+}
+
+fn allocateScopeGeneration(self: *ClaimState) u32 {
+    self.next_scope_generation = nextGeneration(self.next_scope_generation);
+    return self.next_scope_generation;
+}
+
+fn nextGeneration(current: u32) u32 {
+    std.debug.assert(current != std.math.maxInt(u32));
+    return current + 1;
+}
+
+/// Drop slots whose generation a wipe left behind so the transaction delta
+/// carries only slots the retained branch will keep.
+fn compactTransactionStorageChanges(self: *ClaimState) void {
+    var write: usize = 0;
+    for (self.changed_storage.items) |id| {
+        const row = &self.storage[@intFromEnum(id)];
+        if (row.storage_generation !=
+            self.accounts[@intFromEnum(self.plan.storageAccount(id))].storage_generation) continue;
+        self.changed_storage.items[write] = id;
+        write += 1;
+    }
+    self.changed_storage.items.len = write;
+}
+
+fn compactTransactionStorageWipes(self: *ClaimState) void {
+    var write: usize = 0;
+    for (self.transaction_storage_wipes.items) |id| {
+        const row = &self.accounts[@intFromEnum(id)];
+        if (row.storage_wipe_transaction_generation != self.transaction_generation) continue;
+        row.storage_wipe_transaction_generation = 0;
+        self.transaction_storage_wipes.items[write] = id;
+        write += 1;
+    }
+    for (self.transaction_storage_wipes.items[0..write]) |id|
+        self.accounts[@intFromEnum(id)].storage_wipe_transaction_generation =
+            self.transaction_generation;
+    self.transaction_storage_wipes.items.len = write;
 }
 
 /// Drops wiped-away rows and entries orphaned by scope reverts (their flag is
@@ -2039,305 +2350,8 @@ fn compactAcceptedStorageWipes(self: *ClaimState) void {
     self.block_storage_wipes.items.len = write;
 }
 
-fn compactTransactionStorageWipes(self: *ClaimState) void {
-    var write: usize = 0;
-    for (self.transaction_storage_wipes.items) |id| {
-        const row = &self.accounts[@intFromEnum(id)];
-        if (row.storage_wipe_transaction_generation != self.transaction_generation) continue;
-        row.storage_wipe_transaction_generation = 0;
-        self.transaction_storage_wipes.items[write] = id;
-        write += 1;
-    }
-    for (self.transaction_storage_wipes.items[0..write]) |id|
-        self.accounts[@intFromEnum(id)].storage_wipe_transaction_generation =
-            self.transaction_generation;
-    self.transaction_storage_wipes.items.len = write;
-}
-
-fn compactTransactionStorageChanges(self: *ClaimState) void {
-    var write: usize = 0;
-    for (self.changed_storage.items) |id| {
-        const row = &self.storage[@intFromEnum(id)];
-        if (row.storage_generation !=
-            self.accounts[@intFromEnum(self.plan.storageAccount(id))].storage_generation) continue;
-        self.changed_storage.items[write] = id;
-        write += 1;
-    }
-    self.changed_storage.items.len = write;
-}
-
-fn prepareAccountMutation(
-    self: *ClaimState,
-    id: AccountId,
-) Allocator.Error!*AccountRow {
-    const row = &self.accounts[@intFromEnum(id)];
-    const needs_undo = row.journal_scope_generation != self.active_scope_generation;
-    const first_dirty = !row.flags.block_dirty;
-    const first_block_change = !row.flags.block_changed;
-    const first_transaction_dirty =
-        row.transaction_dirty_generation != self.transaction_generation;
-    if (needs_undo) try self.journal.ensureAccount(self.allocator, true);
-    if (first_dirty) try self.dirty_accounts.ensureUnusedCapacity(self.allocator, 1);
-    if (first_block_change)
-        try self.block_changed_accounts.ensureUnusedCapacity(self.allocator, 1);
-    if (first_transaction_dirty) try self.changed_accounts.ensureUnusedCapacity(self.allocator, 1);
-    if (needs_undo) self.appendAccountUndo(id, row);
-    if (first_dirty) {
-        row.flags.block_dirty = true;
-        self.dirty_accounts.appendAssumeCapacity(id);
-    }
-    if (first_block_change) {
-        row.flags.block_changed = true;
-        self.block_changed_accounts.appendAssumeCapacity(id);
-    }
-    if (first_transaction_dirty) {
-        row.transaction_dirty_generation = self.transaction_generation;
-        self.changed_accounts.appendAssumeCapacity(id);
-    }
-    return row;
-}
-
-fn prepareLifecycleMutation(
-    self: *ClaimState,
-    id: AccountId,
-) Allocator.Error!*AccountRow {
-    const row = &self.accounts[@intFromEnum(id)];
-    const first_lifecycle = !row.lifecycle_listed;
-    if (first_lifecycle)
-        try self.lifecycle_accounts.ensureUnusedCapacity(self.allocator, 1);
-    const mutable = try self.prepareAccountMutation(id);
-    if (first_lifecycle) {
-        mutable.lifecycle_listed = true;
-        self.lifecycle_accounts.appendAssumeCapacity(id);
-    }
-    return mutable;
-}
-
-fn appendAccountUndo(self: *ClaimState, id: AccountId, row: *AccountRow) void {
-    const observation = &self.observed_accounts.items[row.observation_index];
-    self.journal.appendAccountAssumeCapacity(.{
-        .account = id,
-        .current = row.current,
-        .code_ref = row.code_ref,
-        .flags = row.flags,
-        .journal_scope_generation = row.journal_scope_generation,
-        .storage_generation = row.storage_generation,
-        .storage_wipe_transaction_generation = row.storage_wipe_transaction_generation,
-        .transaction_dirty_generation = row.transaction_dirty_generation,
-    }, .{
-        .observation = row.observation_index,
-        .effect_current = observation.effect_current,
-        .effect = observation.effect,
-    });
-    row.journal_scope_generation = self.active_scope_generation;
-}
-
-fn appendStorageUndo(self: *ClaimState, id: StorageId, row: *StorageRow) void {
-    const observation = &self.observed_storage.items[row.observation_index];
-    const undo_index: u32 = @intCast(self.journal.storage.items.len);
-    self.journal.appendStorageAssumeCapacity(.{
-        .storage = id,
-        .current = row.current,
-        .flags = row.flags,
-        .journal_scope_generation = row.journal_scope_generation,
-        .storage_generation = row.storage_generation,
-        .transaction_dirty_generation = row.transaction_dirty_generation,
-        .transaction_undo_index = row.transaction_undo_index,
-    }, .{
-        .observation = row.observation_index,
-        .effect_current = observation.effect_current,
-        .effect = observation.effect,
-    });
-    if (row.transaction_undo_index == std.math.maxInt(u32))
-        row.transaction_undo_index = undo_index;
-    row.journal_scope_generation = self.active_scope_generation;
-}
-
-fn revertJournalTo(self: *ClaimState, target_len: u32) void {
-    while (self.journal.entries.items.len > target_len) {
-        const entry = self.journal.entries.pop().?;
-        switch (entry) {
-            .account, .observed_account => |undo_id| {
-                const index = @intFromEnum(undo_id);
-                std.debug.assert(index + 1 == self.journal.accounts.items.len);
-                const undo = self.journal.accounts.pop().?;
-                const row = &self.accounts[@intFromEnum(undo.account)];
-                row.current = undo.current;
-                row.code_ref = undo.code_ref;
-                row.flags = undo.flags;
-                row.journal_scope_generation = undo.journal_scope_generation;
-                row.storage_generation = undo.storage_generation;
-                row.storage_wipe_transaction_generation = undo.storage_wipe_transaction_generation;
-                row.transaction_dirty_generation = undo.transaction_dirty_generation;
-                if (entry == .observed_account) {
-                    const observation_undo = self.journal.account_observations.pop().?;
-                    const observation = &self.observed_accounts.items[observation_undo.observation];
-                    observation.effect_current = observation_undo.effect_current;
-                    observation.effect = observation_undo.effect;
-                }
-            },
-            .storage, .observed_storage => |undo_id| {
-                const index = @intFromEnum(undo_id);
-                std.debug.assert(index + 1 == self.journal.storage.items.len);
-                const undo = self.journal.storage.pop().?;
-                const row = &self.storage[@intFromEnum(undo.storage)];
-                row.current = undo.current;
-                row.flags = undo.flags;
-                row.journal_scope_generation = undo.journal_scope_generation;
-                row.storage_generation = undo.storage_generation;
-                row.transaction_dirty_generation = undo.transaction_dirty_generation;
-                row.transaction_undo_index = undo.transaction_undo_index;
-                if (entry == .observed_storage) {
-                    const observation_undo = self.journal.storage_observations.pop().?;
-                    const observation = &self.observed_storage.items[observation_undo.observation];
-                    observation.effect_current = observation_undo.effect_current;
-                    observation.effect = observation_undo.effect;
-                }
-            },
-            .warm_account => |id| self.accounts[@intFromEnum(id)].warm_generation = 0,
-            .warm_storage => |id| self.storage[@intFromEnum(id)].warm_generation = 0,
-            .introduced_code => {
-                const block_id = self.block_introduced_codes.pop().?;
-                const transaction_id = self.transaction_introduced_codes.pop().?;
-                std.debug.assert(block_id == transaction_id);
-                std.debug.assert(@intFromEnum(block_id) + 1 == self.code.introducedLen());
-                self.code.truncateIntroduced(self.allocator, @intFromEnum(block_id));
-            },
-            .transient_storage => |undo_id| {
-                const index = @intFromEnum(undo_id);
-                std.debug.assert(index + 1 == self.journal.transient.items.len);
-                const undo = self.journal.transient.pop().?;
-                self.transient_storage.putAssumeCapacity(undo.key, undo.previous);
-            },
-        }
-    }
-}
-
-fn validateCheckpoint(self: *const ClaimState, value: Checkpoint) void {
-    self.assertTransaction();
-    std.debug.assert(self.scope_depth >= 1);
-    std.debug.assert(value.attempt_id == self.active_attempt_id.?);
-    std.debug.assert(value.scope_generation == self.active_scope_generation);
-    std.debug.assert(value.journal_len <= self.journal.entries.items.len);
-    std.debug.assert(value.changed_accounts_len <= self.changed_accounts.items.len);
-    std.debug.assert(value.changed_storage_len <= self.changed_storage.items.len);
-    std.debug.assert(value.logs.rows_len <= self.logs.rows.items.len);
-    std.debug.assert(value.logs.topics_len <= self.logs.topics.items.len);
-    std.debug.assert(value.logs.data_len <= self.logs.data.items.len);
-}
-
-fn allocateScopeGeneration(self: *ClaimState) u32 {
-    self.next_scope_generation = nextGeneration(self.next_scope_generation);
-    return self.next_scope_generation;
-}
-
-fn finishTransaction(self: *ClaimState) void {
-    self.transaction_scope_reverted = false;
-    self.transient_storage.clearRetainingCapacity();
-    self.changed_accounts.clearRetainingCapacity();
-    self.changed_storage.clearRetainingCapacity();
-    self.transaction_storage_wipes.clearRetainingCapacity();
-    for (self.lifecycle_accounts.items) |id|
-        self.accounts[@intFromEnum(id)].lifecycle_listed = false;
-    self.lifecycle_accounts.clearRetainingCapacity();
-    self.transaction_introduced_codes.clearRetainingCapacity();
-    self.observed_accounts.clearRetainingCapacity();
-    self.observed_storage.clearRetainingCapacity();
-    self.logs.clearRetainingCapacity();
-    self.journal.clearRetainingCapacity();
-    self.transaction_active = false;
-    self.active_attempt_id = null;
-    self.observed_attempt = false;
-    self.sealed = false;
-    self.active_scope_generation = 0;
-    self.execution_scope_generation = 0;
-    self.scope_depth = 0;
-}
-
-fn assertTransaction(self: *const ClaimState) void {
-    self.assertAttempt();
-    std.debug.assert(self.scope_depth != 0);
-}
-
-fn assertAttempt(self: *const ClaimState) void {
-    std.debug.assert(self.transaction_active);
-    std.debug.assert(self.active_attempt_id != null);
-}
-
-fn assertRootScope(self: *const ClaimState) void {
-    self.assertTransaction();
-    std.debug.assert(self.scope_depth == 1);
-}
-
-fn assertCurrent(self: *const ClaimState, id: AttemptId) void {
-    self.assertAttempt();
-    std.debug.assert(self.active_attempt_id.? == id);
-}
-
-fn nextGeneration(current: u32) u32 {
-    std.debug.assert(current != std.math.maxInt(u32));
-    return current + 1;
-}
-
-fn accountExecutionValue(fact: records.AccountFact) AccountValue {
-    return switch (fact.parent) {
-        .absent => .absent,
-        .present => |parent| blk: {
-            // Dropping `storage_root` is the point: liveness here is EIP-161,
-            // which ignores storage.
-            const account: Account = .{
-                .nonce = parent.nonce,
-                .balance = parent.balance,
-                .code_hash = parent.code_hash,
-            };
-            break :blk if (account.isEip161Empty()) .absent else .{ .present = account };
-        },
-    };
-}
-
-fn accountCodeHash(value: AccountValue) [32]u8 {
-    return switch (value) {
-        .absent => crypto.keccak256_empty,
-        .present => |account| account.code_hash,
-    };
-}
-
-fn accountValue(value: AccountValue) ?Account {
-    return switch (value) {
-        .absent => null,
-        .present => |account_value| account_value,
-    };
-}
-
-fn recordAccountEffect(
-    observation: *AccountObservationRow,
-    previous: AccountValue,
-    current: AccountValue,
-) void {
-    observation.effect_current = current;
-    switch (current) {
-        .absent => observation.effect.account_deleted = previous == .present,
-        .present => |value| switch (previous) {
-            .absent => {
-                observation.effect.balance_written = value.balance != 0;
-                observation.effect.nonce_written = value.nonce != 0;
-                observation.effect.code_written = !std.mem.eql(
-                    u8,
-                    &value.code_hash,
-                    &crypto.keccak256_empty,
-                );
-            },
-            .present => |old| {
-                observation.effect.balance_written = observation.effect.balance_written or
-                    old.balance != value.balance;
-                observation.effect.nonce_written = observation.effect.nonce_written or
-                    old.nonce != value.nonce;
-                observation.effect.code_written = observation.effect.code_written or
-                    !std.mem.eql(u8, &old.code_hash, &value.code_hash);
-            },
-        },
-    }
-}
+const bal = @import("model.zig");
+const addr = @import("../../address.zig").addr;
 
 fn beginTestTransaction(state: *ClaimState) AttemptId {
     const attempt = state.beginObservedTransaction();
@@ -2359,44 +2373,42 @@ fn discardTestTransaction(state: *ClaimState, attempt: AttemptId) void {
 fn initTestState(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    account_facts: []const records.AccountFact,
-    storage_facts: []const records.StorageFact,
+    account_facts: []const ParentFacts.AccountFact,
+    storage_facts: []const ParentFacts.StorageFact,
 ) !ClaimState {
     var owned_plan = plan;
     var owns_plan = true;
     errdefer if (owns_plan) owned_plan.deinit(allocator);
-    const facts = try records.initCopy(allocator, account_facts, storage_facts);
+    const facts = try ParentFacts.initCopy(allocator, account_facts, storage_facts);
     owns_plan = false;
     return init(allocator, owned_plan, facts);
 }
 
-const bal = @import("model.zig");
-
 test "claim state resolves required accesses and skips optional warm-only misses" {
     const claims = [_]bal.AccountChanges{
-        .{ .address = address.addr(1), .storage_reads = &.{7} },
-        .{ .address = address.addr(2) },
+        .{ .address = addr(1), .storage_reads = &.{7} },
+        .{ .address = addr(2) },
     };
     try bal.validate(&claims, .{ .transaction_count = 0 });
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
         .{ .parent = .{ .absent = .empty_trie } },
     };
-    const storage_facts = [_]records.StorageFact{
+    const storage_facts = [_]ParentFacts.StorageFact{
         .{ .value = 0 },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
     defer state.deinit();
 
-    try std.testing.expect((try state.resolveAccount(.fromAddress(address.addr(1)), .required_observed)) != null);
+    try std.testing.expect((try state.resolveAccount(.fromAddress(addr(1)), .required_observed)) != null);
     try std.testing.expectError(
         error.UndeclaredAccount,
-        state.resolveAccount(.fromAddress(address.addr(3)), .required_observed),
+        state.resolveAccount(.fromAddress(addr(3)), .required_observed),
     );
     try std.testing.expectEqual(
         @as(?AccountId, null),
-        try state.resolveAccount(.fromAddress(address.addr(3)), .optional_warm_only),
+        try state.resolveAccount(.fromAddress(addr(3)), .optional_warm_only),
     );
     const first: AccountId = @enumFromInt(0);
     try std.testing.expectError(
@@ -2414,21 +2426,21 @@ test "claim state resolves required accesses and skips optional warm-only misses
     const attempt = beginTestTransaction(&state);
     try std.testing.expectEqual(
         @as(?bool, null),
-        try state.warmAccountAddress(.fromAddress(address.addr(3)), .optional_warm_only),
+        try state.warmAccountAddress(.fromAddress(addr(3)), .optional_warm_only),
     );
     try std.testing.expectError(
         error.UndeclaredAccount,
-        state.warmAccountAddress(.fromAddress(address.addr(3)), .required_observed),
+        state.warmAccountAddress(.fromAddress(addr(3)), .required_observed),
     );
 
     discardTestTransaction(&state, attempt);
 }
 
 test "storage-only parent residue remains authenticated while execution is absent" {
-    const claims = [_]bal.AccountChanges{.{ .address = address.addr(1) }};
+    const claims = [_]bal.AccountChanges{.{ .address = addr(1) }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const storage_root = [_]u8{0x77} ** 32;
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .storage_root = storage_root } } },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &.{});
@@ -2444,20 +2456,20 @@ test "storage-only parent residue remains authenticated while execution is absen
 }
 
 test "observations survive nested revert while values warmth and dirty IDs revert" {
-    const target = address.addr(1);
+    const target = addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
     };
-    const storage_facts = [_]records.StorageFact{
+    const storage_facts = [_]ParentFacts.StorageFact{
         .{ .value = 3 },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
     defer state.deinit();
     const attempt = beginTestTransaction(&state);
 
-    const checkpoint_value = state.checkpoint();
+    const checkpoint_state = state.checkpoint();
     try std.testing.expectEqual(@as(u256, 3), try state.getStorage(.fromAddress(target), 7));
     const account_id: AccountId = @enumFromInt(0);
     const storage_id: StorageId = @enumFromInt(0);
@@ -2468,7 +2480,7 @@ test "observations survive nested revert while values warmth and dirty IDs rever
     try std.testing.expectEqual(@as(usize, 1), state.observed_storage.items.len);
     try std.testing.expect(state.observed_storage.items[0].effect.written);
     try std.testing.expectEqual(@as(u256, 9), state.observed_storage.items[0].effect_current);
-    state.revertToCheckpoint(checkpoint_value);
+    state.revertToCheckpoint(checkpoint_state);
 
     try std.testing.expectEqual(@as(u256, 3), state.storage[0].current);
     try std.testing.expectEqual(@as(u256, 3), state.storage[0].transaction_original);
@@ -2491,11 +2503,11 @@ test "observations survive nested revert while values warmth and dirty IDs rever
 
 test "claim state lifecycle candidates are compact and survive marker rollback" {
     const claims = [_]bal.AccountChanges{
-        .{ .address = address.addr(1) },
-        .{ .address = address.addr(2) },
+        .{ .address = addr(1) },
+        .{ .address = addr(2) },
     };
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .balance = 10 } } },
         .{ .parent = .{ .present = .{ .balance = 20 } } },
     };
@@ -2536,13 +2548,13 @@ test "claim state lifecycle candidates are compact and survive marker rollback" 
 }
 
 test "execution original survives checkpoints and refreshes across execution scopes" {
-    const target = address.addr(1);
+    const target = addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
     };
-    const storage_facts = [_]records.StorageFact{
+    const storage_facts = [_]ParentFacts.StorageFact{
         .{ .value = 3 },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
@@ -2566,9 +2578,9 @@ test "execution original survives checkpoints and refreshes across execution sco
 }
 
 test "scope stamps journal one row once and restore the parent stamp" {
-    const claims = [_]bal.AccountChanges{.{ .address = address.addr(1) }};
+    const claims = [_]bal.AccountChanges{.{ .address = addr(1) }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &.{});
@@ -2591,13 +2603,13 @@ test "scope stamps journal one row once and restore the parent stamp" {
 }
 
 test "storage wipe uses account generation without inventing slot observations" {
-    const target = address.addr(1);
+    const target = addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
     };
-    const storage_facts = [_]records.StorageFact{
+    const storage_facts = [_]ParentFacts.StorageFact{
         .{ .value = 3 },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
@@ -2631,14 +2643,14 @@ test "storage wipe uses account generation without inventing slot observations" 
 
 test "retained storage wipe compacts invalidated accepted slot IDs" {
     const claims = [_]bal.AccountChanges{.{
-        .address = address.addr(1),
+        .address = addr(1),
         .storage_reads = &.{ 7, 8 },
     }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
     };
-    const storage_facts = [_]records.StorageFact{
+    const storage_facts = [_]ParentFacts.StorageFact{
         .{ .value = 3 },
         .{ .value = 4 },
     };
@@ -2671,14 +2683,14 @@ test "retained storage wipe compacts invalidated accepted slot IDs" {
 
 test "scope revert then redirty retains one accepted storage ID" {
     const claims = [_]bal.AccountChanges{.{
-        .address = address.addr(1),
+        .address = addr(1),
         .storage_reads = &.{7},
     }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
     };
-    const storage_facts = [_]records.StorageFact{.{ .value = 3 }};
+    const storage_facts = [_]ParentFacts.StorageFact{.{ .value = 3 }};
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &storage_facts);
     defer state.deinit();
     const storage_id: StorageId = @enumFromInt(0);
@@ -2701,9 +2713,9 @@ test "scope revert then redirty retains one accepted storage ID" {
 }
 
 test "warm undo exists only for the cold to warm transition" {
-    const claims = [_]bal.AccountChanges{.{ .address = address.addr(1) }};
+    const claims = [_]bal.AccountChanges{.{ .address = addr(1) }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .present = .{ .nonce = 1 } } },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &.{});
@@ -2723,10 +2735,10 @@ test "warm undo exists only for the cold to warm transition" {
 }
 
 test "claim state transient root clear does not resurrect values through nested rollback" {
-    const target = address.addr(1);
+    const target = addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_facts = [_]ParentFacts.AccountFact{
         .{ .parent = .{ .absent = .empty_trie } },
     };
     var state = try initTestState(std.testing.allocator, plan, &account_facts, &.{});
@@ -2755,14 +2767,14 @@ test "claim state initialization cleans every allocation failure" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
             const claims = [_]bal.AccountChanges{.{
-                .address = address.addr(1),
+                .address = addr(1),
                 .storage_reads = &.{7},
             }};
             const plan = try claim_plan.ClaimPlan.initAssumeValidated(allocator, &claims);
-            const account_facts = [_]records.AccountFact{
+            const account_facts = [_]ParentFacts.AccountFact{
                 .{ .parent = .{ .absent = .empty_trie } },
             };
-            const storage_facts = [_]records.StorageFact{
+            const storage_facts = [_]ParentFacts.StorageFact{
                 .{ .value = 0 },
             };
             var state = try initTestState(allocator, plan, &account_facts, &storage_facts);
@@ -2773,16 +2785,16 @@ test "claim state initialization cleans every allocation failure" {
 }
 
 test "storage mutation reserves both journal entries atomically" {
-    const target = address.addr(1);
+    const target = addr(1);
     const claims = [_]bal.AccountChanges{.{
         .address = target,
         .storage_reads = &.{7},
     }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{.{
+    const account_facts = [_]ParentFacts.AccountFact{.{
         .parent = .{ .present = .{ .nonce = 1 } },
     }};
-    const storage_facts = [_]records.StorageFact{.{ .value = 3 }};
+    const storage_facts = [_]ParentFacts.StorageFact{.{ .value = 3 }};
     var state = try initTestState(
         std.testing.allocator,
         plan,
@@ -2801,16 +2813,16 @@ test "storage mutation reserves both journal entries atomically" {
 test "claim state transaction cleans every allocation failure" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
-            const target = address.addr(1);
+            const target = addr(1);
             const claims = [_]bal.AccountChanges{.{
                 .address = target,
                 .storage_reads = &.{7},
             }};
             const plan = try claim_plan.ClaimPlan.initAssumeValidated(allocator, &claims);
-            const account_facts = [_]records.AccountFact{
+            const account_facts = [_]ParentFacts.AccountFact{
                 .{ .parent = .{ .present = .{ .nonce = 1 } } },
             };
-            const storage_facts = [_]records.StorageFact{
+            const storage_facts = [_]ParentFacts.StorageFact{
                 .{ .value = 3 },
             };
             var state = try initTestState(allocator, plan, &account_facts, &storage_facts);
