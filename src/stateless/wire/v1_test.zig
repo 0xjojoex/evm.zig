@@ -335,6 +335,88 @@ test "stateless wire v1 returns failure result for malformed guest input" {
     }
 }
 
+test "stateless wire v1 rejects noncanonical SSZ before allocation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var input = try smoke.smokeInput(scratch);
+    input.witness.state = &.{"node"};
+    const canonical = try input.encodeSchemaPrefixed(scratch);
+    _ = try wire.StatelessInput.decodeSchemaPrefixed(scratch, canonical);
+
+    // Exercise the guest's borrowed decoder and the public owning decoder.
+    const Mutation = enum { top_level_gap, nested_gap, zero_state_offset, zero_header_offset };
+    for (std.enums.values(Mutation)) |mutation| {
+        const bytes = try scratch.alloc(u8, canonical.len + @as(usize, switch (mutation) {
+            .top_level_gap, .nested_gap => 1,
+            else => 0,
+        }));
+        @memcpy(bytes[0..canonical.len], canonical);
+        switch (mutation) {
+            .top_level_gap => {
+                // Schema prefix, then request offset, witness offset, chain ID,
+                // and public-key offset: the exact upstream #3531 mutation.
+                for ([_]usize{ 2, 6, 18 }) |offset| {
+                    const field = bytes[offset..][0..4];
+                    std.mem.writeInt(u32, field, std.mem.readInt(u32, field, .little) + 1, .little);
+                }
+                bytes[canonical.len] = 0xff;
+            },
+            .nested_gap => {
+                const witness = wire.schema_id_size + std.mem.readInt(u32, bytes[6..10], .little);
+                const witness_end = wire.schema_id_size + std.mem.readInt(u32, bytes[18..22], .little);
+                @memmove(bytes[witness_end + 1 ..], canonical[witness_end..]);
+                bytes[witness_end] = 0xff;
+                for ([_]usize{ 0, 4, 8 }) |offset| {
+                    const field = bytes[witness + offset ..][0..4];
+                    std.mem.writeInt(u32, field, std.mem.readInt(u32, field, .little) + 1, .little);
+                }
+                std.mem.writeInt(u32, bytes[18..22], @intCast(witness_end + 1 - wire.schema_id_size), .little);
+            },
+            .zero_state_offset, .zero_header_offset => {
+                const witness = wire.schema_id_size + std.mem.readInt(u32, bytes[6..10], .little);
+                // State is a progressive list; headers are a bounded list.
+                const offset: usize = if (mutation == .zero_state_offset) 0 else 8;
+                const list = witness + std.mem.readInt(u32, bytes[witness + offset ..][0..4], .little);
+                std.mem.writeInt(u32, bytes[list..][0..4], 0, .little);
+            },
+        }
+        try std.testing.expectError(error.InvalidFirstOffset, wire.StatelessInput.decodeSchemaPrefixed(std.testing.failing_allocator, bytes));
+        const output = try wire.validateStatelessBytes(scratch, bytes);
+        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 43), output);
+    }
+}
+
+test "stateless wire v1 request root failure returns the complete sentinel" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var input = try smoke.smokeInput(scratch);
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.extra_data = &([_]u8{0} ** 33);
+
+    // A typed input can exceed the SSZ bound and fail the actual root computation.
+    try std.testing.expectError(error.InvalidListLength, input.new_payload_request.hashTreeRoot(scratch));
+    const result = try wire.validateStateless(scratch, input);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 43), try result.encode(scratch));
+}
+
+test "stateless wire v1 validation failure preserves the input commitment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var input = try smoke.smokeInput(scratch);
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.block_hash[0] ^= 1;
+    const bytes = try input.encodeSchemaPrefixed(scratch);
+    const output = try wire.validateStatelessBytes(scratch, bytes);
+    const result = try wire.StatelessValidationResult.decode(scratch, output);
+    try std.testing.expectEqualDeep(wire.StatelessValidationResult{
+        .new_payload_request_root = try input.new_payload_request.hashTreeRoot(scratch),
+        .successful_validation = false,
+        .chain_id = input.chain_id,
+        .schema_id = wire.schema_id,
+    }, result);
+}
+
 test "stateless wire v1 protocol fork values match tests-zkevm v0.8.0" {
     try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(0x0e));
     try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(0x15));
