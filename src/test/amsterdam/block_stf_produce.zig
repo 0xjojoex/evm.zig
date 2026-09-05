@@ -31,7 +31,7 @@ const StateCaptureCounter = struct {
     fn observe(
         ptr: *anyopaque,
         _: bal.BlockAccessIndex,
-        observations: state.TrackedState.ObservationsView,
+        observations: state.OpenState.ObservationsView,
     ) !void {
         const self: *StateCaptureCounter = @ptrCast(@alignCast(ptr));
         self.checkpoints += 1;

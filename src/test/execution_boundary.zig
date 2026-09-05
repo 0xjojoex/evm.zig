@@ -55,9 +55,9 @@ test "execution checkpoints stay inside one stable transaction scope" {
     try executor.warmAccount(other);
     try executor.warmStorage(other, 1);
     try std.testing.expectEqual(sender, executor.execution_context.?.transaction.origin);
-    try std.testing.expect(executor.state.isAccountWarm(sender));
-    try std.testing.expect(executor.state.isAccountWarm(contract));
-    try std.testing.expect(executor.state.isAccountWarm(other));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(sender)));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(contract)));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(other)));
 
     var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
@@ -66,8 +66,8 @@ test "execution checkpoints stay inside one stable transaction scope" {
     checkpoint.restore();
 
     try std.testing.expectEqual(sender, executor.execution_context.?.transaction.origin);
-    try std.testing.expect(executor.state.isAccountWarm(other));
-    try std.testing.expect(!executor.state.isAccountWarm(reverted));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(other)));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(reverted)));
     try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(reverted));
 }
 
@@ -119,12 +119,12 @@ test "beginMessageScope derives root identity context and raw warmth" {
     } });
 
     try std.testing.expectEqualDeep(execution_context, executor.execution_context.?);
-    try std.testing.expect(executor.state.isAccountWarm(sender));
-    try std.testing.expect(executor.state.isAccountWarm(recipient));
-    try std.testing.expect(!executor.state.isAccountWarm(coinbase));
-    try std.testing.expect(executor.state.isAccountWarm(additional));
-    try std.testing.expect(executor.state.isStorageWarm(additional, 47));
-    try std.testing.expect(!executor.state.isAccountWarm(cold));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(sender)));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(recipient)));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(coinbase)));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(additional)));
+    try std.testing.expect(executor.state.isStorageWarm(.fromAddress(additional), 47));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(cold)));
 
     executor.discardStateTransition();
     try executor.beginMessageScope(.{
@@ -137,9 +137,9 @@ test "beginMessageScope derives root identity context and raw warmth" {
         .gas = .legacy(100_000),
     }, .{});
 
-    try std.testing.expect(executor.state.isAccountWarm(sender));
-    try std.testing.expect(!executor.state.isAccountWarm(coinbase));
-    try std.testing.expect(!executor.state.isAccountWarm(recipient));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(sender)));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(coinbase)));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(recipient)));
 }
 
 test "execution checkpoint preserves family pre-scope writes" {
@@ -153,12 +153,12 @@ test "execution checkpoint preserves family pre-scope writes" {
     defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
 
     // OP-style family lifecycle effect: it becomes the payload scope's state baseline.
-    try executor.state.setBalance(sender, 7);
+    try executor.state.setBalance(.fromAddress(sender), 7);
     try transaction_runtime.beginExecution(&executor, request(sender, contract), .{});
 
     var execution_checkpoint = executor.checkpoint();
     defer execution_checkpoint.deinit();
-    try executor.state.setBalance(sender, 9);
+    try executor.state.setBalance(.fromAddress(sender), 9);
     execution_checkpoint.restore();
 
     try std.testing.expectEqual(@as(u256, 7), executor.getAccount(sender).?.balance);
@@ -206,7 +206,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
 
     var committed = executor.checkpoint();
     defer committed.deinit();
-    _ = try executor.state.setStorage(contract, 7, 1);
+    _ = try executor.state.setStorage(.fromAddress(contract), 7, 1);
     committed.commit();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
@@ -214,8 +214,8 @@ test "checkpoint commit retains state and restore rolls back without closing sco
 
     var reverted = executor.checkpoint();
     defer reverted.deinit();
-    _ = try executor.state.setStorage(contract, 7, 2);
-    try executor.state.warmAccount(additional);
+    _ = try executor.state.setStorage(.fromAddress(contract), 7, 2);
+    try executor.state.warmAccount(.fromAddress(additional));
     try executor.state.emitLog(.{
         .address = contract,
         .topics = &.{3},
@@ -224,7 +224,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     reverted.restore();
 
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
-    try std.testing.expect(!executor.state.isAccountWarm(additional));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(additional)));
     try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     try std.testing.expect(executor.execution_context != null);
     try observed.retainStateTransition();
@@ -243,11 +243,11 @@ test "checkpoint nests LIFO and deinit restores an open token" {
     {
         var outer = executor.checkpoint();
         defer outer.deinit();
-        _ = try executor.state.setStorage(contract, 7, 1);
+        _ = try executor.state.setStorage(.fromAddress(contract), 7, 1);
 
         var inner = executor.checkpoint();
         defer inner.deinit();
-        _ = try executor.state.setStorage(contract, 7, 2);
+        _ = try executor.state.setStorage(.fromAddress(contract), 7, 2);
 
         inner.restore();
         try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(contract, 7));
@@ -267,14 +267,14 @@ test "successive checkpoints receive distinct scope generations" {
 
     var first = executor.checkpoint();
     const first_generation = first.checkpoint.scope_generation;
-    _ = try executor.state.setStorage(contract, 7, 1);
+    _ = try executor.state.setStorage(.fromAddress(contract), 7, 1);
     first.commit();
     first.deinit();
 
     var current = executor.checkpoint();
     defer current.deinit();
     try std.testing.expect(first_generation != current.checkpoint.scope_generation);
-    _ = try executor.state.setStorage(contract, 7, 2);
+    _ = try executor.state.setStorage(.fromAddress(contract), 7, 2);
 
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
     current.restore();
@@ -316,7 +316,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
 
     var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
-    _ = try executor.state.setStorage(contract, 8, 1);
+    _ = try executor.state.setStorage(.fromAddress(contract), 8, 1);
     checkpoint.restore();
     try observed.retainStateTransition();
     try std.testing.expect(observations.found);

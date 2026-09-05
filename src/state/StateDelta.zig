@@ -27,7 +27,9 @@ storage_writes: []StorageChange = &.{},
 storage_wipes: []Address = &.{},
 codes: []Code = &.{},
 
+/// Detach a borrowed changes view (`state.checkChangesView`) into owned slices.
 pub fn init(allocator: Allocator, changes: anytype) Allocator.Error!StateDelta {
+    comptime state.checkChangesView(@TypeOf(changes));
     const accounts = try allocator.alloc(AccountChange, changes.accounts.len());
     errdefer allocator.free(accounts);
     const storage_writes = try allocator.alloc(StorageChange, changes.storage_writes.len());

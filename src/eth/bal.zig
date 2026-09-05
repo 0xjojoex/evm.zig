@@ -4,10 +4,12 @@
 //! - model (`model.zig`): list shape, validation, encoding, item costs.
 //! - `ClaimPlan`: one validated list projected to dense account/storage IDs in
 //!   trie order; `ClaimView` and `diff` read and compare lists.
-//! - `ClaimState`: the second implementation of the executor's state lane surface
-//!   (the first is `evmz.state.TrackedState`), keyed by `ClaimPlan` IDs over the
-//!   closed universe the list declares. `ParentFacts`, `claim_artifacts`, and
-//!   `claim_commit` are its ID-native inputs, code store, and commit path.
+//! - `ClosedWorld`: the world for the closed lane, keyed by `ClaimPlan` IDs over
+//!   the universe the list declares; `ClosedState` is `state.WorldState` over
+//!   it and the executor's state lane for BAL forks (the open lane is
+//!   `evmz.state.OpenState`). `ParentFacts` and `claim_artifacts` are its
+//!   ID-native inputs and code store; it commits through `eth.commit` like the
+//!   open lane.
 //!
 //! Driving a block over either lane belongs to `eth.block_stf`; only the
 //! BAL-parallel vocabulary and the BAL executor constructor are aliased here.
@@ -28,10 +30,10 @@ pub const projector = @import("bal/projector.zig");
 
 pub const ClaimView = @import("bal/ClaimView.zig");
 pub const diff = @import("bal/diff.zig");
-pub const ClaimState = @import("bal/ClaimState.zig");
+pub const ClosedWorld = @import("bal/ClosedWorld.zig");
+pub const ClosedState = ClosedWorld.State;
 pub const ParentFacts = @import("bal/ParentFacts.zig");
 pub const claim_artifacts = @import("bal/claim_artifacts.zig");
-pub const claim_commit = @import("bal/claim_commit.zig");
 
 pub const Address = model.Address;
 pub const BlockAccessIndex = model.BlockAccessIndex;
@@ -109,6 +111,6 @@ test {
     std.testing.refAllDecls(claim_plan);
     std.testing.refAllDecls(projector);
     std.testing.refAllDecls(ParentFacts);
-    std.testing.refAllDecls(ClaimState);
-    _ = @import("bal/ClaimState_test.zig");
+    std.testing.refAllDecls(ClosedWorld);
+    _ = @import("bal/ClosedWorld_test.zig");
 }

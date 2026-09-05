@@ -10,7 +10,8 @@
 const std = @import("std");
 
 const trie = @import("trie.zig");
-const TrackedState = @import("../state/TrackedState.zig");
+const commit = @import("commit.zig");
+const OpenState = @import("../state.zig").OpenState;
 const StateDelta = @import("../state/StateDelta.zig");
 const MemoryAccount = @import("../state/MemoryAccount.zig");
 const address = @import("../address.zig");
@@ -36,8 +37,6 @@ const indexWitness = trie.indexWitness;
 const proof = trie.proof;
 const buildWitnessCatalog = trie.buildWitnessCatalog;
 const updateRoot = trie.updateRoot;
-const stateRootAfterChanges = trie.stateRootAfterChanges;
-const stateRootAfterChangesFromNodes = trie.stateRootAfterChangesFromNodes;
 
 const max_rlp_account: Account = .{
     .nonce = std.math.maxInt(u64),
@@ -793,13 +792,17 @@ test "MPT state root is the same through a detached delta" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    var state = TrackedState.init(scratch);
+    var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     const attempt = state.beginTransaction();
     state.beginScope();
-    try state.setBalance(address.addr(0x1000), 20);
-    _ = try state.setStorage(address.addr(0x1000), 1, 7);
-    try state.setBalance(address.addr(0x2000), 5);
+    try state.setBalance(.fromAddress(address.addr(0x1000)), 20);
+    _ = try state.setStorage(.fromAddress(address.addr(0x1000)), 1, 7);
+    try state.setBalance(.fromAddress(address.addr(0x2000)), 5);
     state.closeScope();
     state.seal(attempt);
     state.retain(attempt);
@@ -808,8 +811,8 @@ test "MPT state root is the same through a detached delta" {
     var delta = try StateDelta.init(scratch, live);
     defer delta.deinit();
 
-    const from_live = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, live);
-    const from_delta = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, delta.view());
+    const from_live = try rootAfterChanges(scratch, empty_root_hash, &.{}, live);
+    const from_delta = try rootAfterChanges(scratch, empty_root_hash, &.{}, delta.view());
     try std.testing.expectEqualSlices(u8, &from_live, &from_delta);
 }
 
@@ -819,18 +822,22 @@ test "MPT state root consumes tracked changes" {
     const scratch = arena.allocator();
 
     const target = address.addr(0x1000);
-    var state = TrackedState.init(scratch);
+    var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     const attempt = state.beginTransaction();
     state.beginScope();
-    try state.setBalance(target, 20);
-    _ = try state.setStorage(target, 1, 7);
+    try state.setBalance(.fromAddress(target), 20);
+    _ = try state.setStorage(.fromAddress(target), 1, 7);
     state.closeScope();
     state.seal(attempt);
     state.retain(attempt);
     const changes = state.acceptedView().changes();
 
-    const direct = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, changes);
+    const direct = try rootAfterChanges(scratch, empty_root_hash, &.{}, changes);
     const storage_key = hashedStorageKey(1);
     const storage_value = try storageValue(scratch, 7);
     const storage_root = try root(scratch, &.{.{ .key = &storage_key, .value = storage_value }});
@@ -844,8 +851,8 @@ test "MPT state root consumes tracked changes" {
 
     const wiped = state.beginTransaction();
     state.beginScope();
-    try state.setBalance(target, 0);
-    try state.markSelfdestructed(target);
+    try state.setBalance(.fromAddress(target), 0);
+    try state.markSelfdestructed(.fromAddress(target));
     try state.finalize(.{ .existing_account = .{
         .reset_account = true,
         .clear_storage = true,
@@ -857,7 +864,7 @@ test "MPT state root consumes tracked changes" {
     try std.testing.expectEqual(@as(u32, 1), wiped_changes.storage_wipes.len());
     try std.testing.expectEqual(@as(u32, 0), wiped_changes.storage_writes.len());
 
-    const wiped_direct = try stateRootAfterChangesFromNodes(
+    const wiped_direct = try rootAfterChanges(
         scratch,
         empty_root_hash,
         &.{},
@@ -873,15 +880,19 @@ test "MPT state root groups interleaved tracked storage writes by address" {
 
     const first = address.addr(1);
     const second = address.addr(2);
-    var state = TrackedState.init(scratch);
+    var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     const attempt = state.beginTransaction();
     state.beginScope();
-    try state.setBalance(first, 10);
-    _ = try state.setStorage(first, 1, 11);
-    try state.setBalance(second, 20);
-    _ = try state.setStorage(second, 2, 22);
-    _ = try state.setStorage(first, 3, 33);
+    try state.setBalance(.fromAddress(first), 10);
+    _ = try state.setStorage(.fromAddress(first), 1, 11);
+    try state.setBalance(.fromAddress(second), 20);
+    _ = try state.setStorage(.fromAddress(second), 2, 22);
+    _ = try state.setStorage(.fromAddress(first), 3, 33);
     state.closeScope();
     state.seal(attempt);
     state.retain(attempt);
@@ -890,7 +901,7 @@ test "MPT state root groups interleaved tracked storage writes by address" {
     try std.testing.expectEqual(second, changes.storage_writes.at(1).address);
     try std.testing.expectEqual(first, changes.storage_writes.at(2).address);
 
-    const actual = try stateRootAfterChangesFromNodes(scratch, empty_root_hash, &.{}, changes);
+    const actual = try rootAfterChanges(scratch, empty_root_hash, &.{}, changes);
 
     const first_storage_keys = [_][32]u8{ hashedStorageKey(1), hashedStorageKey(3) };
     const first_storage_values = [_][]const u8{
@@ -920,7 +931,7 @@ test "MPT state root groups interleaved tracked storage writes by address" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
-test "MPT state roots agree with cached and witness-loaded accounts" {
+test "MPT state root loads the parent account from the catalog" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -935,43 +946,57 @@ test "MPT state roots agree with cached and witness-loaded accounts" {
     );
     const root_hash = crypto.keccak256(root_node);
     const nodes = [_][]const u8{root_node};
-    var indexed = try indexWitness(scratch, &nodes);
-    defer indexed.deinit();
 
-    var state = TrackedState.init(scratch);
+    var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     var seeded = MemoryAccount.init(scratch);
     seeded.account.nonce = previous.nonce;
     seeded.account.balance = previous.balance;
     try state.seedAccount(target, seeded);
     const attempt = state.beginTransaction();
     state.beginScope();
-    _ = try state.setStorage(target, 1, 7);
+    _ = try state.setStorage(.fromAddress(target), 1, 7);
     state.closeScope();
     state.seal(attempt);
     state.retain(attempt);
     const changes = state.acceptedView().changes();
+    try std.testing.expectEqual(@as(u32, 0), changes.accounts.len());
 
-    var facts = AccountFacts.init(scratch);
-    defer facts.deinit();
-    try facts.put(target, previous);
-    const cached = try stateRootAfterChanges(
-        scratch,
-        trie.witnessSource(indexed, root_hash, &facts),
-        changes,
-    );
-    const fallback = try stateRootAfterChanges(
-        scratch,
-        trie.witnessSource(indexed, root_hash, null),
-        changes,
-    );
+    const actual = try rootAfterChanges(scratch, root_hash, &nodes, changes);
+
+    const storage_key = hashedStorageKey(1);
+    const storage_root = try root(scratch, &.{.{
+        .key = &storage_key,
+        .value = try storageValue(scratch, 7),
+    }});
+    const expected = try root(scratch, &.{.{
+        .key = &account_key,
+        .value = try accountValueFrom(scratch, .{
+            .nonce = previous.nonce,
+            .balance = previous.balance,
+            .storage_root = storage_root,
+        }),
+    }});
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+/// Root of `changes` applied over `nodes` through the one committer, the way a
+/// witness backend does it for the open lane.
+fn rootAfterChanges(
+    scratch: Allocator,
+    root_hash: [32]u8,
+    nodes: []const []const u8,
+    changes: anytype,
+) ![32]u8 {
+    const indexed = try indexWitness(scratch, nodes);
+    defer indexed.deinit();
     var catalog = try buildWitnessCatalog(scratch, root_hash, indexed);
     defer catalog.deinit();
-    const catalog_root = try stateRootAfterChanges(
-        scratch,
-        try trie.catalogSource(&catalog, root_hash, &facts),
-        changes,
-    );
-    try std.testing.expectEqualSlices(u8, &fallback, &cached);
-    try std.testing.expectEqualSlices(u8, &fallback, &catalog_root);
+    var sorted = try commit.SortedChanges.init(scratch, changes);
+    defer sorted.deinit();
+    return commit.stateRootAfterCommit(scratch, root_hash, &catalog, sorted);
 }

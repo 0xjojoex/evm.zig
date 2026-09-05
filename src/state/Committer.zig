@@ -1,10 +1,10 @@
 //! Write-side state commit contract.
 //!
-//! A committer synchronously consumes a borrowed semantic change view. The
-//! integration owns persistence layout, allocation, ordering, and retention.
+//! A committer synchronously consumes a detached block-final delta. The
+//! integration owns persistence layout, allocation, ordering, and retention;
+//! the delta is borrowed for the duration of the call.
 
-const TrackedState = @import("./TrackedState.zig");
-const ChangesView = TrackedState.ChangesView;
+const StateDelta = @import("./StateDelta.zig");
 
 const Committer = @This();
 
@@ -12,9 +12,9 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    commit: *const fn (ptr: *anyopaque, changes: ChangesView) anyerror!void,
+    commit: *const fn (ptr: *anyopaque, delta: StateDelta.View) anyerror!void,
 };
 
-pub fn commit(self: Committer, changes: ChangesView) !void {
-    return self.vtable.commit(self.ptr, changes);
+pub fn commit(self: Committer, delta: StateDelta.View) !void {
+    return self.vtable.commit(self.ptr, delta);
 }

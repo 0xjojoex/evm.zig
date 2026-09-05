@@ -1,4 +1,6 @@
-//! Non-MPT artifacts owned by the claim-indexed execution lane (`ClaimState`).
+//! Non-MPT artifacts of the execution-state machine: the code store every
+//! `state.WorldState` carries, and the parent-code shape the closed world
+//! hands it at admission.
 //!
 //! Parent code bytes remain borrowed from the sealed witness and are indexed
 //! once by full hash. Code created during execution is copied into stable
@@ -113,6 +115,14 @@ pub const CodeStore = struct {
         if (self.introduced.getEntryId(hash)) |id|
             return .fromIndex(self.parent.items.len + @intFromEnum(id));
         return .missing;
+    }
+
+    /// Bind only against the witness's parent code: `.empty`, a parent index,
+    /// or null when the store would have to search introduced code.
+    pub fn bindParent(self: *const CodeStore, hash: Hash) ?CodeRef {
+        if (std.mem.eql(u8, &hash, &crypto.keccak256_empty)) return .empty;
+        if (self.parentIndex(hash)) |index| return .fromIndex(index);
+        return null;
     }
 
     /// Direct-index a previously bound commitment. A missing reference is a

@@ -15,6 +15,9 @@ const crypto = @import("../crypto.zig");
 const eth_bal = @import("bal/model.zig");
 const bal_differential = @import("bal/differential.zig");
 const differential_executor = @import("bal/differential/block_executor.zig");
+const ClosedWorld = @import("bal/ClosedWorld.zig");
+const DenseClaimVerifier = @import("bal/DenseClaimVerifier.zig");
+const WorldState = @import("../state/world_state.zig").WorldState;
 const projector = @import("bal/projector.zig");
 const block_admission = @import("block_admission.zig");
 const block_capture = @import("block_capture.zig");
@@ -34,7 +37,34 @@ const trace = @import("../trace.zig");
 const vm = @import("../vm.zig");
 const Backend = @import("../backend.zig").Backend;
 const StateDelta = @import("../state/StateDelta.zig");
-const CommitOutput = @import("state_domain.zig").CommitOutput;
+const commit = @import("commit.zig");
+
+/// Optional accepted block-final output, detached from execution: the owned
+/// semantic delta plus, on witness backends, the content-addressed dirty MPT
+/// nodes produced while deriving the accepted root. External backends own
+/// their commitment, so they never populate `mpt_nodes`.
+pub const CommitOutput = struct {
+    delta: ?StateDelta = null,
+    mpt_nodes: ?trie.NodeUpdates = null,
+
+    /// Release output with the allocator supplied to block validation.
+    pub fn deinit(self: *CommitOutput) void {
+        if (self.mpt_nodes) |*nodes| nodes.deinit();
+        if (self.delta) |*delta| delta.deinit();
+        self.* = .{};
+    }
+};
+
+/// Block production discovers its universe as it executes; a declared
+/// universe has nothing to discover.
+fn supportsBlockProduction(comptime World: type) bool {
+    return World.options.grows_on_touch;
+}
+
+/// External observation targets borrow the open world's view.
+fn supportsExternalObservationCapture(comptime World: type) bool {
+    return WorldState(World).ObservationsView == block_capture.ObservationsView;
+}
 
 pub const BlockHeader = Executor.system_contracts.BeforeBlockContext;
 pub const FinalizeBlockContext = Executor.system_contracts.FinalizeBlockContext;
@@ -386,13 +416,13 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
     const ProduceInputAlias = ProduceInput;
     const AssumeDecodedProduceInputAlias = AssumeDecodedProduceInput;
     const block_access_list_enabled = ExactVm.spec.block.block_access_list;
+    const external_capture_enabled = supportsExternalObservationCapture(ExactVm.World);
     const bal_production_enabled = block_access_list_enabled and
-        ExactVm.StateDomain.Lifecycle.supports_block_production;
-    const bal_differential_enabled = block_access_list_enabled and
-        ExactVm.StateDomain.Lifecycle.supports_external_observation_capture;
+        supportsBlockProduction(ExactVm.World);
+    const bal_differential_enabled = block_access_list_enabled and external_capture_enabled;
     const Producer = struct {
         fn produce(allocator: std.mem.Allocator, input: ProduceInputAlias) !ProduceOutcome {
-            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, ExactVm.compile_options, input.capture);
+            try requireCaptureSupport(external_capture_enabled, ExactVm.compile_options, input.capture);
             return produceExact(revision, ExactVm, allocator, input);
         }
 
@@ -400,7 +430,7 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedProduceInputAlias,
         ) !ProduceOutcome {
-            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, ExactVm.compile_options, input.capture);
+            try requireCaptureSupport(external_capture_enabled, ExactVm.compile_options, input.capture);
             return produceAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
     };
@@ -432,8 +462,8 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             struct {};
 
         pub fn apply(allocator: std.mem.Allocator, input: BlockInputAlias) !Result {
-            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, compile_options, input.capture);
-            try requireDifferentialSupport(ExactVm.StateDomain.Lifecycle, input.bal_differential);
+            try requireCaptureSupport(external_capture_enabled, compile_options, input.capture);
+            try requireDifferentialSupport(external_capture_enabled, input.bal_differential);
             return applyExact(revision, ExactVm, allocator, input);
         }
 
@@ -441,8 +471,8 @@ pub fn Bind(comptime revision: Revision, comptime ExactVm: type) type {
             allocator: std.mem.Allocator,
             input: AssumeDecodedBlockInputAlias,
         ) !Result {
-            try requireCaptureSupport(ExactVm.StateDomain.Lifecycle, compile_options, input.capture);
-            try requireDifferentialSupport(ExactVm.StateDomain.Lifecycle, input.bal_differential);
+            try requireCaptureSupport(external_capture_enabled, compile_options, input.capture);
+            try requireDifferentialSupport(external_capture_enabled, input.bal_differential);
             return applyAssumeDecodedExact(revision, ExactVm, allocator, input);
         }
     };
@@ -457,12 +487,12 @@ fn requireStepCaptureSupport(
 }
 
 fn requireCaptureSupport(
-    comptime Lifecycle: type,
+    comptime external_capture: bool,
     comptime options: vm.CompileOptions,
     capture: ?ExecutionCapture,
 ) !void {
     try requireStepCaptureSupport(options, capture);
-    if (!Lifecycle.supports_external_observation_capture and
+    if (!external_capture and
         capture != null and capture.?.observations != null)
     {
         return error.ObservationCaptureUnavailable;
@@ -470,10 +500,10 @@ fn requireCaptureSupport(
 }
 
 fn requireDifferentialSupport(
-    comptime Lifecycle: type,
+    comptime external_capture: bool,
     differential: ?*BalDifferentialReport,
 ) !void {
-    if (!Lifecycle.supports_external_observation_capture and differential != null)
+    if (!external_capture and differential != null)
         return error.BalDifferentialUnavailable;
 }
 
@@ -538,7 +568,7 @@ fn applyAssumeDecodedExact(
 ) !Result {
     resetBalReport(input);
     const result = (if (comptime Engine.spec.block.block_access_list and
-        Engine.StateDomain.Lifecycle.supports_external_observation_capture)
+        supportsExternalObservationCapture(Engine.World))
     blk: {
         if (input.bal_differential) |report| {
             var observer = differential_executor.Observer(revision, Engine).init(
@@ -637,7 +667,7 @@ fn produceAssumeDecodedExact(
 ) !ProduceOutcome {
     comptime {
         std.debug.assert(Engine.spec.block.block_access_list);
-        std.debug.assert(Engine.StateDomain.Lifecycle.supports_block_production);
+        std.debug.assert(supportsBlockProduction(Engine.World));
     }
 
     const observer = {};
@@ -688,7 +718,7 @@ fn foldedResult(status: Status, tx_index: usize, progress: vm.BlockResult, reque
 
 /// Adapter required by BlockExecution's observation capability. Consensus BAL
 /// folding and optional external diagnostics remain separate authorities.
-fn StateObservationSink(comptime Lifecycle: type, comptime BalFold: type) type {
+fn StateObservationSink(comptime external_capture: bool, comptime BalFold: type) type {
     return struct {
         bal_fold: ?*BalFold,
         external_target: ?ObservationTarget,
@@ -702,12 +732,10 @@ fn StateObservationSink(comptime Lifecycle: type, comptime BalFold: type) type {
             if (self.bal_fold) |fold| {
                 try fold.append(observations, self.block_access_index);
             }
-            if (self.external_target) |target| {
-                try Lifecycle.consumeObservationTarget(
-                    target,
-                    self.block_access_index,
-                    observations,
-                );
+            if (comptime external_capture) {
+                if (self.external_target) |target| {
+                    try target.consume(self.block_access_index, observations);
+                }
             }
         }
     };
@@ -900,6 +928,7 @@ fn BlockRun(comptime Engine: type) type {
         allocator: std.mem.Allocator,
         state_backend: Backend,
         executor: ?Engine.Executor = null,
+        delta: ?StateDelta = null,
         encoded_block_access_list: ?[]u8 = null,
         node_updates: ?trie.NodeUpdates = null,
         block_access_list_mismatch: bool = false,
@@ -917,6 +946,7 @@ fn BlockRun(comptime Engine: type) type {
         }
 
         fn deinit(self: *Self) void {
+            if (self.delta) |*delta| delta.deinit();
             if (self.node_updates) |*nodes| nodes.deinit();
             if (self.encoded_block_access_list) |encoded| self.allocator.free(encoded);
             if (self.executor) |*executor| executor.deinit();
@@ -930,7 +960,7 @@ fn BlockRun(comptime Engine: type) type {
             if (!retain_output) return null;
             switch (self.state_backend) {
                 .external => return null,
-                .witness, .catalog_witness => {},
+                .witness => {},
             }
             std.debug.assert(self.node_updates == null);
             self.node_updates = trie.NodeUpdates.init(self.allocator);
@@ -941,15 +971,13 @@ fn BlockRun(comptime Engine: type) type {
             std.debug.assert(self.candidate_ready);
             std.debug.assert(!self.committed);
             const executor = &self.executor.?;
-            var delta: ?StateDelta = if (output != null)
-                try StateDelta.init(self.allocator, executor.acceptedView().changes())
-            else
-                null;
-            errdefer if (delta) |*value| value.deinit();
-            try Engine.StateDomain.Lifecycle.commit(&self.state_backend, executor.acceptedView());
+            if (self.delta == null and (output != null or self.state_backend.commitsDelta()))
+                self.delta = try StateDelta.init(self.allocator, executor.acceptedView().changes());
+            try self.state_backend.commit(if (self.delta) |*value| value.view() else null);
             self.committed = true;
             if (output) |target| {
-                target.* = .{ .delta = delta, .mpt_nodes = self.node_updates };
+                target.* = .{ .delta = self.delta, .mpt_nodes = self.node_updates };
+                self.delta = null;
                 self.node_updates = null;
             }
         }
@@ -1120,14 +1148,27 @@ fn executeBlock(
     var observed_block_access_list_encoded: ?[]u8 = null;
     defer if (observed_block_access_list_encoded) |encoded| allocator.free(encoded);
 
-    const executor_state = Engine.StateDomain.Lifecycle.admit(allocator, .{
-        .backend = &run.state_backend,
-        .validated_claim = bal_claim.accounts(),
-        .precheck_claim_state = precheck_claim_state,
-    }) catch |err| switch (err) {
-        error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
-        error.InvalidWitness => return .{ .status = .invalid_witness },
-        else => return err,
+    const executor_state: @FieldType(Engine.Executor.Init, "state") = if (comptime Engine.World == ClosedWorld)
+        block_admission.closedState(
+            allocator,
+            &run.state_backend,
+            bal_claim.accounts() orelse return .{ .status = .invalid_block_access_list },
+        ) catch |err| switch (err) {
+            error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
+            error.InvalidWitness => return .{ .status = .invalid_witness },
+            else => return err,
+        }
+    else blk: {
+        if (precheck_claim_state) {
+            if (bal_claim.accounts()) |claim| {
+                block_admission.precheckClaim(allocator, &run.state_backend, claim) catch |err| switch (err) {
+                    error.InvalidBlockAccessList => return .{ .status = .invalid_block_access_list },
+                    error.InvalidWitness => return .{ .status = .invalid_witness },
+                    else => return err,
+                };
+            }
+        }
+        break :blk .{ .reader = run.state_backend.reader() };
     };
     run.executor = Engine.Executor.init(allocator, .{
         .state = executor_state,
@@ -1144,19 +1185,17 @@ fn executeBlock(
     }
 
     const BalFold = if (verifies_bal_claim)
-        Engine.StateDomain.Lifecycle.BalClaimVerifier
+        if (Engine.World == ClosedWorld) DenseClaimVerifier else projector.ClaimVerifier
     else
         projector.BlockBuilder;
-    var bal_fold = if (comptime verifies_bal_claim)
-        try Engine.StateDomain.Lifecycle.initBalClaimVerifier(
-            allocator,
-            &executor.state,
-            bal_claim.accounts().?,
-        )
+    var bal_fold = if (comptime !verifies_bal_claim)
+        projector.BlockBuilder.init(allocator)
+    else if (comptime Engine.World == ClosedWorld)
+        try DenseClaimVerifier.init(allocator, &executor.state.world.plan, bal_claim.accounts().?)
     else
-        projector.BlockBuilder.init(allocator);
+        projector.ClaimVerifier.init(allocator, bal_claim.accounts().?);
     defer bal_fold.deinit();
-    var observation_sink = StateObservationSink(Engine.StateDomain.Lifecycle, BalFold){
+    var observation_sink = StateObservationSink(supportsExternalObservationCapture(Engine.World), BalFold){
         .bal_fold = if (block_access_list_enabled) &bal_fold else null,
         .external_target = if (input.capture) |capture| capture.observations else null,
     };
@@ -1362,11 +1401,12 @@ fn executeBlock(
         .gas_used = block_result.gas_used,
         .block_gas_used = block_result.block_gas.total,
         .block_state_gas_used = block_result.block_gas.state,
-        .state_root = Engine.StateDomain.Lifecycle.stateRoot(
+        .state_root = commit.stateRoot(
             allocator,
             &run.state_backend,
             accepted_state,
             run.nodeUpdatesTarget(input.commit_output != null),
+            &run.delta,
         ) catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             else => return err,
@@ -1612,4 +1652,82 @@ test {
     _ = block_rules;
     _ = eth_receipt;
     _ = differential_executor;
+}
+
+test "external candidate owns its root delta through failure commit and output" {
+    const state_types = @import("../state.zig");
+    const Engine = @import("../t.zig").Vm(.latest).?;
+    const Mode = enum { root_failure, commit_failure, commit_only, output };
+    const Recorder = struct {
+        mode: Mode,
+        allocator: *std.testing.FailingAllocator,
+        root_accounts: []const state_types.AccountChange = &.{},
+        committed: bool = false,
+
+        fn afterChanges(ptr: *anyopaque, _: std.mem.Allocator, delta: StateDelta.View) ![32]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.root_accounts = delta.accounts.items;
+            try std.testing.expectEqual(@as(u256, 7), delta.accounts.at(0).account.?.balance);
+            // Everything needed for commit/output must already be owned.
+            self.allocator.fail_index = self.allocator.alloc_index;
+            if (self.mode == .root_failure) return error.RootFailed;
+            return trie.empty_root_hash;
+        }
+
+        fn commitDelta(ptr: *anyopaque, delta: StateDelta.View) !void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            try std.testing.expectEqual(self.root_accounts.ptr, delta.accounts.items.ptr);
+            try std.testing.expectEqual(@as(u256, 7), delta.accounts.at(0).account.?.balance);
+            if (self.mode == .commit_failure) return error.CommitFailed;
+            self.committed = true;
+        }
+    };
+
+    for ([_]Mode{ .root_failure, .commit_failure, .commit_only, .output }) |mode| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var memory = state_types.MemoryStore.init(std.testing.allocator);
+        defer memory.deinit();
+        var recorder = Recorder{ .mode = mode, .allocator = &failing };
+        var run = BlockRun(Engine).init(failing.allocator(), Backend.fromExternal(
+            memory.reader(),
+            .{ .ptr = &recorder, .vtable = &.{ .afterChanges = Recorder.afterChanges } },
+            .{ .ptr = &recorder, .vtable = &.{ .commit = Recorder.commitDelta } },
+        ));
+        defer run.deinit();
+        run.executor = Engine.Executor.init(failing.allocator(), .{});
+        const execution_state = &run.executor.?.state;
+        const attempt = execution_state.beginTransaction();
+        execution_state.beginScope();
+        try execution_state.setBalance(.fromAddress(address.addr(1)), 7);
+        execution_state.closeScope();
+        execution_state.seal(attempt);
+        execution_state.retain(attempt);
+
+        const root_result = commit.stateRoot(failing.allocator(), &run.state_backend, execution_state.acceptedView(), null, &run.delta);
+        if (mode == .root_failure) {
+            try std.testing.expectError(error.InfrastructureFailure, root_result);
+            try std.testing.expect(run.delta != null);
+            continue;
+        }
+        _ = try root_result;
+        run.candidate_ready = true;
+        var output: CommitOutput = .{};
+        defer output.deinit();
+        if (mode == .commit_failure) {
+            try std.testing.expectError(error.CommitFailed, run.commit(&output));
+            try std.testing.expect(!run.committed);
+            try std.testing.expect(run.delta != null);
+            try std.testing.expect(output.delta == null);
+            continue;
+        }
+        try run.commit(if (mode == .output) &output else null);
+        try std.testing.expect(recorder.committed);
+        try std.testing.expect(!failing.has_induced_failure);
+        if (mode == .output) {
+            try std.testing.expect(run.delta == null);
+            try std.testing.expectEqual(recorder.root_accounts.ptr, output.delta.?.accounts.ptr);
+        } else {
+            try std.testing.expect(run.delta != null);
+        }
+    }
 }

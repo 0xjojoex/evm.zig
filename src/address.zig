@@ -185,6 +185,16 @@ pub const AddressWord = extern struct {
             a.words[1] == b.words[1] and
             a.words[2] == b.words[2];
     }
+
+    pub const HashContext = struct {
+        pub inline fn hash(_: HashContext, value: AddressWord) u64 {
+            return std.hash.Wyhash.hash(0, std.mem.asBytes(&value.words));
+        }
+
+        pub inline fn eql(_: HashContext, a: AddressWord, b: AddressWord) bool {
+            return AddressWord.eql(a, b);
+        }
+    };
 };
 
 pub const addr = Address.addr;

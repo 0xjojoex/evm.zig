@@ -1,21 +1,25 @@
-//! Generic state vocabulary and the tracked execution lane.
+//! Generic state vocabulary and the open execution lane.
 //!
 //! - `AccessHint`, `FinalizationRules`, `CodeView`, the change records, and the
 //!   observation/effect flags: vocabulary shared by both execution state lanes
-//!   at the executor boundary. `checkLane` pins the ones a lane must re-export
-//!   rather than redefine.
+//!   at the executor boundary.
 //! - `Reader`: client/database read interface (root alias `evmz.StateReader`).
-//! - `TrackedState`: accepted branch, transaction rows, and scope rollback.
+//! - `WorldState(World)`: the one execution-state machine; `OpenWorld` is the
+//!   world for block building, discovery, and forks without a block access
+//!   list, and `OpenState` its instantiation.
 //! - `Checkpoint`: scope-rollback record shared with the claim-indexed lane.
 //! - `LogBuffer`: packed emitted logs, also shared with the claim-indexed lane.
 //! - `StateDelta`: owned block-final semantic changes, detached from execution.
-//! - `Committer`: integration-owned sink for borrowed tracked-state changes.
-//! - `RootProvider`: integration-owned post-state root over borrowed changes.
+//!   It is the only change shape that leaves evmz; `checkChangesView` pins the
+//!   borrowed producers it is built from, `checkCommitView` the id-indexed
+//!   projection the trie commits from.
+//! - `Committer`: integration-owned sink for a detached delta.
+//! - `RootProvider`: integration-owned post-state root over a detached delta.
 //! - `MemoryStore`: in-memory store for seeded pre-state and test/demo commits.
 //!
-//! The claim-indexed lane, `evmz.eth.bal.ClaimState`, is the other implementation
-//! of the executor's state-lane surface; `evmz.Backend` selects between the two
-//! lanes and is therefore layered above both.
+//! The claim-indexed lane, `evmz.eth.bal.ClosedState`, is `WorldState` over
+//! `eth.bal.ClosedWorld`; `evmz.Backend` selects between the two lanes and is
+//! therefore layered above both.
 
 const std = @import("std");
 
@@ -31,7 +35,11 @@ pub const ConcurrentReader = @import("./state/ConcurrentReader.zig");
 pub const StateDelta = @import("./state/StateDelta.zig");
 pub const Committer = @import("./state/Committer.zig");
 pub const RootProvider = @import("./state/RootProvider.zig");
-pub const TrackedState = @import("./state/TrackedState.zig");
+pub const sparse_hash_map = @import("./state/sparse_hash_map.zig");
+pub const world_state = @import("./state/world_state.zig");
+pub const WorldState = world_state.WorldState;
+pub const OpenWorld = @import("./state/OpenWorld.zig");
+pub const OpenState = WorldState(OpenWorld);
 pub const MemoryStore = @import("./state/MemoryStore.zig");
 
 pub const StorageKey = storage.Key;
@@ -100,6 +108,35 @@ pub const StorageChange = struct {
     value: u256,
 };
 
+/// One sealed account observation: what a transaction read or wrote for one
+/// address, with the value it started from and ended at. `null` is absent.
+pub const AccountObservationFact = struct {
+    address: Address,
+    original: ?Account,
+    current: ?Account,
+    observation: AccountObservation,
+    effect: AccountEffect,
+};
+
+/// One sealed storage observation with a complete value fact.
+pub const StorageObservationFact = struct {
+    address: Address,
+    key: u256,
+    original: u256,
+    current: u256,
+    observation: StorageObservation,
+    effect: StorageEffect,
+};
+
+/// The identity and flags of a storage observation without its values; gas-only
+/// access rows in the open lane have no value fact.
+pub const StorageObservationMetadata = struct {
+    address: Address,
+    key: u256,
+    observation: StorageObservation,
+    effect: StorageEffect,
+};
+
 /// Which branch a changes view reads: the accepted branch accumulated across
 /// committed transactions, or the open transaction attempt alone.
 pub const ChangeLayer = enum {
@@ -162,24 +199,67 @@ pub const StorageEffect = packed struct {
     _padding: u7 = 0,
 };
 
-/// Assert `State` shares the state boundary types and declares its capacity
-/// policy. Runs once per compiled executor.
-///
-/// `grows_on_touch` says whether the lane allocates rows as execution touches
-/// state. A lane that does accepts `reserveAccessHint`,
-/// `reserveAcceptedAccessHint`, and the transaction capacity-reuse pair; a lane
-/// whose universe is declared up front has nothing to reserve, and the executor
-/// skips those calls at comptime.
-pub fn checkLane(comptime State: type) void {
+/// Assert `View` enumerates semantic changes: three indexed lists (`len() u32`
+/// + `at(u32)`) of `AccountChange`, `StorageChange`, and wiped `Address`, plus
+/// `introducedCode(hash)`. Ordering is unspecified. Both lanes' change views
+/// and `StateDelta.View` qualify; `StateDelta.init` and
+/// `eth.commit.SortedChanges` are the consumers.
+pub fn checkChangesView(comptime View: type) void {
     comptime {
-        if (@TypeOf(State.grows_on_touch) != bool) @compileError(
-            @typeName(State) ++ ".grows_on_touch must be a bool capability",
+        for ([_][]const u8{ "accounts", "storage_writes", "storage_wipes" }) |list_name| {
+            if (!@hasField(View, list_name)) @compileError(
+                "changes view " ++ @typeName(View) ++ " is missing list '" ++ list_name ++ "'",
+            );
+        }
+        for ([_]type{
+            @FieldType(View, "accounts"),
+            @FieldType(View, "storage_writes"),
+            @FieldType(View, "storage_wipes"),
+        }) |List| {
+            for ([_][]const u8{ "len", "at" }) |method| {
+                if (!std.meta.hasMethod(List, method)) @compileError(
+                    "changes list " ++ @typeName(List) ++ " is missing '" ++ method ++ "'",
+                );
+            }
+        }
+        if (!std.meta.hasMethod(View, "introducedCode")) @compileError(
+            "changes view " ++ @typeName(View) ++ " is missing 'introducedCode'",
         );
     }
 }
 
-test "tracked state satisfies the state lane surface" {
-    checkLane(TrackedState);
+/// Assert `Commit` is a commit view: the accepted branch projected as dense
+/// ids in trie order with pre-hashed keys, so the trie walks sorted fixed keys
+/// and never reconstructs identity from address/slot records. The id types
+/// are whatever `accountTrieOrder` and `storageTrieOrder` yield. Each lane
+/// provides one; `eth.commit` is the consumer.
+///
+/// `authenticated_parents` says whether the view carries the parent trie
+/// facts itself through `accountFact(id)` (a closed world authenticated at
+/// admission) or the committer resolves parents from the witness by
+/// `accountTrieKey(id)`.
+pub fn checkCommitView(comptime Commit: type) void {
+    comptime {
+        if (!@hasDecl(Commit, "authenticated_parents")) @compileError(
+            "commit view " ++ @typeName(Commit) ++ " is missing 'authenticated_parents'",
+        );
+        if (@TypeOf(Commit.authenticated_parents) != bool) @compileError(
+            "commit view " ++ @typeName(Commit) ++ ".authenticated_parents must be a bool",
+        );
+        const methods = [_][]const u8{
+            "accountTrieOrder", "storageTrieOrder", "accountTrieKey", "storageTrieKey",
+            "accountDirty",     "accountChanged",   "accountValue",   "accountStorageDirty",
+            "storageDirty",     "storageWiped",     "storageValue",
+        };
+        for (methods) |method| {
+            if (!std.meta.hasMethod(Commit, method)) @compileError(
+                "commit view " ++ @typeName(Commit) ++ " is missing '" ++ method ++ "'",
+            );
+        }
+        if (Commit.authenticated_parents and !std.meta.hasMethod(Commit, "accountFact")) @compileError(
+            "commit view " ++ @typeName(Commit) ++ " authenticates parents but has no 'accountFact'",
+        );
+    }
 }
 
 test {

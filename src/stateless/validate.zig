@@ -30,7 +30,7 @@ pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || sta
     BlockTransitionFailed,
 };
 
-pub const CommitOutput = @import("../eth/state_domain.zig").CommitOutput;
+pub const CommitOutput = @import("../eth/block_stf.zig").CommitOutput;
 
 pub const Options = struct {
     /// Prove every BAL-declared account/storage path before execution. Disabled
@@ -211,7 +211,7 @@ fn validateExact(
             .parent_hash = block.parent_hash,
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
-        .state_backend = try ExactBlockStf.Vm.StateDomain.Lifecycle.witnessBackend(
+        .state_backend = try Backend.fromWitness(
             allocator,
             parent_header.state_root,
             input.witness.state,
@@ -609,8 +609,8 @@ test "stateless validator is specialized by the complete spec" {
     comptime {
         std.debug.assert(ExactValidator.BlockStf.spec.call.base_gas == custom.call.base_gas);
         std.debug.assert(ExactValidator.BlockStf.Vm.spec.call.base_gas == custom.call.base_gas);
-        std.debug.assert(ExactValidator.BlockStf.Vm.Executor.State == @import("../eth/bal/ClaimState.zig"));
-        std.debug.assert(Oracle.BlockStf.Vm.Executor.State == state.TrackedState);
+        std.debug.assert(ExactValidator.BlockStf.Vm.Executor.State == @import("../eth/bal.zig").ClosedState);
+        std.debug.assert(Oracle.BlockStf.Vm.Executor.State == state.OpenState);
     }
 }
 
@@ -634,12 +634,12 @@ test "revision stateless validator binds matching tracked specs" {
     comptime {
         std.debug.assert(Prague.fork == .prague);
         std.debug.assert(Prague.BlockStf.spec.transaction.regular_gas_cap == null);
-        std.debug.assert(Prague.BlockStf.Vm.Executor.State == state.TrackedState);
+        std.debug.assert(Prague.BlockStf.Vm.Executor.State == state.OpenState);
         std.debug.assert(!Prague.compile_options.step_capture);
         std.debug.assert(CapturingPrague.compile_options.step_capture);
         std.debug.assert(Osaka.fork == .osaka);
         std.debug.assert(Osaka.BlockStf.spec.transaction.regular_gas_cap != null);
-        std.debug.assert(Osaka.BlockStf.Vm.Executor.State == state.TrackedState);
+        std.debug.assert(Osaka.BlockStf.Vm.Executor.State == state.OpenState);
     }
 }
 

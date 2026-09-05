@@ -19,6 +19,7 @@ pub const precompile = @import("eth/precompile.zig");
 pub const system = @import("eth/system.zig");
 pub const header = @import("eth/header.zig");
 pub const trie = @import("eth/trie.zig");
+pub const commit = @import("eth/commit.zig");
 pub const block_stf = @import("eth/block_stf.zig");
 pub const block_rules = @import("eth/block_rules.zig");
 pub const receipt = @import("eth/receipt.zig");

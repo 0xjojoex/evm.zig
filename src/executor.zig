@@ -88,15 +88,12 @@ const ScopeRoot = struct {
     }
 };
 
-/// Construct the public initializer for one execution-state implementation.
-/// Implementations with a semantic empty baseline may omit `state`;
-/// authenticated dense state keeps
-/// the field structurally required.
-fn ExecutorInitType(comptime Execution: type) type {
-    const StateInit = Execution.Init;
-    if (Execution.default_init) |default_state| {
+/// An open world may start empty or load through a reader. Other worlds must
+/// arrive as an admitted state, whose ownership transfers to the executor.
+fn ExecutorInitType(comptime World: type) type {
+    if (World == evmz.state.OpenWorld) {
         return struct {
-            state: StateInit = default_state,
+            state: struct { reader: ?evmz.state.Reader = null } = .{},
             /// Caller-owned derived-artifact service. Its allocation, I/O,
             /// synchronization, and capacity policy are outside executor bounds.
             prepared_code_backend: ?prepared_code.Backend = null,
@@ -105,7 +102,7 @@ fn ExecutorInitType(comptime Execution: type) type {
         };
     }
     return struct {
-        state: StateInit,
+        state: evmz.state.WorldState(World),
         prepared_code_backend: ?prepared_code.Backend = null,
         block_hash_source: ?BlockHashSource = null,
         reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
@@ -140,19 +137,15 @@ pub const CompileOptions = struct {
     step_capture: bool = false,
 };
 
-/// Compile one exact executor over an execution-state implementation.
-///
-/// The domain defines how its executor state is constructed. Admission,
-/// authenticated facts, and commitment construction remain outside this
-/// executor boundary.
+/// Compile one exact executor over `WorldState(World)`. Admission, authenticated
+/// facts, and commitment construction remain outside this executor boundary.
 pub fn ExecutorType(
     comptime spec: Spec,
-    comptime ExecutionState: type,
+    comptime World: type,
     comptime options_value: CompileOptions,
 ) type {
-    comptime {
-        ExecutionState.checkSpec(spec);
-        evmz.state.checkLane(ExecutionState.State);
+    if (World == evmz.eth.bal.ClosedWorld and !spec.block.block_access_list) {
+        @compileError("ClosedWorld requires a block-access-list specification");
     }
 
     return struct {
@@ -160,22 +153,24 @@ pub fn ExecutorType(
 
         const BoundInterpreter = Interpreter.Interpreter(spec);
 
-        const callbacks = HostCallbacks(spec, ExecutionState, options_value);
+        const callbacks = HostCallbacks(spec, World, options_value);
 
-        pub const State = ExecutionState.State;
+        pub const State = evmz.state.WorldState(World);
 
-        pub const StateAddress = ExecutionState.StateAddress;
+        /// Both worlds key rows by `AddressWord`, the form the interpreter
+        /// already holds; `Address` enters only from transaction fields.
+        pub const StateAddress = AddressWord;
 
         pub const BranchSnapshot = State.BranchSnapshot;
 
-        pub const Init = ExecutorInitType(ExecutionState);
+        pub const Init = ExecutorInitType(World);
 
         pub inline fn stateAddress(value: Address) StateAddress {
-            return ExecutionState.stateAddress(value);
+            return .fromAddress(value);
         }
 
         pub inline fn executionAddress(value: AddressWord) StateAddress {
-            return ExecutionState.executionAddress(value);
+            return value;
         }
 
         allocator: std.mem.Allocator,
@@ -197,11 +192,14 @@ pub fn ExecutorType(
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
 
-        /// Construct and take exclusive ownership of domain state.
+        /// Construct and take exclusive ownership of the execution state.
         pub fn init(allocator: std.mem.Allocator, options: Init) Executor {
             return .{
                 .allocator = allocator,
-                .state = ExecutionState.init(spec, allocator, options.state),
+                .state = if (World == evmz.state.OpenWorld)
+                    State.init(allocator, World.initForSpec(allocator, spec, options.state.reader))
+                else
+                    options.state,
                 .frame_store = .{ .stable_metadata_capacity = default_max_live_frames },
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = .init(allocator),
@@ -699,15 +697,12 @@ pub fn ExecutorType(
             self.prepared_code_scratch.reset();
         }
 
-        /// Reuse prepared code and cleared transaction containers for one
-        /// sequential protocol-call batch.
+        /// Reuse prepared code for one sequential protocol-call batch.
         pub fn beginSystemCallBatch(self: *Executor) void {
             self.beginPreparedCodeExecution();
-            if (comptime State.grows_on_touch) self.state.beginTransactionCapacityReuse();
         }
 
         pub fn endSystemCallBatch(self: *Executor) void {
-            if (comptime State.grows_on_touch) self.state.endTransactionCapacityReuse();
             self.endPreparedCodeExecution();
         }
 
@@ -780,22 +775,21 @@ pub fn ExecutorType(
             return output_data.ptr == last.ptr;
         }
 
-        // Tracked-state access. Thin passthroughs that only widen `Address` to `StateAddress`.
+        // State access. Thin passthroughs that only convert `Address` to the row key.
 
         pub fn traceAccountAccess(self: *Executor, account_address: Address) !void {
             try self.state.observeAccountAccess(stateAddress(account_address));
         }
 
-        /// Capacity advice for the current transaction attempt. A lane that
-        /// does not grow on touch has nothing to reserve.
+        /// Capacity advice for the current transaction attempt. Whether there
+        /// is anything to reserve is the world's decision, made at comptime.
         pub fn reserveAccessHint(self: *Executor, hint: evmz.state.AccessHint) !void {
-            if (comptime State.grows_on_touch) try self.state.reserveAccessHint(hint);
+            try self.state.reserveAccessHint(hint);
         }
 
-        /// Capacity advice for the accepted branch. A lane that does not grow
-        /// on touch has nothing to reserve.
+        /// Capacity advice for the accepted branch.
         pub fn reserveAcceptedAccessHint(self: *Executor, hint: evmz.state.AccessHint) !void {
-            if (comptime State.grows_on_touch) try self.state.reserveAcceptedAccessHint(hint);
+            try self.state.reserveAcceptedAccessHint(hint);
         }
 
         /// Mark an account warm in the current transaction scope.
@@ -811,7 +805,7 @@ pub fn ExecutorType(
         }
 
         /// Return account metadata already present in tracked state.
-        pub fn getAccount(self: *const Executor, address: Address) ?AccountState {
+        pub fn getAccount(self: *Executor, address: Address) ?AccountState {
             return self.state.getAccount(stateAddress(address));
         }
 
@@ -2519,17 +2513,17 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
     {
         var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
         defer checkpoint.deinit();
-        try executor.state.addBalance(address, 7);
+        try executor.state.addBalance(.fromAddress(address), 7);
     }
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(address));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(address)));
 
     {
         var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
         defer checkpoint.deinit();
-        try executor.state.addBalance(address, 9);
+        try executor.state.addBalance(.fromAddress(address), 9);
         checkpoint.commit();
     }
-    try std.testing.expectEqual(@as(u256, 9), try executor.state.getBalance(address));
+    try std.testing.expectEqual(@as(u256, 9), try executor.state.getBalance(.fromAddress(address)));
 }
 
 test "call runtime abort skips resolved top and restores enclosing checkpoint" {
@@ -2570,13 +2564,13 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     try call.pushRootCall(&root_message, bytecode.view());
 
     const parent_checkpoint = executor.state.checkpoint();
-    try executor.state.addBalance(parent_write, 7);
+    try executor.state.addBalance(.fromAddress(parent_write), 7);
     var parent_message = root_message;
     parent_message.depth = 1;
     try call.pushChildCall(&parent_message, bytecode.view(), parent_checkpoint, null);
 
     const child_checkpoint = executor.state.checkpoint();
-    try executor.state.addBalance(child_write, 9);
+    try executor.state.addBalance(.fromAddress(child_write), 9);
     var child_message = root_message;
     child_message.depth = 2;
     try call.pushChildCall(&child_message, bytecode.view(), child_checkpoint, null);
@@ -2587,8 +2581,8 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     _ = try call.finishFrame(child_index, child_frame.result());
 
     call.deinit();
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(parent_write));
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(child_write));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(parent_write)));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(child_write)));
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 }
 
@@ -2636,8 +2630,8 @@ test "nested runtime error restores its transferred checkpoint once" {
         .value = 7,
         .code_address = recipient,
     }));
-    try std.testing.expectEqual(@as(u256, 10), try executor.state.getBalance(sender));
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(recipient));
+    try std.testing.expectEqual(@as(u256, 10), try executor.state.getBalance(.fromAddress(sender)));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(recipient)));
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 }
 
@@ -2712,7 +2706,7 @@ test "nested call runtime owns its segment and keeps capture indices global" {
     try std.testing.expectEqual(Interpreter.Status.success, child_result.status());
     try std.testing.expectEqual(@as(usize, 1), executor.frame_store.len());
     try std.testing.expectEqual(@as(usize, 1), capture.frame_captures.items.len);
-    try std.testing.expectEqual(@as(u256, 7), try executor.state.getStorage(child_address, 0));
+    try std.testing.expectEqual(@as(u256, 7), try executor.state.getStorage(.fromAddress(child_address), 0));
 
     const root_result = try outer.run();
     try std.testing.expectEqual(Interpreter.Status.success, root_result.status());

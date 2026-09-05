@@ -40,7 +40,7 @@ fn executeStandalone(
 }
 
 fn accountChange(
-    changes: evmz.state.TrackedState.ChangesView,
+    changes: evmz.state.OpenState.ChangesView,
     target: evmz.Address,
 ) ?evmz.state.AccountChange {
     var index: u32 = 0;
@@ -52,7 +52,7 @@ fn accountChange(
 }
 
 fn storageChange(
-    changes: evmz.state.TrackedState.ChangesView,
+    changes: evmz.state.OpenState.ChangesView,
     target: evmz.Address,
     key: u256,
 ) ?evmz.state.StorageChange {
@@ -86,10 +86,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
                 const fact = view.accounts.at(index);
                 if (!evmz.Address.eql(fact.address, self.address)) continue;
                 try std.testing.expect(fact.observation.code_read);
-                const loaded_account = switch (fact.current orelse return error.ExpectedLoadedAccount) {
-                    .present => |value| value,
-                    .absent, .exists_only => return error.ExpectedLoadedAccount,
-                };
+                const loaded_account = fact.current orelse return error.ExpectedLoadedAccount;
                 try std.testing.expectEqualSlices(u8, &self.code_hash, &loaded_account.code_hash);
                 return;
             }
@@ -628,7 +625,9 @@ test "explicit backend commit persists then rebases the Executor overlay" {
         .rejected => return error.UnexpectedRejection,
     };
     defer executed.discardIfCurrent();
-    try memory.committer().commit(executed.changes());
+    var delta = try evmz.state.StateDelta.init(std.testing.allocator, executed.changes());
+    defer delta.deinit();
+    try memory.committer().commit(delta.view());
     executed.retain();
     executor.discardAccepted();
 

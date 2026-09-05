@@ -1,7 +1,7 @@
 //! Executing a block from a sealed witness rather than from a client database.
 //!
 //! "Stateless" is a property of the driver, not of the execution state: both
-//! execution-state lanes — `evmz.state.TrackedState` and `evmz.eth.bal.ClaimState`
+//! execution-state lanes — `evmz.state.OpenState` and `evmz.eth.bal.ClosedState`
 //! — run from a witness through `evmz.Backend`. Two layers live here, on
 //! opposite sides of that backend:
 //!

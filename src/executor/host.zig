@@ -9,10 +9,10 @@ const execution = evmz.execution;
 
 pub fn Callbacks(
     comptime spec: evmz.Spec,
-    comptime ExecutionState: type,
+    comptime World: type,
     comptime options_value: evmz.executor.CompileOptions,
 ) type {
-    const Executor = evmz.executor.ExecutorType(spec, ExecutionState, options_value);
+    const Executor = evmz.executor.ExecutorType(spec, World, options_value);
 
     return struct {
         pub fn host(self: *Executor) Host {

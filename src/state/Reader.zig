@@ -1,7 +1,7 @@
 //! Read-only canonical state provider supplied by an Ethereum client.
 //!
 //! Implementations should read from the client's database/trie/cache.
-//! Speculative writes belong to `TrackedState`.
+//! Speculative writes belong to the execution state (`WorldState`).
 
 const std = @import("std");
 
@@ -15,17 +15,12 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    accountExists: *const fn (ptr: *anyopaque, address: Address) anyerror!bool,
     loadAccount: *const fn (ptr: *anyopaque, address: Address) anyerror!?Account,
     /// Returns bytes whose hash is `code_hash`. The reader owns the slice.
     loadCode: *const fn (ptr: *anyopaque, code_hash: [32]u8) anyerror![]const u8,
     loadCodeValidatesHash: bool = false,
     getStorage: *const fn (ptr: *anyopaque, address: Address, key: u256) anyerror!u256,
 };
-
-pub fn accountExists(self: Reader, address: Address) !bool {
-    return self.vtable.accountExists(self.ptr, address);
-}
 
 pub fn loadAccount(self: Reader, address: Address) !?Account {
     return self.vtable.loadAccount(self.ptr, address);
@@ -52,17 +47,10 @@ pub fn empty() Reader {
 var empty_context: u8 = 0;
 
 const empty_vtable = VTable{
-    .accountExists = emptyAccountExists,
     .loadAccount = emptyLoadAccount,
     .loadCode = emptyLoadCode,
     .getStorage = emptyGetStorage,
 };
-
-fn emptyAccountExists(ptr: *anyopaque, address: Address) !bool {
-    _ = ptr;
-    _ = address;
-    return false;
-}
 
 fn emptyLoadAccount(ptr: *anyopaque, address: Address) !?Account {
     _ = ptr;
@@ -85,7 +73,6 @@ fn emptyGetStorage(ptr: *anyopaque, address: Address, key: u256) !u256 {
 
 test "empty state reader returns empty state" {
     const reader = Reader.empty();
-    try std.testing.expect(!try reader.accountExists(.addr(1)));
     try std.testing.expectEqual(@as(?Account, null), try reader.loadAccount(.addr(1)));
     try std.testing.expectEqualSlices(u8, &.{}, try reader.loadCode(crypto.keccak256_empty));
     try std.testing.expectEqual(@as(u256, 0), try reader.getStorage(.addr(1), 1));

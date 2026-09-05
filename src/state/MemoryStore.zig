@@ -1,11 +1,11 @@
 //! In-memory state store for tests, demos, fixtures, and lightweight embeds.
 //!
 //! `reader()` exposes the read-only `StateReader` adapter. `committer()` applies
-//! borrowed final changes back into this canonical memory store, and
-//! `rootProvider()` derives their post-state root without applying them.
+//! a detached `StateDelta` back into this canonical memory store, and
+//! `rootProvider()` derives its post-state root without applying it.
 //!
 //! It is not the execution state: speculative writes, checkpoints, reverts,
-//! logs, warmth, and the journal live in `TrackedState`.
+//! logs, warmth, and the journal live in `OpenState`.
 
 const std = @import("std");
 
@@ -14,14 +14,15 @@ const Account = @import("./Account.zig");
 const MemoryAccount = @import("./MemoryAccount.zig");
 const Committer = @import("./Committer.zig");
 const RootProvider = @import("./RootProvider.zig");
-const TrackedState = @import("./TrackedState.zig");
+const StateDelta = @import("./StateDelta.zig");
+const OpenState = @import("../state.zig").OpenState;
 const StateReader = @import("./Reader.zig");
 const ConcurrentReader = @import("./ConcurrentReader.zig");
 const trie = @import("../eth/trie.zig");
 const sparse_hash_map = @import("./sparse_hash_map.zig");
 
 const Address = evmz.Address;
-const ChangesView = TrackedState.ChangesView;
+const ChangesView = StateDelta.View;
 
 /// Whether a stored account holding no state at all reaches the state root.
 ///
@@ -68,7 +69,6 @@ pub fn deinit(self: *MemoryStore) void {
 
 pub fn reader(self: *MemoryStore) StateReader {
     return .{ .ptr = self, .vtable = &.{
-        .accountExists = accountExists,
         .loadAccount = loadAccount,
         .loadCode = loadCode,
         .getStorage = getStorage,
@@ -303,11 +303,6 @@ fn rootAfterChanges(ptr: *anyopaque, allocator: std.mem.Allocator, changes: Chan
     return self.stateRootAfterChanges(allocator, changes);
 }
 
-fn accountExists(ptr: *anyopaque, address: Address) !bool {
-    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    return self.accounts.contains(address);
-}
-
 fn loadAccount(ptr: *anyopaque, address: Address) !?Account {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const account = self.accounts.getPtr(address) orelse return null;
@@ -371,7 +366,6 @@ test "memory store exposes state reader" {
     try account.storage.put(7, 0xaa);
 
     const state_reader = memory.reader();
-    try std.testing.expect(try state_reader.accountExists(address));
     try std.testing.expectEqual(@as(u256, 0xaa), try state_reader.getStorage(address, 7));
 
     const loaded = (try state_reader.loadAccount(address)).?;
@@ -447,7 +441,6 @@ test "memory store copies a borrowed account" {
     arena.deinit();
 
     const state_reader = memory.reader();
-    try std.testing.expect(try state_reader.accountExists(address));
     const loaded = (try state_reader.loadAccount(address)).?;
     try std.testing.expectEqual(evmz.crypto.keccak256(&.{0x5f}), loaded.code_hash);
     try std.testing.expectEqualSlices(u8, &.{0x5f}, try state_reader.loadCode(loaded.code_hash));
@@ -472,20 +465,26 @@ test "memory store exposes committer adapter" {
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
 
-    var state = TrackedState.initWithStateReader(std.testing.allocator, memory.reader());
+    var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, memory.reader()));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     const attempt = state.beginTransaction();
     state.beginScope();
-    _ = try state.setStorage(address, 7, 99);
+    _ = try state.setStorage(.fromAddress(address), 7, 99);
     state.closeScope();
     state.seal(attempt);
 
-    try memory.committer().commit(state.pendingView().changes());
+    var delta = try StateDelta.init(std.testing.allocator, state.pendingView().changes());
+    defer delta.deinit();
+    try memory.committer().commit(delta.view());
 
     try std.testing.expectEqual(@as(u256, 99), memory.getAccount(address).?.getStorage(7));
 }
 
-test "memory store consumes cumulative wipe then write from a borrowed view" {
+test "memory store consumes cumulative wipe then write from a detached delta" {
     const address = addr(0xc1ea);
     var memory = MemoryStore.init(std.testing.allocator);
     defer memory.deinit();
@@ -494,12 +493,16 @@ test "memory store consumes cumulative wipe then write from a borrowed view" {
     try base.storage.put(1, 11);
     try base.storage.put(2, 22);
 
-    var state = TrackedState.initWithStateReader(std.testing.allocator, memory.reader());
+    var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, memory.reader()));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
 
     const wiped = state.beginTransaction();
     state.beginScope();
-    try state.markSelfdestructed(address);
+    try state.markSelfdestructed(.fromAddress(address));
     try state.finalize(.{ .existing_account = .{
         .reset_account = true,
         .clear_storage = true,
@@ -510,12 +513,14 @@ test "memory store consumes cumulative wipe then write from a borrowed view" {
 
     const rewritten = state.beginTransaction();
     state.beginScope();
-    _ = try state.setStorage(address, 2, 33);
+    _ = try state.setStorage(.fromAddress(address), 2, 33);
     state.closeScope();
     state.seal(rewritten);
     state.retain(rewritten);
 
-    const changes = state.acceptedView().changes();
+    var delta = try StateDelta.init(std.testing.allocator, state.acceptedView().changes());
+    defer delta.deinit();
+    const changes = delta.view();
     try std.testing.expectEqual(@as(u32, 1), changes.storage_wipes.len());
     try std.testing.expectEqual(@as(u32, 1), changes.storage_writes.len());
     try memory.applyChanges(changes);

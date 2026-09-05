@@ -9,19 +9,19 @@ const MemoryStore = support.MemoryStore;
 const transact = support.transact;
 const expectRejected = support.expectRejected;
 
-test "supported state domains analyze as complete VM products" {
-    const Tracked = evmz.Vm(evmz.eth.amsterdam);
-    const Claim = evmz.BalVm(evmz.eth.amsterdam);
+test "worlds analyze as complete VM products" {
+    const Open = evmz.t.Vm(.latest).?;
+    const Closed = evmz.VmType(Open.spec, evmz.eth.bal.ClosedWorld, .{});
 
-    analyzeEngineProduct(Tracked);
-    analyzeEngineProduct(Claim);
+    analyzeEngineProduct(Open);
+    analyzeEngineProduct(Closed);
 
-    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Tracked));
-    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.amsterdam, Claim));
+    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.latest, Open));
+    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.latest, Closed));
 }
 
 test "exact Engine derives one coherent transaction authoring chain" {
-    const ExactVm = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const ExactVm = evmz.t.Vm(.latest).?;
     const ExactEngine = evmz.Engine(ExactVm.spec);
     const Input = struct {
         env: evmz.Env,
@@ -31,7 +31,7 @@ test "exact Engine derives one coherent transaction authoring chain" {
     const Context = ExactEngine.Context(Input);
     const SourceContext = evmz.transaction.program.ContextType(
         ExactVm.spec,
-        ExactVm.StateDomain.Execution,
+        ExactVm.World,
         .{},
         Input,
     );
@@ -47,33 +47,31 @@ test "exact Engine derives one coherent transaction authoring chain" {
     comptime {
         std.debug.assert(ExactEngine.Executor == ExactVm.Executor);
         std.debug.assert(!@hasDecl(ExactEngine.Executor, "specification"));
-        std.debug.assert(ExactVm.StateDomain.Execution == evmz.state_domain.Tracked.Execution);
-        std.debug.assert(!@hasDecl(ExactEngine, "StateDomain"));
+        std.debug.assert(ExactVm.World == evmz.state.OpenWorld);
+        std.debug.assert(!@hasDecl(ExactEngine, "Lane"));
         std.debug.assert(SourceContext == Context);
         std.debug.assert(!@hasDecl(Context, "specification"));
-        std.debug.assert(!@hasDecl(Context, "StateDomain"));
+        std.debug.assert(!@hasDecl(Context, "Lane"));
         std.debug.assert(!@hasDecl(Context, "compile_options"));
         std.debug.assert(@TypeOf(Transition.transact) == ExpectedTransact);
     }
 }
 
-test "Amsterdam BlockSTF combines spec and state capabilities" {
-    const Tracked = evmz.Vm(evmz.eth.amsterdam);
-    const Claim = evmz.BalVm(evmz.eth.amsterdam);
-    const TrackedBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Tracked);
-    const ClaimBlockStf = evmz.eth.BlockSTF.Bind(.amsterdam, Claim);
+test "BlockSTF combines spec and world capabilities" {
+    const Open = evmz.t.Vm(.latest).?;
+    const Closed = evmz.VmType(Open.spec, evmz.eth.bal.ClosedWorld, .{});
+    const OpenBlockStf = evmz.eth.BlockSTF.Bind(.latest, Open);
+    const ClosedBlockStf = evmz.eth.BlockSTF.Bind(.latest, Closed);
 
     comptime {
-        std.debug.assert(Tracked.StateDomain.Lifecycle.supports_block_production);
-        std.debug.assert(!Claim.StateDomain.Lifecycle.supports_block_production);
-        std.debug.assert(Tracked.StateDomain.Lifecycle.supports_external_observation_capture);
-        std.debug.assert(!Claim.StateDomain.Lifecycle.supports_external_observation_capture);
-        std.debug.assert(@TypeOf(TrackedBlockStf.produce) != type);
-        std.debug.assert(@TypeOf(TrackedBlockStf.produceAssumeDecoded) != type);
-        std.debug.assert(@TypeOf(ClaimBlockStf.produce) == type);
-        std.debug.assert(@TypeOf(ClaimBlockStf.produceAssumeDecoded) == type);
-        std.debug.assert(@hasDecl(TrackedBlockStf.BalExecutor, "init"));
-        std.debug.assert(!@hasDecl(ClaimBlockStf.BalExecutor, "init"));
+        std.debug.assert(Open.World.options.grows_on_touch);
+        std.debug.assert(!Closed.World.options.grows_on_touch);
+        std.debug.assert(@TypeOf(OpenBlockStf.produce) != type);
+        std.debug.assert(@TypeOf(OpenBlockStf.produceAssumeDecoded) != type);
+        std.debug.assert(@TypeOf(ClosedBlockStf.produce) == type);
+        std.debug.assert(@TypeOf(ClosedBlockStf.produceAssumeDecoded) == type);
+        std.debug.assert(@hasDecl(OpenBlockStf.BalExecutor, "init"));
+        std.debug.assert(!@hasDecl(ClosedBlockStf.BalExecutor, "init"));
     }
 }
 
@@ -260,9 +258,9 @@ test "exact VM closes the complete spec without revision state" {
         std.debug.assert(!@hasField(Cancun.Executor.Init, "revision"));
         std.debug.assert(!@hasField(Cancun.Executor, "revision_id"));
         std.debug.assert(Cancun.spec.transaction.max_initcode_size == evmz.eth.cancun.transaction.max_initcode_size);
-        std.debug.assert(Cancun.Executor == evmz.executor.ExecutorType(
+        std.debug.assert(Cancun.Executor == evmz.Executor(
             Cancun.spec,
-            Cancun.StateDomain.Execution,
+            Cancun.World,
             Cancun.compile_options,
         ));
     }
