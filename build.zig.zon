@@ -36,6 +36,7 @@
         "pkg/mpt",
         "pkg/rlp",
         "pkg/ssz",
+        "pkg/stdx",
         "README.md",
         "src",
     },

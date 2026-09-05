@@ -460,7 +460,7 @@ pub const Raw = struct {
         }
 
         while (stack_len < max_stack_len) {
-            const doubled = std.math.mul(usize, stack_len, 2) catch max_stack_len;
+            const doubled = stack_len *| 2;
             stack_len = @min(max_stack_len, @max(doubled, 1));
             const stack_bytes = std.math.mul(usize, @sizeOf(raw.Cursor), stack_len) catch
                 return error.DecodeAllocationLimitExceeded;

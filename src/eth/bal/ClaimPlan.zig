@@ -105,7 +105,7 @@ pub const ClaimPlan = struct {
 
         var storage_index: usize = 0;
         for (block_access_list, 0..) |account, account_index| {
-            const id: AccountId = @enumFromInt(@as(u32, @intCast(account_index)));
+            const id: AccountId = @enumFromInt(account_index);
             const storage_start = storage_index;
             var change_index: usize = 0;
             var read_index: usize = 0;
@@ -125,7 +125,7 @@ pub const ClaimPlan = struct {
                     read_index += 1;
                     break :slot value;
                 };
-                const storage_id: StorageId = @enumFromInt(@as(u32, @intCast(storage_index)));
+                const storage_id: StorageId = @enumFromInt(storage_index);
                 storage_accounts[storage_index] = id;
                 storage_slots[storage_index] = slot;
                 trie.hashedStorageKeyInto(slot, &storage_trie_keys[storage_index]);
@@ -249,7 +249,7 @@ pub const ClaimPlan = struct {
         };
         const offset = std.sort.binarySearch(u256, window, slot, S.compareStorageSlot) orelse
             return null;
-        return @enumFromInt(@as(u32, @intCast(range.start + offset)));
+        return @enumFromInt(range.start + offset);
     }
 
     pub fn allocationBytes(self: *const ClaimPlan) usize {

@@ -51,7 +51,8 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 .access_list_counts = access_list_counts,
                 .blob_hashes = view.blob_hashes,
             };
-            const gas_plan = validation_planner.gasPlan(validation_input);
+            const gas_plan = validation_planner.gasPlan(validation_input) catch
+                return .{ .rejected = .intrinsic_gas_too_low };
 
             if (validation_planner.validateBeforeAccount(validation_input, gas_plan)) |err|
                 return .{ .rejected = err };

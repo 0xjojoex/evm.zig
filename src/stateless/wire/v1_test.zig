@@ -59,6 +59,22 @@ test "stateless wire v1 normalizes payload words with field-specific byte order"
     try std.testing.expectEqual((@as(u256, 0x02) << 248) | 0x01, normalized.input.block.base_fee_per_gas);
 }
 
+test "stateless wire v1 derives the normalized requests hash" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var normalized = try wire.normalize(scratch, try smoke.smokeInput(scratch));
+    defer normalized.deinit(scratch);
+    const requests_hash = normalized.input.block.requests_hash orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(
+        u8,
+        &block_stf.empty_requests_hash,
+        &requests_hash,
+    );
+}
+
 test "stateless wire v1 decodes and authenticates public-key inputs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

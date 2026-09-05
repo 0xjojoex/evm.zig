@@ -1,11 +1,12 @@
 //! Typed execution-state transitions referenced by immutable trace metadata.
 
 const std = @import("std");
-const range = @import("../range.zig");
+const range = @import("stdx").range;
 
 const Allocator = std.mem.Allocator;
 
-pub const WordRange = range.Words;
+/// 32-byte words cut from a shared `[]u256` arena.
+pub const WordRange = range.Range(u256, u32);
 pub const ByteRange = range.Bytes;
 pub const MemoryWriteRange = range.Range(MemoryWrite, u32);
 
@@ -39,15 +40,15 @@ pub const ReturnDataTransition = struct {
     after: ByteRange = .{},
 };
 
-pub const StateCheckpoint = struct {
+pub const FrameCursor = struct {
     stack: WordRange = .{},
     return_data: ByteRange = .{},
     memory_size: u32 = 0,
 };
 
 pub const FrameTransition = struct {
-    initial: StateCheckpoint = .{},
-    parent: StateCheckpoint = .{},
+    initial: FrameCursor = .{},
+    parent: FrameCursor = .{},
     final_return_data: ByteRange = .{},
     final_memory_size: u32 = 0,
 };

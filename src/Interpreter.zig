@@ -469,8 +469,8 @@ pub const CallFrame = struct {
         }
         self.gas_reservoir -= from_reservoir;
         self.gas_left -= from_regular;
-        self.state_gas_from_gas_left = std.math.add(i64, self.state_gas_from_gas_left, from_regular) catch std.math.maxInt(i64);
-        self.state_gas_spent = std.math.add(i64, self.state_gas_spent, gas) catch std.math.maxInt(i64);
+        self.state_gas_from_gas_left +|= from_regular;
+        self.state_gas_spent +|= gas;
         return true;
     }
 
@@ -479,11 +479,11 @@ pub const CallFrame = struct {
     pub inline fn refillStateGas(self: *CallFrame, gas: i64) void {
         if (gas <= 0) return;
         const to_regular = @min(self.state_gas_from_gas_left, gas);
-        self.gas_left = std.math.add(i64, self.gas_left, to_regular) catch std.math.maxInt(i64);
+        self.gas_left +|= to_regular;
         self.state_gas_from_gas_left -= to_regular;
         const to_reservoir = gas - to_regular;
-        self.gas_reservoir = std.math.add(i64, self.gas_reservoir, to_reservoir) catch std.math.maxInt(i64);
-        self.state_gas_spent = std.math.sub(i64, self.state_gas_spent, gas) catch std.math.minInt(i64);
+        self.gas_reservoir +|= to_reservoir;
+        self.state_gas_spent -|= gas;
     }
 
     /// Repay merged state-gas spill from reservoir credit after a successful child.
@@ -897,15 +897,7 @@ test "captured tail memory exhaustion remains a resource error" {
         .PUSH1, 0x2a, .PUSH1, 0x20, .MSTORE,
         .STOP,
     });
-    const no_growth_allocator: std.mem.Allocator = .{
-        .ptr = undefined,
-        .vtable = &.{
-            .alloc = std.mem.Allocator.noAlloc,
-            .resize = std.mem.Allocator.noResize,
-            .remap = std.mem.Allocator.noRemap,
-            .free = std.mem.Allocator.noFree,
-        },
-    };
+    const no_growth_allocator = @import("stdx").no_growth_allocator;
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;

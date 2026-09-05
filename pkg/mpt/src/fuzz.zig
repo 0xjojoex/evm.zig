@@ -70,19 +70,17 @@ const Properties = struct {
         const unsorted_root = try trie.root(reversed[0..entry_count]);
         try expectRootEqual(sorted_root, unsorted_root);
 
-        const root_workspace_len = try mpt.rootWorkspaceSize(reversed[0..entry_count], true);
-        const root_buffer = try std.testing.allocator.alloc(u8, root_workspace_len);
+        const root_buffer_len = try mpt.rootBufferSize(reversed[0..entry_count], true);
+        const root_buffer = try std.testing.allocator.alloc(u8, root_buffer_len);
         defer std.testing.allocator.free(root_buffer);
-        var root_workspace = mpt.RootWorkspace.init(root_buffer);
-        const workspace_root = try trie.rootWithWorkspace(&root_workspace, reversed[0..entry_count]);
-        try expectRootEqual(sorted_root, workspace_root);
-        try std.testing.expect(root_workspace.peak_used_bytes <= root_workspace_len);
+        const buffer_root = try trie.rootWithBuffer(root_buffer, reversed[0..entry_count]);
+        try expectRootEqual(sorted_root, buffer_root);
 
         var updates: [max_entries]mpt.Update = undefined;
         for (entries[0..entry_count], 0..) |entry, index| {
             updates[index] = .{ .key = entry.key, .value = entry.value };
         }
-        const sparse_root = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, updates[0..entry_count]);
+        const sparse_root = try trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, updates[0..entry_count]);
         try expectRootEqual(sorted_root, sparse_root);
 
         try checkLeafProof(trie, entries[0]);
@@ -107,14 +105,14 @@ fn checkEmbeddedBranchUpdates(trie: mpt.DefaultTrie) !void {
 
     const root = mpt.StdKeccak256Context.keccak256(.{}, &encoded);
     const encoded_nodes = [_][]const u8{&encoded};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
 
     const updates = [_]mpt.Update{
         .{ .key = &key0, .value = &[_]u8{0x03} },
         .{ .key = &key1, .value = null },
     };
-    const updated = try trie.updateSorted(root, indexed.index(), &updates);
+    const updated = try trie.updateSorted(root, indexed, &updates);
     const expected = try trie.rootSorted(&.{.{
         .key = &key0,
         .value = &[_]u8{0x03},
@@ -125,7 +123,7 @@ fn checkEmbeddedBranchUpdates(trie: mpt.DefaultTrie) !void {
         .{ .key = &key0, .value = null },
         .{ .key = &key1, .value = null },
     };
-    const emptied = try trie.updateSorted(root, indexed.index(), &deletions);
+    const emptied = try trie.updateSorted(root, indexed, &deletions);
     try expectRootEqual(mpt.empty_root, emptied);
 }
 
@@ -168,14 +166,14 @@ fn checkHashedBranchUpdateDifferential(trie: mpt.DefaultTrie, smith: *std.testin
         &leaves[2],
         &leaves[3],
     };
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, &root_node);
     const update = [_]mpt.Update{.{
         .key = &keys[selected],
         .value = if (delete_selected) null else &replacement,
     }};
-    const actual = try trie.updateSorted(root_hash, indexed.index(), &update);
+    const actual = try trie.updateSorted(root_hash, indexed, &update);
 
     var expected_entries: [child_count]mpt.Entry = undefined;
     var expected_len: usize = 0;
@@ -224,9 +222,9 @@ fn checkLeafProof(trie: mpt.DefaultTrie, entry: mpt.Entry) !void {
     try expectRootEqual(single_entry_root, encoded_root);
 
     const encoded_nodes = [_][]const u8{encoded};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
-    switch (try trie.lookup(encoded_root, indexed.index(), entry.key)) {
+    switch (try indexed.lookup(encoded_root, entry.key)) {
         .present => |value| try std.testing.expectEqualSlices(u8, entry.value, value),
         .absent => return error.ExpectedPresent,
     }
@@ -236,7 +234,7 @@ fn checkLeafProof(trie: mpt.DefaultTrie, entry: mpt.Entry) !void {
         .key = entry.key,
         .value = &replacement_value,
     }};
-    const replaced = try trie.updateSorted(encoded_root, indexed.index(), &replacement);
+    const replaced = try trie.updateSorted(encoded_root, indexed, &replacement);
     const expected_replaced = try trie.rootSorted(&.{.{
         .key = entry.key,
         .value = &replacement_value,
@@ -244,7 +242,7 @@ fn checkLeafProof(trie: mpt.DefaultTrie, entry: mpt.Entry) !void {
     try expectRootEqual(expected_replaced, replaced);
 
     const deletion = [_]mpt.Update{.{ .key = entry.key, .value = null }};
-    const deleted = try trie.updateSorted(encoded_root, indexed.index(), &deletion);
+    const deleted = try trie.updateSorted(encoded_root, indexed, &deletion);
     try expectRootEqual(mpt.empty_root, deleted);
 }
 
@@ -287,27 +285,25 @@ fn checkFixedKeyEngineDifferential(trie: mpt.DefaultTrie, smith: *std.testing.Sm
     }
 
     const expected = try trie.rootSorted(entries[0..unique]);
-    const via_index = try trie.updateSorted(mpt.empty_root, mpt.empty_node_index, index_updates[0..unique]);
+    const via_index = try trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, index_updates[0..unique]);
     try expectRootEqual(expected, via_index);
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     const via_fixed_index = try trie.updateFixedSorted(
-        &region,
-        mpt.empty_root,
-        mpt.empty_node_index,
+        &arena,
+        mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
         fixed_updates[0..unique],
     );
     try expectRootEqual(expected, via_fixed_index);
 
-    var builder = try trie.catalogBuilder(mpt.empty_node_index);
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, mpt.WitnessIndex.empty);
     defer builder.deinit();
     const root_ref = try builder.authenticateRoot(mpt.empty_root);
     var catalog = try builder.finish();
     defer catalog.deinit();
-    const via_occurrence = try trie.updateCatalogSorted(
-        &region,
-        &catalog,
-        root_ref,
+    const via_occurrence = try trie.updateFixedSorted(
+        &arena,
+        mpt.catalogSource(&catalog, root_ref),
         fixed_updates[0..unique],
     );
     try expectRootEqual(expected, via_occurrence);
@@ -323,15 +319,15 @@ fn checkArbitraryProofDeterminism(trie: mpt.DefaultTrie, smith: *std.testing.Smi
     const encoded = encoded_storage[0..encoded_len];
     const key = key_storage[0..key_len];
     const encoded_nodes = [_][]const u8{encoded};
-    var indexed = try trie.indexNodes(&encoded_nodes);
+    var indexed = try trie.indexWitness(&encoded_nodes);
     defer indexed.deinit();
     const root = mpt.StdKeccak256Context.keccak256(.{}, encoded);
 
-    if (trie.lookup(root, indexed.index(), key)) |first| {
-        const second = try trie.lookup(root, indexed.index(), key);
+    if (indexed.lookup(root, key)) |first| {
+        const second = try indexed.lookup(root, key);
         try expectLookupEqual(first, second);
     } else |first_error| {
-        if (trie.lookup(root, indexed.index(), key)) |_| {
+        if (indexed.lookup(root, key)) |_| {
             return error.NondeterministicLookup;
         } else |second_error| {
             try std.testing.expectEqual(first_error, second_error);

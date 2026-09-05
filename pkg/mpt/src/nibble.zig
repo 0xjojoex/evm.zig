@@ -120,9 +120,9 @@ pub fn compactLen(path_len: usize) usize {
 
 /// Hex-prefix-encode `path` into `out`, flagged `terminal` for a leaf or not
 /// for an extension. Returns the written slice.
-pub fn encodeCompact(out: []u8, path: Path, terminal: bool) error{WorkspaceTooSmall}![]const u8 {
+pub fn encodeCompact(out: []u8, path: Path, terminal: bool) error{BufferTooSmall}![]const u8 {
     const encoded_len = compactLen(path.len);
-    if (out.len < encoded_len) return error.WorkspaceTooSmall;
+    if (out.len < encoded_len) return error.BufferTooSmall;
 
     const odd = path.len % 2 == 1;
     const flags: u8 = (@as(u8, @intFromBool(terminal)) << 1) |

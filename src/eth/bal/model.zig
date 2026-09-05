@@ -646,11 +646,11 @@ const max_aggregate_value_size = blk: {
 };
 
 fn saturatingAdd(lhs: usize, rhs: usize) usize {
-    return std.math.add(usize, lhs, rhs) catch std.math.maxInt(usize);
+    return lhs +| rhs;
 }
 
 fn saturatingMul(lhs: usize, rhs: usize) usize {
-    return std.math.mul(usize, lhs, rhs) catch std.math.maxInt(usize);
+    return lhs *| rhs;
 }
 
 fn deinitAccount(allocator: Allocator, account: *AccountChanges) void {

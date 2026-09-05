@@ -40,9 +40,9 @@ fn executeStandalone(
 }
 
 fn accountChange(
-    changes: evmz.state.TrackedState.ChangesView,
+    changes: evmz.state.OpenState.ChangesView,
     target: evmz.Address,
-) ?evmz.state.TrackedState.AccountChange {
+) ?evmz.state.AccountChange {
     var index: u32 = 0;
     while (index < changes.accounts.len()) : (index += 1) {
         const change = changes.accounts.at(index);
@@ -52,10 +52,10 @@ fn accountChange(
 }
 
 fn storageChange(
-    changes: evmz.state.TrackedState.ChangesView,
+    changes: evmz.state.OpenState.ChangesView,
     target: evmz.Address,
     key: u256,
-) ?evmz.state.TrackedState.StorageChange {
+) ?evmz.state.StorageChange {
     var index: u32 = 0;
     while (index < changes.storage_writes.len()) : (index += 1) {
         const change = changes.storage_writes.at(index);
@@ -86,10 +86,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
                 const fact = view.accounts.at(index);
                 if (!evmz.Address.eql(fact.address, self.address)) continue;
                 try std.testing.expect(fact.observation.code_read);
-                const loaded_account = switch (fact.current orelse return error.ExpectedLoadedAccount) {
-                    .loaded => |value| value,
-                    .absent, .exists_only => return error.ExpectedLoadedAccount,
-                };
+                const loaded_account = fact.current orelse return error.ExpectedLoadedAccount;
                 try std.testing.expectEqualSlices(u8, &self.code_hash, &loaded_account.code_hash);
                 return;
             }
@@ -154,7 +151,7 @@ test "Executor runs low-level standalone call" {
     const changes = executor.acceptedChanges();
     try std.testing.expectEqual(@as(u32, 1), changes.storage_writes.len());
     try std.testing.expectEqual(
-        evmz.state.TrackedState.StorageChange{
+        evmz.state.StorageChange{
             .address = contract,
             .key = 0,
             .value = 0x2a,
@@ -628,7 +625,9 @@ test "explicit backend commit persists then rebases the Executor overlay" {
         .rejected => return error.UnexpectedRejection,
     };
     defer executed.discardIfCurrent();
-    try memory.committer().commit(executed.changes());
+    var delta = try evmz.state.StateDelta.init(std.testing.allocator, executed.changes());
+    defer delta.deinit();
+    try memory.committer().commit(delta.view());
     executed.retain();
     executor.discardAccepted();
 
@@ -795,7 +794,7 @@ test "transaction STF uses comptime transaction gas policy" {
     default_execution.discard();
 
     const Overrides = struct {
-        fn intrinsicBaseGas(_: transaction.IntrinsicGasOptions) ?u64 {
+        fn intrinsicBaseGas(_: transaction.IntrinsicGasOptions) error{Overflow}!u64 {
             return 42_000;
         }
     };

@@ -8,7 +8,7 @@
 //!   - **EIP-161 empty / dead** - zero nonce, zero balance, empty code, with
 //!     storage deliberately ignored. Drives account existence, `EXTCODEHASH`
 //!     (EIP-1052), and the CALL and SELFDESTRUCT new-account charge, which
-//!     EIP-161 levies against a *dead* destination. `TrackedState` resolves
+//!     EIP-161 levies against a *dead* destination. `OpenWorld` resolves
 //!     such an account to absent on every fork past Spurious Dragon; see
 //!     `Spec.retains_empty_accounts`.
 //!   - **No state at all** - additionally requires an empty storage root, and

@@ -274,11 +274,16 @@ pub const OpInput = struct {
 };
 
 const DepositPrepared = struct {
-    gas_plan: evmz.transaction.GasPlan,
-    execution_gas: ?evmz.execution.ExecutionGas,
+    /// Null selects the failed-deposit inclusion path; see `resolveRunnableGas`.
+    runnable: ?RunnableGas,
     request: evmz.execution.ExecutionRequest,
     created_address: ?Address,
     deposit_nonce: u64,
+
+    const RunnableGas = struct {
+        plan: evmz.transaction.GasPlan,
+        execution: evmz.execution.ExecutionGas,
+    };
 };
 
 /// OP owns deposit policy; the shared transaction program owns active and
@@ -311,7 +316,7 @@ fn DepositTransition(comptime op_spec: OpSpec) type {
             var status: evmz.TxStatus = .invalid;
             var gas_result: evmz.transaction.ExecutionGasResult = .empty;
             var output: []const u8 = &.{};
-            if (prepared.execution_gas == null) {
+            if (prepared.runnable == null) {
                 try context.finalizeState();
             } else {
                 const result = (try context.runPayload(prepared.request)).result;
@@ -331,28 +336,26 @@ fn DepositTransition(comptime op_spec: OpSpec) type {
             // insufficient-balance top call, which op-revm's failed-deposit
             // recovery charges in full.
             const failed_deposit = status != .success and status != .revert;
-            return .{ .completed = .{
-                .status = status,
-                .gas = if (failed_deposit)
-                    .{ .used = tx.gas_limit, .block = .legacy(tx.gas_limit) }
-                else
-                    try depositGas(context, tx, prepared.gas_plan, gas_result),
-                .output = if (failed_deposit) &.{} else output,
-                .created_address = if (status == .success) prepared.created_address else null,
-                .source_hash = tx.source_hash,
-                .deposit_nonce = prepared.deposit_nonce,
-                .failed_deposit = failed_deposit,
-            } };
+            return .{
+                .completed = .{
+                    .status = status,
+                    // A success or revert status proves the payload ran, so the
+                    // runnable plan exists.
+                    .gas = if (failed_deposit)
+                        .{ .used = tx.gas_limit, .block = .legacy(tx.gas_limit) }
+                    else
+                        try depositGas(context, tx, prepared.runnable.?.plan, gas_result),
+                    .output = if (failed_deposit) &.{} else output,
+                    .created_address = if (status == .success) prepared.created_address else null,
+                    .source_hash = tx.source_hash,
+                    .deposit_nonce = prepared.deposit_nonce,
+                    .failed_deposit = failed_deposit,
+                },
+            };
         }
 
         fn prepare(context: *Context, tx: DepositTransaction) Error!DepositPrepared {
-            const gas_planner = Gas{};
-            const gas_plan = gas_planner.gasPlan(tx.input, tx.gas_limit, .{
-                .is_create = tx.to == null,
-                .value = tx.value,
-                .is_self_transfer = if (tx.to) |to| tx.from.eql(to) else false,
-            });
-            const execution_gas = resolveExecutionGas(gas_planner, tx, gas_plan);
+            const runnable = resolveRunnableGas(.{}, tx);
 
             var state = context.preparationState();
             const sender = state.accountSummary(tx.from) catch |err|
@@ -370,13 +373,12 @@ fn DepositTransition(comptime op_spec: OpSpec) type {
                 .create_recipient = created_address,
             });
             return .{
-                .gas_plan = gas_plan,
-                .execution_gas = execution_gas,
+                .runnable = runnable,
                 // Deposits execute at gas price zero and carry no blob hashes.
                 .request = evmz.transaction.executionRequest(
                     context.input().env.executionContext(.{ .origin = tx.from }),
                     message,
-                    execution_gas orelse evmz.execution.ExecutionGas.none,
+                    if (runnable) |gas| gas.execution else evmz.execution.ExecutionGas.none,
                 ),
                 .created_address = created_address,
                 .deposit_nonce = deposit_nonce,
@@ -410,19 +412,24 @@ fn DepositTransition(comptime op_spec: OpSpec) type {
         /// full gas limit. Returning null selects that inclusion path —
         /// including for the legacy system-transaction flag, which op-revm
         /// rejects in validation and then converts to a failed deposit in
-        /// `catch_error_failed_deposit`.
-        fn resolveExecutionGas(
+        /// `catch_error_failed_deposit`, and for a gas plan whose cost
+        /// arithmetic overflows.
+        fn resolveRunnableGas(
             gas_planner: Gas,
             tx: DepositTransaction,
-            gas_plan: evmz.transaction.GasPlan,
-        ) ?evmz.execution.ExecutionGas {
+        ) ?DepositPrepared.RunnableGas {
             if (tx.is_system_transaction) return null;
-            const execution_gas = gas_plan.execution orelse return null;
+            const plan = gas_planner.gasPlan(tx.input, tx.gas_limit, .{
+                .is_create = tx.to == null,
+                .value = tx.value,
+                .is_self_transfer = if (tx.to) |to| tx.from.eql(to) else false,
+            }) catch return null;
+            const execution = plan.execution orelse return null;
             if (tx.to == null and tx.input.len > gas_planner.maxInitcodeSize()) return null;
             if (op_spec.engine.transaction.total_gas_limit) |limit| {
                 if (tx.gas_limit > limit) return null;
             }
-            return execution_gas;
+            return .{ .plan = plan, .execution = execution };
         }
     };
 }
@@ -446,7 +453,6 @@ pub const OpExecutorError = evmz.executor.errors.Error;
 pub const OpBlockError = OpExecutorError || error{
     MissingCreateRecipient,
     Overflow,
-    TransactionCountOverflow,
 };
 
 pub const OpTransactError = OpExecutorError || error{
@@ -523,8 +529,7 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                 info.operatorFeeCharge(enveloped, variant.tx.gas_limit)
             else
                 0;
-            const rollup_charge = std.math.add(u256, l1_fee, operator_charge) catch
-                return error.Overflow;
+            const rollup_charge = try std.math.add(u256, l1_fee, operator_charge);
 
             const executable = switch (try EthereumTransition.prepare(context, variant.tx)) {
                 .rejected => |reason| return .{ .rejected = .{ .ethereum = reason } },
@@ -532,10 +537,16 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
             };
             var widened = executable;
             if (rollup_charge != 0) {
-                widened.settlement.upfront_debit = std.math.add(u256, widened.settlement.upfront_debit, rollup_charge) catch
-                    return error.Overflow;
-                widened.settlement.minimum_balance = std.math.add(u256, widened.settlement.minimum_balance, rollup_charge) catch
-                    return error.Overflow;
+                widened.settlement.upfront_debit = try std.math.add(
+                    u256,
+                    widened.settlement.upfront_debit,
+                    rollup_charge,
+                );
+                widened.settlement.minimum_balance = try std.math.add(
+                    u256,
+                    widened.settlement.minimum_balance,
+                    rollup_charge,
+                );
                 // Preparation validated only the unwidened requirement;
                 // re-check so a shortfall rejects the way op-revm's
                 // LackOfFundForMaxFee does instead of including an invalid
@@ -559,8 +570,11 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
             // cost and never credited anywhere by the engine, so the redirect
             // is one credit with no burn to undo.
             if (l1_fee != 0) try context.addBalance(rollup.l1_fee_recipient, l1_fee);
-            const base_fee_amount = std.math.mul(u256, context.input().env.base_fee, execution_result.gas.used) catch
-                return error.Overflow;
+            const base_fee_amount = try std.math.mul(
+                u256,
+                context.input().env.base_fee,
+                execution_result.gas.used,
+            );
             if (base_fee_amount != 0) try context.addBalance(rollup.base_fee_recipient, base_fee_amount);
             var operator_fee_paid: u256 = 0;
             if (op_spec.operator_fee and operator_charge != 0) {
@@ -620,9 +634,11 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                         var executed = executed_value;
                         defer executed.discardIfCurrent();
                         const view = executed.view();
-                        const transaction_count =
-                            std.math.add(u64, self.transaction_count, 1) catch
-                                return error.TransactionCountOverflow;
+                        const transaction_count = try std.math.add(
+                            u64,
+                            self.transaction_count,
+                            1,
+                        );
                         const included: OpIncludedTransaction = .{
                             .output = view.output.*,
                             .cumulative_transactions = transaction_count,

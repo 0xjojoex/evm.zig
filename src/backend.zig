@@ -1,21 +1,25 @@
 //! Block-lifetime state capability consumed by higher-level transition drivers.
+//!
+//! Two arms: a witness authenticated into a catalog, which both execution-state
+//! lanes read from and commit against, and an external integration that owns
+//! its canonical state and consumes a detached `StateDelta`. Root derivation
+//! is `eth.commit.stateRoot`, which switches on these arms by whether the
+//! lane's world authenticated its parents.
 
 const std = @import("std");
 
 const Committer = @import("./state/Committer.zig");
 const Reader = @import("./state/Reader.zig");
 const RootProvider = @import("./state/RootProvider.zig");
-const TrackedState = @import("./state/TrackedState.zig");
+const StateDelta = @import("./state/StateDelta.zig");
 const MemoryStore = @import("./state/MemoryStore.zig");
-const witness_reader = @import("./stateless/WitnessReader.zig");
+const WitnessReader = @import("./stateless/WitnessReader.zig");
+const trie = @import("./eth/trie.zig");
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
-const ChangesView = TrackedState.ChangesView;
-const DenseCommitView = @import("./stateless/BlockState.zig").CommitView;
-const ParentCode = @import("./stateless/artifacts.zig").ParentCode;
+const ParentCode = @import("./eth/bal/claim_artifacts.zig").ParentCode;
 
 pub const Backend = union(enum) {
-    witness: witness_reader.Indexed,
-    catalog_witness: witness_reader.Catalog,
+    witness: WitnessReader,
     external: External,
 
     pub const External = struct {
@@ -24,23 +28,15 @@ pub const Backend = union(enum) {
         committer: ?Committer = null,
     };
 
-    /// `allocator` and witness byte slices must outlive the returned block-lifetime backend.
+    /// Authenticate `state_root` over the witness nodes. `allocator` and the
+    /// byte slices must outlive the returned block-lifetime backend.
     pub fn fromWitness(
         allocator: std.mem.Allocator,
         state_root: [32]u8,
         nodes: []const []const u8,
         codes: []const []const u8,
     ) !Backend {
-        return .{ .witness = try witness_reader.Indexed.initFromNodes(allocator, state_root, nodes, codes) };
-    }
-
-    pub fn fromCatalogWitness(
-        allocator: std.mem.Allocator,
-        state_root: [32]u8,
-        nodes: []const []const u8,
-        codes: []const []const u8,
-    ) !Backend {
-        return .{ .catalog_witness = try witness_reader.Catalog.initFromNodes(allocator, state_root, nodes, codes) };
+        return .{ .witness = try WitnessReader.initFromNodes(allocator, state_root, nodes, codes) };
     }
 
     /// Convenience wiring for the in-memory store used by fixtures, examples,
@@ -60,7 +56,6 @@ pub const Backend = union(enum) {
     pub fn deinit(self: *Backend) void {
         switch (self.*) {
             .witness => |*witness| witness.deinit(),
-            .catalog_witness => |*witness| witness.deinit(),
             .external => {},
         }
         self.* = undefined;
@@ -69,21 +64,19 @@ pub const Backend = union(enum) {
     pub fn reader(self: *Backend) Reader {
         return switch (self.*) {
             .witness => |*witness| witness.reader(),
-            .catalog_witness => |*witness| witness.reader(),
             .external => |external| external.reader,
         };
     }
 
     /// Batch-authenticate a validated BAL plan when this is a witness backend.
-    /// Stateful/external backends return null and retain their canonical reader.
+    /// External backends return null and retain their canonical reader.
     pub fn authenticateClaimPlan(
         self: *Backend,
         allocator: std.mem.Allocator,
         plan: ClaimPlan,
-    ) !?witness_reader.ParentFacts {
+    ) !?WitnessReader.ParentFacts {
         return switch (self.*) {
             .witness => |*witness| try witness.authenticateClaimPlan(allocator, plan),
-            .catalog_witness => |*witness| try witness.authenticateClaimPlan(allocator, plan),
             .external => null,
         };
     }
@@ -91,70 +84,40 @@ pub const Backend = union(enum) {
     pub fn parentCodes(self: *const Backend) ?[]const ParentCode {
         return switch (self.*) {
             .witness => |*witness| witness.parentCodes(),
-            .catalog_witness => |*witness| witness.parentCodes(),
             .external => null,
         };
     }
 
-    pub fn stateRootAfterChanges(self: *Backend, allocator: std.mem.Allocator, changes: ChangesView) ![32]u8 {
+    /// Whether `commit` consumes the accepted delta: only an external backend
+    /// with a committer writes anything; a witness owns no canonical state.
+    pub fn commitsDelta(self: *const Backend) bool {
         return switch (self.*) {
-            .witness => |*witness| witness.stateRootAfterChanges(allocator, changes),
-            .catalog_witness => |*witness| witness.stateRootAfterChanges(allocator, changes),
-            .external => |external| external.root_provider.afterChanges(allocator, changes),
+            .witness => false,
+            .external => |external| external.committer != null,
         };
     }
 
-    /// Only the dense witness lane keeps state projected as ClaimPlan IDs, so
-    /// an external backend has no commit view to root.
-    pub fn stateRootAfterDenseCommit(
-        self: *Backend,
-        allocator: std.mem.Allocator,
-        commit_view: DenseCommitView,
-    ) ![32]u8 {
-        return switch (self.*) {
-            .catalog_witness => |*witness| witness.stateRootAfterDenseCommit(allocator, commit_view),
-            .witness => error.InvalidWitness,
-            .external => error.InvalidWitness,
-        };
-    }
-
-    pub fn commit(self: *Backend, changes: ChangesView) !void {
+    /// `delta` is required exactly when `commitsDelta()`.
+    pub fn commit(self: *Backend, delta: ?StateDelta.View) !void {
         switch (self.*) {
             .witness => {},
-            .catalog_witness => {},
-            .external => |external| if (external.committer) |committer| try committer.commit(changes),
+            .external => |external| if (external.committer) |committer| try committer.commit(delta.?),
         }
     }
 };
 
-test "witness backend releases its owned node index" {
-    const trie = @import("./eth/trie.zig");
-    const nodes = [_][]const u8{"encoded witness node"};
-    var backend = try Backend.fromWitness(
-        std.testing.allocator,
-        trie.empty_root_hash,
-        &nodes,
-        &.{},
-    );
-    backend.deinit();
-}
-
-test "catalog witness authenticates its root during construction" {
-    const trie = @import("./eth/trie.zig");
+test "witness backend authenticates its root during construction" {
     const missing_root = [_]u8{0xab} ** 32;
-
-    var indexed = try Backend.fromWitness(std.testing.allocator, missing_root, &.{}, &.{});
-    indexed.deinit();
     try std.testing.expectError(
         error.InvalidNode,
-        Backend.fromCatalogWitness(std.testing.allocator, missing_root, &.{}, &.{}),
+        Backend.fromWitness(std.testing.allocator, missing_root, &.{}, &.{}),
     );
 
-    var empty_catalog = try Backend.fromCatalogWitness(
+    var empty = try Backend.fromWitness(
         std.testing.allocator,
         trie.empty_root_hash,
         &.{},
         &.{},
     );
-    empty_catalog.deinit();
+    empty.deinit();
 }

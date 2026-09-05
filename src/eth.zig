@@ -11,8 +11,6 @@
 pub const revision = @import("eth/revision.zig");
 pub const spec = @import("eth/spec.zig");
 pub const bal = @import("eth/bal.zig");
-pub const bal_diff = @import("eth/bal/diff.zig");
-pub const bal_view = @import("eth/bal/ClaimView.zig");
 pub const instruction = @import("eth/instruction.zig");
 pub const transaction = @import("eth/transaction.zig");
 pub const transaction_prepare = @import("transaction/prepare.zig");
@@ -21,6 +19,7 @@ pub const precompile = @import("eth/precompile.zig");
 pub const system = @import("eth/system.zig");
 pub const header = @import("eth/header.zig");
 pub const trie = @import("eth/trie.zig");
+pub const commit = @import("eth/commit.zig");
 pub const block_stf = @import("eth/block_stf.zig");
 pub const block_rules = @import("eth/block_rules.zig");
 pub const receipt = @import("eth/receipt.zig");

@@ -7,9 +7,12 @@
 
 const std = @import("std");
 
-const claim_plan = @import("../eth/bal/ClaimPlan.zig");
-const trie = @import("../eth/trie.zig");
+const address = @import("../../address.zig");
+const bal = @import("model.zig");
+const claim_plan = @import("ClaimPlan.zig");
+const trie = @import("../trie.zig");
 const mpt = @import("mpt");
+const rlp = @import("rlp");
 
 const Allocator = std.mem.Allocator;
 const ParentFacts = @This();
@@ -67,9 +70,8 @@ pub fn authenticate(
     for (plan.account_trie_order, 0..) |id, index| {
         account_keys[index] = plan.accountTrieKey(id);
     }
-    var workspace: mpt.BindWorkspace = .{};
-    try mpt.bindAssumeSorted(
-        catalog.topology,
+    var workspace: mpt.Catalog.BindWorkspace = .{};
+    try catalog.topology.bindAssumeSorted(
         catalog.stateCatalogRoot(),
         account_keys,
         account_results,
@@ -94,7 +96,7 @@ pub fn authenticate(
     const storage_keys = keys[0..plan.storageCount()];
     const storage_results = results[0..plan.storageCount()];
     for (accounts, 0..) |account, account_index| {
-        const id: claim_plan.AccountId = @enumFromInt(@as(u32, @intCast(account_index)));
+        const id: claim_plan.AccountId = @enumFromInt(account_index);
         const order = plan.storageTrieOrder(id);
         if (order.len == 0) continue;
         const parent = switch (account.parent) {
@@ -109,8 +111,7 @@ pub fn authenticate(
         for (order, 0..) |storage_id, offset| {
             storage_keys[begin + offset] = plan.storageTrieKey(storage_id);
         }
-        try mpt.bindAssumeSorted(
-            catalog.topology,
+        try catalog.topology.bindAssumeSorted(
             try catalog.storageCatalogRoot(parent.storage_root),
             storage_keys[begin..end],
             storage_results[begin..end],
@@ -146,8 +147,6 @@ test "catalog records bind typed account and storage facts without another topol
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const address = @import("../address.zig");
-    const bal = @import("../eth/bal/model.zig");
     const target = address.addr(1);
     const slot: u256 = 7;
     const storage_key = trie.hashedStorageKey(slot);
@@ -158,7 +157,7 @@ test "catalog records bind typed account and storage facts without another topol
     const account_leaf = try testLeafNode(scratch, trie.hashedAddressKey(target), account_value);
     const state_root = mpt.StdKeccak256Context.keccak256(.{}, account_leaf);
     const nodes = [_][]const u8{ account_leaf, storage_leaf };
-    var indexed = try trie.indexNodes(scratch, &nodes);
+    var indexed = try trie.indexWitness(scratch, &nodes);
     defer indexed.deinit();
     var catalog = try trie.buildWitnessCatalog(scratch, state_root, indexed);
     defer catalog.deinit();
@@ -182,12 +181,10 @@ test "catalog records bind typed account and storage facts without another topol
 }
 
 test "catalog records inherit absence without resolving storage" {
-    const address = @import("../address.zig");
-    const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(2), .storage_reads = &.{7} }};
     var plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     defer plan.deinit(std.testing.allocator);
-    var indexed = try trie.indexNodes(std.testing.allocator, &.{});
+    var indexed = try trie.indexWitness(std.testing.allocator, &.{});
     defer indexed.deinit();
     var catalog = try trie.buildWitnessCatalog(std.testing.allocator, trie.empty_root_hash, indexed);
     defer catalog.deinit();
@@ -199,12 +196,10 @@ test "catalog records inherit absence without resolving storage" {
 }
 
 test "authentication workspace is transient and facts reclaim in LIFO order" {
-    const address = @import("../address.zig");
-    const bal = @import("../eth/bal/model.zig");
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(2), .storage_reads = &.{7} }};
     var plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     defer plan.deinit(std.testing.allocator);
-    var indexed = try trie.indexNodes(std.testing.allocator, &.{});
+    var indexed = try trie.indexWitness(std.testing.allocator, &.{});
     defer indexed.deinit();
     var catalog = try trie.buildWitnessCatalog(std.testing.allocator, trie.empty_root_hash, indexed);
     defer catalog.deinit();
@@ -220,8 +215,6 @@ test "authentication workspace is transient and facts reclaim in LIFO order" {
 test "catalog records clean every allocation failure position" {
     const Harness = struct {
         fn run(allocator: Allocator) !void {
-            const address = @import("../address.zig");
-            const bal = @import("../eth/bal/model.zig");
             const target = address.addr(1);
             const account_value = try trie.accountValueFrom(allocator, .{ .balance = 1 });
             defer allocator.free(account_value);
@@ -229,7 +222,7 @@ test "catalog records clean every allocation failure position" {
             defer allocator.free(leaf);
             const root = mpt.StdKeccak256Context.keccak256(.{}, leaf);
             const nodes = [_][]const u8{leaf};
-            var indexed = try trie.indexNodes(allocator, &nodes);
+            var indexed = try trie.indexWitness(allocator, &nodes);
             defer indexed.deinit();
             var catalog = try trie.buildWitnessCatalog(allocator, root, indexed);
             defer catalog.deinit();
@@ -244,7 +237,6 @@ test "catalog records clean every allocation failure position" {
 }
 
 fn testLeafNode(allocator: Allocator, key: [32]u8, value: []const u8) ![]u8 {
-    const rlp = @import("rlp");
     var compact: [33]u8 = undefined;
     compact[0] = 0x20;
     @memcpy(compact[1..], &key);

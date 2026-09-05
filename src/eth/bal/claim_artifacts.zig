@@ -1,12 +1,15 @@
-//! Non-MPT artifacts owned by the dense stateless execution lane.
+//! Non-MPT artifacts of the execution-state machine: the code store every
+//! `state.WorldState` carries, and the parent-code shape the closed world
+//! hands it at admission.
 //!
 //! Parent code bytes remain borrowed from the sealed witness and are indexed
 //! once by full hash. Code created during execution is copied into stable
 //! block-lifetime storage.
 
 const std = @import("std");
-const crypto = @import("../crypto.zig");
-const SparseHashMap = @import("../state/sparse_hash_map.zig").Auto;
+const crypto = @import("../../crypto.zig");
+const CodeView = @import("../../state.zig").CodeView;
+const SparseHashMap = @import("../../state/sparse_hash_map.zig").Auto;
 
 const Allocator = std.mem.Allocator;
 const Hash = [32]u8;
@@ -25,11 +28,6 @@ pub const ParentCode = struct {
     }
 };
 
-pub const CodeView = struct {
-    code_hash: Hash,
-    bytes: []const u8,
-};
-
 pub const IntroducedCodeId = enum(u32) { _ };
 
 /// Stable block-lifetime index into `CodeStore`. Parent and introduced code
@@ -44,7 +42,7 @@ pub const CodeRef = enum(u32) {
 
     pub fn fromIndex(index: usize) CodeRef {
         std.debug.assert(index < CodeRef.max_indexed);
-        return @enumFromInt(@as(u32, @intCast(index)));
+        return @enumFromInt(index);
     }
 };
 
@@ -117,6 +115,14 @@ pub const CodeStore = struct {
         if (self.introduced.getEntryId(hash)) |id|
             return .fromIndex(self.parent.items.len + @intFromEnum(id));
         return .missing;
+    }
+
+    /// Bind only against the witness's parent code: `.empty`, a parent index,
+    /// or null when the store would have to search introduced code.
+    pub fn bindParent(self: *const CodeStore, hash: Hash) ?CodeRef {
+        if (std.mem.eql(u8, &hash, &crypto.keccak256_empty)) return .empty;
+        if (self.parentIndex(hash)) |index| return .fromIndex(index);
+        return null;
     }
 
     /// Direct-index a previously bound commitment. A missing reference is a

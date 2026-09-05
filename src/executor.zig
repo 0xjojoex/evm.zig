@@ -23,7 +23,9 @@ const std = @import("std");
 
 const evmz = @import("./evm.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
-const checkpoint_guard = @import("./executor/checkpoint.zig");
+const Checkpoint = @import("state.zig").Checkpoint;
+const LogBuffer = @import("./state/LogBuffer.zig");
+const CheckpointGuard = @import("./executor/checkpoint.zig").Guard;
 const frame_io = @import("./frame_io.zig");
 const FrameStore = @import("./executor/FrameStore.zig");
 const HostCallbacks = @import("./executor/host.zig").Callbacks;
@@ -86,15 +88,12 @@ const ScopeRoot = struct {
     }
 };
 
-/// Construct the public initializer for one execution-state implementation.
-/// Implementations with a semantic empty baseline may omit `state`;
-/// authenticated dense state keeps
-/// the field structurally required.
-fn ExecutorInitType(comptime Execution: type) type {
-    const StateInit = Execution.Init;
-    if (Execution.default_init) |default_state| {
+/// An open world may start empty or load through a reader. Other worlds must
+/// arrive as an admitted state, whose ownership transfers to the executor.
+fn ExecutorInitType(comptime World: type) type {
+    if (World == evmz.state.OpenWorld) {
         return struct {
-            state: StateInit = default_state,
+            state: struct { reader: ?evmz.state.Reader = null } = .{},
             /// Caller-owned derived-artifact service. Its allocation, I/O,
             /// synchronization, and capacity policy are outside executor bounds.
             prepared_code_backend: ?prepared_code.Backend = null,
@@ -103,7 +102,7 @@ fn ExecutorInitType(comptime Execution: type) type {
         };
     }
     return struct {
-        state: StateInit,
+        state: evmz.state.WorldState(World),
         prepared_code_backend: ?prepared_code.Backend = null,
         block_hash_source: ?BlockHashSource = null,
         reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
@@ -138,39 +137,40 @@ pub const CompileOptions = struct {
     step_capture: bool = false,
 };
 
-/// Compile one exact executor over an execution-state implementation.
-///
-/// The domain defines how its executor state is constructed. Admission,
-/// authenticated facts, and commitment construction remain outside this
-/// executor boundary.
+/// Compile one exact executor over `WorldState(World)`. Admission, authenticated
+/// facts, and commitment construction remain outside this executor boundary.
 pub fn ExecutorType(
     comptime spec: Spec,
-    comptime ExecutionState: type,
+    comptime World: type,
     comptime options_value: CompileOptions,
 ) type {
-    comptime ExecutionState.checkSpec(spec);
+    if (World == evmz.eth.bal.ClosedWorld and !spec.block.block_access_list) {
+        @compileError("ClosedWorld requires a block-access-list specification");
+    }
 
     return struct {
         const Executor = @This();
 
         const BoundInterpreter = Interpreter.Interpreter(spec);
 
-        const callbacks = HostCallbacks(spec, ExecutionState, options_value);
+        const callbacks = HostCallbacks(spec, World, options_value);
 
-        pub const State = ExecutionState.State;
+        pub const State = evmz.state.WorldState(World);
 
-        pub const StateAddress = ExecutionState.StateAddress;
+        /// Both worlds key rows by `AddressWord`, the form the interpreter
+        /// already holds; `Address` enters only from transaction fields.
+        pub const StateAddress = AddressWord;
 
-        pub const BranchCheckpoint = State.BranchCheckpoint;
+        pub const BranchSnapshot = State.BranchSnapshot;
 
-        pub const Init = ExecutorInitType(ExecutionState);
+        pub const Init = ExecutorInitType(World);
 
         pub inline fn stateAddress(value: Address) StateAddress {
-            return ExecutionState.stateAddress(value);
+            return .fromAddress(value);
         }
 
         pub inline fn executionAddress(value: AddressWord) StateAddress {
-            return ExecutionState.executionAddress(value);
+            return value;
         }
 
         allocator: std.mem.Allocator,
@@ -184,8 +184,6 @@ pub fn ExecutorType(
         next_transaction_generation: u64 = 0,
         active_block_execution_generation: ?u64 = null,
         next_block_execution_generation: u64 = 0,
-        checkpoint_top: usize = 0,
-        next_checkpoint_id: usize = 0,
         block_hash_source: ?BlockHashSource = null,
         reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
         prepared_code_backend: ?prepared_code.Backend,
@@ -194,11 +192,14 @@ pub fn ExecutorType(
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
 
-        /// Construct and take exclusive ownership of domain state.
+        /// Construct and take exclusive ownership of the execution state.
         pub fn init(allocator: std.mem.Allocator, options: Init) Executor {
             return .{
                 .allocator = allocator,
-                .state = ExecutionState.init(spec, allocator, options.state),
+                .state = if (World == evmz.state.OpenWorld)
+                    State.init(allocator, World.initForSpec(allocator, spec, options.state.reader))
+                else
+                    options.state,
                 .frame_store = .{ .stable_metadata_capacity = default_max_live_frames },
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = .init(allocator),
@@ -213,7 +214,7 @@ pub fn ExecutorType(
         pub fn deinit(self: *Executor) void {
             std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.frame_store.len() == 0);
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             std.debug.assert(self.prepared_code_execution_depth == 0);
             std.debug.assert(self.prepared_code_execution == null);
@@ -235,7 +236,7 @@ pub fn ExecutorType(
         /// attempts, `transaction/runtime.zig` resolves `transaction` ones
         /// through an `Executed` handle.
         const Attempt = struct {
-            id: State.AttemptId,
+            id: Checkpoint.AttemptId,
             mode: InstrumentationMode,
             owner: Owner,
 
@@ -251,26 +252,25 @@ pub fn ExecutorType(
                 nonce_advanced: bool = false,
                 payload_started: bool = false,
             };
-        };
 
-        /// The family row inside the live attempt. Callers that may run under a
-        /// manual attempt must test `hasCurrentTransaction` first.
-        fn transactionAttempt(self: *Executor) *Attempt.Transaction {
-            const attempt = if (self.attempt) |*value| value else unreachable;
-            return switch (attempt.owner) {
-                .manual => unreachable,
-                .transaction => |*value| value,
-            };
-        }
+            /// The family row inside the live attempt. Callers that may run under a
+            /// manual attempt must test `hasCurrentTransaction` first.
+            fn transaction(self: *Attempt) *Transaction {
+                return switch (self.owner) {
+                    .manual => unreachable,
+                    .transaction => |*value| value,
+                };
+            }
+        };
 
         /// Callback-scoped semantic view of one sealed transition.
         /// State attempt identity and resolution remain private to Executor.
         pub const Observation = struct {
-            log_view: State.LogView,
+            log_view: LogBuffer.View,
             changes_view: State.ChangesView,
             observations_view: State.ObservationsView,
 
-            pub fn logs(self: Observation) State.LogView {
+            pub fn logs(self: Observation) LogBuffer.View {
                 return self.log_view;
             }
 
@@ -289,7 +289,7 @@ pub fn ExecutorType(
             mode: InstrumentationMode,
         ) !void {
             std.debug.assert(self.execution_context == null);
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(self.attempt == null);
             assertExecutionMode(mode);
             const state_attempt_id = if (mode.observesState())
@@ -396,7 +396,7 @@ pub fn ExecutorType(
         }
 
         pub fn advanceTransactionNonce(self: *Executor, message: Message) !void {
-            const runtime_state = self.transactionAttempt();
+            const runtime_state = self.attempt.?.transaction();
             std.debug.assert(runtime_state.phase == .active);
             std.debug.assert(!runtime_state.nonce_advanced);
             std.debug.assert(!runtime_state.payload_started);
@@ -453,7 +453,7 @@ pub fn ExecutorType(
         }
 
         fn commitTransactionWithObserver(self: *Executor, observer: anytype) !void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             try self.finalizeTransactionState();
             try self.resolveManualTransaction(observer);
@@ -470,18 +470,10 @@ pub fn ExecutorType(
         }
 
         fn retainStateTransitionWithObserver(self: *Executor, observer: anytype) !void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             if (self.execution_context == null) return;
             try self.resolveManualTransaction(observer);
-        }
-
-        /// Restore a caller-owned branch checkpoint and discard the transition.
-        pub fn rollbackTransaction(self: *Executor, checkpoint_state: *BranchCheckpoint) void {
-            std.debug.assert(self.checkpoint_top == 0);
-            std.debug.assert(!self.hasCurrentTransaction());
-            self.restoreBranch(checkpoint_state);
-            self.discardStateTransition();
         }
 
         /// Discard the active manual transition and close its execution scope.
@@ -490,7 +482,7 @@ pub fn ExecutorType(
         /// no-op after the transition has already been committed, retained, or
         /// discarded.
         pub fn discardStateTransition(self: *Executor) void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             if (self.execution_context == null) {
                 std.debug.assert(self.attempt == null);
@@ -527,7 +519,7 @@ pub fn ExecutorType(
         /// Close whichever execution scope belongs to a resolved transaction
         /// attempt, or clear an execution-less attempt's retained journal.
         fn closeTransactionLifetime(self: *Executor) void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(self.hasCurrentTransaction());
             std.debug.assert(!self.state.scopeActive());
             self.execution_context = null;
@@ -560,7 +552,7 @@ pub fn ExecutorType(
 
                 pub const View = struct {
                     output: *const Output,
-                    logs: State.LogView,
+                    logs: LogBuffer.View,
                 };
 
                 /// Borrow family output and logs while this result is unresolved.
@@ -578,7 +570,7 @@ pub fn ExecutorType(
                 }
 
                 /// Borrow transaction logs while this result is unresolved.
-                pub fn logs(self: Execution) State.LogView {
+                pub fn logs(self: Execution) LogBuffer.View {
                     _ = self.state();
                     return self.executor.state.pendingView().logs();
                 }
@@ -629,13 +621,13 @@ pub fn ExecutorType(
                 /// This is the idempotent cleanup operation for `defer`.
                 pub fn discardIfCurrent(self: Execution) void {
                     if (!self.executor.hasCurrentTransaction()) return;
-                    const current = self.executor.transactionAttempt();
+                    const current = self.executor.attempt.?.transaction();
                     if (current.generation != self.generation or current.phase != .pending) return;
                     self.discard();
                 }
 
                 fn state(self: Execution) *Attempt.Transaction {
-                    const state_value = self.executor.transactionAttempt();
+                    const state_value = self.executor.attempt.?.transaction();
                     std.debug.assert(state_value.generation == self.generation);
                     std.debug.assert(state_value.phase == .pending);
                     return state_value;
@@ -643,83 +635,27 @@ pub fn ExecutorType(
             };
         }
 
-        // Checkpoints. `ExecutionCheckpoint` is the public id-nested token; `CheckpointGuard`
-        // is the interior one whose ownership migrates into a frame-store row.
-
-        /// Scope-bound execution checkpoint paired with one trace/BAL lifecycle.
-        ///
-        /// This journal-backed token must be opened and closed inside one active
-        /// transaction scope. It never finalizes or closes that scope. The owning
-        /// transaction runtime can span prelude writes and payload execution;
-        /// broader block phases still use their own STF/backend lifetime.
-        /// Treat this token as move-only.
-        pub const ExecutionCheckpoint = struct {
-            executor: *Executor,
-            journal_checkpoint: State.Checkpoint,
-            id: usize,
-            parent_id: usize,
-            open: bool = true,
-
-            pub fn commit(self: *ExecutionCheckpoint) void {
-                self.validateClose();
-                self.executor.state.commitCheckpoint(self.journal_checkpoint);
-                self.finishClose();
-            }
-
-            pub fn restore(self: *ExecutionCheckpoint) void {
-                self.validateClose();
-                self.executor.state.revertToCheckpoint(self.journal_checkpoint);
-                self.finishClose();
-            }
-
-            pub fn deinit(self: *ExecutionCheckpoint) void {
-                if (self.open) {
-                    std.debug.assert(self.executor.checkpoint_top == self.id);
-                    self.executor.state.revertToCheckpoint(self.journal_checkpoint);
-                    self.finishClose();
-                }
-                self.* = undefined;
-            }
-
-            fn validateClose(self: *const ExecutionCheckpoint) void {
-                std.debug.assert(self.open);
-                std.debug.assert(self.executor.checkpoint_top == self.id);
-            }
-
-            fn finishClose(self: *ExecutionCheckpoint) void {
-                self.open = false;
-                self.executor.checkpoint_top = self.parent_id;
-            }
-        };
+        /// Caller-owned journal checkpoint. Opened only inside an active
+        /// transaction scope; it never finalizes or closes that scope, so the
+        /// owning runtime can span prelude writes and payload execution.
+        pub const ExecutionCheckpoint = CheckpointGuard(State);
 
         /// Open one journal-backed checkpoint inside the active execution scope.
         pub fn checkpoint(self: *Executor) ExecutionCheckpoint {
             self.requireTransactionScope();
-            std.debug.assert(self.next_checkpoint_id < std.math.maxInt(usize));
-            const id = self.next_checkpoint_id + 1;
-            const parent_id = self.checkpoint_top;
-            const journal_checkpoint = self.state.checkpoint();
-            self.next_checkpoint_id = id;
-            self.checkpoint_top = id;
-            return .{
-                .executor = self,
-                .journal_checkpoint = journal_checkpoint,
-                .id = id,
-                .parent_id = parent_id,
-            };
+            return .begin(&self.state);
         }
 
-        /// Capture the mutable branch independently from execution checkpoints.
-        pub fn branchCheckpoint(self: *Executor) !BranchCheckpoint {
-            return self.state.branchCheckpoint();
+        /// Copy the accepted branch so a later `restoreBranch` can roll back
+        /// across whole transactions. Allocates; only valid between them.
+        pub fn branchSnapshot(self: *Executor) !BranchSnapshot {
+            return self.state.branchSnapshot();
         }
 
-        /// Restore the mutable branch independently from execution checkpoints.
-        pub fn restoreBranch(self: *Executor, checkpoint_state: *BranchCheckpoint) void {
-            self.state.restoreBranch(checkpoint_state);
+        /// Swap a snapshot back in, discarding any transaction in flight.
+        pub fn restoreBranch(self: *Executor, snapshot: *BranchSnapshot) void {
+            self.state.restoreBranch(snapshot);
         }
-
-        const CheckpointGuard = checkpoint_guard.Guard(State);
 
         // Ambient per-execution state. Each of these is saved and restored by hand at
         // every entrypoint that owns it, rather than inherited from a scope value.
@@ -761,15 +697,12 @@ pub fn ExecutorType(
             self.prepared_code_scratch.reset();
         }
 
-        /// Reuse prepared code and cleared transaction containers for one
-        /// sequential protocol-call batch.
+        /// Reuse prepared code for one sequential protocol-call batch.
         pub fn beginSystemCallBatch(self: *Executor) void {
             self.beginPreparedCodeExecution();
-            self.state.beginTransactionCapacityReuse();
         }
 
         pub fn endSystemCallBatch(self: *Executor) void {
-            self.state.endTransactionCapacityReuse();
             self.endPreparedCodeExecution();
         }
 
@@ -842,13 +775,20 @@ pub fn ExecutorType(
             return output_data.ptr == last.ptr;
         }
 
-        // Tracked-state access. Thin passthroughs that only widen `Address` to `StateAddress`.
+        // State access. Thin passthroughs that only convert `Address` to the row key.
 
         pub fn traceAccountAccess(self: *Executor, account_address: Address) !void {
             try self.state.observeAccountAccess(stateAddress(account_address));
         }
 
-        pub fn reserveAcceptedAccessHint(self: *Executor, hint: State.AccessHint) !void {
+        /// Capacity advice for the current transaction attempt. Whether there
+        /// is anything to reserve is the world's decision, made at comptime.
+        pub fn reserveAccessHint(self: *Executor, hint: evmz.state.AccessHint) !void {
+            try self.state.reserveAccessHint(hint);
+        }
+
+        /// Capacity advice for the accepted branch.
+        pub fn reserveAcceptedAccessHint(self: *Executor, hint: evmz.state.AccessHint) !void {
             try self.state.reserveAcceptedAccessHint(hint);
         }
 
@@ -865,7 +805,7 @@ pub fn ExecutorType(
         }
 
         /// Return account metadata already present in tracked state.
-        pub fn getAccount(self: *const Executor, address: Address) ?AccountState {
+        pub fn getAccount(self: *Executor, address: Address) ?AccountState {
             return self.state.getAccount(stateAddress(address));
         }
 
@@ -917,7 +857,7 @@ pub fn ExecutorType(
             try self.state.clearCode(stateAddress(address));
         }
 
-        pub fn logView(self: *const Executor) State.LogView {
+        pub fn logView(self: *const Executor) LogBuffer.View {
             return self.state.logView();
         }
 
@@ -937,7 +877,7 @@ pub fn ExecutorType(
 
         /// Drop the cumulative accepted branch and clear any open context.
         pub fn discardAccepted(self: *Executor) void {
-            std.debug.assert(self.checkpoint_top == 0);
+            std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             self.state.discardAccepted();
             self.execution_context = null;
@@ -978,7 +918,7 @@ pub fn ExecutorType(
         /// Increment an account nonce, saturating at `maxInt(u64)`.
         fn incrementNonce(self: *Executor, address: Address) !void {
             const account = try self.getAccountOrLoad(address) orelse AccountState{};
-            try self.state.setNonce(stateAddress(address), std.math.add(u64, account.nonce, 1) catch std.math.maxInt(u64));
+            try self.state.setNonce(stateAddress(address), account.nonce +| 1);
         }
 
         /// Return this executor's `Host` adapter for interpreter frames.
@@ -991,7 +931,7 @@ pub fn ExecutorType(
         pub const ResolvedCode = struct {
             address: Address,
             delegated: bool,
-            original_view: State.CodeView,
+            original_view: evmz.state.CodeView,
         };
 
         /// Resolve canonical code first, then consult the executor-owned derived
@@ -1001,7 +941,7 @@ pub fn ExecutorType(
             return self.resolveExecutionCodeView(try self.state.getCodeView(stateAddress(address)));
         }
 
-        pub fn resolveExecutionCodeView(self: *Executor, code: State.CodeView) !Bytecode.View {
+        pub fn resolveExecutionCodeView(self: *Executor, code: evmz.state.CodeView) !Bytecode.View {
             std.debug.assert(self.prepared_code_execution != null);
             const execution = &self.prepared_code_execution.?;
             return execution.resolve(code.code_hash, code.bytes, .{
@@ -1025,7 +965,7 @@ pub fn ExecutorType(
             };
         }
 
-        pub fn resolvedCodeView(self: *Executor, resolved: ResolvedCode) !State.CodeView {
+        pub fn resolvedCodeView(self: *Executor, resolved: ResolvedCode) !evmz.state.CodeView {
             if (resolved.delegated) return self.state.getCodeView(stateAddress(resolved.address));
             return resolved.original_view;
         }
@@ -1093,7 +1033,7 @@ pub fn ExecutorType(
         };
 
         const ChildCall = struct {
-            checkpoint_state: State.Checkpoint,
+            checkpoint_state: Checkpoint,
             bytecode: Bytecode.View,
         };
 
@@ -1108,7 +1048,7 @@ pub fn ExecutorType(
         };
 
         const ChildCreate = struct {
-            checkpoint_state: State.Checkpoint,
+            checkpoint_state: Checkpoint,
             /// Consumed synchronously while the originating CREATE action or
             /// root message remains alive. Address, kind, and init code are
             /// projections of this message and must not be duplicated here.
@@ -1175,7 +1115,7 @@ pub fn ExecutorType(
                 self: *CallRuntime,
                 msg: *const Host.Message,
                 bytecode: Bytecode.View,
-                checkpoint_state: State.Checkpoint,
+                checkpoint_state: Checkpoint,
                 call_capture: ?evmz.trace.CallToken,
             ) !void {
                 try self.pushFrame(msg, bytecode, .{
@@ -1378,7 +1318,7 @@ pub fn ExecutorType(
                 defer self.executor.trace_depth = previous_depth;
 
                 const call_capture = try trace_capture.beginCall(self.capture_context, msg);
-                if (Host.precheckResult(msg.*)) |result| {
+                if (Host.precheckResult(msg)) |result| {
                     if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                     return result;
                 }
@@ -1388,7 +1328,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCall(msg, child.bytecode, child.checkpoint_state, call_capture);
@@ -1404,7 +1344,7 @@ pub fn ExecutorType(
                 defer self.executor.trace_depth = previous_depth;
 
                 const call_capture = try trace_capture.beginCall(self.capture_context, msg);
-                if (Host.precheckResult(msg.*)) |result| {
+                if (Host.precheckResult(msg)) |result| {
                     if (call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
                     return result;
                 }
@@ -1420,7 +1360,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = CheckpointGuard.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCreate(child, call_capture);
@@ -1436,10 +1376,10 @@ pub fn ExecutorType(
                 const control = self.frames.control(frame_index).*;
                 const frame_kind = control.kind;
                 const call_capture = control.call_capture;
-                var frame_checkpoint: ?CheckpointGuard = switch (frame_kind) {
+                var frame_checkpoint: ?ExecutionCheckpoint = switch (frame_kind) {
                     .root_call => null,
-                    .call => |checkpoint_state| CheckpointGuard.init(&self.executor.state, checkpoint_state),
-                    .create => |child| CheckpointGuard.init(&self.executor.state, child.checkpoint_state),
+                    .call => |checkpoint_state| ExecutionCheckpoint.init(&self.executor.state, checkpoint_state),
+                    .create => |child| ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state),
                 };
                 defer if (frame_checkpoint) |*guard| guard.deinit();
 
@@ -1496,7 +1436,7 @@ pub fn ExecutorType(
             if (resolved.delegated) try self.traceAccountAccess(resolved.address);
             const code = try self.resolvedCodeView(resolved);
 
-            var call_checkpoint = CheckpointGuard.begin(&self.state);
+            var call_checkpoint = ExecutionCheckpoint.begin(&self.state);
             defer call_checkpoint.deinit();
 
             if (msg.value > 0 and (msg.kind == .call or msg.kind == .callcode)) {
@@ -1543,7 +1483,7 @@ pub fn ExecutorType(
             const bytecode = try self.resolveExecutionCodeView(code);
             call_checkpoint.disarm();
             return .{ .child = .{
-                .checkpoint_state = call_checkpoint.checkpoint_state,
+                .checkpoint_state = call_checkpoint.checkpoint,
                 .bytecode = bytecode,
             } };
         }
@@ -1643,7 +1583,7 @@ pub fn ExecutorType(
             return switch (try begin(self, &msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
-                    var child_checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -1694,7 +1634,7 @@ pub fn ExecutorType(
 
         fn beginPreparedCreate(self: *Executor, msg: *const Host.Message) !StartedCreate {
             const create_address = msg.recipient;
-            var create_checkpoint = CheckpointGuard.begin(&self.state);
+            var create_checkpoint = ExecutionCheckpoint.begin(&self.state);
             defer create_checkpoint.deinit();
 
             if (try self.createCollision(create_address)) {
@@ -1720,7 +1660,7 @@ pub fn ExecutorType(
 
             create_checkpoint.disarm();
             return .{ .child = .{
-                .checkpoint_state = create_checkpoint.checkpoint_state,
+                .checkpoint_state = create_checkpoint.checkpoint,
                 .source_msg = msg,
             } };
         }
@@ -1729,7 +1669,7 @@ pub fn ExecutorType(
             self: *Executor,
             child: FrameStore.CreateControl,
             frame_result: FrameResult,
-            create_checkpoint: *CheckpointGuard,
+            create_checkpoint: *ExecutionCheckpoint,
         ) !Host.Result {
             const result = frame_result.executionResult();
             const output = result.output_data;
@@ -1753,7 +1693,7 @@ pub fn ExecutorType(
                 create_checkpoint.restore();
                 return self.createFailureFromResult(result, .out_of_gas, .code_store_out_of_gas);
             };
-            const deposit_regular_cost = spec.create.depositRegularGas(runtime_size) orelse {
+            const deposit_regular_cost = spec.create.depositRegularGas(runtime_size) catch {
                 create_checkpoint.restore();
                 return self.createFailureFromResult(result, .out_of_gas, .code_store_out_of_gas);
             };
@@ -1770,7 +1710,7 @@ pub fn ExecutorType(
 
             var deposit_result = result;
             deposit_result.gas_left -= deposit_regular_cost;
-            const deposit_state_gas = spec.create.depositStateGas(runtime_size) orelse {
+            const deposit_state_gas = spec.create.depositStateGas(runtime_size) catch {
                 create_checkpoint.restore();
                 return self.createFailureFromResult(deposit_result, .out_of_gas, .code_store_out_of_gas);
             };
@@ -1842,7 +1782,7 @@ pub fn ExecutorType(
 
             const capture_value = self.currentCaptureContext();
             const call_capture = try trace_capture.beginCall(capture_value, &msg);
-            const result = Host.precheckResult(msg) orelse if (msg.kind == .create or msg.kind == .create2) result: {
+            const result = Host.precheckResult(&msg) orelse if (msg.kind == .create or msg.kind == .create2) result: {
                 // Direct Host callers may still submit an over-depth message.
                 // Opcode-generated terminal attempts were resolved above.
                 if (msg.depth > Host.max_call_depth) {
@@ -1852,7 +1792,7 @@ pub fn ExecutorType(
             } else switch (try self.beginCall(&msg)) {
                 .immediate => |immediate| immediate,
                 .child => |child| blk: {
-                    var child_checkpoint = CheckpointGuard.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -2084,7 +2024,7 @@ pub fn ExecutorType(
                         .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                         .output_data = &.{},
                     },
                 };
@@ -2107,7 +2047,7 @@ pub fn ExecutorType(
                         .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                         .output_data = &.{},
                     };
                     top_frame_gas.finish(&result, top_frame_state_gas);
@@ -2144,9 +2084,9 @@ pub fn ExecutorType(
             if (!try self.transferValue(sender, recipient, value)) {
                 return .{
                     .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
-                    .gas_left = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
+                    .gas_left = std.math.lossyCast(i64, gas.regular_left),
                     .gas_refund = 0,
-                    .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                    .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                     .output_data = &.{},
                 };
             }
@@ -2154,8 +2094,8 @@ pub fn ExecutorType(
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
-                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                 .recipient = recipient,
                 .sender = sender,
                 .input_data = input,
@@ -2176,9 +2116,9 @@ pub fn ExecutorType(
             if (!try self.transferValue(options.sender, options.recipient, options.value)) {
                 return .{
                     .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
-                    .gas_left = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
+                    .gas_left = std.math.lossyCast(i64, options.gas),
                     .gas_refund = 0,
-                    .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
+                    .gas_reservoir = std.math.lossyCast(i64, options.gas_reservoir),
                     .output_data = &.{},
                 };
             }
@@ -2186,8 +2126,8 @@ pub fn ExecutorType(
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
-                .gas = std.math.cast(i64, options.gas) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, options.gas_reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, options.gas),
+                .gas_reservoir = std.math.lossyCast(i64, options.gas_reservoir),
                 .recipient = options.recipient,
                 .sender = options.sender,
                 .input_data = options.input,
@@ -2267,7 +2207,7 @@ pub fn ExecutorType(
                         .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
                         .gas_left = 0,
                         .gas_refund = 0,
-                        .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                        .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                         .output_data = &.{},
                     },
                 };
@@ -2276,8 +2216,8 @@ pub fn ExecutorType(
             const host_result = try self.executeTransactionCreateMessage(.{
                 .depth = 0,
                 .kind = if (options.salt == null) .create else .create2,
-                .gas = std.math.cast(i64, execution_gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, execution_gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, execution_gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, execution_gas.reservoir),
                 .recipient = options.recipient,
                 .sender = options.sender,
                 .input_data = options.init_code,
@@ -2298,8 +2238,8 @@ pub fn ExecutorType(
             return self.executeCreateMessage(.{
                 .depth = 0,
                 .kind = if (options.salt == null) .create else .create2,
-                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                 .recipient = options.recipient,
                 .sender = options.sender,
                 .input_data = options.init_code,
@@ -2357,8 +2297,8 @@ pub fn ExecutorType(
             const message = Host.Message{
                 .depth = 0,
                 .kind = .call,
-                .gas = std.math.cast(i64, gas.regular_left) orelse std.math.maxInt(i64),
-                .gas_reservoir = std.math.cast(i64, gas.reservoir) orelse std.math.maxInt(i64),
+                .gas = std.math.lossyCast(i64, gas.regular_left),
+                .gas_reservoir = std.math.lossyCast(i64, gas.reservoir),
                 .recipient = recipient,
                 .sender = sender,
                 .input_data = input,
@@ -2571,19 +2511,19 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
     }
 
     {
-        var checkpoint = Executor.CheckpointGuard.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
         defer checkpoint.deinit();
-        try executor.state.addBalance(address, 7);
+        try executor.state.addBalance(.fromAddress(address), 7);
     }
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(address));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(address)));
 
     {
-        var checkpoint = Executor.CheckpointGuard.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
         defer checkpoint.deinit();
-        try executor.state.addBalance(address, 9);
+        try executor.state.addBalance(.fromAddress(address), 9);
         checkpoint.commit();
     }
-    try std.testing.expectEqual(@as(u256, 9), try executor.state.getBalance(address));
+    try std.testing.expectEqual(@as(u256, 9), try executor.state.getBalance(.fromAddress(address)));
 }
 
 test "call runtime abort skips resolved top and restores enclosing checkpoint" {
@@ -2624,13 +2564,13 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     try call.pushRootCall(&root_message, bytecode.view());
 
     const parent_checkpoint = executor.state.checkpoint();
-    try executor.state.addBalance(parent_write, 7);
+    try executor.state.addBalance(.fromAddress(parent_write), 7);
     var parent_message = root_message;
     parent_message.depth = 1;
     try call.pushChildCall(&parent_message, bytecode.view(), parent_checkpoint, null);
 
     const child_checkpoint = executor.state.checkpoint();
-    try executor.state.addBalance(child_write, 9);
+    try executor.state.addBalance(.fromAddress(child_write), 9);
     var child_message = root_message;
     child_message.depth = 2;
     try call.pushChildCall(&child_message, bytecode.view(), child_checkpoint, null);
@@ -2641,8 +2581,8 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     _ = try call.finishFrame(child_index, child_frame.result());
 
     call.deinit();
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(parent_write));
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(child_write));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(parent_write)));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(child_write)));
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 }
 
@@ -2690,8 +2630,8 @@ test "nested runtime error restores its transferred checkpoint once" {
         .value = 7,
         .code_address = recipient,
     }));
-    try std.testing.expectEqual(@as(u256, 10), try executor.state.getBalance(sender));
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(recipient));
+    try std.testing.expectEqual(@as(u256, 10), try executor.state.getBalance(.fromAddress(sender)));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(recipient)));
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.len());
 }
 
@@ -2766,7 +2706,7 @@ test "nested call runtime owns its segment and keeps capture indices global" {
     try std.testing.expectEqual(Interpreter.Status.success, child_result.status());
     try std.testing.expectEqual(@as(usize, 1), executor.frame_store.len());
     try std.testing.expectEqual(@as(usize, 1), capture.frame_captures.items.len);
-    try std.testing.expectEqual(@as(u256, 7), try executor.state.getStorage(child_address, 0));
+    try std.testing.expectEqual(@as(u256, 7), try executor.state.getStorage(.fromAddress(child_address), 0));
 
     const root_result = try outer.run();
     try std.testing.expectEqual(Interpreter.Status.success, root_result.status());

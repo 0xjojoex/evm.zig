@@ -6,10 +6,11 @@
 
 const std = @import("std");
 
-const catalog = @import("catalog.zig");
+const Catalog = @import("catalog.zig").Catalog;
 const errors = @import("error.zig");
 const nibble = @import("nibble.zig");
 
+/// Fixed 32-byte structural key traversed by the fixed-key lanes.
 pub const FixedKey = [32]u8;
 pub const key_nibbles = @sizeOf(FixedKey) * 2;
 pub const max_path_nodes = key_nibbles + 1;
@@ -36,8 +37,8 @@ pub const BindWorkspace = struct {
 /// Bind sorted unique fixed-width keys against an immutable catalog.
 /// Results retain trie-key order and borrow value spans from witness nodes.
 pub fn bindSorted(
-    topology: catalog.Catalog,
-    root: catalog.RootRef,
+    topology: Catalog,
+    root: Catalog.Root,
     keys: []const FixedKey,
     results: []FixedLookup,
     workspace: *BindWorkspace,
@@ -50,8 +51,8 @@ pub fn bindSorted(
 
 /// Bind keys whose strict sorted order was already established by the caller.
 pub fn bindAssumeSorted(
-    topology: catalog.Catalog,
-    root: catalog.RootRef,
+    topology: Catalog,
+    root: Catalog.Root,
     keys: []const FixedKey,
     results: []FixedLookup,
     workspace: *BindWorkspace,
@@ -104,9 +105,8 @@ pub fn bindAssumeSorted(
                             pop(workspace);
                             continue;
                         };
-                        const child = try followRequired(
-                            node.extensionChild() orelse return error.InvalidNodeReference,
-                        );
+                        const child = try (node.extensionChild() orelse
+                            return error.InvalidNodeReference).followRequired();
                         const child_node = topology.node(child) orelse return error.InvalidNodeReference;
                         if (child_node.kind != .branch) return error.NonCanonicalNode;
                         frame.* = .{
@@ -139,7 +139,7 @@ pub fn bindAssumeSorted(
                 branch.next = group_end;
                 const children = topology.branchChildren(frame.node) orelse
                     return error.InvalidNodeReference;
-                const child = (try follow(children[selected])) orelse {
+                const child = (try children[selected].follow()) orelse {
                     @memset(results[group_begin..group_end], .{ .absent = .missing_branch_child });
                     continue;
                 };
@@ -155,7 +155,7 @@ pub fn bindAssumeSorted(
 }
 
 const Frame = struct {
-    node: catalog.NodeId,
+    node: Catalog.NodeId,
     begin: usize,
     end: usize,
     depth: u7,
@@ -174,18 +174,6 @@ fn push(workspace: *BindWorkspace, frame: Frame) void {
 fn pop(workspace: *BindWorkspace) void {
     std.debug.assert(workspace.len != 0);
     workspace.len -= 1;
-}
-
-fn followRequired(link: catalog.Link) Error!catalog.NodeId {
-    return (try follow(link)) orelse return error.InvalidNodeReference;
-}
-
-fn follow(link: catalog.Link) Error!?catalog.NodeId {
-    return switch (link) {
-        .empty => null,
-        .@"opaque" => error.MissingNode,
-        _ => link.node() orelse error.InvalidNodeReference,
-    };
 }
 
 fn validateSortedKeys(keys: []const FixedKey) BatchLookupError!void {

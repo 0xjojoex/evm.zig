@@ -525,7 +525,7 @@ fn modexp(call: Call, comptime config: Config) Error!Result {
     const output = try allocOutput(call, modulus_len_usize);
     errdefer freeOutput(call, output);
     @memset(output, 0);
-    if (allZero(modulus_bytes)) {
+    if (std.mem.allEqual(u8, modulus_bytes, 0)) {
         return successOutput(call, output, gas_left);
     }
 
@@ -657,13 +657,6 @@ fn paddedBytes(allocator: std.mem.Allocator, input: []const u8, offset: usize, l
         @memcpy(bytes[0..copied], input[offset..][0..copied]);
     }
     return bytes;
-}
-
-fn allZero(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte != 0) return false;
-    }
-    return true;
 }
 
 fn bn254Add(call: Call, comptime gas: GasSchedule) Error!Result {

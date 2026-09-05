@@ -21,6 +21,10 @@ pub const Execution = struct {
     };
 };
 
+/// The view external targets consume. It is the open lane's, so only a lane
+/// whose state hands out this exact view can feed a target.
+pub const ObservationsView = state.OpenState.ObservationsView;
+
 /// Synchronous borrowed observation consumer. The callback must copy anything
 /// it retains beyond the call.
 pub const ObservationTarget = struct {
@@ -28,7 +32,7 @@ pub const ObservationTarget = struct {
     consume_fn: *const fn (
         *anyopaque,
         bal.BlockAccessIndex,
-        state.TrackedState.ObservationsView,
+        ObservationsView,
     ) anyerror!void,
 
     pub fn init(
@@ -36,7 +40,7 @@ pub const ObservationTarget = struct {
         consume_fn: *const fn (
             *anyopaque,
             bal.BlockAccessIndex,
-            state.TrackedState.ObservationsView,
+            ObservationsView,
         ) anyerror!void,
     ) ObservationTarget {
         return .{ .ptr = ptr, .consume_fn = consume_fn };
@@ -45,7 +49,7 @@ pub const ObservationTarget = struct {
     pub fn consume(
         self: ObservationTarget,
         block_access_index: bal.BlockAccessIndex,
-        view: state.TrackedState.ObservationsView,
+        view: ObservationsView,
     ) !void {
         try self.consume_fn(self.ptr, block_access_index, view);
     }

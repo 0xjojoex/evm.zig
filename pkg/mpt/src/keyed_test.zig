@@ -21,12 +21,6 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
         .{ .namespace = 0xa5 },
     );
 
-    const entries = [_]Map.Entry{
-        .{ .key = .bob, .value = "bob" },
-        .{ .key = .alice, .value = "alice" },
-    };
-    const typed_root = try map.root(&entries);
-
     const alice_key = map.key_context.trieKey(.alice);
     const bob_key = map.key_context.trieKey(.bob);
     const structural = mpt.init(std.testing.allocator);
@@ -34,15 +28,14 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
         .{ .key = &bob_key, .value = "bob" },
         .{ .key = &alice_key, .value = "alice" },
     });
-    try std.testing.expectEqualSlices(u8, &raw_root, &typed_root);
 
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
-    const inserted = try map.update(&region, mpt.empty_root, mpt.empty_node_index, &.{
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const inserted = try map.update(&arena, mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root), &.{
         .{ .key = .bob, .value = "bob" },
         .{ .key = .alice, .value = "alice" },
     });
-    try std.testing.expectEqualSlices(u8, &typed_root, &inserted);
+    try std.testing.expectEqualSlices(u8, &raw_root, &inserted);
 
     var leaf: [36]u8 = undefined;
     leaf[0] = 0xe3;
@@ -51,10 +44,10 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
     @memcpy(leaf[3..35], &alice_key);
     leaf[35] = 0x01;
     const leaf_root = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
-    var indexed = try map.structural.indexNodes(&.{&leaf});
+    var indexed = try map.structural.indexWitness(&.{&leaf});
     defer indexed.deinit();
 
-    switch (try map.lookup(leaf_root, indexed.index(), .alice)) {
+    switch (try map.lookup(leaf_root, indexed, .alice)) {
         .present => |value| try std.testing.expectEqualSlices(u8, &.{0x01}, value),
         .absent => return error.ExpectedPresent,
     }
@@ -69,17 +62,12 @@ test "typed key facade detects collisions after projection" {
     const Structural = mpt.Trie(mpt.StdKeccak256Context);
     const Map = Structural.Keyed(u8, KeyContext);
     const map = Map.init(Structural.init(std.testing.allocator, .{}), .{});
-    var region = mpt.Region.init(std.testing.allocator);
-    defer region.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
 
-    try std.testing.expectError(error.DuplicateKey, map.root(&.{
-        .{ .key = 1, .value = "one" },
-        .{ .key = 2, .value = "two" },
-    }));
     try std.testing.expectError(error.DuplicateKey, map.update(
-        &region,
-        mpt.empty_root,
-        mpt.empty_node_index,
+        &arena,
+        mpt.witnessSource(mpt.WitnessIndex.empty, mpt.empty_root),
         &.{
             .{ .key = 1, .value = "one" },
             .{ .key = 2, .value = "two" },

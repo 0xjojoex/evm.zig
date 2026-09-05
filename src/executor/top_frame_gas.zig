@@ -19,7 +19,7 @@ pub const Charge = struct {
 pub fn charge(gas: *ExecutionGas, amount: i64) Charge {
     if (amount <= 0) return .{};
 
-    const total = std.math.cast(u64, amount) orelse std.math.maxInt(u64);
+    const total: u64 = @intCast(amount);
     const from_reservoir = @min(gas.reservoir, total);
     const from_regular = total - from_reservoir;
     if (from_regular > gas.regular_left) return .{ .out_of_gas = true };
@@ -28,7 +28,7 @@ pub fn charge(gas: *ExecutionGas, amount: i64) Charge {
     gas.regular_left -= from_regular;
     return .{
         .spent = amount,
-        .from_regular = std.math.cast(i64, from_regular) orelse std.math.maxInt(i64),
+        .from_regular = @intCast(from_regular),
     };
 }
 
@@ -36,18 +36,20 @@ pub fn charge(gas: *ExecutionGas, amount: i64) Charge {
 /// every rollback status refunds it.
 pub fn finish(result: *ExecutionResult, spent: Charge) void {
     if (spent.spent == 0) return;
-    const from_reservoir = std.math.sub(i64, spent.spent, spent.from_regular) catch 0;
+    std.debug.assert(spent.from_regular >= 0);
+    std.debug.assert(spent.from_regular <= spent.spent);
+    const from_reservoir = spent.spent - spent.from_regular;
     switch (result.outcome.status) {
         .success => {
-            result.state_gas_spent = std.math.add(i64, result.state_gas_spent, spent.spent) catch std.math.maxInt(i64);
-            result.state_gas_from_gas_left = std.math.add(i64, result.state_gas_from_gas_left, spent.from_regular) catch std.math.maxInt(i64);
+            result.state_gas_spent +|= spent.spent;
+            result.state_gas_from_gas_left +|= spent.from_regular;
         },
         .revert => {
-            result.gas_reservoir = std.math.add(i64, result.gas_reservoir, from_reservoir) catch std.math.maxInt(i64);
-            result.gas_left = std.math.add(i64, result.gas_left, spent.from_regular) catch std.math.maxInt(i64);
+            result.gas_reservoir +|= from_reservoir;
+            result.gas_left +|= spent.from_regular;
         },
         .invalid, .out_of_gas => {
-            result.gas_reservoir = std.math.add(i64, result.gas_reservoir, from_reservoir) catch std.math.maxInt(i64);
+            result.gas_reservoir +|= from_reservoir;
         },
     }
 }

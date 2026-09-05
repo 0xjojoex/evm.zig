@@ -4,9 +4,9 @@
 //! untouched references, and bottom-up dirty encoding remain shared.
 
 const std = @import("std");
-const RewindableRegion = @import("rewindable_region");
+const ScopedArenaAllocator = @import("stdx").ScopedArenaAllocator;
 
-const catalog = @import("catalog.zig");
+const Catalog = @import("catalog.zig").Catalog;
 const encode = @import("encode.zig");
 const errors = @import("error.zig");
 const fixed_key = @import("fixed_key.zig");
@@ -19,12 +19,66 @@ const Allocator = std.mem.Allocator;
 const UpdateError = errors.UpdateError;
 const AllocUpdateError = Allocator.Error || UpdateError;
 
+/// Owned content-addressed dirty nodes from one commitment candidate.
+///
+/// Root and hashed-child encodings are packed into one byte buffer and paired
+/// with the digest already computed by mutation. Embedded children are carried
+/// by their parent encoding and therefore do not appear independently.
+pub const NodeUpdates = struct {
+    allocator: Allocator,
+    bytes: std.ArrayList(u8) = .empty,
+    ranges: std.ArrayList(Range) = .empty,
+
+    const Range = struct {
+        digest: hash.Root,
+        start: usize,
+        len: usize,
+    };
+
+    pub const Entry = struct {
+        digest: hash.Root,
+        bytes: []const u8,
+    };
+
+    pub fn init(allocator: Allocator) NodeUpdates {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *NodeUpdates) void {
+        self.ranges.deinit(self.allocator);
+        self.bytes.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn len(self: *const NodeUpdates) usize {
+        return self.ranges.items.len;
+    }
+
+    pub fn at(self: *const NodeUpdates, index: usize) Entry {
+        const range = self.ranges.items[index];
+        return .{
+            .digest = range.digest,
+            .bytes = self.bytes.items[range.start..][0..range.len],
+        };
+    }
+
+    fn append(self: *NodeUpdates, digest: hash.Root, encoded: []const u8) Allocator.Error!void {
+        const start = self.bytes.items.len;
+        try self.bytes.appendSlice(self.allocator, encoded);
+        errdefer self.bytes.shrinkRetainingCapacity(start);
+        try self.ranges.append(self.allocator, .{
+            .digest = digest,
+            .start = start,
+            .len = encoded.len,
+        });
+    }
+};
+
+/// Final value or deletion for one fixed 32-byte structural key.
 pub const Update = struct {
     key: fixed_key.FixedKey,
     value: ?[]const u8,
 };
-
-pub const Region = RewindableRegion;
 
 const OccurrenceId = enum(u32) { _ };
 
@@ -48,11 +102,11 @@ const IndexSource = struct {
 };
 
 fn Source(comptime mode: SourceMode) type {
-    return if (mode == .catalog) catalog.NodeId else IndexSource;
+    return if (mode == .catalog) Catalog.NodeId else IndexSource;
 }
 
 fn BranchSource(comptime mode: SourceMode) type {
-    return if (mode == .catalog) *const catalog.Node else *const node_codec.Node.Branch;
+    return if (mode == .catalog) *const Catalog.Node else *const node_codec.Node.Branch;
 }
 
 fn MutableNode(comptime mode: SourceMode) type {
@@ -147,15 +201,20 @@ comptime {
     std.debug.assert(@alignOf(CatalogNode) == 8);
 }
 
-fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
+fn Context(
+    comptime KeccakContext: type,
+    comptime mode: SourceMode,
+    comptime Updates: type,
+) type {
     return struct {
         const Self = @This();
         const Occurrence = MutableNode(mode);
-        const SourceResolver = if (mode == .catalog) *const catalog.Catalog else *const proof.NodeIndex;
+        const SourceResolver = if (mode == .catalog) *const Catalog else *const proof.NodeIndex;
 
         allocator: Allocator,
         keccak_context: KeccakContext,
         source_resolver: SourceResolver,
+        node_updates: Updates,
         nodes: std.ArrayList(Occurrence) = .empty,
         compact_buffer: std.ArrayList(u8) = .empty,
         node_buffer: std.ArrayList(u8) = .empty,
@@ -180,7 +239,7 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
             dirty: bool,
         ) Allocator.Error!OccurrenceId {
             if (self.nodes.items.len > std.math.maxInt(u32)) return error.OutOfMemory;
-            const id: OccurrenceId = @enumFromInt(@as(u32, @intCast(self.nodes.items.len)));
+            const id: OccurrenceId = @enumFromInt(self.nodes.items.len);
             try self.nodes.append(self.allocator, .{
                 .kind = kind,
                 .parent = parent,
@@ -216,7 +275,7 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
             return self.materializeIndex(id, source);
         }
 
-        fn materializeCatalog(self: *Self, id: OccurrenceId, source: catalog.NodeId) AllocUpdateError!void {
+        fn materializeCatalog(self: *Self, id: OccurrenceId, source: Catalog.NodeId) AllocUpdateError!void {
             const topology = self.source_resolver;
             const entry = topology.node(source) orelse return error.InvalidNodeReference;
             switch (entry.kind) {
@@ -312,7 +371,7 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
 
         fn appendCatalogDeferred(
             self: *Self,
-            link: catalog.Link,
+            link: Catalog.Link,
             reference: node_codec.Reference,
             parent: Parent,
         ) AllocUpdateError!OccurrenceId {
@@ -804,7 +863,9 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
             result: *?hash.Root,
         ) AllocUpdateError!void {
             if (is_root) {
-                result.* = self.keccak_context.keccak256(encoded);
+                const digest = self.keccak_context.keccak256(encoded);
+                if (comptime Updates != void) try self.node_updates.append(digest, encoded);
+                result.* = digest;
             } else if (encoded.len < 32) {
                 var embedded: Reference.Embedded = .{
                     .len = @intCast(encoded.len),
@@ -813,7 +874,9 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
                 @memcpy(embedded.bytes[0..encoded.len], encoded);
                 self.occurrence(node).reference = .{ .embedded = embedded };
             } else {
-                self.occurrence(node).reference = .{ .hashed = self.keccak_context.keccak256(encoded) };
+                const digest = self.keccak_context.keccak256(encoded);
+                if (comptime Updates != void) try self.node_updates.append(digest, encoded);
+                self.occurrence(node).reference = .{ .hashed = digest };
             }
         }
 
@@ -921,21 +984,39 @@ fn Context(comptime KeccakContext: type, comptime mode: SourceMode) type {
 
 pub fn updateCatalogSorted(
     keccak_context: anytype,
-    region: *Region,
-    topology: *const catalog.Catalog,
-    root_ref: catalog.RootRef,
+    scratch_arena: *ScopedArenaAllocator,
+    topology: *const Catalog,
+    root_ref: Catalog.Root,
     updates: []const Update,
+) AllocUpdateError!hash.Root {
+    return updateCatalogSortedWithUpdates(
+        keccak_context,
+        scratch_arena,
+        topology,
+        root_ref,
+        updates,
+        {},
+    );
+}
+
+pub fn updateCatalogSortedWithUpdates(
+    keccak_context: anytype,
+    scratch_arena: *ScopedArenaAllocator,
+    topology: *const Catalog,
+    root_ref: Catalog.Root,
+    updates: []const Update,
+    node_updates: anytype,
 ) AllocUpdateError!hash.Root {
     const root_hash = root_ref.digest();
     if (updates.len == 0) return root_hash;
     try validateUpdates(updates);
 
-    const mark = region.mark();
-    defer region.rewind(mark);
+    const mark = scratch_arena.mark();
+    defer scratch_arena.rewind(mark);
     return updateResolved(
         .catalog,
         keccak_context,
-        region.allocator(),
+        scratch_arena.allocator(),
         topology,
         switch (root_ref) {
             .empty => null,
@@ -943,25 +1024,44 @@ pub fn updateCatalogSorted(
         },
         root_hash,
         updates,
+        node_updates,
     );
 }
 
 pub fn updateIndexSorted(
     keccak_context: anytype,
-    region: *Region,
+    scratch_arena: *ScopedArenaAllocator,
     root_hash: hash.Root,
     index: *const proof.NodeIndex,
     updates: []const Update,
 ) AllocUpdateError!hash.Root {
+    return updateIndexSortedWithUpdates(
+        keccak_context,
+        scratch_arena,
+        root_hash,
+        index,
+        updates,
+        {},
+    );
+}
+
+pub fn updateIndexSortedWithUpdates(
+    keccak_context: anytype,
+    scratch_arena: *ScopedArenaAllocator,
+    root_hash: hash.Root,
+    index: *const proof.NodeIndex,
+    updates: []const Update,
+    node_updates: anytype,
+) AllocUpdateError!hash.Root {
     if (updates.len == 0) return root_hash;
     try validateUpdates(updates);
 
-    const mark = region.mark();
-    defer region.rewind(mark);
+    const mark = scratch_arena.mark();
+    defer scratch_arena.rewind(mark);
     return updateResolved(
         .index,
         keccak_context,
-        region.allocator(),
+        scratch_arena.allocator(),
         index,
         if (std.mem.eql(u8, &root_hash, &hash.empty_root)) null else .{
             .reference = .{ .hashed = &root_hash },
@@ -970,6 +1070,7 @@ pub fn updateIndexSorted(
         },
         root_hash,
         updates,
+        node_updates,
     );
 }
 
@@ -977,15 +1078,17 @@ fn updateResolved(
     comptime mode: SourceMode,
     keccak_context: anytype,
     allocator: Allocator,
-    source_resolver: if (mode == .catalog) *const catalog.Catalog else *const proof.NodeIndex,
+    source_resolver: if (mode == .catalog) *const Catalog else *const proof.NodeIndex,
     root_source: ?Source(mode),
     root_hash: hash.Root,
     updates: []const Update,
+    node_updates: anytype,
 ) AllocUpdateError!hash.Root {
-    var context: Context(@TypeOf(keccak_context), mode) = .{
+    var context: Context(@TypeOf(keccak_context), mode, @TypeOf(node_updates)) = .{
         .allocator = allocator,
         .keccak_context = keccak_context,
         .source_resolver = source_resolver,
+        .node_updates = node_updates,
     };
     defer context.deinit();
     const root = if (root_source) |source|

@@ -494,7 +494,7 @@ const ZkvmBackend = struct {
     fn compactFp(out: []u8, input: []const u8) bool {
         std.debug.assert(out.len == 48);
         std.debug.assert(input.len == 64);
-        if (!allZero(input[0..16])) return false;
+        if (!std.mem.allEqual(u8, input[0..16], 0)) return false;
         @memcpy(out, input[16..64]);
         return true;
     }
@@ -755,13 +755,6 @@ fn ripemd160RightK(round: usize) u32 {
         64...79 => 0x00000000,
         else => unreachable,
     };
-}
-
-fn allZero(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte != 0) return false;
-    }
-    return true;
 }
 
 test "RIPEMD-160 vectors" {

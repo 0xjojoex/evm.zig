@@ -70,7 +70,7 @@ pub fn setCode(self: *MemoryAccount, code: []const u8) !void {
 /// Take ownership of bytes already allocated from this account's allocator.
 ///
 /// Assigning `code` directly instead leaves `account.code_hash` stale, which
-/// `MemoryStore.putAccount` and `TrackedState.seedAccount` then reject.
+/// `MemoryStore.putAccount` and `OpenWorld.seedAccount` then reject.
 pub fn adoptCode(self: *MemoryAccount, code: []u8) void {
     std.debug.assert(self.code.len == 0 or self.code.ptr != code.ptr);
     self.allocator.free(self.code);

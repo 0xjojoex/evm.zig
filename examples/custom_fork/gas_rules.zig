@@ -8,7 +8,7 @@ const evmz = @import("evmz");
 const harness = @import("harness.zig");
 
 const rules = struct {
-    fn freeCalldata(input: []const u8) ?u64 {
+    fn freeCalldata(input: []const u8) !u64 {
         _ = input;
         return 0;
     }

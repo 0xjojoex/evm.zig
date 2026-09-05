@@ -57,7 +57,6 @@ pub fn reader(self: *ClaimReader) Reader {
 }
 
 const vtable = Reader.VTable{
-    .accountExists = accountExists,
     .loadAccount = loadAccount,
     .loadCode = loadCode,
     .getStorage = getStorage,
@@ -65,10 +64,6 @@ const vtable = Reader.VTable{
 
 fn context(ptr: *anyopaque) *ClaimReader {
     return @ptrCast(@alignCast(ptr));
-}
-
-fn accountExists(ptr: *anyopaque, target: Address) !bool {
-    return (try loadPositionedAccount(context(ptr), target)) != null;
 }
 
 fn loadAccount(ptr: *anyopaque, target: Address) !?Account {
@@ -154,7 +149,6 @@ const TestBase = struct {
 
     fn reader(self: *TestBase) Reader {
         return .{ .ptr = self, .vtable = &.{
-            .accountExists = testAccountExists,
             .loadAccount = testLoadAccount,
             .loadCode = testLoadCode,
             .getStorage = testGetStorage,
@@ -163,11 +157,6 @@ const TestBase = struct {
 
     fn from(ptr: *anyopaque) *TestBase {
         return @ptrCast(@alignCast(ptr));
-    }
-
-    fn testAccountExists(ptr: *anyopaque, target: Address) !bool {
-        const self = from(ptr);
-        return Address.eql(self.target, target) and self.account != null;
     }
 
     fn testLoadAccount(ptr: *anyopaque, target: Address) !?Account {
@@ -267,10 +256,6 @@ test "ClaimReader fails closed outside claim coverage" {
         state_reader.loadAccount(address.addr(2)),
     );
     try std.testing.expectError(
-        error.BlockAccessListAccountNotCovered,
-        state_reader.accountExists(address.addr(2)),
-    );
-    try std.testing.expectError(
         error.BlockAccessListStorageNotCovered,
         state_reader.getStorage(target, 4),
     );
@@ -302,7 +287,6 @@ test "ClaimReader keeps an untouched base leaf and verifies delegated code" {
     var positioned = ClaimReader.init(base.reader(), &view, 0);
     const state_reader = positioned.reader();
 
-    try std.testing.expect(try state_reader.accountExists(target));
     try std.testing.expectEqual(@as(u256, 5), (try state_reader.loadAccount(target)).?.balance);
     try std.testing.expectError(error.CodeHashMismatch, state_reader.loadCode(expected_hash));
 
@@ -310,7 +294,6 @@ test "ClaimReader keeps an untouched base leaf and verifies delegated code" {
     // instead of becoming an unresolvable lifecycle question.
     var later = ClaimReader.init(base.reader(), &view, 1);
     try std.testing.expectEqual(@as(u256, 5), (try later.reader().loadAccount(target)).?.balance);
-    try std.testing.expect(try later.reader().accountExists(target));
     try std.testing.expectEqual(@as(u256, 0), try later.reader().getStorage(target, 3));
 }
 
@@ -335,10 +318,9 @@ test "ClaimReader resolves an emptied account to absent" {
     };
 
     var before = ClaimReader.init(base.reader(), &view, 0);
-    try std.testing.expect(try before.reader().accountExists(target));
+    try std.testing.expect((try before.reader().loadAccount(target)) != null);
 
     var after = ClaimReader.init(base.reader(), &view, 1);
-    try std.testing.expect(!(try after.reader().accountExists(target)));
     try std.testing.expectEqual(@as(?Account, null), try after.reader().loadAccount(target));
 }
 
@@ -352,14 +334,14 @@ test "ClaimReader resolves an untouched empty leaf to absent" {
     defer view.deinit(std.testing.allocator);
 
     // A seeded EIP-161-empty leaf reads as absent here for the same reason it
-    // does through `TrackedState`: from Spurious Dragon on there is no such
+    // does through `OpenWorld`: from Spurious Dragon on there is no such
     // account. The two must agree, because `account_exists` drives new-account
     // gas and a disagreement would surface as a lane mismatch on gas alone.
     var empty_leaf = TestBase{ .target = target, .account = .{} };
     var over_empty = ClaimReader.init(empty_leaf.reader(), &view, 1);
-    try std.testing.expect(!(try over_empty.reader().accountExists(target)));
+    try std.testing.expectEqual(@as(?Account, null), try over_empty.reader().loadAccount(target));
 
     var absent = TestBase{ .target = target };
     var over_absent = ClaimReader.init(absent.reader(), &view, 1);
-    try std.testing.expect(!(try over_absent.reader().accountExists(target)));
+    try std.testing.expectEqual(@as(?Account, null), try over_absent.reader().loadAccount(target));
 }

@@ -41,8 +41,6 @@ pub const prepared_code = @import("./prepared_code.zig");
 pub const rlp = @import("rlp");
 pub const spec = @import("./spec.zig");
 pub const state = @import("./state.zig");
-/// Coherent Ethereum execution-state and block-lifecycle choices.
-pub const state_domain = @import("./eth/state_domain.zig");
 pub const stateless = @import("./stateless.zig");
 pub const Backend = @import("./backend.zig").Backend;
 pub const t = @import("./t.zig");
@@ -51,6 +49,8 @@ pub const transaction = @import("./transaction.zig");
 pub const uint256 = @import("./uint256.zig");
 const vm = @import("./vm.zig");
 
+/// Compile an executor over `state.OpenWorld` or `eth.bal.ClosedWorld`.
+pub const Executor = executor.ExecutorType;
 /// Compile one complete exact engine specification.
 pub const Vm = vm.Vm;
 pub const VmWithOptions = vm.VmWithOptions;
@@ -58,10 +58,10 @@ pub const VmType = vm.VmType;
 pub const Engine = vm.Engine;
 pub const EngineWithOptions = vm.EngineWithOptions;
 pub const EngineType = vm.EngineType;
-pub const BalStatelessEngine = vm.BalStatelessEngine;
-pub const BalStatelessEngineWithOptions = vm.BalStatelessEngineWithOptions;
-pub const BalStatelessVm = vm.BalStatelessVm;
-pub const BalStatelessVmWithOptions = vm.BalStatelessVmWithOptions;
+pub const BalEngine = vm.BalEngine;
+pub const BalEngineWithOptions = vm.BalEngineWithOptions;
+pub const BalVm = vm.BalVm;
+pub const BalVmWithOptions = vm.BalVmWithOptions;
 
 /// The latest exact Ethereum engine — the usual ready-to-use entry point.
 pub const Evm = Vm(eth.latest);
@@ -75,12 +75,10 @@ pub const Spec = spec.Spec;
 pub const Committer = vm.Committer;
 pub const eip7702 = executor.eip7702;
 pub const Env = vm.Env;
-pub const Executor = Evm.Executor;
 pub const Interpreter = Evm.Interpreter;
 pub const Log = vm.Log;
 pub const Message = execution.Message;
 pub const Opcode = opcode.Opcode;
-pub const OpcodeInfo = opcode.OpInfo;
 pub const PreparedCodeBackend = prepared_code.Backend;
 pub const InMemoryPreparedPool = prepared_code.InMemoryPreparedPool;
 pub const ExecutionResourcePlan = execution_resources.Plan;

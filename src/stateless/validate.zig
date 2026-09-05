@@ -11,6 +11,7 @@ const Vm = @import("../vm.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
 const eth_header = @import("../eth/header.zig");
+const eth_spec = @import("../eth/spec.zig");
 const input_mod = @import("./input.zig");
 const trie = @import("../eth/trie.zig");
 const rlp = @import("rlp");
@@ -29,6 +30,8 @@ pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || sta
     BlockTransitionFailed,
 };
 
+pub const CommitOutput = @import("../eth/block_stf.zig").CommitOutput;
+
 pub const Options = struct {
     /// Prove every BAL-declared account/storage path before execution. Disabled
     /// by default because witness-backed readers would otherwise traverse the
@@ -36,6 +39,9 @@ pub const Options = struct {
     precheck_block_access_list_state: bool = false,
     /// Optional expected-vs-observed BAL diagnostics.
     bal_differential: ?*block_stf.BalDifferentialReport = null,
+    /// Optional accepted block-final delta and MPT node updates. Validation
+    /// clears it on entry and populates it only after every claim matches.
+    commit_output: ?*CommitOutput = null,
 };
 
 /// Compile the production stateless validator from one complete specification.
@@ -50,7 +56,7 @@ pub fn ValidatorWithOptions(
     comptime options: Vm.CompileOptions,
 ) type {
     requireAmsterdamSpec(spec);
-    const ExactVm = Vm.BalStatelessVmWithOptions(spec, options);
+    const ExactVm = Vm.BalVmWithOptions(spec, options);
     return ValidatorType(block_stf.Bind(.amsterdam, ExactVm));
 }
 
@@ -60,6 +66,28 @@ pub fn TrackedValidator(comptime spec: Spec) type {
     return ValidatorType(block_stf.Bind(
         .amsterdam,
         Vm.VmWithOptions(spec, .{ .step_capture = true }),
+    ));
+}
+
+/// Stateless validator for a canonical revision before Amsterdam. The revision
+/// selects both the header lineage and its matching tracked-state VM. Opcode
+/// capture is excluded; diagnostic callers opt in through
+/// `RevisionValidatorWithOptions`.
+pub fn RevisionValidator(comptime revision: Revision) type {
+    return RevisionValidatorWithOptions(revision, .{});
+}
+
+pub fn RevisionValidatorWithOptions(
+    comptime revision: Revision,
+    comptime options: Vm.CompileOptions,
+) type {
+    switch (revision) {
+        .prague, .osaka => {},
+        else => @compileError("revision stateless validation supports Prague and Osaka"),
+    }
+    return ValidatorType(block_stf.Bind(
+        revision,
+        Vm.VmWithOptions(eth_spec.specAt(revision), options),
     ));
 }
 
@@ -120,6 +148,7 @@ fn validateWithScratchExact(
     capture: ?block_stf.ExecutionCapture,
     options: Options,
 ) Error!block_stf.Result {
+    if (options.commit_output) |output| output.deinit();
     const block = &input.block;
     if (!blockShapeValid(ExactBlockStf.fork, block)) return .{ .status = .invalid_block_body };
     if (ExactBlockStf.fork.isImpl(.osaka) and !blockRlpSizeValid(ExactBlockStf.fork, block, max_rlp_block_size)) {
@@ -182,7 +211,7 @@ fn validateExact(
             .parent_hash = block.parent_hash,
             .parent_beacon_block_root = block.parent_beacon_block_root,
         },
-        .state_backend = try ExactBlockStf.Vm.StateDomain.Lifecycle.witnessBackend(
+        .state_backend = try Backend.fromWitness(
             allocator,
             parent_header.state_root,
             input.witness.state,
@@ -214,10 +243,7 @@ fn validateExact(
             .logs_bloom = block.logs_bloom,
             .blob_gas_used = block.blob_gas_used,
             .excess_blob_gas = try expectedExcessBlobGas(revision, block),
-            .requests_hash = if (revision.isImpl(.prague))
-                try block_stf.requestsHash(allocator, block.execution_requests)
-            else
-                null,
+            .requests_hash = block.requests_hash,
         },
         .header_hash_claim = .{
             .block_hash = block.block_hash,
@@ -227,6 +253,7 @@ fn validateExact(
         },
         .capture = capture,
         .bal_differential = options.bal_differential,
+        .commit_output = options.commit_output,
         // Future optimization: verified values can seed the execution overlay
         // or reader cache, after which this can become the default without
         // repeating proof traversal. It never changes EVM warmth semantics.
@@ -266,7 +293,7 @@ fn blockShapeValid(revision: Revision, block: *const input_mod.Block) bool {
     if (has_cancun) {
         if (!versionedHashesMatch(block.transactions, block.versioned_hashes)) return false;
     } else if (block.versioned_hashes.len != 0) return false;
-    if (!revision.isImpl(.prague) and block.execution_requests.len != 0) return false;
+    if ((block.requests_hash != null) != revision.isImpl(.prague)) return false;
 
     if (revision.isImpl(.amsterdam)) {
         if (block.block_access_list == null) return false;
@@ -550,7 +577,19 @@ test "normalized stateless block shape uses actual fields" {
     extra_hash.versioned_hashes = &.{ expected_hashes[0], expected_hashes[1], expected_hashes[0] };
     try std.testing.expect(!blockShapeValid(.cancun, &extra_hash));
 
-    var amsterdam = cancun;
+    var premature_requests_hash = cancun;
+    premature_requests_hash.requests_hash = block_stf.empty_requests_hash;
+    try std.testing.expect(!blockShapeValid(.cancun, &premature_requests_hash));
+
+    var prague = cancun;
+    prague.requests_hash = block_stf.empty_requests_hash;
+    try std.testing.expect(blockShapeValid(.prague, &prague));
+
+    var missing_requests_hash = prague;
+    missing_requests_hash.requests_hash = null;
+    try std.testing.expect(!blockShapeValid(.prague, &missing_requests_hash));
+
+    var amsterdam = prague;
     amsterdam.block_access_list = &.{};
     try std.testing.expect(blockShapeValid(.amsterdam, &amsterdam));
 
@@ -570,8 +609,8 @@ test "stateless validator is specialized by the complete spec" {
     comptime {
         std.debug.assert(ExactValidator.BlockStf.spec.call.base_gas == custom.call.base_gas);
         std.debug.assert(ExactValidator.BlockStf.Vm.spec.call.base_gas == custom.call.base_gas);
-        std.debug.assert(ExactValidator.BlockStf.Vm.Executor.State == @import("BlockState.zig"));
-        std.debug.assert(Oracle.BlockStf.Vm.Executor.State == state.TrackedState);
+        std.debug.assert(ExactValidator.BlockStf.Vm.Executor.State == @import("../eth/bal.zig").ClosedState);
+        std.debug.assert(Oracle.BlockStf.Vm.Executor.State == state.OpenState);
     }
 }
 
@@ -585,6 +624,56 @@ test "stateless block errors preserve witness and body taxonomy" {
         (try mapBlockError(error.WithdrawalBalanceOverflow)).status,
     );
     try std.testing.expectError(error.BlockTransitionFailed, mapBlockError(error.CodeUnavailable));
+}
+
+test "revision stateless validator binds matching tracked specs" {
+    const Prague = RevisionValidator(.prague);
+    const Osaka = RevisionValidator(.osaka);
+    const CapturingPrague = RevisionValidatorWithOptions(.prague, .{ .step_capture = true });
+
+    comptime {
+        std.debug.assert(Prague.fork == .prague);
+        std.debug.assert(Prague.BlockStf.spec.transaction.regular_gas_cap == null);
+        std.debug.assert(Prague.BlockStf.Vm.Executor.State == state.OpenState);
+        std.debug.assert(!Prague.compile_options.step_capture);
+        std.debug.assert(CapturingPrague.compile_options.step_capture);
+        std.debug.assert(Osaka.fork == .osaka);
+        std.debug.assert(Osaka.BlockStf.spec.transaction.regular_gas_cap != null);
+        std.debug.assert(Osaka.BlockStf.Vm.Executor.State == state.OpenState);
+    }
+}
+
+test "shape rejection clears reused commit output" {
+    const Amsterdam = Validator(@import("../eth/spec.zig").amsterdam);
+    const invalid_block = input_mod.Block{
+        .parent_hash = [_]u8{0} ** 32,
+        .fee_recipient = address.Address.fromBytes([_]u8{0} ** 20),
+        .state_root = [_]u8{0} ** 32,
+        .receipts_root = [_]u8{0} ** 32,
+        .logs_bloom = [_]u8{0} ** 256,
+        .prev_randao = 0,
+        .number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 0,
+        .timestamp = 1,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1,
+        .block_hash = [_]u8{0} ** 32,
+    };
+    var output: CommitOutput = .{
+        .mpt_nodes = trie.NodeUpdates.init(std.testing.allocator),
+    };
+    defer output.deinit();
+
+    const result = try Amsterdam.validateWithOptions(std.testing.allocator, .{
+        .chain_id = 1,
+        .block = invalid_block,
+        .witness = .{},
+    }, .{ .commit_output = &output });
+
+    try std.testing.expectEqual(block_stf.Status.invalid_block_body, result.status);
+    try std.testing.expect(output.delta == null);
+    try std.testing.expect(output.mpt_nodes == null);
 }
 
 test "stateless BAL witness precheck is an explicit Amsterdam option" {

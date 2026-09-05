@@ -57,7 +57,7 @@ pub fn PreludeBinding(comptime PreludeError: type) type {
 /// types stay inside the binder.
 pub fn ProgramType(
     comptime spec: ExactSpec,
-    comptime ExecutionState: type,
+    comptime World: type,
     comptime compile_options: executor_engine.CompileOptions,
     comptime Input: type,
     comptime Output: type,
@@ -65,8 +65,8 @@ pub fn ProgramType(
     comptime Error: type,
     comptime Family: type,
 ) type {
-    const Engine = vm.EngineType(spec, ExecutionState, compile_options);
-    const Runtime = RuntimeStateType(spec, ExecutionState, compile_options, Input);
+    const Engine = vm.EngineType(spec, World, compile_options);
+    const Runtime = RuntimeStateType(spec, World, compile_options, Input);
     const ExpectedTransact = fn (
         *Engine.Context(Input),
         @FieldType(Input, "tx"),
@@ -196,11 +196,11 @@ pub fn ProgramType(
 
 fn RuntimeStateType(
     comptime spec: ExactSpec,
-    ExecutionState: type,
+    World: type,
     comptime compile_options: vm.CompileOptions,
     comptime Input: type,
 ) type {
-    const Executor = vm.EngineType(spec, ExecutionState, compile_options).Executor;
+    const Executor = vm.EngineType(spec, World, compile_options).Executor;
 
     const Error = executor_errors.Error;
 
@@ -322,13 +322,13 @@ fn PreludeType(comptime Context: type, comptime PreludeError: type) type {
 /// Execution-state-complete Context constructor for engine and program wiring.
 pub fn ContextType(
     comptime spec: ExactSpec,
-    comptime ExecutionState: type,
+    comptime World: type,
     comptime compile_options: executor_engine.CompileOptions,
     comptime Input: type,
 ) type {
-    const Engine = vm.EngineType(spec, ExecutionState, compile_options);
+    const Engine = vm.EngineType(spec, World, compile_options);
     const ContextError = executor_errors.Error;
-    const RuntimeState = RuntimeStateType(spec, ExecutionState, compile_options, Input);
+    const RuntimeState = RuntimeStateType(spec, World, compile_options, Input);
 
     return struct {
         runtime: *RuntimeState,

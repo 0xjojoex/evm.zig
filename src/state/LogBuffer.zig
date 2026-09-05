@@ -1,6 +1,6 @@
 //! Packed log storage shared by every execution state model.
 //!
-//! Like `checkpoint`, this belongs to neither the tracked nor the dense lane.
+//! Like `Checkpoint`, this belongs to neither the tracked nor the claim-indexed lane.
 //! Emitted logs are protocol output — receipts, blooms, and EIP-6110 deposit
 //! decoding read them the same way regardless of which lane produced them.
 //!
@@ -13,8 +13,8 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const Host = @import("../Host.zig");
-const checkpoint_types = @import("./checkpoint.zig");
-const range = @import("../range.zig");
+const Checkpoint = @import("../state.zig").Checkpoint;
+const range = @import("stdx").range;
 
 const Allocator = std.mem.Allocator;
 const LogBuffer = @This();
@@ -22,13 +22,18 @@ const LogBuffer = @This();
 /// Consensus caps a log at four topics; `append` rejects anything wider.
 pub const max_topics = 4;
 
+/// Log topics. Consensus caps a log at four topics, so `u8` is generous.
+const TopicRange = range.Range(u256, u8);
+
 pub const Row = struct {
     address: Address,
-    topics: range.Topics,
+    topics: TopicRange,
     data: range.Bytes,
-};
 
-pub const Checkpoint = checkpoint_types.LogCheckpoint;
+    comptime {
+        std.debug.assert(@sizeOf(Row) == 36);
+    }
+};
 
 pub const AppendError = Allocator.Error || error{TooManyLogTopics};
 
@@ -52,15 +57,15 @@ pub fn clone(self: *const LogBuffer, allocator: Allocator) Allocator.Error!LogBu
     return result;
 }
 
-pub fn checkpoint(self: *const LogBuffer) Checkpoint {
+pub fn checkpoint(self: *const LogBuffer) Checkpoint.Log {
     return .{
-        .rows_len = index32(self.rows.items.len),
-        .topics_len = index32(self.topics.items.len),
-        .data_len = index32(self.data.items.len),
+        .rows_len = @intCast(self.rows.items.len),
+        .topics_len = @intCast(self.topics.items.len),
+        .data_len = @intCast(self.data.items.len),
     };
 }
 
-pub fn truncate(self: *LogBuffer, value: Checkpoint) void {
+pub fn truncate(self: *LogBuffer, value: Checkpoint.Log) void {
     std.debug.assert(value.rows_len <= self.rows.items.len);
     std.debug.assert(value.topics_len <= self.topics.items.len);
     std.debug.assert(value.data_len <= self.data.items.len);
@@ -76,7 +81,7 @@ pub fn clearRetainingCapacity(self: *LogBuffer) void {
 pub fn append(self: *LogBuffer, allocator: Allocator, event_log: Host.Log) AppendError!void {
     if (event_log.topics.len > max_topics) return error.TooManyLogTopics;
     std.debug.assert(self.rows.items.len < std.math.maxInt(u32));
-    const topics: range.Topics = .init(self.topics.items.len, event_log.topics.len);
+    const topics: TopicRange = .init(self.topics.items.len, event_log.topics.len);
     const data: range.Bytes = .init(self.data.items.len, event_log.data.len);
     try self.rows.ensureUnusedCapacity(allocator, 1);
     try self.topics.ensureUnusedCapacity(allocator, event_log.topics.len);
@@ -149,15 +154,6 @@ pub const View = struct {
         };
     }
 };
-
-fn index32(value: usize) u32 {
-    std.debug.assert(value <= std.math.maxInt(u32));
-    return @intCast(value);
-}
-
-comptime {
-    std.debug.assert(@sizeOf(Row) == 36);
-}
 
 test "packed log buffer owns callback bytes and truncates to checkpoint" {
     var logs: LogBuffer = .{};

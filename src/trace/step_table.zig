@@ -24,11 +24,11 @@ pub const StepRow = struct {
     pc_next: u32 = 0,
     opcode: u8,
     outcome: StepOutcome = .pending,
-};
 
-comptime {
-    std.debug.assert(@sizeOf(StepRow) == 48);
-}
+    comptime {
+        std.debug.assert(@sizeOf(StepRow) == 48);
+    }
+};
 
 pub const FrameKind = enum(u8) {
     root,
@@ -49,11 +49,11 @@ pub const FrameRow = struct {
     depth: u16,
     kind: FrameKind,
     outcome: FrameOutcome = .pending,
-};
 
-comptime {
-    std.debug.assert(@sizeOf(FrameRow) == 20);
-}
+    comptime {
+        std.debug.assert(@sizeOf(FrameRow) == 20);
+    }
+};
 
 pub const Mark = struct {
     steps_len: usize,

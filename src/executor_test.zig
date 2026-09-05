@@ -11,7 +11,7 @@ const trace = @import("./trace.zig");
 const transaction_runtime = @import("./transaction/runtime.zig");
 const uint256 = @import("./uint256.zig");
 const ExactSpec = @import("./spec.zig").Spec;
-const state_domain = @import("./eth/state_domain.zig");
+const OpenWorld = @import("./state/OpenWorld.zig");
 
 const CaptureContext = executor_module.CaptureContext;
 const TransactionExecutionStage = executor_module.TransactionExecutionStage;
@@ -19,11 +19,11 @@ const Address = evmz.Address;
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
 const Opcode = evmz.Opcode;
-const TrackedState = evmz.state.TrackedState;
+const OpenState = evmz.state.OpenState;
 const prepared_code = evmz.prepared_code;
 const eip7702 = executor_module.eip7702;
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
-const ParentFacts = @import("./stateless/ParentFacts.zig");
+const ParentFacts = @import("./eth/bal/ParentFacts.zig");
 
 /// Standalone-message conveniences mirroring the executor's private
 /// `runStandalone*` forms: explicit (context, message, gas) with default scope.
@@ -103,13 +103,22 @@ const DenseTransitionObserver = struct {
     }
 };
 
-test "public executor remains bound to TrackedState" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
-    try std.testing.expect(Amsterdam.Executor.State == TrackedState);
+test "public executor binds world types and requires admitted closed state" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const Open = evmz.Executor(Latest.spec, OpenWorld, .{});
+    const Closed = evmz.Executor(Latest.spec, evmz.eth.bal.ClosedWorld, .{});
+    try std.testing.expect(Open == Latest.Executor);
+    try std.testing.expect(Open.State == OpenState);
+    try std.testing.expect(Closed.State == evmz.eth.bal.ClosedWorld.State);
+    try std.testing.expect(std.meta.fieldInfo(Open.Init, .state).default_value_ptr != null);
+    try std.testing.expect(std.meta.fieldInfo(Closed.Init, .state).default_value_ptr == null);
+    var empty = Open.init(std.testing.allocator, .{});
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(u256, 0), try empty.getBalance(evmz.addr(1)));
 }
 
-test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+test "closed world executor matches open world checkpoint discard" {
+    const Latest = evmz.t.Vm(.latest).?;
     const bal = @import("./eth/bal/model.zig");
     const target = evmz.addr(1);
     const storage_changes = [_]bal.StorageChange{.{ .block_access_index = 1, .new_value = 9 }};
@@ -131,115 +140,115 @@ test "dense Amsterdam state binds to ExecutorCore and matches checkpoint discard
     backing_account.account.balance = 10;
     try backing_account.storage.put(7, 3);
 
-    var tracked = Amsterdam.Executor.init(std.testing.allocator, .{
+    var tracked = Latest.Executor.init(std.testing.allocator, .{
         .state = .{ .reader = backing.reader() },
     });
     defer tracked.deinit();
-    const dense_facts = try ParentFacts.initCopy(
+    const claim_facts = try ParentFacts.initCopy(
         std.testing.allocator,
         &account_facts,
         &storage_facts,
     );
-    const dense_state = try evmz.stateless.BlockState.initWithCodes(
+    const claim_state = try evmz.eth.bal.ClosedWorld.initState(
         std.testing.allocator,
         plan,
-        dense_facts,
+        claim_facts,
         &.{},
     );
-    const DenseEngine = @import("./vm.zig").BalStatelessVm(evmz.eth.amsterdam);
-    var dense = DenseEngine.Executor.init(std.testing.allocator, .{ .state = dense_state });
-    defer dense.deinit();
+    const Closed = evmz.Executor(Latest.spec, evmz.eth.bal.ClosedWorld, .{});
+    var claim = Closed.init(std.testing.allocator, .{ .state = claim_state });
+    defer claim.deinit();
 
     const context = testExecutionContext(target, 100_000);
     var tracked_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
-    var dense_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
+    var claim_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
     const observed_tracked = tracked.observe(&tracked_observer);
-    const observed_dense = dense.observe(&dense_observer);
+    const observed_claim = claim.observe(&claim_observer);
     try observed_tracked.beginStateTransition(context);
     defer tracked.discardStateTransition();
-    try observed_dense.beginStateTransition(context);
-    defer dense.discardStateTransition();
+    try observed_claim.beginStateTransition(context);
+    defer claim.discardStateTransition();
 
     const undeclared = evmz.addr(2);
-    try dense.warmAccount(undeclared);
-    try dense.warmStorage(target, 8);
-    try std.testing.expect(!dense.state.isAccountWarm(.fromAddress(undeclared)));
-    try std.testing.expect(!dense.state.isStorageWarm(.fromAddress(target), 8));
-    try std.testing.expectError(error.UndeclaredAccount, dense.getBalance(undeclared));
-    try std.testing.expectError(error.UndeclaredStorage, dense.getStorage(target, 8));
-    try std.testing.expectError(error.UndeclaredAccount, dense.observeAccountAccess(undeclared));
+    try claim.warmAccount(undeclared);
+    try claim.warmStorage(target, 8);
+    try std.testing.expect(!claim.state.isAccountWarm(.fromAddress(undeclared)));
+    try std.testing.expect(!claim.state.isStorageWarm(.fromAddress(target), 8));
+    try std.testing.expectError(error.UndeclaredAccount, claim.getBalance(undeclared));
+    try std.testing.expectError(error.UndeclaredStorage, claim.getStorage(target, 8));
+    try std.testing.expectError(error.UndeclaredAccount, claim.observeAccountAccess(undeclared));
 
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
-    try std.testing.expectEqual(try tracked.getStorage(target, 7), try dense.getStorage(target, 7));
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
+    try std.testing.expectEqual(try tracked.getStorage(target, 7), try claim.getStorage(target, 7));
     try tracked.addBalance(target, 5);
-    try dense.addBalance(target, 5);
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
+    try claim.addBalance(target, 5);
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
 
     var tracked_checkpoint = tracked.checkpoint();
     defer tracked_checkpoint.deinit();
-    var dense_checkpoint = dense.checkpoint();
-    defer dense_checkpoint.deinit();
+    var claim_checkpoint = claim.checkpoint();
+    defer claim_checkpoint.deinit();
 
-    const tracked_load = try tracked.state.loadStorage(target, 7);
-    const dense_load = try dense.state.loadStorage(.fromAddress(target), 7);
-    try std.testing.expectEqual(tracked_load, dense_load);
-    try std.testing.expectEqual(.cold, dense_load.access_status);
-    try std.testing.expect(dense.state.isStorageWarm(.fromAddress(target), 7));
-    const tracked_store = try tracked.state.storeStorage(target, 7, 9);
-    const dense_store = try dense.state.storeStorage(.fromAddress(target), 7, 9);
-    try std.testing.expectEqual(tracked_store, dense_store);
-    try std.testing.expectEqual(.warm, dense_store.access_status);
-    try std.testing.expectEqual(.modified, dense_store.storage_status);
-    try std.testing.expectEqual(@as(u256, 9), try dense.getStorage(target, 7));
+    const tracked_load = try tracked.state.loadStorage(.fromAddress(target), 7);
+    const claim_load = try claim.state.loadStorage(.fromAddress(target), 7);
+    try std.testing.expectEqual(tracked_load, claim_load);
+    try std.testing.expectEqual(.cold, claim_load.access_status);
+    try std.testing.expect(claim.state.isStorageWarm(.fromAddress(target), 7));
+    const tracked_store = try tracked.state.storeStorage(.fromAddress(target), 7, 9);
+    const claim_store = try claim.state.storeStorage(.fromAddress(target), 7, 9);
+    try std.testing.expectEqual(tracked_store, claim_store);
+    try std.testing.expectEqual(.warm, claim_store.access_status);
+    try std.testing.expectEqual(.modified, claim_store.storage_status);
+    try std.testing.expectEqual(@as(u256, 9), try claim.getStorage(target, 7));
 
     try tracked.addBalance(target, 7);
-    try dense.addBalance(target, 7);
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
+    try claim.addBalance(target, 7);
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
     tracked_checkpoint.restore();
-    dense_checkpoint.restore();
+    claim_checkpoint.restore();
     try std.testing.expectEqual(@as(u256, 15), try tracked.getBalance(target));
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
-    try std.testing.expectEqual(@as(u256, 3), try dense.getStorage(target, 7));
-    try std.testing.expect(!dense.state.isStorageWarm(.fromAddress(target), 7));
-    try std.testing.expectEqual(.cold, (try dense.state.loadStorage(.fromAddress(target), 7)).access_status);
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
+    try std.testing.expectEqual(@as(u256, 3), try claim.getStorage(target, 7));
+    try std.testing.expect(!claim.state.isStorageWarm(.fromAddress(target), 7));
+    try std.testing.expectEqual(.cold, (try claim.state.loadStorage(.fromAddress(target), 7)).access_status);
 
     tracked.discardStateTransition();
-    dense.discardStateTransition();
+    claim.discardStateTransition();
     try observed_tracked.beginStateTransition(context);
-    try observed_dense.beginStateTransition(context);
+    try observed_claim.beginStateTransition(context);
     try std.testing.expectEqual(@as(u256, 10), try tracked.getBalance(target));
-    try std.testing.expectEqual(try tracked.getBalance(target), try dense.getBalance(target));
+    try std.testing.expectEqual(try tracked.getBalance(target), try claim.getBalance(target));
     try std.testing.expectEqual(@as(u256, 3), try tracked.getStorage(target, 7));
-    try std.testing.expectEqual(try tracked.getStorage(target, 7), try dense.getStorage(target, 7));
+    try std.testing.expectEqual(try tracked.getStorage(target, 7), try claim.getStorage(target, 7));
 
     const replacement_code = [_]u8{0x5f};
     const replacement_hash = evmz.crypto.keccak256(&replacement_code);
     try tracked.setCode(target, &replacement_code);
-    try dense.setCode(target, &replacement_code);
-    try tracked.state.setTransientStorage(target, 8, 12);
-    try dense.state.setTransientStorage(.fromAddress(target), 8, 12);
+    try claim.setCode(target, &replacement_code);
+    try tracked.state.setTransientStorage(.fromAddress(target), 8, 12);
+    try claim.state.setTransientStorage(.fromAddress(target), 8, 12);
     const topics = [_]u256{7};
     const data = [_]u8{8};
     try tracked.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
-    try dense.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
-    _ = try tracked.state.setStorage(target, 7, 11);
-    _ = try dense.state.setStorage(.fromAddress(target), 7, 11);
+    try claim.state.emitLog(.{ .address = target, .topics = &topics, .data = &data });
+    _ = try tracked.state.setStorage(.fromAddress(target), 7, 11);
+    _ = try claim.state.setStorage(.fromAddress(target), 7, 11);
 
     tracked_observer.code_hash = replacement_hash;
-    dense_observer.code_hash = replacement_hash;
+    claim_observer.code_hash = replacement_hash;
     try observed_tracked.retainStateTransition();
-    try observed_dense.retainStateTransition();
-    try std.testing.expectEqualDeep(tracked_observer.summary, dense_observer.summary);
-    try std.testing.expectEqual(@as(usize, 1), dense.logView().len());
+    try observed_claim.retainStateTransition();
+    try std.testing.expectEqualDeep(tracked_observer.summary, claim_observer.summary);
+    try std.testing.expectEqual(@as(usize, 1), claim.logView().len());
     const tracked_account_change = tracked.acceptedChanges().accounts.at(0);
-    const dense_account_change = dense.acceptedChanges().accounts.at(0);
-    try std.testing.expectEqual(tracked_account_change.address, dense_account_change.address);
-    try std.testing.expectEqualDeep(tracked_account_change.account, dense_account_change.account);
+    const claim_account_change = claim.acceptedChanges().accounts.at(0);
+    try std.testing.expectEqual(tracked_account_change.address, claim_account_change.address);
+    try std.testing.expectEqualDeep(tracked_account_change.account, claim_account_change.account);
     const tracked_storage_change = tracked.acceptedChanges().storage_writes.at(0);
-    const dense_storage_change = dense.acceptedChanges().storage_writes.at(0);
-    try std.testing.expectEqual(tracked_storage_change.address, dense_storage_change.address);
-    try std.testing.expectEqual(tracked_storage_change.key, dense_storage_change.key);
-    try std.testing.expectEqual(tracked_storage_change.value, dense_storage_change.value);
+    const claim_storage_change = claim.acceptedChanges().storage_writes.at(0);
+    try std.testing.expectEqual(tracked_storage_change.address, claim_storage_change.address);
+    try std.testing.expectEqual(tracked_storage_change.key, claim_storage_change.key);
+    try std.testing.expectEqual(tracked_storage_change.value, claim_storage_change.value);
 }
 
 test "executor prepareBytecode eagerly analyzes jumpdests" {
@@ -390,7 +399,7 @@ test "trace replay runs after prepared code leaves the live frame" {
 
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    const code_view = try executor.state.getCodeView(contract);
+    const code_view = try executor.state.getCodeView(.fromAddress(contract));
     _ = try pool.getOrPrepare(code_view.code_hash, code_view.bytes);
 
     var recorder = CacheInvalidatingTrace{ .pool = &pool };
@@ -473,7 +482,7 @@ test "prepared execution follows current code hash without owning public code re
     try std.testing.expect(original_prepared.bytes.ptr != public_original.ptr);
     try std.testing.expectEqualSlices(u8, &original_code, public_original);
 
-    try executor.state.setCode(contract, &replacement_code);
+    try executor.state.setCode(.fromAddress(contract), &replacement_code);
     const replacement_execution = try Osaka.Executor.resolveExecutionCode(&executor, contract);
     try std.testing.expect(replacement_execution.bytes.ptr != original_prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &replacement_code, replacement_execution.bytes);
@@ -519,8 +528,8 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         const account_value = try evmz.eth.trie.accountValueFrom(scratch, .{ .code_hash = code_hash });
         const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
         const nodes = [_][]const u8{state_node};
-        const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
-        var witness = try evmz.stateless.WitnessReader.Indexed.init(
+        const indexed = try evmz.eth.trie.indexWitness(scratch, &nodes);
+        var witness = try evmz.stateless.WitnessReader.init(
             scratch,
             evmz.crypto.keccak256(state_node),
             indexed,
@@ -552,8 +561,8 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         const account_value = try evmz.eth.trie.accountValueFrom(scratch, .{ .code_hash = code_hash });
         const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
         const nodes = [_][]const u8{state_node};
-        const indexed = try evmz.eth.trie.indexNodes(scratch, &nodes);
-        var witness = try evmz.stateless.WitnessReader.Indexed.init(
+        const indexed = try evmz.eth.trie.indexWitness(scratch, &nodes);
+        var witness = try evmz.stateless.WitnessReader.init(
             scratch,
             evmz.crypto.keccak256(state_node),
             indexed,
@@ -928,7 +937,7 @@ fn executeCreateOpcodeStatus(comptime spec: ExactSpec) !Interpreter.Status {
         .STOP,
     });
 
-    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
+    const Exec = executor_module.ExecutorType(spec, OpenWorld, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -945,7 +954,7 @@ fn executeCallResultStore(comptime spec: ExactSpec) !u256 {
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
-    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
+    const Exec = executor_module.ExecutorType(spec, OpenWorld, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
 
@@ -975,7 +984,7 @@ fn executeTopLevelDelegatedCall(comptime spec: ExactSpec) !i64 {
     const target = evmz.addr(0x3333);
     const execution_context = testExecutionContext(sender, 100_000);
 
-    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
+    const Exec = executor_module.ExecutorType(spec, OpenWorld, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1038,7 +1047,7 @@ fn executeTopFrameValueTransfer(comptime spec: ExactSpec) !TopFrameValueTransfer
     const recipient = evmz.addr(0x2222);
     const execution_context = testExecutionContext(sender, 100_000);
 
-    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
+    const Exec = executor_module.ExecutorType(spec, OpenWorld, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1075,7 +1084,7 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
         .STOP,
     });
 
-    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
+    const Exec = executor_module.ExecutorType(spec, OpenWorld, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1088,13 +1097,13 @@ fn emptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
     } }, .legacy(100_000)));
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    return executor.state.accountExists(recipient);
+    return executor.state.accountExists(.fromAddress(recipient));
 }
 
 fn topLevelEmptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x3333);
-    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
+    const Exec = executor_module.ExecutorType(spec, OpenWorld, .{});
     var executor = Exec.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
@@ -1107,11 +1116,11 @@ fn topLevelEmptyCallRecipientMaterialized(comptime spec: ExactSpec) !bool {
     );
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    return executor.state.accountExists(recipient);
+    return executor.state.accountExists(.fromAddress(recipient));
 }
 
 fn executeNestedBalanceCall(comptime spec: ExactSpec) !i64 {
-    const Exec = executor_module.ExecutorType(spec, state_domain.Tracked.Execution, .{});
+    const Exec = executor_module.ExecutorType(spec, OpenWorld, .{});
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
@@ -1553,7 +1562,7 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(contract).?.nonce);
-    try std.testing.expect(!executor.state.isAccountWarm(create2_address));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(create2_address)));
 }
 
 test "captured runtime records nested call and create frames without generic stepping" {
@@ -1705,7 +1714,7 @@ test "active transaction owns rollback before pending state" {
     errdefer transaction_runtime.discard(&executor);
     try transaction_runtime.beginExecution(&executor, request, .{});
     const first_generation = executor.attempt.?.owner.transaction.generation;
-    try executor.state.addBalance(sender, 9);
+    try executor.state.addBalance(.fromAddress(sender), 9);
     try std.testing.expectEqual(@as(u256, 9), try executor.getBalance(sender));
 
     transaction_runtime.discard(&executor);
@@ -1740,7 +1749,7 @@ test "active transaction finishes into pending state" {
     try transaction_runtime.begin(&executor, .normal);
     errdefer transaction_runtime.discard(&executor);
     try transaction_runtime.beginExecution(&executor, request, .{});
-    try executor.state.addBalance(sender, 7);
+    try executor.state.addBalance(.fromAddress(sender), 7);
     const executed = Cancun.Executor.Executed(void){
         .executor = &executor,
         .generation = transaction_runtime.finish(&executor),
@@ -1808,8 +1817,8 @@ test "multi-root transaction preserves committed roots and isolates failed roots
     }, .{});
     try std.testing.expectEqual(Interpreter.Status.success, first.result.status());
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(first_contract, 0));
-    try std.testing.expectEqual(@as(u256, 1), try executor.state.getTransientStorage(first_contract, 0));
-    try std.testing.expect(executor.state.isAccountWarm(first_contract));
+    try std.testing.expectEqual(@as(u256, 1), executor.state.getTransientStorage(.fromAddress(first_contract), 0));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(first_contract)));
     try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
 
     var second_context = session_context;
@@ -1825,9 +1834,9 @@ test "multi-root transaction preserves committed roots and isolates failed roots
     try std.testing.expectEqual(Interpreter.Status.success, second.result.status());
     try std.testing.expectEqual(second_origin.toU256(), try executor.getStorage(second_contract, 0));
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(second_contract, 1));
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getTransientStorage(first_contract, 0));
-    try std.testing.expect(executor.state.isAccountWarm(first_contract));
-    try std.testing.expect(executor.state.isAccountWarm(second_contract));
+    try std.testing.expectEqual(@as(u256, 0), executor.state.getTransientStorage(.fromAddress(first_contract), 0));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(first_contract)));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(second_contract)));
     try std.testing.expectEqual(@as(usize, 2), executor.logView().len());
     try std.testing.expect(executor.execution_context.?.transaction.extension.get(Runtime).? == &runtime);
 
@@ -1842,13 +1851,13 @@ test "multi-root transaction preserves committed roots and isolates failed roots
         .gas = .legacy(100_000),
     }, .{});
     try std.testing.expectEqual(Interpreter.Status.revert, failed.result.status());
-    try std.testing.expect(!executor.state.isAccountWarm(failed_contract));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(failed_contract)));
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(failed_contract, 0));
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getTransientStorage(failed_contract, 0));
+    try std.testing.expectEqual(@as(u256, 0), executor.state.getTransientStorage(.fromAddress(failed_contract), 0));
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(first_contract, 0));
     try std.testing.expectEqual(second_origin.toU256(), try executor.getStorage(second_contract, 0));
-    try std.testing.expect(executor.state.isAccountWarm(first_contract));
-    try std.testing.expect(executor.state.isAccountWarm(second_contract));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(first_contract)));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(second_contract)));
     try std.testing.expectEqual(@as(usize, 2), executor.logView().len());
 }
 
@@ -2039,12 +2048,12 @@ test "transaction payload resolves only its inner checkpoint" {
 
         try transaction_runtime.begin(&executor, .normal);
         defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
-        try executor.state.addBalance(sender, 7);
+        try executor.state.addBalance(.fromAddress(sender), 7);
         try transaction_runtime.beginExecution(&executor, request, .{});
 
         var preparation_checkpoint = executor.checkpoint();
         defer preparation_checkpoint.deinit();
-        try executor.state.addBalance(sender, 5);
+        try executor.state.addBalance(.fromAddress(sender), 5);
 
         const outcome = try transaction_runtime.runPayload(&executor, request);
         try std.testing.expectEqual(TransactionExecutionStage.payload, outcome.stage);
@@ -2073,7 +2082,7 @@ test "transaction payload resolves only its inner checkpoint" {
 
         try transaction_runtime.begin(&executor, .normal);
         defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
-        try executor.state.addBalance(sender, 7);
+        try executor.state.addBalance(.fromAddress(sender), 7);
         try transaction_runtime.beginExecution(&executor, request, .{});
 
         const outcome = try transaction_runtime.runPayload(&executor, request);
@@ -2091,30 +2100,6 @@ test "transaction payload resolves only its inner checkpoint" {
         executed.retain();
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
     }
-}
-
-test "rollback transaction restores branch checkpoint and closes execution context" {
-    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
-    const sender = evmz.addr(0xaaaa);
-    const contract = evmz.addr(0xbbbb);
-    const execution_context = testExecutionContext(sender, 100_000);
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
-    defer executor.deinit();
-
-    try evmz.t.seedExecutorAccount(&executor, contract, .{});
-
-    try executor.beginTransaction(execution_context, sender, contract);
-    var pre_execution = try executor.branchCheckpoint();
-    defer pre_execution.deinit();
-
-    try std.testing.expectEqual(execution_values.StorageStatus.added, try executor.state.setStorage(contract, 7, 2));
-    try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));
-
-    executor.rollbackTransaction(&pre_execution);
-
-    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 7));
-    try std.testing.expectEqual(@as(usize, 0), executor.state.journalEntryCount());
-    try std.testing.expect(executor.execution_context == null);
 }
 
 test "executor executes top-level create transaction" {
@@ -2216,7 +2201,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
 
     try std.testing.expectEqual(Interpreter.Status.revert, result.status());
     try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(recipient));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(recipient)));
 }
 
 test "Amsterdam CREATE endowment emits transfer log" {
@@ -2406,21 +2391,29 @@ test "exact spec drives create runtime prefix rejection" {
 }
 
 test "exact spec drives create deposit gas" {
-    const Shanghai = evmz.t.Vm(.shanghai) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const overrides = struct {
-        fn createDepositRegularGas(runtime_size: i64) ?i64 {
+        fn expensiveDepositRegularGas(runtime_size: i64) error{Overflow}!i64 {
             _ = runtime_size;
             return 1_000_000;
         }
+
+        fn overflowingDepositRegularGas(runtime_size: i64) error{Overflow}!i64 {
+            _ = runtime_size;
+            return error.Overflow;
+        }
     };
-    const ExpensiveDeposit = evmz.t.CustomVm(.shanghai, .{
-        .create = .{ .depositRegularGas = overrides.createDepositRegularGas },
-    }) orelse return error.SkipZigTest;
+    const ExpensiveDeposit = evmz.t.CustomVm(.latest, .{
+        .create = .{ .depositRegularGas = overrides.expensiveDepositRegularGas },
+    }).?;
+    const OverflowingDeposit = evmz.t.CustomVm(.latest, .{
+        .create = .{ .depositRegularGas = overrides.overflowingDepositRegularGas },
+    }).?;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
     const init_code = initCodeReturningRuntimeSize(1);
 
-    var default_executor = Shanghai.Executor.init(std.testing.allocator, .{});
+    var default_executor = Latest.Executor.init(std.testing.allocator, .{});
     defer default_executor.deinit();
     try putFundedSender(&default_executor, sender);
 
@@ -2444,6 +2437,22 @@ test "exact spec drives create deposit gas" {
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, custom_result.status());
     try std.testing.expectEqual(evmz.execution.TerminalCause.code_store_out_of_gas, custom_result.outcome.cause);
     try std.testing.expect(custom_result.checkpoint_reverted);
+
+    var overflow_executor = OverflowingDeposit.Executor.init(std.testing.allocator, .{});
+    defer overflow_executor.deinit();
+    try putFundedSender(&overflow_executor, sender);
+
+    const overflow_result = (try runStandalone(&overflow_executor, execution_context, .{ .create = .{
+        .sender = sender,
+        .recipient = evmz.address.create(sender, 0),
+        .init_code = &init_code,
+    } }, .legacy(100_000)));
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, overflow_result.status());
+    try std.testing.expectEqual(
+        evmz.execution.TerminalCause.code_store_out_of_gas,
+        overflow_result.outcome.cause,
+    );
+    try std.testing.expect(overflow_result.checkpoint_reverted);
 }
 
 test "exact spec drives created account initial nonce" {
@@ -2587,7 +2596,7 @@ test "exact spec drives selfdestruct host policy" {
     try std.testing.expectEqual(@as(i64, 7), result.gas_refund);
     try std.testing.expectEqual(@as(u256, 7), executor.getAccount(contract).?.balance);
     try std.testing.expectEqual(@as(u256, 7), executor.getAccount(beneficiary).?.balance);
-    try std.testing.expect(!executor.state.wasSelfdestructed(contract));
+    try std.testing.expect(!executor.state.wasSelfdestructed(.fromAddress(contract)));
 }
 
 test "create warms created address from Berlin" {
@@ -2609,7 +2618,7 @@ test "create warms created address from Berlin" {
     const result = (try executor.executeMessage(request.message, request.gas));
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expect(executor.state.isAccountWarm(create_address));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(create_address)));
 }
 
 test "callcode with insufficient balance leaves caller storage unchanged" {
@@ -2665,7 +2674,7 @@ test "create address collision preserves nonce and warmth outside payload rollba
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
-    try std.testing.expect(executor.state.isAccountWarm(create_address));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(create_address)));
 }
 
 test "create observes the computed address only after preflight validation" {
@@ -2741,7 +2750,7 @@ test "call-like message at max depth still executes in recipient storage" {
 
     inline for (.{ Host.CallKind.callcode, Host.CallKind.delegatecall }, 0..) |kind, slot| {
         try executor.beginTransaction(execution_context, caller, caller);
-        try executor.state.setCode(target, &.{ 0x60, 0x2a, 0x60, @intCast(slot), 0x55, 0x00 });
+        try executor.state.setCode(.fromAddress(target), &.{ 0x60, 0x2a, 0x60, @intCast(slot), 0x55, 0x00 });
         const result = (try executeHostCall(&executor, .{
             .depth = Host.max_call_depth,
             .kind = kind,
@@ -2839,7 +2848,7 @@ test "Amsterdam value call at max depth refills new-account state gas" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, evmz.eth.eip8037.new_account_state_gas), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
-    try std.testing.expect(!try executor.state.accountExists(recipient));
+    try std.testing.expect(!try executor.state.accountExists(.fromAddress(recipient)));
 }
 
 test "Amsterdam create at max depth refills new-account state gas" {
@@ -2900,7 +2909,7 @@ test "exceptional child call rolls back storage via checkpoint" {
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
-    try std.testing.expectEqual(@as(u256, 0), try executor.state.getStorage(target, 0x64));
+    try std.testing.expectEqual(@as(u256, 0), try executor.state.getStorage(.fromAddress(target), 0x64));
 }
 
 test "contract creation rejects EF-prefixed runtime code from London" {
@@ -2925,7 +2934,7 @@ test "contract creation rejects EF-prefixed runtime code from London" {
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
     try std.testing.expect(executor.getAccount(create_address) == null);
-    try std.testing.expect(executor.state.isAccountWarm(create_address));
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(create_address)));
 }
 
 test "selfdestruct charges new-account cost for nonzero balance" {
@@ -3042,7 +3051,7 @@ test "EXTCODESIZE and CALL canonicalize and share warmth for high-bit address wo
         try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(usize, 32), result.output_data.len);
         try std.testing.expectEqual(@as(u8, 0x2a), result.output_data[31]);
-        try std.testing.expect(executor.state.isAccountWarm(target));
+        try std.testing.expect(executor.state.isAccountWarm(.fromAddress(target)));
         gas_left[index] = result.gas_left;
     }
 
@@ -3254,7 +3263,7 @@ test "EIP-161 empty accounts do not exist from Spurious Dragon on" {
             .legacy(200_000),
         );
         try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(probe, 0));
-        try std.testing.expect(!try executor.state.accountExists(seeded_empty));
+        try std.testing.expect(!try executor.state.accountExists(.fromAddress(seeded_empty)));
     }
 
     // Alive through balance alone: an ordinary codeless account still reports
@@ -3283,9 +3292,9 @@ test "pre-Spurious-Dragon retains empty accounts as real state" {
     const seeded_empty = evmz.addr(0x00e0);
     var executor = TangerineWhistle.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    try std.testing.expect(executor.state.retains_empty_accounts);
+    try std.testing.expect(executor.state.world.retains_empty_accounts);
     executor.discardAccepted();
-    try std.testing.expect(executor.state.retains_empty_accounts);
+    try std.testing.expect(executor.state.world.retains_empty_accounts);
     try evmz.t.seedExecutorAccount(&executor, seeded_empty, .{});
 
     const attempt = executor.state.beginTransaction();
@@ -3295,5 +3304,5 @@ test "pre-Spurious-Dragon retains empty accounts as real state" {
         executor.state.seal(attempt);
         executor.state.discard(attempt);
     }
-    try std.testing.expect(try executor.state.accountExists(seeded_empty));
+    try std.testing.expect(try executor.state.accountExists(.fromAddress(seeded_empty)));
 }

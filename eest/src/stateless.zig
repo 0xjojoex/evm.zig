@@ -768,7 +768,7 @@ const GasTracePrinter = struct {
     fn observe(
         ptr: *anyopaque,
         block_access_index: evmz.eth.bal.BlockAccessIndex,
-        observations: evmz.state.TrackedState.ObservationsView,
+        observations: evmz.state.OpenState.ObservationsView,
     ) !void {
         _ = ptr;
         var account_index: u32 = 0;
@@ -818,10 +818,10 @@ const GasTracePrinter = struct {
 
     fn printBalance(
         block_access_index: evmz.eth.bal.BlockAccessIndex,
-        fact: evmz.state.TrackedState.AccountObservationFact,
+        fact: evmz.state.AccountObservationFact,
     ) void {
-        const original = account(fact.original);
-        const current = account(fact.current);
+        const original = fact.original orelse evmz.state.Account{};
+        const current = fact.current orelse evmz.state.Account{};
         std.debug.print(
             "    trace balance index={} addr={x} previous={x} value={x}\n",
             .{ block_access_index, fact.address, original.balance, current.balance },
@@ -830,22 +830,14 @@ const GasTracePrinter = struct {
 
     fn printNonce(
         block_access_index: evmz.eth.bal.BlockAccessIndex,
-        fact: evmz.state.TrackedState.AccountObservationFact,
+        fact: evmz.state.AccountObservationFact,
     ) void {
-        const original = account(fact.original);
-        const current = account(fact.current);
+        const original = fact.original orelse evmz.state.Account{};
+        const current = fact.current orelse evmz.state.Account{};
         std.debug.print(
             "    trace nonce index={} addr={x} previous={} value={}\n",
             .{ block_access_index, fact.address, original.nonce, current.nonce },
         );
-    }
-
-    fn account(value: ?evmz.state.TrackedState.AccountValue) evmz.state.Account {
-        return switch (value orelse .absent) {
-            .loaded => |loaded| loaded,
-            .absent => .{},
-            .exists_only => unreachable,
-        };
     }
 
     fn consumeTrace(ptr: *anyopaque, span: evmz.trace.TraceSpan) !void {

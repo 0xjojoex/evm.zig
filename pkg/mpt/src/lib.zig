@@ -1,33 +1,42 @@
 //! Standalone Ethereum modified Merkle Patricia Trie (MPT).
 //!
 //! The package computes trie roots, resolves inclusion/exclusion proofs, and
-//! applies sparse updates to a witness-backed trie. The trie retains a
-//! caller-provided allocator, so native callers may grow while guests may use
-//! fixed or bump allocation. Operation workspace is derived from actual input.
-//! The trie is generic over a Keccak execution context so native and zkVM
-//! backends can implement the same fixed structural commitment rule.
+//! applies sparse updates to a witness-backed trie. This is a stateless
+//! root/proof/update engine, not a persistent trie database.
 //!
-//! This is a stateless root/proof/update engine, not a persistent trie
-//! database. One engine per capability:
+//! Operations that execute Keccak — root construction, witness indexing, and
+//! every mutation — live on `Trie(KeccakContext)`, which retains the caller's
+//! allocator so native callers may grow while guests may use fixed or bump
+//! allocation. Hash-free reads live on the data they read: `WitnessIndex`
+//! serves proof lookups, `Catalog` serves authenticated linked-topology reads
+//! and batch binds.
 //!
-//! | capability            | module         | entry points                    |
-//! |-----------------------|----------------|---------------------------------|
-//! | construct from scratch| `root.zig`     | `rootSorted`/`root`, exact flat workspace |
-//! | authenticated reads   | `proof.zig`    | `lookup`, allocation-free       |
-//! | mutate arbitrary keys | `sparse.zig`   | `updateSorted` — variable-width structural keys |
-//! | mutate fixed keys     | `occurrence.zig` | `updateFixedSorted`/`updateCatalogSorted` — resolver-backed fixed-64-nibble algebra |
+//! One engine per capability:
+//!
+//! | capability            | module           | entry points                    |
+//! |-----------------------|------------------|---------------------------------|
+//! | construct from scratch| `construct.zig`  | `rootSorted`/`root`, exact flat buffer |
+//! | authenticated reads   | `proof.zig`      | `WitnessIndex.lookup`, allocation-free |
+//! | linked topology reads | `catalog.zig`    | `Catalog.lookup`/`bindSorted` over stable `u32` handles |
+//! | mutate arbitrary keys | `sparse.zig`     | `updateSorted` — variable-width structural keys |
+//! | mutate fixed keys     | `occurrence.zig` | `updateFixedSorted` over `Source(.witness)`/`Source(.catalog)` — resolver-backed fixed-64-nibble algebra |
+//!
+//! Naming: a `Sorted` suffix means the input must already be strictly
+//! ascending and unique (validated, `error.UnsortedKeys`/`error.DuplicateKey`);
+//! `AssumeSorted` means the caller guarantees it; an unsuffixed variant sorts
+//! for the caller.
 //!
 //! `fuzz.zig` differentially checks arbitrary sparse, fixed index, and catalog
 //! occurrence mutation against full construction.
 
 const std = @import("std");
 const hash = @import("hash.zig");
-const root_mod = @import("root.zig");
+const construct = @import("construct.zig");
 const proof = @import("proof.zig");
 const sparse = @import("sparse.zig");
 const occurrence = @import("occurrence.zig");
-const catalog = @import("catalog.zig");
 const fixed_key = @import("fixed_key.zig");
+pub const nibble = @import("nibble.zig");
 
 const errors = @import("error.zig");
 pub const Error = errors.Error;
@@ -35,105 +44,70 @@ pub const BuildError = errors.BuildError;
 pub const IndexError = errors.IndexError;
 pub const LookupError = errors.LookupError;
 pub const UpdateError = errors.UpdateError;
+
 pub const Root = hash.Root;
-pub const FixedKey = fixed_key.FixedKey;
 pub const empty_root = hash.empty_root;
 pub const StdKeccak256Context = hash.StdKeccak256Context;
-pub const RootWorkspace = @import("workspace.zig").Workspace;
-pub const Entry = root_mod.Entry;
-pub const rootWorkspaceSize = root_mod.workspaceSize;
-pub const rootWorkspaceSizeForLimits = root_mod.workspaceSizeForLimits;
-pub const Absence = proof.Absence;
-pub const Lookup = proof.Lookup;
-pub const LookupCache = proof.LookupCache;
-pub const NodeIndex = proof.NodeIndex;
-pub const Catalog = catalog.Catalog;
-pub const CatalogBuilder = catalog.Builder;
-pub const CatalogRoot = catalog.RootRef;
-pub const CatalogNodeId = catalog.NodeId;
-pub const CatalogLimits = catalog.Limits;
-pub const CatalogInitError = catalog.InitError;
-pub const BoundLookup = catalog.BoundLookup;
-pub const BoundValue = catalog.BoundValue;
-pub const Region = occurrence.Region;
-pub const FixedAbsence = fixed_key.FixedAbsence;
-pub const FixedLookup = fixed_key.FixedLookup;
-pub const BindWorkspace = fixed_key.BindWorkspace;
-pub const BatchLookupError = fixed_key.BatchLookupError;
-pub const bindSorted = fixed_key.bindSorted;
-pub const bindAssumeSorted = fixed_key.bindAssumeSorted;
-/// Final value or deletion for one fixed 32-byte structural key.
-pub const FixedUpdate = occurrence.Update;
+pub const ScopedArenaAllocator = @import("stdx").ScopedArenaAllocator;
+
+pub const Entry = construct.Entry;
 pub const Update = sparse.Update;
+pub const FixedKey = fixed_key.FixedKey;
+pub const FixedUpdate = occurrence.Update;
+pub const NodeUpdates = occurrence.NodeUpdates;
 
-const empty_index_storage: proof.IndexStorage = .{};
-pub const empty_node_index = proof.emptyIndex(&empty_index_storage);
+pub const Lookup = proof.Lookup;
+pub const Absence = proof.Absence;
+pub const LookupCache = proof.LookupCache;
+pub const FixedLookup = fixed_key.FixedLookup;
+pub const FixedAbsence = fixed_key.FixedAbsence;
 
-const IndexedNodesData = struct {
-    allocator: ?std.mem.Allocator,
-    storage: []proof.NodeRecord,
-    table: []u32,
-    index_storage: proof.IndexStorage,
-};
+pub const WitnessIndex = proof.WitnessIndex;
+pub const Catalog = @import("catalog.zig").Catalog;
 
-var empty_indexed_nodes: IndexedNodesData = .{
-    .allocator = null,
-    .storage = &.{},
-    .table = &.{},
-    .index_storage = .{},
-};
+/// Which node-resolution source backs a fixed-key mutation batch.
+pub const SourceMode = enum { witness, catalog };
 
-/// Opaque allocator-owned witness index. Encoded node bytes remain borrowed.
-/// The allocator passed to `Trie.init` must outlive this value.
-pub const IndexedNodes = opaque {
-    pub fn deinit(self: *IndexedNodes) void {
-        const data = indexedNodesData(self);
-        if (data.allocator) |allocator| {
-            allocator.free(data.table);
-            allocator.free(data.storage);
-            allocator.destroy(data);
-        }
-    }
-
-    pub fn index(self: *const IndexedNodes) *const NodeIndex {
-        return proof.emptyIndex(&indexedNodesConstData(self).index_storage);
-    }
-
-    pub fn nodeCount(self: *const IndexedNodes) usize {
-        return proof.nodeCount(self.index());
-    }
-
-    /// Requested bytes retained by this owned index, excluding allocator
-    /// alignment and bookkeeping. Empty indexes use static storage.
-    pub fn allocationBytes(self: *const IndexedNodes) usize {
-        const data = indexedNodesConstData(self);
-        if (data.allocator == null) return 0;
-        return @sizeOf(IndexedNodesData) +
-            data.storage.len * @sizeOf(proof.NodeRecord) +
-            data.table.len * @sizeOf(u32);
-    }
-};
-
-fn indexedNodesData(indexed: *IndexedNodes) *IndexedNodesData {
-    return @ptrCast(@alignCast(indexed));
+/// Fixed-key mutation source: the node resolver plus the root the batch
+/// applies to. The value's type selects the engine lane at comptime, so each
+/// mutation verb exists once. Construct with `witnessSource`/`catalogSource`.
+pub fn Source(comptime mode: SourceMode) type {
+    return switch (mode) {
+        .witness => struct {
+            pub const source_mode: SourceMode = .witness;
+            index: *const WitnessIndex,
+            root: Root,
+        },
+        .catalog => struct {
+            pub const source_mode: SourceMode = .catalog;
+            topology: *const Catalog,
+            root: Catalog.Root,
+        },
+    };
 }
 
-fn indexedNodesConstData(indexed: *const IndexedNodes) *const IndexedNodesData {
-    return @ptrCast(@alignCast(indexed));
+pub fn witnessSource(index: *const WitnessIndex, root: Root) Source(.witness) {
+    return .{ .index = index, .root = root };
 }
 
-fn indexedNodesFromData(data: *IndexedNodesData) *IndexedNodes {
-    return @ptrCast(data);
+pub fn catalogSource(topology: *const Catalog, root: Catalog.Root) Source(.catalog) {
+    return .{ .topology = topology, .root = root };
 }
 
-pub const AllocBuildError = std.mem.Allocator.Error || BuildError;
-pub const AllocIndexError = std.mem.Allocator.Error || IndexError;
-pub const AllocUpdateError = std.mem.Allocator.Error || UpdateError;
+fn sourceModeOf(comptime T: type) SourceMode {
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "source_mode") and T == Source(T.source_mode)) {
+        return T.source_mode;
+    }
+    @compileError("expected mpt.Source(.witness) or mpt.Source(.catalog), found " ++ @typeName(T));
+}
+
+pub const rootBufferSize = construct.bufferSize;
+pub const rootBufferSizeForLimits = construct.bufferSizeForLimits;
 
 /// Trie operations bound to an allocator and a Keccak execution context, which
 /// must expose `keccak256(self, []const u8) [32]u8`. The algorithm is not
 /// customizable: the context only selects how canonical Keccak-256 executes.
-/// The allocator must outlive the trie and its `IndexedNodes`.
+/// The allocator must outlive the trie and every `WitnessIndex` it creates.
 pub fn Trie(comptime KeccakContext: type) type {
     comptime hash.assertKeccakContext(KeccakContext);
     return struct {
@@ -151,16 +125,17 @@ pub fn Trie(comptime KeccakContext: type) type {
         pub fn rootSorted(
             self: Self,
             entries: []const Entry,
-        ) AllocBuildError!Root {
+        ) (std.mem.Allocator.Error || BuildError)!Root {
             return self.buildRoot(entries, true);
         }
 
-        /// Compute the root of a trie built from `entries` in any order; they
-        /// are copied into allocator-backed scratch and sorted before building.
+        /// Compute the root of a trie built from `entries` in any order; the
+        /// entry descriptors are copied into allocator-backed scratch and
+        /// sorted before building. Key and value bytes are never copied.
         pub fn root(
             self: Self,
             entries: []const Entry,
-        ) AllocBuildError!Root {
+        ) (std.mem.Allocator.Error || BuildError)!Root {
             return self.buildRoot(entries, false);
         }
 
@@ -168,148 +143,107 @@ pub fn Trie(comptime KeccakContext: type) type {
             self: Self,
             entries: []const Entry,
             already_sorted: bool,
-        ) AllocBuildError!Root {
+        ) (std.mem.Allocator.Error || BuildError)!Root {
             if (entries.len == 0) return empty_root;
-            const needed = try root_mod.requirements(entries);
-            const scratch_len = try root_mod.workspaceSizeFor(entries.len, needed, !already_sorted);
+            const needed = try construct.requirements(entries);
+            const scratch_len = try construct.bufferSizeFor(entries.len, needed, !already_sorted);
             const scratch = try self.allocator.alloc(u8, scratch_len);
             defer self.allocator.free(scratch);
-            var workspace = RootWorkspace.init(scratch);
             return if (already_sorted)
-                root_mod.rootSorted(self.keccak_context, &workspace, entries, needed)
+                construct.rootSorted(self.keccak_context, scratch, entries, needed)
             else
-                root_mod.root(self.keccak_context, &workspace, entries, needed);
+                construct.root(self.keccak_context, scratch, entries, needed);
         }
 
-        /// Advanced fixed-scratch variant of `rootSorted`.
-        pub fn rootSortedWithWorkspace(
+        /// Advanced caller-provided-buffer variant of `root`; size the buffer
+        /// with `rootBufferSize`/`rootBufferSizeForLimits`.
+        pub fn rootWithBuffer(
             self: Self,
-            workspace: *RootWorkspace,
+            buffer: []u8,
             entries: []const Entry,
         ) BuildError!Root {
-            return root_mod.rootSorted(self.keccak_context, workspace, entries, try root_mod.requirements(entries));
+            return construct.root(self.keccak_context, buffer, entries, try construct.requirements(entries));
         }
 
-        /// Advanced fixed-scratch variant of `root`.
-        pub fn rootWithWorkspace(
-            self: Self,
-            workspace: *RootWorkspace,
-            entries: []const Entry,
-        ) BuildError!Root {
-            return root_mod.root(self.keccak_context, workspace, entries, try root_mod.requirements(entries));
-        }
-
-        /// Hash each encoded witness node and index them by hash into an
-        /// allocator-owned sealed index for use by `lookup` and `updateSorted`.
-        pub fn indexNodes(
+        /// Hash each encoded witness node and seal them into an
+        /// allocator-owned index serving lookups and updates.
+        pub fn indexWitness(
             self: Self,
             encoded_nodes: []const []const u8,
-        ) AllocIndexError!*IndexedNodes {
-            if (encoded_nodes.len == 0) {
-                return indexedNodesFromData(&empty_indexed_nodes);
-            }
-
-            const storage = try self.allocator.alloc(proof.NodeRecord, encoded_nodes.len);
-            errdefer self.allocator.free(storage);
-            const table = try self.allocator.alloc(u32, proof.tableCapacity(encoded_nodes.len));
-            errdefer self.allocator.free(table);
-            const data = try self.allocator.create(IndexedNodesData);
-            errdefer self.allocator.destroy(data);
-            data.* = .{
-                .allocator = self.allocator,
-                .storage = storage,
-                .table = table,
-                .index_storage = .{},
-            };
-            _ = proof.indexNodes(self.keccak_context, &data.index_storage, storage, table, encoded_nodes) catch |err| switch (err) {
-                error.WorkspaceTooSmall => unreachable,
-                error.ConflictingNode => return error.ConflictingNode,
-            };
-            return indexedNodesFromData(data);
-        }
-
-        /// Resolve `key` against the witness index rooted at `root_hash`,
-        /// returning the stored value or the reason the key is absent.
-        pub fn lookup(
-            _: Self,
-            root_hash: Root,
-            index: *const NodeIndex,
-            key: []const u8,
-        ) LookupError!Lookup {
-            return proof.lookup(root_hash, index, key);
+        ) (std.mem.Allocator.Error || IndexError)!*WitnessIndex {
+            return proof.indexWitness(self.keccak_context, self.allocator, encoded_nodes);
         }
 
         /// Apply `updates` (sorted ascending by key; a null value deletes the
         /// key) to the witness trie rooted at `root_hash` and return the new
         /// root. Insertions precede deletions; hashed children are materialized
-        /// from the index only when the combined update still needs them.
+        /// from the witness only when the combined update still needs them.
         pub fn updateSorted(
             self: Self,
             root_hash: Root,
-            index: *const NodeIndex,
+            witness: *const WitnessIndex,
             updates: []const Update,
-        ) AllocUpdateError!Root {
+        ) (std.mem.Allocator.Error || UpdateError)!Root {
             return sparse.updateSorted(
                 self.keccak_context,
                 self.allocator,
                 root_hash,
-                index,
+                proof.sealedIndex(witness),
                 updates,
             );
         }
 
         /// Apply sorted fixed-32-byte-key updates through the shared mutation
-        /// engine, resolving authenticated nodes lazily from the sealed index.
-        /// Scratch comes from the caller's region and is rewound before return.
+        /// engine, resolving nodes from `source`: a witness source materializes
+        /// authenticated nodes lazily, a catalog source walks pre-authenticated
+        /// linked topology.
+        /// Scratch comes from the caller's arena and is rewound before return.
         pub fn updateFixedSorted(
             self: Self,
-            region: *Region,
-            root_hash: Root,
-            index: *const NodeIndex,
+            scratch_arena: *ScopedArenaAllocator,
+            source: anytype,
             updates: []const FixedUpdate,
-        ) AllocUpdateError!Root {
-            return occurrence.updateIndexSorted(
-                self.keccak_context,
-                region,
-                root_hash,
-                index,
-                updates,
-            );
+        ) (std.mem.Allocator.Error || UpdateError)!Root {
+            return self.updateFixedMode(scratch_arena, source, updates, {});
         }
 
-        /// Apply sorted fixed-key updates through an authenticated catalog.
-        /// Scratch comes from the caller's region and is rewound before return.
-        pub fn updateCatalogSorted(
+        /// Apply sorted fixed-key updates and retain content-addressed dirty
+        /// nodes in caller-owned storage before the scratch arena is rewound.
+        pub fn updateFixedSortedWithNodeUpdates(
             self: Self,
-            region: *Region,
-            topology: *const Catalog,
-            catalog_root: CatalogRoot,
+            scratch_arena: *ScopedArenaAllocator,
+            source: anytype,
             updates: []const FixedUpdate,
-        ) AllocUpdateError!Root {
-            return occurrence.updateCatalogSorted(
-                self.keccak_context,
-                region,
-                topology,
-                catalog_root,
-                updates,
-            );
+            node_updates: *NodeUpdates,
+        ) (std.mem.Allocator.Error || UpdateError)!Root {
+            return self.updateFixedMode(scratch_arena, source, updates, node_updates);
         }
 
-        /// Start a root-scoped authenticated catalog over an existing sealed
-        /// witness index. Additional state or storage roots may be linked
-        /// before `CatalogBuilder.finish` seals the immutable topology.
-        pub fn catalogBuilder(self: Self, index: *const NodeIndex) std.mem.Allocator.Error!CatalogBuilder {
-            return catalog.Builder.init(self.allocator, index);
-        }
-
-        /// Admission-bounded catalog ingestion. A surrounding application may
-        /// fall back to proof lookup when a sealed witness exceeds its budget.
-        pub fn catalogBuilderWithLimits(
+        fn updateFixedMode(
             self: Self,
-            index: *const NodeIndex,
-            limits: CatalogLimits,
-        ) CatalogInitError!CatalogBuilder {
-            return catalog.Builder.initWithLimits(self.allocator, index, limits);
+            scratch_arena: *ScopedArenaAllocator,
+            source: anytype,
+            updates: []const FixedUpdate,
+            node_updates: anytype,
+        ) (std.mem.Allocator.Error || UpdateError)!Root {
+            return switch (comptime sourceModeOf(@TypeOf(source))) {
+                .witness => occurrence.updateIndexSortedWithUpdates(
+                    self.keccak_context,
+                    scratch_arena,
+                    source.root,
+                    proof.sealedIndex(source.index),
+                    updates,
+                    node_updates,
+                ),
+                .catalog => occurrence.updateCatalogSortedWithUpdates(
+                    self.keccak_context,
+                    scratch_arena,
+                    source.topology,
+                    source.root,
+                    updates,
+                    node_updates,
+                ),
+            };
         }
 
         /// Build a typed-key facade over this configured structural trie.
@@ -335,11 +269,6 @@ pub fn Trie(comptime KeccakContext: type) type {
             return struct {
                 const KeyedSelf = @This();
 
-                pub const Entry = struct {
-                    key: Key,
-                    value: []const u8,
-                };
-
                 pub const Update = struct {
                     key: Key,
                     value: ?[]const u8,
@@ -352,76 +281,70 @@ pub fn Trie(comptime KeccakContext: type) type {
                     return .{ .structural = structural, .key_context = key_context };
                 }
 
-                /// Project each typed key, then sort by the projected key.
-                /// Domain-key ordering cannot be reused because projection may
-                /// not preserve order.
-                pub fn root(self: KeyedSelf, entries: []const KeyedSelf.Entry) AllocBuildError!Root {
-                    const allocator = self.structural.allocator;
-                    const projected_keys = try allocator.alloc(FixedKey, entries.len);
-                    defer allocator.free(projected_keys);
-                    const structural_entries = try allocator.alloc(root_mod.Entry, entries.len);
-                    defer allocator.free(structural_entries);
-
-                    for (entries, 0..) |entry, index| {
-                        projected_keys[index] = self.key_context.trieKey(entry.key);
-                        structural_entries[index] = .{
-                            .key = &projected_keys[index],
-                            .value = entry.value,
-                        };
-                    }
-                    return self.structural.root(structural_entries);
-                }
-
                 /// Fixed-size projection stays on the stack, so lookup remains
                 /// allocation-free after witness indexing.
                 pub fn lookup(
                     self: KeyedSelf,
                     root_hash: Root,
-                    index: *const NodeIndex,
+                    witness: *const WitnessIndex,
                     key: Key,
                 ) LookupError!Lookup {
                     const projected_key = self.key_context.trieKey(key);
-                    return self.structural.lookup(root_hash, index, &projected_key);
+                    return witness.lookup(root_hash, &projected_key);
                 }
 
                 /// Project and sort the batch before fixed-key mutation through
-                /// the sealed witness index.
+                /// `source` (witness or catalog). Domain-key ordering cannot be
+                /// reused because projection may not preserve order.
                 /// Colliding projections are reported as `DuplicateKey`.
-                /// Scratch comes from the caller's region and is rewound before return.
+                /// Scratch comes from the caller's arena and is rewound before return.
                 pub fn update(
                     self: KeyedSelf,
-                    region: *Region,
-                    root_hash: Root,
-                    index: *const NodeIndex,
+                    scratch_arena: *ScopedArenaAllocator,
+                    source: anytype,
                     updates: []const KeyedSelf.Update,
-                ) AllocUpdateError!Root {
-                    const mark = region.mark();
-                    defer region.rewind(mark);
-                    const allocator = region.allocator();
-                    const structural_updates = try allocator.alloc(occurrence.Update, updates.len);
-
-                    for (updates, structural_updates) |item, *projected| {
-                        projected.* = .{
-                            .key = self.key_context.trieKey(item.key),
-                            .value = item.value,
-                        };
-                    }
-                    sortFixedUpdates(structural_updates);
-                    return self.structural.updateFixedSorted(region, root_hash, index, structural_updates);
+                ) (std.mem.Allocator.Error || UpdateError)!Root {
+                    return self.updateMode(scratch_arena, source, updates, {});
                 }
 
-                pub fn updateCatalog(
+                pub fn updateWithNodeUpdates(
                     self: KeyedSelf,
-                    region: *Region,
-                    topology: *const Catalog,
-                    catalog_root: CatalogRoot,
+                    scratch_arena: *ScopedArenaAllocator,
+                    source: anytype,
                     updates: []const KeyedSelf.Update,
-                ) AllocUpdateError!Root {
-                    const mark = region.mark();
-                    defer region.rewind(mark);
-                    const allocator = region.allocator();
-                    const structural_updates = try allocator.alloc(occurrence.Update, updates.len);
+                    node_updates: *NodeUpdates,
+                ) (std.mem.Allocator.Error || UpdateError)!Root {
+                    return self.updateMode(scratch_arena, source, updates, node_updates);
+                }
 
+                fn updateMode(
+                    self: KeyedSelf,
+                    scratch_arena: *ScopedArenaAllocator,
+                    source: anytype,
+                    updates: []const KeyedSelf.Update,
+                    node_updates: anytype,
+                ) (std.mem.Allocator.Error || UpdateError)!Root {
+                    const mark = scratch_arena.mark();
+                    defer scratch_arena.rewind(mark);
+                    const structural_updates = try self.project(scratch_arena, updates);
+                    return if (comptime @TypeOf(node_updates) == void)
+                        self.structural.updateFixedSorted(scratch_arena, source, structural_updates)
+                    else
+                        self.structural.updateFixedSortedWithNodeUpdates(
+                            scratch_arena,
+                            source,
+                            structural_updates,
+                            node_updates,
+                        );
+                }
+
+                fn project(
+                    self: KeyedSelf,
+                    scratch_arena: *ScopedArenaAllocator,
+                    updates: []const KeyedSelf.Update,
+                ) std.mem.Allocator.Error![]FixedUpdate {
+                    const structural_updates =
+                        try scratch_arena.allocator().alloc(FixedUpdate, updates.len);
                     for (updates, structural_updates) |item, *projected| {
                         projected.* = .{
                             .key = self.key_context.trieKey(item.key),
@@ -429,12 +352,7 @@ pub fn Trie(comptime KeccakContext: type) type {
                         };
                     }
                     sortFixedUpdates(structural_updates);
-                    return self.structural.updateCatalogSorted(
-                        region,
-                        topology,
-                        catalog_root,
-                        structural_updates,
-                    );
+                    return structural_updates;
                 }
             };
         }
@@ -462,19 +380,4 @@ pub const DefaultTrie = Trie(StdKeccak256Context);
 /// Construct a trie using the default Keccak-256 context.
 pub fn init(allocator: std.mem.Allocator) DefaultTrie {
     return DefaultTrie.init(allocator, .{});
-}
-
-/// Allocation-free proof lookup. The witness index and encoded node bytes must
-/// remain alive for the duration of the call.
-pub fn lookup(root_hash: Root, index: *const NodeIndex, key: []const u8) LookupError!Lookup {
-    return proof.lookup(root_hash, index, key);
-}
-
-pub fn lookupCached(
-    root_hash: Root,
-    index: *const NodeIndex,
-    key: []const u8,
-    cache: *LookupCache,
-) (std.mem.Allocator.Error || LookupError)!Lookup {
-    return proof.lookupCached(root_hash, index, key, cache);
 }

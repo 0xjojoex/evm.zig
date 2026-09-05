@@ -6,6 +6,7 @@ const fixed = @import("../basic/fixed.zig");
 const Error = @import("../error.zig").Error;
 const eager = @import("../basic/eager.zig");
 const schema_limit = @import("../schema_limit.zig");
+const sequence = @import("../variable_sequence.zig");
 
 /// Return the codec for SSZ `List[FixedT, limit]`.
 /// `limit` is an arbitrary-precision schema capacity; runtime lengths remain `usize`.
@@ -39,7 +40,7 @@ fn ListCodec(comptime T: type, comptime limit: comptime_int, comptime progressiv
             try validateCount(values.len);
             const len = std.math.mul(usize, values.len, element_size) catch
                 return error.EncodedLengthOverflow;
-            try validateSerializedLength(len);
+            try sequence.validateSerializedLength(len);
             return len;
         }
 
@@ -89,7 +90,7 @@ fn ListCodec(comptime T: type, comptime limit: comptime_int, comptime progressiv
         }
 
         fn decodedCount(bytes: []const u8) Error!usize {
-            try validateSerializedLength(bytes.len);
+            try sequence.validateSerializedLength(bytes.len);
             if (bytes.len % element_size != 0) return error.InvalidByteLength;
             const count = bytes.len / element_size;
             try validateCount(count);
@@ -103,10 +104,6 @@ fn ListCodec(comptime T: type, comptime limit: comptime_int, comptime progressiv
 
         fn validateCount(count: usize) Error!void {
             if (!progressive and schema_limit.exceededBy(count, limit)) return error.ListLimitExceeded;
-        }
-
-        fn validateSerializedLength(len: usize) Error!void {
-            if (len > std.math.maxInt(u32)) return error.EncodedLengthOverflow;
         }
     };
 }

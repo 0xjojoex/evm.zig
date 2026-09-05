@@ -40,14 +40,16 @@ pub const AccountFields = struct {
     storage_wiped: bool = false,
 };
 
+pub inline fn accountValueRequired(effect: anytype) bool {
+    return effect.balance_written or
+        (!effect.storage_wiped and (effect.nonce_written or effect.code_written));
+}
+
 pub fn accountFields(view: anytype, fact: anytype) !?AccountFields {
     if (!fact.observation.semantic_access and !fact.effect.any()) return null;
 
     var fields = AccountFields{ .storage_wiped = fact.effect.storage_wiped };
-    if (fact.effect.balance_written or
-        (!fact.effect.storage_wiped and
-            (fact.effect.nonce_written or fact.effect.code_written)))
-    {
+    if (accountValueRequired(fact.effect)) {
         const original = accountOrZero(fact.original);
         const current = accountOrZero(fact.current);
         if (fact.effect.balance_written) fields.balance = .{
@@ -69,6 +71,29 @@ pub fn accountFields(view: anytype, fact: anytype) !?AccountFields {
         }
     }
     return fields;
+}
+
+test "account value materialization classification" {
+    const Effect = struct {
+        balance_written: bool = false,
+        nonce_written: bool = false,
+        code_written: bool = false,
+        storage_wiped: bool = false,
+    };
+
+    try std.testing.expect(!accountValueRequired(Effect{}));
+    try std.testing.expect(accountValueRequired(Effect{ .balance_written = true }));
+    try std.testing.expect(accountValueRequired(Effect{ .nonce_written = true }));
+    try std.testing.expect(accountValueRequired(Effect{ .code_written = true }));
+    try std.testing.expect(accountValueRequired(Effect{
+        .balance_written = true,
+        .storage_wiped = true,
+    }));
+    try std.testing.expect(!accountValueRequired(Effect{
+        .nonce_written = true,
+        .code_written = true,
+        .storage_wiped = true,
+    }));
 }
 
 pub inline fn storageIsRead(
@@ -111,11 +136,6 @@ pub const LaneTransition = struct {
     }
 };
 
-fn accountOrZero(value: anytype) Account {
-    if (@TypeOf(value) == ?Account) return value orelse .{};
-    return switch (value orelse .absent) {
-        .loaded => |account| account,
-        .absent => .{},
-        .exists_only => unreachable,
-    };
+fn accountOrZero(value: ?Account) Account {
+    return value orelse .{};
 }

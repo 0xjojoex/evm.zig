@@ -52,7 +52,7 @@ test "Amsterdam value-to-empty account state gas is charged at top frame" {
     }, 1);
 
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, result.status());
-    try std.testing.expect(!try executor.state.accountExists(recipient));
+    try std.testing.expect(!try executor.state.accountExists(.fromAddress(recipient)));
 }
 
 test "Amsterdam top-frame value-to-empty account spends state gas on success" {
@@ -139,7 +139,7 @@ test "Amsterdam authorization state-gas OOG is included and rolls back authoriza
     try std.testing.expectEqual(@as(u64, 30_000), result.gas.used);
     try std.testing.expectEqual(@as(u64, 0), result.gas.block.state);
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
-    try std.testing.expect(!try executor.state.accountExists(authority));
+    try std.testing.expect(!try executor.state.accountExists(.fromAddress(authority)));
 }
 
 test "Amsterdam dispatch state-gas OOG rolls back completed authorization" {
@@ -175,7 +175,7 @@ test "Amsterdam dispatch state-gas OOG rolls back completed authorization" {
     try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
     try std.testing.expectEqual(@as(u64, 0), executor.getAccount(authority).?.nonce);
     try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(authority)).len);
-    try std.testing.expect(!try executor.state.accountExists(recipient));
+    try std.testing.expect(!try executor.state.accountExists(.fromAddress(recipient)));
 }
 
 test "Amsterdam top-frame delegated target honors transaction warmth" {
@@ -191,7 +191,7 @@ test "Amsterdam top-frame delegated target honors transaction warmth" {
     try evmz.t.seedExecutorAccount(&executor, target, .{ .code = &.{evmz.Opcode.STOP.toByte()} });
 
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, authority);
-    try executor.state.warmAccount(target);
+    try executor.state.warmAccount(.fromAddress(target));
     const result = try executor.executeCallTransaction(sender, authority, &.{}, .{
         .regular_left = 10_000,
     }, 0);

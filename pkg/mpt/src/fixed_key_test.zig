@@ -11,9 +11,9 @@ test "catalog fixed batch binds shared prefixes without allocation" {
     defer std.testing.allocator.free(root_node);
     const nodes = [_][]const u8{ root_node, leaf0, leaf1 };
     const trie = mpt.init(std.testing.allocator);
-    var indexed = try trie.indexNodes(&nodes);
+    var indexed = try trie.indexWitness(&nodes);
     defer indexed.deinit();
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root_hash = mpt.StdKeccak256Context.keccak256(.{}, root_node);
     const root = try builder.authenticateRoot(root_hash);
@@ -25,8 +25,8 @@ test "catalog fixed batch binds shared prefixes without allocation" {
     const key2: mpt.FixedKey = [_]u8{0x20} ++ [_]u8{0} ** (@sizeOf(mpt.FixedKey) - 1);
     const keys = [_]mpt.FixedKey{ key0, key1, key2 };
     var results: [keys.len]mpt.FixedLookup = undefined;
-    var workspace: mpt.BindWorkspace = .{};
-    try mpt.bindSorted(catalog, root, &keys, &results, &workspace);
+    var workspace: mpt.Catalog.BindWorkspace = .{};
+    try catalog.bindSorted(root, &keys, &results, &workspace);
 
     try std.testing.expectEqualSlices(u8, &.{0x01}, results[0].present);
     try std.testing.expectEqualSlices(u8, &.{0x02}, results[1].present);
@@ -45,8 +45,8 @@ test "catalog fixed batch rejects key order before walking" {
     const low: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
     const high: mpt.FixedKey = [_]u8{0xff} ** @sizeOf(mpt.FixedKey);
     var results: [2]mpt.FixedLookup = undefined;
-    var workspace: mpt.BindWorkspace = .{};
-    var builder = try mpt.init(std.testing.allocator).catalogBuilder(mpt.empty_node_index);
+    var workspace: mpt.Catalog.BindWorkspace = .{};
+    var builder = try mpt.Catalog.Builder.init(std.testing.allocator, mpt.WitnessIndex.empty);
     defer builder.deinit();
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
@@ -54,26 +54,26 @@ test "catalog fixed batch rejects key order before walking" {
     const descending = [_]mpt.FixedKey{ high, low };
     try std.testing.expectError(
         error.UnsortedKeys,
-        mpt.bindSorted(catalog, .empty, &descending, &results, &workspace),
+        catalog.bindSorted(.empty, &descending, &results, &workspace),
     );
     const duplicate = [_]mpt.FixedKey{ low, low };
     try std.testing.expectError(
         error.DuplicateKey,
-        mpt.bindSorted(catalog, .empty, &duplicate, &results, &workspace),
+        catalog.bindSorted(.empty, &duplicate, &results, &workspace),
     );
 }
 
 test "catalog fixed batch preserves fixed-key validation and missing-node errors" {
     const key: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
     var results: [1]mpt.FixedLookup = undefined;
-    var workspace: mpt.BindWorkspace = .{};
+    var workspace: mpt.Catalog.BindWorkspace = .{};
     const trie = mpt.init(std.testing.allocator);
 
     const short_leaf = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x01};
     const short_nodes = [_][]const u8{&short_leaf};
-    var short_indexed = try trie.indexNodes(&short_nodes);
+    var short_indexed = try trie.indexWitness(&short_nodes);
     defer short_indexed.deinit();
-    var short_builder = try trie.catalogBuilder(short_indexed.index());
+    var short_builder = try mpt.Catalog.Builder.init(trie.allocator, short_indexed);
     defer short_builder.deinit();
     const short_root = try short_builder.authenticateRoot(
         mpt.StdKeccak256Context.keccak256(.{}, &short_leaf),
@@ -82,16 +82,16 @@ test "catalog fixed batch preserves fixed-key validation and missing-node errors
     defer short_catalog.deinit();
     try std.testing.expectError(
         error.InvalidNode,
-        mpt.bindSorted(short_catalog, short_root, &.{key}, &results, &workspace),
+        short_catalog.bindSorted(short_root, &.{key}, &results, &workspace),
     );
 
     const missing_digest = [_]u8{0x55} ** 32;
     const missing_child = [_]u8{0xf3} ++ [_]u8{0xa0} ++ missing_digest ++
         [_]u8{0x80} ** 14 ++ [_]u8{ 0xc2, 0x20, 0x02, 0x80 };
     const missing_nodes = [_][]const u8{&missing_child};
-    var missing_indexed = try trie.indexNodes(&missing_nodes);
+    var missing_indexed = try trie.indexWitness(&missing_nodes);
     defer missing_indexed.deinit();
-    var missing_builder = try trie.catalogBuilder(missing_indexed.index());
+    var missing_builder = try mpt.Catalog.Builder.init(trie.allocator, missing_indexed);
     defer missing_builder.deinit();
     const missing_root = try missing_builder.authenticateRoot(
         mpt.StdKeccak256Context.keccak256(.{}, &missing_child),
@@ -100,7 +100,7 @@ test "catalog fixed batch preserves fixed-key validation and missing-node errors
     defer missing_catalog.deinit();
     try std.testing.expectError(
         error.MissingNode,
-        mpt.bindSorted(missing_catalog, missing_root, &.{key}, &results, &workspace),
+        missing_catalog.bindSorted(missing_root, &.{key}, &results, &workspace),
     );
 }
 
@@ -112,18 +112,18 @@ test "catalog fixed batch rejects branch values" {
         [_]u8{0x80} ** 15 ++ [_]u8{0x01};
     const nodes = [_][]const u8{ &branch, &child };
     const trie = mpt.init(std.testing.allocator);
-    var indexed = try trie.indexNodes(&nodes);
+    var indexed = try trie.indexWitness(&nodes);
     defer indexed.deinit();
-    var builder = try trie.catalogBuilder(indexed.index());
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
     const root = try builder.authenticateRoot(mpt.StdKeccak256Context.keccak256(.{}, &branch));
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
     var results: [1]mpt.FixedLookup = undefined;
-    var workspace: mpt.BindWorkspace = .{};
+    var workspace: mpt.Catalog.BindWorkspace = .{};
     try std.testing.expectError(
         error.NonCanonicalNode,
-        mpt.bindSorted(catalog, root, &.{key}, &results, &workspace),
+        catalog.bindSorted(root, &.{key}, &results, &workspace),
     );
 }
 

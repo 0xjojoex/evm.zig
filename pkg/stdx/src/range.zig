@@ -37,27 +37,24 @@ pub fn Range(comptime T: type, comptime Len: type) type {
     };
 }
 
-/// Bytes cut from a shared `[]u8` arena.
 pub const Bytes = Range(u8, u32);
-
-/// 32-byte words cut from a shared `[]u256` arena.
-pub const Words = Range(u256, u32);
-
-/// Log topics. Consensus caps a log at four topics, so `u8` is generous.
-pub const Topics = Range(u256, u8);
 
 comptime {
     std.debug.assert(@sizeOf(Bytes) == 8);
-    std.debug.assert(@sizeOf(Words) == 8);
-    std.debug.assert(@sizeOf(Topics) == 8);
 }
 
 test "range slices its backing array and stays byte-identical across widths" {
+    const Words = Range(u256, u32);
+    const Narrow = Range(u256, u8);
+
     const bytes = [_]u8{ 1, 2, 3, 4, 5 };
-    const range = Bytes.init(1, 3);
-    try std.testing.expectEqualSlices(u8, bytes[1..4], range.slice(&bytes));
+    try std.testing.expectEqualSlices(u8, bytes[1..4], Bytes.init(1, 3).slice(&bytes));
 
     const words = [_]u256{ 7, 8, 9 };
-    try std.testing.expectEqualSlices(u256, words[2..3], Topics.init(2, 1).slice(&words));
+    try std.testing.expectEqualSlices(u256, words[2..3], Narrow.init(2, 1).slice(&words));
     try std.testing.expectEqualSlices(u256, words[0..0], (Words{}).slice(&words));
+
+    try std.testing.expectEqual(8, @sizeOf(Bytes));
+    try std.testing.expectEqual(8, @sizeOf(Words));
+    try std.testing.expectEqual(8, @sizeOf(Narrow));
 }

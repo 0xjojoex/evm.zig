@@ -1,18 +1,25 @@
-//! BAL adapter over one sealed tracked-state observation view.
+//! Address-keyed BAL adapter over one sealed observation view.
 //!
-//! The tracked rows are the checkpoint-resolved source. This module owns BAL
-//! grouping, sorting, allocation, and detached ownership.
+//! The view is consumed structurally, so either execution state lane feeds
+//! this: the checkpoint-resolved rows are the source either way. This module
+//! owns BAL grouping, sorting, allocation, and detached ownership.
+//!
+//! `bal.DenseClaimVerifier` is the dense-ID counterpart; `ClaimVerifier` here
+//! is the address-keyed one. BlockSTF selects the verifier for its world.
 
 const std = @import("std");
 const address = @import("../../address.zig");
-const State = @import("../../state/TrackedState.zig");
-const Account = @import("../../state/Account.zig");
-const MemoryAccount = @import("../../state/MemoryAccount.zig");
-const StateReader = @import("../../state/Reader.zig");
 const bal = @import("model.zig");
 const observation = @import("observation.zig");
 const shard_fold = @import("shard_fold.zig");
 const ShardFold = shard_fold.ShardFold;
+
+// Test-only: the tracked lane is one concrete view source the tests drive
+// through. Nothing above the tests names a lane.
+const OpenState = @import("../../state.zig").OpenState;
+const Account = @import("../../state/Account.zig");
+const MemoryAccount = @import("../../state/MemoryAccount.zig");
+const StateReader = @import("../../state/Reader.zig");
 
 const Address = address.Address;
 const Allocator = std.mem.Allocator;
@@ -415,15 +422,10 @@ test "existence-only semantic access does not require account fields" {
 
         fn reader() StateReader {
             return .{ .ptr = &context, .vtable = &.{
-                .accountExists = accountExists,
                 .loadAccount = loadAccount,
                 .loadCode = loadCode,
                 .getStorage = getStorage,
             } };
-        }
-
-        fn accountExists(_: *anyopaque, _: Address) !bool {
-            return true;
         }
 
         fn loadAccount(_: *anyopaque, _: Address) !?Account {
@@ -441,13 +443,17 @@ test "existence-only semantic access does not require account fields" {
         }
     };
 
-    var state = State.initWithStateReader(std.testing.allocator, Reader.reader());
+    var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, Reader.reader()));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     const target = address.addr(1);
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try std.testing.expect(try state.accountExists(target));
-    _ = try state.accessAccount(target);
+    try std.testing.expect(try state.accountExists(.fromAddress(target)));
+    _ = try state.accessAccount(.fromAddress(target));
     state.closeScope();
     state.seal(attempt);
 
@@ -461,11 +467,15 @@ test "existence-only semantic access does not require account fields" {
 }
 
 test "gas-only storage access does not require storage values" {
-    var state = State.init(std.testing.allocator);
+    var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    _ = try state.accessStorage(address.addr(1), 7);
+    _ = try state.accessStorage(.fromAddress(address.addr(1)), 7);
     state.closeScope();
     state.seal(attempt);
 
@@ -522,8 +532,12 @@ test "block builder coalesces transitions at one access index" {
     const allocator = std.testing.allocator;
     const target = address.addr(1);
 
-    var state = State.init(allocator);
+    var state = OpenState.init(allocator, .init(allocator, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;
     try state.seedAccount(target, seeded);
@@ -535,7 +549,7 @@ test "block builder coalesces transitions at one access index" {
 
     const first = state.beginObservedTransaction();
     state.beginScope();
-    try state.setBalance(target, 12);
+    try state.setBalance(.fromAddress(target), 12);
     state.closeScope();
     state.seal(first);
     try builder.append(state.pendingView().observations(), 3);
@@ -546,7 +560,7 @@ test "block builder coalesces transitions at one access index" {
 
     const second = state.beginObservedTransaction();
     state.beginScope();
-    try state.setBalance(target, 15);
+    try state.setBalance(.fromAddress(target), 15);
     state.closeScope();
     state.seal(second);
     try builder.append(state.pendingView().observations(), 3);

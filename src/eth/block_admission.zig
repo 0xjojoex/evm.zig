@@ -9,6 +9,17 @@ const bal = @import("bal/model.zig");
 const bal_witness = @import("bal/witness.zig");
 const execution_resources = @import("../execution/resources.zig");
 const rlp = @import("rlp");
+const Backend = @import("../backend.zig").Backend;
+const ClaimPlan = @import("bal/ClaimPlan.zig").ClaimPlan;
+const ClosedWorld = @import("bal/ClosedWorld.zig");
+
+pub const AdmissionError = error{
+    InfrastructureFailure,
+    InvalidBlockAccessList,
+    InvalidWitness,
+    OutOfMemory,
+    ResourceLimitExceeded,
+};
 
 pub const Claim = struct {
     decoded: ?bal.Decoded = null,
@@ -87,4 +98,69 @@ fn validate(
     const counts = bal.count(block_access_list);
     try validateCounts(counts, gas_limit);
     return counts;
+}
+
+/// Authenticate a validated claim and take ownership of its execution state.
+/// Plan and parent facts are released on every failure path.
+pub fn closedState(
+    allocator: std.mem.Allocator,
+    backend: *Backend,
+    claim: bal.BlockAccessList,
+) AdmissionError!ClosedWorld.State {
+    var plan = ClaimPlan.initAssumeValidated(allocator, claim) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ResourceLimitExceeded, error.TrieKeyCollision => return error.InvalidBlockAccessList,
+    };
+    const authenticated = backend.authenticateClaimPlan(allocator, plan) catch |err| {
+        plan.deinit(allocator);
+        return switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidWitness,
+        };
+    };
+    var facts = authenticated orelse {
+        plan.deinit(allocator);
+        return error.InvalidWitness;
+    };
+    const codes = backend.parentCodes() orelse {
+        facts.deinit(allocator);
+        plan.deinit(allocator);
+        return error.InvalidWitness;
+    };
+    return ClosedWorld.initStateHashed(allocator, plan, facts, codes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ResourceLimitExceeded => return error.ResourceLimitExceeded,
+        error.CodeHashCollision => return error.InvalidWitness,
+    };
+}
+
+pub fn precheckClaim(
+    allocator: std.mem.Allocator,
+    backend: *Backend,
+    claim: bal.BlockAccessList,
+) AdmissionError!void {
+    var claim_plan = ClaimPlan.initAssumeValidated(allocator, claim) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ResourceLimitExceeded, error.TrieKeyCollision => return error.InvalidBlockAccessList,
+    };
+    defer claim_plan.deinit(allocator);
+
+    const authenticated = backend.authenticateClaimPlan(allocator, claim_plan) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidWitness,
+    };
+    if (authenticated) |records_value| {
+        var records = records_value;
+        records.deinit(allocator);
+        return;
+    }
+
+    var resources = bal_witness.planAllocAssumeValidated(allocator, claim) catch
+        return error.OutOfMemory;
+    defer resources.deinit(allocator);
+    bal_witness.probeState(backend.reader(), resources.resources.state) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidWitness => return error.InvalidWitness,
+        else => return error.InfrastructureFailure,
+    };
 }

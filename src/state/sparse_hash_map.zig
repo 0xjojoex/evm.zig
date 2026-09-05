@@ -156,7 +156,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         }
 
         pub fn capacity(self: Self) Index {
-            return std.math.cast(Index, self.entries.len) orelse std.math.maxInt(Index);
+            return @intCast(self.entries.len);
         }
 
         pub fn allocationBytes(self: Self) usize {
@@ -189,11 +189,25 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             return &self.entries[row_index].key;
         }
 
-        /// Access a dense row by an identity returned from `getOrPut`.
-        pub fn valuePtrById(self: *Self, entry_id: EntryId) *V {
+        /// Access a dense row by an identity returned from `getOrPut`. The
+        /// row storage is owned through the slice, so a shared map handle
+        /// still hands out a mutable value: dense rows are the caller's state,
+        /// the map only indexes them.
+        pub fn valuePtrById(self: *const Self, entry_id: EntryId) *V {
             const row_index: Index = @intFromEnum(entry_id);
             std.debug.assert(row_index < self.len);
             return &self.entries[row_index].value;
+        }
+
+        /// Drop every dense row at or past `new_len`, keeping the identities
+        /// below it. Rows are appended in insertion order, so this discards
+        /// exactly the entries inserted after the map held `new_len` rows.
+        pub fn truncate(self: *Self, new_len: Index) void {
+            std.debug.assert(new_len <= self.len);
+            for (new_len..self.len) |index| {
+                self.index[self.entries[index].slot] = empty_slot;
+            }
+            self.len = new_len;
         }
 
         /// Access one dense row. Ordering is internal and not stable across
@@ -527,6 +541,27 @@ test "sparse hash map dense entry identity survives growth" {
 
     try std.testing.expectEqual(@as(u64, 7), map.keyById(first_id).*);
     try std.testing.expectEqual(@as(u64, 70), map.valuePtrById(first_id).*);
+}
+
+test "sparse hash map truncate keeps earlier identities and frees later slots" {
+    var map = Auto(u64, u64).init(std.testing.allocator);
+    defer map.deinit();
+
+    const first = try map.getOrPut(7);
+    first.value_ptr.* = 70;
+    try map.put(8, 80);
+    try map.put(9, 90);
+
+    map.truncate(1);
+    try std.testing.expectEqual(@as(u32, 1), map.count());
+    try std.testing.expectEqual(@as(?u64, 70), map.get(7));
+    try std.testing.expect(!map.contains(8));
+    try std.testing.expect(!map.contains(9));
+    try std.testing.expectEqual(@as(u64, 70), map.valuePtrById(first.entry_id).*);
+
+    try map.put(9, 91);
+    try std.testing.expectEqual(@as(?u64, 91), map.get(9));
+    try std.testing.expectEqual(@as(u32, 2), map.count());
 }
 
 test "sparse hash map clone owns independent dense rows" {

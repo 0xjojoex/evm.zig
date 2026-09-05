@@ -236,7 +236,7 @@ where you know at ship time what you need
 
 ## Packages
 
-Standalone Zig libraries under `pkg/` can be fetched independently:
+These standalone Zig libraries under `pkg/` can be fetched independently:
 
 - [`pkg/rlp`](pkg/rlp) — strict RLP encoding and decoding
 - [`pkg/mpt`](pkg/mpt) — stateless MPT proofs, authenticated catalogs, and

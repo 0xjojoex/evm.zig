@@ -1,6 +1,4 @@
 test {
-    // Stage 0: the debug lane is reachable for tests but is
-    // deliberately not exported from `evm.zig` or `Vm(spec)` yet.
     _ = @import("./debug.zig");
     // Only debug_cli consumes the disassembler, and that binary is not part of
     // the test build, so nothing else reaches these tests.
@@ -13,6 +11,7 @@ test {
     _ = @import("./test/executor_custom_handler_reentry.zig");
     _ = @import("./test/execution_reentrant_native_contract.zig");
     _ = @import("./test/mpt_package_test.zig");
+    _ = @import("./eth/trie_test.zig");
     _ = @import("./test/eip2200.zig");
     // Opcode semantics are tested against bytecode, independently of which
     // dispatcher implements them. No production module imports these.

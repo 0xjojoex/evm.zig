@@ -27,7 +27,7 @@ const Backend = @import("../backend.zig").Backend;
 
 const Log = vm.Log;
 const AssumeDecodedBlockInput = block_stf.AssumeDecodedBlockInput;
-const DenseAmsterdam = block_stf.Bind(.amsterdam, vm.BalStatelessVm(eth_spec.amsterdam));
+const DenseAmsterdam = block_stf.Bind(.amsterdam, vm.BalVm(eth_spec.amsterdam));
 const FinalizeBlockContext = block_stf.FinalizeBlockContext;
 const ObservationTarget = block_stf.ObservationTarget;
 const empty_requests_hash = block_stf.empty_requests_hash;
@@ -35,6 +35,7 @@ const ParentBlobGas = block_stf.ParentBlobGas;
 const ParentHeaderContext = block_stf.ParentHeaderContext;
 const ReceiptPayload = block_stf.ReceiptPayload;
 const RootChecks = block_stf.RootChecks;
+const CommitOutput = @import("block_stf.zig").CommitOutput;
 const Status = block_stf.Status;
 const TransactionInput = block_stf.TransactionInput;
 const encodeReceipt = block_stf.encodeReceipt;
@@ -175,7 +176,7 @@ test "BlockSTF validates a single witnessed transaction" {
         fn observe(
             ptr: *anyopaque,
             _: eth_bal.BlockAccessIndex,
-            observations: state.TrackedState.ObservationsView,
+            observations: state.OpenState.ObservationsView,
         ) !void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             var index: u32 = 0;
@@ -222,9 +223,40 @@ test "BlockSTF validates a single witnessed transaction" {
     try std.testing.expectEqual(trace_recorder.step_starts, trace_recorder.step_ends);
     try std.testing.expect(trace_recorder.storage_writes > 0);
 
+    var commit_output: CommitOutput = .{};
+    defer commit_output.deinit();
+    const retained = try StfFrontier.applyAssumeDecoded(scratch, .{
+        .env = .{ .gas_limit = 100_000 },
+        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .commit_output = &commit_output,
+        .transactions = &tx_input,
+        .root_checks = testRootChecks(
+            expected_state_root,
+            try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
+            first_result.receipts_root,
+        ),
+        .header_claims = .{
+            .gas_used = first_result.gas_used,
+            .block_gas_used = first_result.block_gas_used,
+            .logs_bloom = expected_logs_bloom,
+        },
+    });
+    try std.testing.expectEqual(Status.valid, retained.status);
+    try std.testing.expect(commit_output.delta.?.view().hasChanges());
+    const post_state_nodes = &commit_output.mpt_nodes.?;
+    try std.testing.expect(post_state_nodes.len() > 0);
+    const root_update = post_state_nodes.at(post_state_nodes.len() - 1);
+    try std.testing.expectEqualSlices(u8, &expected_state_root, &root_update.digest);
+    try std.testing.expectEqualSlices(
+        u8,
+        &root_update.digest,
+        &crypto.keccak256(root_update.bytes),
+    );
+
     const gas_mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &codes),
+        .commit_output = &commit_output,
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             expected_state_root,
@@ -234,6 +266,8 @@ test "BlockSTF validates a single witnessed transaction" {
         .header_claims = .{ .gas_used = first_result.gas_used + 1 },
     });
     try std.testing.expectEqual(Status.gas_used_mismatch, gas_mismatch.status);
+    try std.testing.expect(commit_output.delta == null);
+    try std.testing.expect(commit_output.mpt_nodes == null);
 
     const block_gas_mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
@@ -375,9 +409,17 @@ test "BlockSTF reports root mismatches and invalid witness" {
     });
     try std.testing.expectEqual(Status.state_root_mismatch, mismatch.status);
 
+    // The witness authenticates the root but omits the code the recipient
+    // leaf commits to, so the first transaction cannot be executed from it.
+    const coded_value = try trie.accountValueFrom(scratch, .{
+        .balance = 1_000_000,
+        .code_hash = crypto.keccak256(&.{0x00}),
+    });
+    const coded_node = try testLeafNode(scratch, &account_key, coded_value);
+    const coded_nodes = [_][]const u8{coded_node};
     const invalid = try StfFrontier.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
-        .state_backend = try Backend.fromWitness(scratch, pre_state_root, &.{}, &.{}),
+        .state_backend = try Backend.fromWitness(scratch, crypto.keccak256(coded_node), &coded_nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
             pre_state_root,
@@ -822,7 +864,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
     };
     const withdrawals = [_]Withdrawal{withdrawal};
     const missing_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
-        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
+        .state_backend = try Backend.fromWitness(
             scratch,
             trie.empty_root_hash,
             &.{},
@@ -866,7 +908,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
     }};
     const missing_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
-        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
+        .state_backend = try Backend.fromWitness(
             scratch,
             state_root,
             &.{account_node},
@@ -886,7 +928,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         .address = address.addr(0x3000),
     }});
     const spurious_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
-        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
+        .state_backend = try Backend.fromWitness(
             scratch,
             trie.empty_root_hash,
             &.{},
@@ -904,7 +946,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         .storage_reads = &spurious_slot,
     }});
     const spurious_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
-        .state_backend = try DenseAmsterdam.Vm.StateDomain.Lifecycle.witnessBackend(
+        .state_backend = try Backend.fromWitness(
             scratch,
             trie.empty_root_hash,
             &.{},

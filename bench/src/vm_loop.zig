@@ -65,7 +65,7 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
         allocator: std.mem.Allocator,
         executor: Executor,
         bytecode: evmz.Bytecode,
-        baseline: ?Executor.BranchCheckpoint = null,
+        baseline: ?Executor.BranchSnapshot = null,
 
         fn init(
             allocator: std.mem.Allocator,
@@ -105,14 +105,11 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
         }
 
         fn timeRuntimeCall(self: *Self, call_data: []const u8, gas_limit: u64) !u64 {
-            if (self.baseline == null) self.baseline = try self.executor.branchCheckpoint();
+            if (self.baseline == null) self.baseline = try self.executor.branchSnapshot();
             var baseline = try self.baseline.?.clone();
             defer baseline.deinit();
             self.executor.restoreBranch(&baseline);
             try self.executor.beginTransaction(executorExecutionContext(gas_limit), common.caller_address, common.contract_address);
-
-            var pre_execution = try self.executor.branchCheckpoint();
-            defer pre_execution.deinit();
 
             const start_ns = try common.monotonicNowNs();
             const call_options = evmz.executor.PreparedCallTransaction{
@@ -127,11 +124,10 @@ fn ExecutorRuntimeRunner(comptime ExactVm: type) type {
             const end_ns = try common.monotonicNowNs();
 
             if (result.status() != .success) {
-                self.executor.restoreBranch(&pre_execution);
-            } else {
-                try self.executor.commitTransaction();
+                self.executor.discardStateTransition();
+                return error.CallFailed;
             }
-            if (result.status() != .success) return error.CallFailed;
+            try self.executor.commitTransaction();
 
             return end_ns - start_ns;
         }

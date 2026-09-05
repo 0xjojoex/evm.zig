@@ -1,7 +1,7 @@
 //! Executor state I/O aliases.
 //!
 //! `StateReader` is the canonical-state read boundary. `Committer` is the
-//! optional persistence boundary for consuming a borrowed `ChangesView`.
+//! optional persistence boundary for consuming a detached `StateDelta`.
 
 const state = @import("../state.zig");
 

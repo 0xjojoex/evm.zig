@@ -1,14 +1,18 @@
-//! Single-owner chunked region with nested mark/rewind and retained capacity.
+//! Single-owner chunked arena with nested mark/rewind and retained capacity.
 //!
 //! Allocations made after a mark are invalidated together when that mark is
 //! rewound. Marks are strictly LIFO. Individual frees reclaim only the most
 //! recent allocation.
+//!
+//! Not `std.heap.ArenaAllocator`: the std arena is thread-safe, and its atomic
+//! RMW allocation path is wasted codegen for a single-threaded owner. Single
+//! ownership is also what makes nested marks expressible at all.
 
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
-const RewindableRegion = @This();
+const ScopedArenaAllocator = @This();
 
 parent: Allocator,
 first: ?*Chunk = null,
@@ -35,26 +39,31 @@ const Chunk = struct {
     }
 };
 
-/// One mark's identity and region position. Also the region's innermost
-/// active scope; `id` 0 means no mark is active.
+/// The innermost active scope: the newest mark's identity and the arena
+/// position it rewinds to. `id` 0 means no mark is active.
 const ScopeState = struct {
     id: u64 = 0,
     chunk: ?*Chunk = null,
     end_index: usize = 0,
 };
 
+/// Handle for `rewind`. The mark's rewind position lives in `owner.active`
+/// while the mark is innermost; LIFO discipline (asserted) guarantees it is
+/// still there when rewound.
 pub const Mark = struct {
-    owner: *RewindableRegion,
-    position: ScopeState,
+    owner: *ScopedArenaAllocator,
+    id: u64,
     previous: ScopeState,
 };
 
-pub fn init(parent: Allocator) RewindableRegion {
+pub fn init(parent: Allocator) ScopedArenaAllocator {
     return .{ .parent = parent };
 }
 
-pub fn deinit(self: *RewindableRegion) void {
+pub fn deinit(self: *ScopedArenaAllocator) void {
     std.debug.assert(self.active.id == 0);
+    // Free newest-first: with byte-exact packing (see `appendChunk`) a LIFO
+    // parent unwinds every chunk, reclaiming its space completely.
     var current = self.last;
     while (current) |chunk| {
         const previous = chunk.previous;
@@ -64,35 +73,34 @@ pub fn deinit(self: *RewindableRegion) void {
     self.* = undefined;
 }
 
-pub fn mark(self: *RewindableRegion) Mark {
+pub fn mark(self: *ScopedArenaAllocator) Mark {
     const id = self.next_mark_id;
     std.debug.assert(id != 0);
     self.next_mark_id +%= 1;
-    const position = ScopeState{
+    const result: Mark = .{ .owner = self, .id = id, .previous = self.active };
+    self.active = .{
         .id = id,
         .chunk = self.current,
         .end_index = if (self.current) |chunk| chunk.end_index else 0,
     };
-    const result = Mark{ .owner = self, .position = position, .previous = self.active };
-    self.active = position;
     return result;
 }
 
 /// Invalidate every allocation made after `mark`, retaining chunks for reuse.
-pub fn rewind(self: *RewindableRegion, target: Mark) void {
+pub fn rewind(self: *ScopedArenaAllocator, target: Mark) void {
     std.debug.assert(target.owner == self);
-    std.debug.assert(target.position.id == self.active.id);
+    std.debug.assert(target.id == self.active.id);
+    self.rewindTo(self.active.chunk, self.active.end_index);
     self.active = target.previous;
-    self.rewindTo(target.position.chunk, target.position.end_index);
 }
 
 /// Invalidate every outstanding allocation while keeping all chunks.
-pub fn resetRetainingCapacity(self: *RewindableRegion) void {
+pub fn resetRetainingCapacity(self: *ScopedArenaAllocator) void {
     std.debug.assert(self.active.id == 0);
     self.rewindTo(null, 0);
 }
 
-fn rewindTo(self: *RewindableRegion, target: ?*Chunk, end_index: usize) void {
+fn rewindTo(self: *ScopedArenaAllocator, target: ?*Chunk, end_index: usize) void {
     if (target) |chunk| {
         std.debug.assert(end_index <= chunk.buffer().len);
         chunk.end_index = end_index;
@@ -106,7 +114,7 @@ fn rewindTo(self: *RewindableRegion, target: ?*Chunk, end_index: usize) void {
     }
 }
 
-pub fn allocator(self: *RewindableRegion) Allocator {
+pub fn allocator(self: *ScopedArenaAllocator) Allocator {
     return .{
         .ptr = self,
         .vtable = &.{
@@ -118,7 +126,7 @@ pub fn allocator(self: *RewindableRegion) Allocator {
     };
 }
 
-pub fn capacity(self: *const RewindableRegion) usize {
+pub fn capacity(self: *const ScopedArenaAllocator) usize {
     var total: usize = 0;
     var current = self.first;
     while (current) |chunk| : (current = chunk.next) total += chunk.buffer().len;
@@ -126,7 +134,7 @@ pub fn capacity(self: *const RewindableRegion) usize {
 }
 
 fn alloc(context: *anyopaque, len: usize, alignment: Alignment, return_address: usize) ?[*]u8 {
-    const self: *RewindableRegion = @ptrCast(@alignCast(context));
+    const self: *ScopedArenaAllocator = @ptrCast(@alignCast(context));
     std.debug.assert(len > 0);
 
     var current = self.current orelse self.first;
@@ -149,7 +157,7 @@ fn resize(
     new_len: usize,
     return_address: usize,
 ) bool {
-    const self: *RewindableRegion = @ptrCast(@alignCast(context));
+    const self: *ScopedArenaAllocator = @ptrCast(@alignCast(context));
     _ = alignment;
     _ = return_address;
     std.debug.assert(memory.len > 0);
@@ -157,7 +165,7 @@ fn resize(
 
     if (!self.allocationInsideActiveMark(memory)) return new_len == memory.len;
 
-    const chunk = self.current orelse return new_len <= memory.len;
+    const chunk = self.current.?;
     const buffer = chunk.buffer();
     if (@intFromPtr(memory.ptr) + memory.len != @intFromPtr(buffer.ptr) + chunk.end_index) {
         return new_len <= memory.len;
@@ -191,12 +199,12 @@ fn free(
     alignment: Alignment,
     return_address: usize,
 ) void {
-    const self: *RewindableRegion = @ptrCast(@alignCast(context));
+    const self: *ScopedArenaAllocator = @ptrCast(@alignCast(context));
     _ = alignment;
     _ = return_address;
     std.debug.assert(memory.len > 0);
 
-    const chunk = self.current orelse return;
+    const chunk = self.current.?;
     const buffer = chunk.buffer();
     if (@intFromPtr(memory.ptr) + memory.len != @intFromPtr(buffer.ptr) + chunk.end_index) return;
     if (!self.allocationInsideActiveMark(memory)) return;
@@ -205,7 +213,7 @@ fn free(
 
 /// Whether an allocation belongs to the innermost active scope. Allocations
 /// below its mark floor must retain both their address and extent until rewind.
-fn allocationInsideActiveMark(self: *const RewindableRegion, memory: []u8) bool {
+fn allocationInsideActiveMark(self: *const ScopedArenaAllocator, memory: []u8) bool {
     if (self.active.id == 0) return true;
     const floor = self.active.chunk orelse return true;
     const address = @intFromPtr(memory.ptr);
@@ -228,8 +236,12 @@ fn allocateFrom(chunk: *Chunk, len: usize, alignment: Alignment) ?[*]u8 {
     return buffer[start..end].ptr;
 }
 
+/// Chunks are requested from the parent at alignment 1, with the header
+/// aligned manually inside (`base_offset`): consecutive chunks pack
+/// byte-exactly, so a LIFO parent (`FixedBufferAllocator`, another instance)
+/// never strands padding between them and `deinit` unwinds it fully.
 fn appendChunk(
-    self: *RewindableRegion,
+    self: *ScopedArenaAllocator,
     len: usize,
     alignment: Alignment,
     return_address: usize,
@@ -265,47 +277,47 @@ fn alignedIndex(buffer: [*]u8, end_index: usize, alignment: Alignment) usize {
 test "nested marks rewind to exact allocation positions" {
     var backing: [4096]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&backing);
-    var region = RewindableRegion.init(fixed.allocator());
-    defer region.deinit();
-    const allocator_instance = region.allocator();
+    var arena = ScopedArenaAllocator.init(fixed.allocator());
+    defer arena.deinit();
+    const allocator_instance = arena.allocator();
 
     const persistent = try allocator_instance.alloc(u8, 17);
     @memset(persistent, 0xa5);
-    const outer = region.mark();
+    const outer = arena.mark();
     const outer_scratch = try allocator_instance.alignedAlloc(u8, .@"64", 100);
-    const inner = region.mark();
+    const inner = arena.mark();
     const inner_scratch = try allocator_instance.alloc(u8, 1000);
-    const retained = region.capacity();
+    const retained = arena.capacity();
 
-    region.rewind(inner);
+    arena.rewind(inner);
     const inner_again = try allocator_instance.alloc(u8, 1000);
     try std.testing.expectEqual(@intFromPtr(inner_scratch.ptr), @intFromPtr(inner_again.ptr));
-    region.rewind(outer);
+    arena.rewind(outer);
     const outer_again = try allocator_instance.alignedAlloc(u8, .@"64", 100);
     try std.testing.expectEqual(@intFromPtr(outer_scratch.ptr), @intFromPtr(outer_again.ptr));
-    try std.testing.expectEqual(retained, region.capacity());
+    try std.testing.expectEqual(retained, arena.capacity());
     try std.testing.expect(std.mem.allEqual(u8, persistent, 0xa5));
 }
 
 test "reset retains chunks and parent allocation is fully reclaimed" {
     var backing: [4096]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&backing);
-    var region = RewindableRegion.init(fixed.allocator());
-    const allocator_instance = region.allocator();
+    var arena = ScopedArenaAllocator.init(fixed.allocator());
+    const allocator_instance = arena.allocator();
     _ = try allocator_instance.alloc(u8, 17);
     _ = try allocator_instance.alignedAlloc(u8, .@"64", 1000);
-    const retained = region.capacity();
-    region.resetRetainingCapacity();
-    _ = try region.allocator().alignedAlloc(u8, .@"64", 1000);
-    try std.testing.expectEqual(retained, region.capacity());
-    region.deinit();
+    const retained = arena.capacity();
+    arena.resetRetainingCapacity();
+    _ = try arena.allocator().alignedAlloc(u8, .@"64", 1000);
+    try std.testing.expectEqual(retained, arena.capacity());
+    arena.deinit();
     try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
 
 test "top allocation resize and free reuse current chunk" {
-    var region = RewindableRegion.init(std.testing.allocator);
-    defer region.deinit();
-    const allocator_instance = region.allocator();
+    var arena = ScopedArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator_instance = arena.allocator();
     var bytes = try allocator_instance.alloc(u8, 16);
     bytes = try allocator_instance.realloc(bytes, 32);
     allocator_instance.free(bytes);
@@ -316,20 +328,20 @@ test "top allocation resize and free reuse current chunk" {
 test "active mark protects earlier top allocation from free and resize" {
     var backing: [4096]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&backing);
-    var region = RewindableRegion.init(fixed.allocator());
-    defer region.deinit();
-    const allocator_instance = region.allocator();
+    var arena = ScopedArenaAllocator.init(fixed.allocator());
+    defer arena.deinit();
+    const allocator_instance = arena.allocator();
 
     var persistent = try allocator_instance.alloc(u8, 32);
     const persistent_address = @intFromPtr(persistent.ptr);
-    const scope = region.mark();
+    const scope = arena.mark();
     allocator_instance.free(persistent);
     try std.testing.expect(!allocator_instance.resize(persistent, 16));
     try std.testing.expect(!allocator_instance.resize(persistent, 48));
     const scratch = try allocator_instance.alloc(u8, 32);
     try std.testing.expect(persistent_address != @intFromPtr(scratch.ptr));
 
-    region.rewind(scope);
+    arena.rewind(scope);
     try std.testing.expect(allocator_instance.resize(persistent, 16));
     persistent = persistent[0..16];
     try std.testing.expectEqual(persistent_address, @intFromPtr(persistent.ptr));
@@ -338,22 +350,22 @@ test "active mark protects earlier top allocation from free and resize" {
 test "inner mark protects allocations owned by outer scope" {
     var backing: [4096]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&backing);
-    var region = RewindableRegion.init(fixed.allocator());
-    defer region.deinit();
-    const allocator_instance = region.allocator();
+    var arena = ScopedArenaAllocator.init(fixed.allocator());
+    defer arena.deinit();
+    const allocator_instance = arena.allocator();
 
-    const outer = region.mark();
+    const outer = arena.mark();
     const outer_value = try allocator_instance.alloc(u8, 32);
     const outer_address = @intFromPtr(outer_value.ptr);
-    const inner = region.mark();
+    const inner = arena.mark();
     allocator_instance.free(outer_value);
     const inner_value = try allocator_instance.alloc(u8, 32);
     try std.testing.expect(outer_address != @intFromPtr(inner_value.ptr));
 
-    region.rewind(inner);
+    arena.rewind(inner);
     allocator_instance.free(outer_value);
     const outer_again = try allocator_instance.alloc(u8, 32);
     try std.testing.expectEqual(outer_address, @intFromPtr(outer_again.ptr));
     try std.testing.expect(allocator_instance.resize(outer_again, 16));
-    region.rewind(outer);
+    arena.rewind(outer);
 }

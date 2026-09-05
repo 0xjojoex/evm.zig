@@ -1,5 +1,3 @@
-const std = @import("std");
-
 /// State observed while applying one successful authorization tuple.
 pub const signing_magic: u8 = 0x05;
 pub const base_cost: u64 = 12_500;
@@ -21,9 +19,9 @@ pub const GasAdjustment = struct {
     regular_refund: u64 = 0,
 
     pub fn add(self: *GasAdjustment, other: GasAdjustment) void {
-        self.account_state_charge = std.math.add(u64, self.account_state_charge, other.account_state_charge) catch std.math.maxInt(u64);
-        self.account_write_charge = std.math.add(u64, self.account_write_charge, other.account_write_charge) catch std.math.maxInt(u64);
-        self.delegation_state_charge = std.math.add(u64, self.delegation_state_charge, other.delegation_state_charge) catch std.math.maxInt(u64);
-        self.regular_refund = std.math.add(u64, self.regular_refund, other.regular_refund) catch std.math.maxInt(u64);
+        self.account_state_charge +|= other.account_state_charge;
+        self.account_write_charge +|= other.account_write_charge;
+        self.delegation_state_charge +|= other.delegation_state_charge;
+        self.regular_refund +|= other.regular_refund;
     }
 };

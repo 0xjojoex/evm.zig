@@ -1,14 +1,16 @@
 const std = @import("std");
-const bal = @import("../../evm.zig").eth.bal;
+const eth = @import("../../evm.zig").eth;
+const bal = eth.bal;
+const block_stf = eth.block_stf;
 
 pub fn apply(
     io: std.Io,
     allocator: std.mem.Allocator,
-    input: bal.BlockInput,
+    input: block_stf.BlockInput,
     strategy: bal.ParallelStrategy,
     resources: bal.ParallelResources,
-) !bal.Result {
-    var executor = bal.Executor.init(io, allocator, input, strategy, resources);
+) !block_stf.Result {
+    var executor = bal.Executor(.amsterdam).init(io, allocator, input, strategy, resources);
     defer executor.deinit();
     return executor.run();
 }
@@ -16,11 +18,11 @@ pub fn apply(
 pub fn applyAssumeDecoded(
     io: std.Io,
     allocator: std.mem.Allocator,
-    input: bal.AssumeDecodedBlockInput,
+    input: block_stf.AssumeDecodedBlockInput,
     strategy: bal.ParallelStrategy,
     resources: bal.ParallelResources,
-) !bal.Result {
-    var executor = bal.Executor.initAssumeDecoded(io, allocator, input, strategy, resources);
+) !block_stf.Result {
+    var executor = bal.Executor(.amsterdam).initAssumeDecoded(io, allocator, input, strategy, resources);
     defer executor.deinit();
     return executor.run();
 }

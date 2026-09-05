@@ -203,7 +203,9 @@ fn runGrowableLifecycle(comptime Engine: type, allocator: std.mem.Allocator, opt
 }
 
 fn commitChanges(executor: anytype, memory: *MemoryStore) !void {
-    try memory.committer().commit(executor.acceptedChanges());
+    var delta = try evmz.state.StateDelta.init(memory.allocator, executor.acceptedChanges());
+    defer delta.deinit();
+    try memory.committer().commit(delta.view());
     executor.discardAccepted();
 }
 

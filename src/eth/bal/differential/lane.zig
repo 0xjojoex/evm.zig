@@ -15,7 +15,7 @@ const std = @import("std");
 const bal = @import("../model.zig");
 const observation = @import("../observation.zig");
 const ClaimView = @import("../ClaimView.zig");
-const tracked_state_projector = @import("../tracked_state_projector.zig");
+const projector = @import("../projector.zig");
 const prepared_code = @import("../../../prepared_code.zig");
 const ClaimReader = @import("../ClaimReader.zig");
 const Reader = @import("../../../state/Reader.zig");
@@ -169,14 +169,14 @@ pub fn Lane(comptime Engine: type) type {
         /// the serial block-start and block-final phases, not by lanes.
         pub const ObservationCollector = struct {
             allocator: std.mem.Allocator,
-            builder: *tracked_state_projector.BlockBuilder,
+            builder: *projector.BlockBuilder,
             block_access_index: bal.BlockAccessIndex,
 
             pub fn observe(
                 self: *ObservationCollector,
                 transition_view: Engine.Executor.Observation,
             ) !void {
-                var transition = try tracked_state_projector.materialize(
+                var transition = try projector.materialize(
                     transition_view.observations(),
                     self.allocator,
                 );
@@ -240,7 +240,7 @@ pub fn Lane(comptime Engine: type) type {
                     {
                         return .outcome_mismatch;
                     }
-                    return .{ .evidence = try tracked_state_projector.materialize(
+                    return .{ .evidence = try projector.materialize(
                         executed.observations(),
                         allocator,
                     ) };

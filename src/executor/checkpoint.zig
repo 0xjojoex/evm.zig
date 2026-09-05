@@ -1,39 +1,42 @@
-//! Interior call/create checkpoint ownership.
+//! Journal-checkpoint ownership for one execution scope.
 
 const std = @import("std");
 
+const Checkpoint = @import("../state.zig").Checkpoint;
 const Status = @import("../evm.zig").interpreter.Status;
 
-/// Owns one interior call/create checkpoint until it is resolved or
-/// transferred to a store row. Any early error restores it.
+/// Owns one journal checkpoint from open until it is committed, restored, or
+/// handed to a frame-store row. Dropping it open restores, so early error
+/// paths need no cleanup. LIFO order is enforced by the state's scope
+/// generations, not here. Treat as move-only.
 pub fn Guard(comptime State: type) type {
     return struct {
         const Self = @This();
 
         state: *State,
-        checkpoint_state: State.Checkpoint,
+        checkpoint: Checkpoint,
         open: bool = true,
 
-        pub fn init(state: *State, checkpoint_state: State.Checkpoint) Self {
-            return .{ .state = state, .checkpoint_state = checkpoint_state };
+        pub fn init(state: *State, checkpoint: Checkpoint) Self {
+            return .{ .state = state, .checkpoint = checkpoint };
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.open) self.state.revertToCheckpoint(self.checkpoint_state);
+            if (self.open) self.state.revertToCheckpoint(self.checkpoint);
             self.* = undefined;
         }
 
         pub fn begin(state: *State) Self {
-            return .{ .state = state, .checkpoint_state = state.checkpoint() };
+            return .{ .state = state, .checkpoint = state.checkpoint() };
         }
 
         pub fn commit(self: *Self) void {
-            self.state.commitCheckpoint(self.checkpoint_state);
+            self.state.commitCheckpoint(self.checkpoint);
             self.open = false;
         }
 
         pub fn restore(self: *Self) void {
-            self.state.revertToCheckpoint(self.checkpoint_state);
+            self.state.revertToCheckpoint(self.checkpoint);
             self.open = false;
         }
 

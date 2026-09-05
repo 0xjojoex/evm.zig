@@ -146,7 +146,13 @@ pub fn Runtime(comptime spec: ExactSpec) type {
         }
 
         pub fn defaultPlanFromGasPlan(_: Self, gas_limit: u64, plan: tx_gas.GasPlan, fees: DefaultFees) DefaultPlan {
-            const upfront_debit = prechargeCost(transaction.blob_schedule, gas_limit, fees.gas_price, fees.blob_base_fee, fees.blob_count) orelse std.math.maxInt(u256);
+            const upfront_debit = prechargeCost(
+                transaction.blob_schedule,
+                gas_limit,
+                fees.gas_price,
+                fees.blob_base_fee,
+                fees.blob_count,
+            );
             return .{
                 .payer = fees.payer,
                 .gas_limit = gas_limit,
@@ -156,7 +162,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 .priority_fee = fees.priority_fee,
                 .fee_recipient = fees.fee_recipient,
                 .upfront_debit = upfront_debit,
-                .minimum_balance = std.math.add(u256, upfront_debit, fees.value) catch std.math.maxInt(u256),
+                .minimum_balance = upfront_debit +| fees.value,
             };
         }
 
@@ -192,11 +198,18 @@ fn runtime(comptime spec: ExactSpec) Runtime(spec) {
     return .{};
 }
 
-fn prechargeCost(blob_schedule: ?tx_blob.BlobSchedule, gas_limit: u64, gas_price: u256, blob_base_fee: u256, blob_count: usize) ?u256 {
-    const gas_cost = checkedGasCost(gas_limit, gas_price) catch return null;
-    const blob_gas = blobGasForCount(blob_schedule, blob_count) orelse return null;
-    const blob_cost = std.math.mul(u256, blob_gas, blob_base_fee) catch return null;
-    return std.math.add(u256, gas_cost, blob_cost) catch null;
+fn prechargeCost(
+    blob_schedule: ?tx_blob.BlobSchedule,
+    gas_limit: u64,
+    gas_price: u256,
+    blob_base_fee: u256,
+    blob_count: usize,
+) u256 {
+    const gas_cost = @as(u256, gas_limit) *| gas_price;
+    const blob_gas = blobGasForCount(blob_schedule, blob_count) orelse
+        return std.math.maxInt(u256);
+    const blob_cost = blob_gas *| blob_base_fee;
+    return gas_cost +| blob_cost;
 }
 
 fn blobGasForCount(blob_schedule: ?tx_blob.BlobSchedule, blob_count: usize) ?u256 {
@@ -221,10 +234,7 @@ fn calculateDefaultCosts(
     else
         settlement.gas_limit - @min(settlement.gas_limit, gas_left);
     const refund_cap = pre_refund_gas_used / refund_cap_divisor;
-    const raw_refund = if (result.gas_refund > 0)
-        std.math.cast(u64, result.gas_refund) orelse std.math.maxInt(u64)
-    else
-        0;
+    const raw_refund = if (result.gas_refund > 0) @as(u64, @intCast(result.gas_refund)) else 0;
     const refund_gas = @min(raw_refund, refund_cap);
     const gas_used_after_refund = pre_refund_gas_used - @min(pre_refund_gas_used, refund_gas);
     const gas_used = @max(gas_used_after_refund, settlement.floor_gas);
@@ -254,13 +264,26 @@ fn calculateDefaultCosts(
     };
 }
 
-pub fn checkedGasCost(gas: u64, price: u256) !u256 {
-    return std.math.mul(u256, @as(u256, gas), price) catch error.Overflow;
+pub fn checkedGasCost(gas: u64, price: u256) error{Overflow}!u256 {
+    return std.math.mul(u256, @as(u256, gas), price);
 }
 
 fn positiveGas(gas: i64) u64 {
     if (gas <= 0) return 0;
-    return std.math.cast(u64, gas) orelse std.math.maxInt(u64);
+    return @intCast(gas);
+}
+
+test "precharge cost saturates unrepresentable requirements" {
+    const eth = @import("../eth.zig");
+    const max = std.math.maxInt(u256);
+
+    try std.testing.expectEqual(@as(u256, 6), prechargeCost(null, 2, 3, 0, 0));
+    try std.testing.expectEqual(max, prechargeCost(null, 2, max, 0, 0));
+    try std.testing.expectEqual(max, prechargeCost(null, 0, 0, 1, 1));
+    try std.testing.expectEqual(
+        max,
+        prechargeCost(eth.cancun.transaction.blob_schedule, 0, 0, max, 1),
+    );
 }
 
 test "effective priority fee follows legacy and dynamic fee policy" {

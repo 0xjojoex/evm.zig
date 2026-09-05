@@ -13,7 +13,8 @@ const executor_module = @import("./executor.zig");
 const execution = @import("./execution.zig");
 const Host = @import("./Host.zig");
 const interpreter = @import("./Interpreter.zig");
-const state_domain = @import("./eth/state_domain.zig");
+const OpenWorld = @import("./state/OpenWorld.zig");
+const ClosedWorld = @import("./eth/bal/ClosedWorld.zig");
 const transaction = @import("./transaction.zig");
 const transaction_result = @import("./transaction/result.zig");
 
@@ -79,38 +80,41 @@ pub fn EngineWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return EngineType(spec, state_domain.Tracked.Execution, options_value);
+    return EngineType(spec, OpenWorld, options_value);
 }
 
 pub fn VmWithOptions(comptime spec: engine_spec.Spec, comptime options_value: CompileOptions) type {
-    return VmType(spec, state_domain.Tracked, options_value);
+    return VmType(spec, OpenWorld, options_value);
 }
 
-pub fn BalStatelessVm(comptime spec: engine_spec.Spec) type {
-    return BalStatelessVmWithOptions(spec, .{});
+/// `Vm(spec)` over `eth.bal.ClosedWorld`: state is declared up front by the
+/// block access list. Both this and `Vm` run from a witness. Requires a spec
+/// with `block.block_access_list` and admitted state at initialization.
+pub fn BalVm(comptime spec: engine_spec.Spec) type {
+    return BalVmWithOptions(spec, .{});
 }
 
-pub fn BalStatelessEngine(comptime spec: engine_spec.Spec) type {
-    return BalStatelessEngineWithOptions(spec, .{});
+pub fn BalEngine(comptime spec: engine_spec.Spec) type {
+    return BalEngineWithOptions(spec, .{});
 }
 
-pub fn BalStatelessEngineWithOptions(
+pub fn BalEngineWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return EngineType(spec, state_domain.BalStateless.Execution, options_value);
+    return EngineType(spec, ClosedWorld, options_value);
 }
 
-pub fn BalStatelessVmWithOptions(
+pub fn BalVmWithOptions(
     comptime spec: engine_spec.Spec,
     comptime options_value: CompileOptions,
 ) type {
-    return VmType(spec, state_domain.BalStateless, options_value);
+    return VmType(spec, ClosedWorld, options_value);
 }
 
 pub fn VmType(
     comptime specification: engine_spec.Spec,
-    comptime StateDomainType: type,
+    comptime WorldType: type,
     comptime options_value: CompileOptions,
 ) type {
     return struct {
@@ -118,7 +122,7 @@ pub fn VmType(
         pub const spec = specification;
         pub const compile_options = options_value;
 
-        const ExactEngine = EngineType(spec, StateDomainType.Execution, options_value);
+        const ExactEngine = EngineType(spec, WorldType, options_value);
         const Family = ExactEngine.EthereumTransition(FamilyTransactInput);
         const Program = ExactEngine.Program(
             FamilyTransactInput,
@@ -128,8 +132,7 @@ pub fn VmType(
             Family,
         );
         const BlockExecutionType = ethereum_block_execution.ExecutionType(Program);
-        // pub const compile_options = options_value;
-        pub const StateDomain = StateDomainType;
+        pub const World = WorldType;
         pub const Executor = ExactEngine.Executor;
         pub const Init = Executor.Init;
         pub const Interpreter = interpreter.Interpreter(spec);
@@ -189,16 +192,16 @@ pub fn VmType(
 /// from this root instead of accepting the same dependency in several forms.
 pub fn EngineType(
     comptime spec: engine_spec.Spec,
-    comptime ExecutionState: type,
+    comptime World: type,
     comptime compile_options: CompileOptions,
 ) type {
     return struct {
-        pub const Executor = executor_module.ExecutorType(spec, ExecutionState, compile_options);
+        pub const Executor = executor_module.ExecutorType(spec, World, compile_options);
 
         pub fn Context(comptime Input: type) type {
             return transaction.program.ContextType(
                 spec,
-                ExecutionState,
+                World,
                 compile_options,
                 Input,
             );
@@ -207,7 +210,7 @@ pub fn EngineType(
         pub fn EthereumTransition(comptime Input: type) type {
             return transaction.transition.ImplType(
                 spec,
-                ExecutionState,
+                World,
                 compile_options,
                 Input,
             );
@@ -222,7 +225,7 @@ pub fn EngineType(
         ) type {
             return transaction.program.ProgramType(
                 spec,
-                ExecutionState,
+                World,
                 compile_options,
                 Input,
                 Output,

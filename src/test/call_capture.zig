@@ -368,7 +368,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         try std.testing.expectEqual(@as(i64, 0), span.rows[1].gas_used);
         try std.testing.expectEqual(case.target, span.rows[1].to);
         try std.testing.expectEqual(case.nonce, executor.getAccount(root).?.nonce);
-        try std.testing.expect(!executor.state.isAccountWarm(case.target));
+        try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(case.target)));
     }
 }
 

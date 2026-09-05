@@ -9,7 +9,7 @@ const Memory = @import("../Memory.zig");
 const frame_io = @import("../frame_io.zig");
 const Stack = @import("../Stack.zig");
 const evmz = @import("../evm.zig");
-const Checkpoint = @import("../state/checkpoint.zig").Checkpoint;
+const Checkpoint = @import("../state.zig").Checkpoint;
 const CallToken = @import("../trace/call_arena.zig").Token;
 
 const FrameStore = @This();
@@ -43,16 +43,6 @@ max_stack_words: usize = 0,
 /// Reserve pointer-bearing metadata before the first acquisition. Memory and
 /// I/O rows remain lazy; packed stack words grow independently.
 stable_metadata_capacity: ?usize = null,
-
-const no_growth_allocator: std.mem.Allocator = .{
-    .ptr = undefined,
-    .vtable = &.{
-        .alloc = std.mem.Allocator.noAlloc,
-        .resize = std.mem.Allocator.noResize,
-        .remap = std.mem.Allocator.noRemap,
-        .free = std.mem.Allocator.noFree,
-    },
-};
 
 pub fn deinit(self: *FrameStore, allocator: std.mem.Allocator) void {
     while (self.frames.items.len != 0) {
@@ -341,6 +331,8 @@ fn pushTestFrame(
         .bytecode = evmz.Bytecode.View.empty,
     }, .{ .kind = .root_call });
 }
+
+const no_growth_allocator = @import("stdx").no_growth_allocator;
 
 test "frame store rebinds active rows after growth" {
     var store: FrameStore = .{};

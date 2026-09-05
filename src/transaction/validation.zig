@@ -97,7 +97,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
         }
 
         pub fn validate(self: Self, input: Input) ?ValidationError {
-            const gas_plan = self.gasPlan(input);
+            const gas_plan = self.gasPlan(input) catch return .intrinsic_gas_too_low;
             if (self.validateBeforeAccount(input, gas_plan)) |err| return err;
             if (self.validateAfterAccount(input)) |err| return err;
             return self.validateSenderCode(
@@ -110,10 +110,6 @@ pub fn Runtime(comptime spec: ExactSpec) type {
             if (self.inactiveTransactionKindError(input.kind)) |err| return err;
             if (input.chain_id) |chain_id| {
                 if (chain_id != input.expected_chain_id) return .invalid_chain_id;
-            }
-
-            if (gas_plan.intrinsic_gas == std.math.maxInt(u64)) {
-                return .intrinsic_gas_too_low;
             }
 
             if (transaction.intrinsic_regular_gas_limit) |regular_intrinsic_limit| {
@@ -141,7 +137,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
             return null;
         }
 
-        pub fn gasPlan(self: Self, input: Input) gas.GasPlan {
+        pub fn gasPlan(self: Self, input: Input) error{Overflow}!gas.GasPlan {
             return self.gasPlanner().gasPlan(input.input, input.gas_limit, .{
                 .authorization_count = input.authorization_count,
                 .access_list_counts = input.access_list_counts,
@@ -250,11 +246,11 @@ fn effectiveBlobSchedule(spec_schedule: ?blob.BlobSchedule, params: ?blob.BlobPa
 }
 
 fn maxBlobCount(schedule: blob.BlobSchedule) usize {
-    return std.math.cast(usize, schedule.max) orelse std.math.maxInt(usize);
+    return std.math.lossyCast(usize, schedule.max);
 }
 
 fn maxBlobCountPerTransaction(schedule: blob.BlobSchedule) usize {
-    return std.math.cast(usize, schedule.max_per_transaction) orelse std.math.maxInt(usize);
+    return std.math.lossyCast(usize, schedule.max_per_transaction);
 }
 
 fn blobGasForCount(spec_schedule: ?blob.BlobSchedule, blob_count: usize) ?u256 {

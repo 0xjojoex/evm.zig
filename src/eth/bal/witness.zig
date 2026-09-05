@@ -84,7 +84,6 @@ const ProbeReader = struct {
 
     fn reader(self: *ProbeReader) state.Reader {
         return .{ .ptr = self, .vtable = &.{
-            .accountExists = accountExists,
             .loadAccount = loadAccount,
             .loadCode = loadCode,
             .getStorage = getStorage,
@@ -93,12 +92,6 @@ const ProbeReader = struct {
 
     fn context(ptr: *anyopaque) *ProbeReader {
         return @ptrCast(@alignCast(ptr));
-    }
-
-    fn accountExists(ptr: *anyopaque, account_address: Address) !bool {
-        _ = ptr;
-        _ = account_address;
-        return false;
     }
 
     fn loadAccount(ptr: *anyopaque, account_address: Address) !?state.Account {

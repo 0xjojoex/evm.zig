@@ -65,7 +65,7 @@ fn printHex(bytes: []const u8) void {
     }
 }
 
-fn storageValue(writes: evmz.state.TrackedState.StorageChanges, address: evmz.Address, key: u256) u256 {
+fn storageValue(writes: evmz.state.OpenState.StorageChanges, address: evmz.Address, key: u256) u256 {
     var index: u32 = 0;
     while (index < writes.len()) : (index += 1) {
         const write = writes.at(index);

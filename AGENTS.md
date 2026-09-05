@@ -11,6 +11,7 @@ Zig conventions — follow the [Zig style guide](https://ziglang.org/documentati
 - File case follows its root: `TitleCase.zig` when the top level has fields (the file _is_ the type), `snake_case.zig` when it's a namespace. Directories are `snake_case`.
 - Names are chosen against the fully-qualified path — folder is the prefix, don't repeat it in members (`state.Journal`, not `state.StateJournal`).
 - No `_` prefixes — Zig has no private fields. Document the invariant instead of encoding it in the name.
+- `pkg/stdx` holds domain-free utilities that could plausibly live in `std`, and **imports `std` and nothing else**. A helper that needs an evmz, MPT, or RLP type belongs with its domain. `stdx` is internal: it is not exported under `-Dcore=false` and carries no compatibility promise.
 
 For performance, measure benchmark and guest cycle, they are not guaranteed to be the same.
 

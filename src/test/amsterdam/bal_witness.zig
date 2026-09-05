@@ -5,6 +5,22 @@ const bal = evmz.eth.bal;
 const block_stf = evmz.eth.block_stf;
 const trie = evmz.eth.trie;
 
+fn leafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
+    const path = try allocator.alloc(u8, key.len + 1);
+    path[0] = 0x20;
+    @memcpy(path[1..], key);
+
+    var payload = evmz.rlp.Writer.alloc(allocator);
+    defer payload.deinit();
+    try payload.bytes(path);
+    try payload.bytes(value);
+
+    var out = evmz.rlp.Writer.alloc(allocator);
+    errdefer out.deinit();
+    try out.listPayload(payload.written());
+    return try out.toOwnedSlice();
+}
+
 const RecordingPreparer = struct {
     called: bool = false,
     fail: bool = false,
@@ -49,7 +65,19 @@ test "BlockSTF BAL state precheck without a claim is a no-op" {
 }
 
 test "BlockSTF BAL state precheck classifies a missing trie path as invalid witness" {
-    const claim = [_]bal.AccountChanges{.{ .address = evmz.addr(0x7928) }};
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    // The state leaf authenticates, but its storage trie is not in the witness,
+    // so the declared slot has no proven path.
+    const account = evmz.addr(0x7928);
+    const account_key = trie.hashedAddressKey(account);
+    const account_value = try trie.accountValueFrom(scratch, .{ .storage_root = [_]u8{0xab} ** 32 });
+    const state_node = try leafNode(scratch, &account_key, account_value);
+    const nodes = [_][]const u8{state_node};
+
+    const claim = [_]bal.AccountChanges{.{ .address = account, .storage_reads = &.{1} }};
     const encoded = try bal.encodeAlloc(std.testing.allocator, &claim);
     defer std.testing.allocator.free(encoded);
 
@@ -57,8 +85,8 @@ test "BlockSTF BAL state precheck classifies a missing trie path as invalid witn
         .env = .{ .gas_limit = 30_000_000 },
         .state_backend = try evmz.Backend.fromWitness(
             std.testing.allocator,
-            [_]u8{0xab} ** 32,
-            &.{},
+            evmz.crypto.keccak256(state_node),
+            &nodes,
             &.{},
         ),
         .transactions = &.{},

@@ -1,7 +1,7 @@
 //! Independent BAL oracle built from the raw execution trace tape.
 //!
 //! This is a test double, not a production path. The shipping builder folds
-//! `TrackedState.ObservationsView` rows, which are already checkpoint-resolved.
+//! `OpenState.ObservationsView` rows, which are already checkpoint-resolved.
 //! This one replays trace events and resolves reverts itself, so agreement
 //! between the two is real evidence rather than a tautology. Keep it out of the
 //! production module graph.
@@ -16,10 +16,10 @@ const crypto = @import("../../crypto.zig");
 const Allocator = std.mem.Allocator;
 
 const shard_fold = @import("../../eth/bal/shard_fold.zig");
-const tracked_state_projector = @import("../../eth/bal/tracked_state_projector.zig");
-const materialize = tracked_state_projector.materialize;
-const BlockBuilder = tracked_state_projector.BlockBuilder;
-const State = @import("../../state/TrackedState.zig");
+const projector = @import("../../eth/bal/projector.zig");
+const materialize = projector.materialize;
+const BlockBuilder = projector.BlockBuilder;
+const State = @import("../../state.zig").OpenState;
 const MemoryAccount = @import("../../state/MemoryAccount.zig");
 
 pub const LaneTransition = observation.LaneTransition;
@@ -1208,8 +1208,12 @@ test "tracked observations match recorder after inner rollback" {
     const original_code = [_]u8{ 0x60, 0x01 };
     const replacement_code = [_]u8{ 0x60, 0x02 };
 
-    var state = State.init(allocator);
+    var state = State.init(allocator, .init(allocator, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;
     seeded.account.nonce = 3;
@@ -1223,36 +1227,36 @@ test "tracked observations match recorder after inner rollback" {
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try state.observeAccountAccess(accessed);
+    try state.observeAccountAccess(.fromAddress(accessed));
     try oracle.recordAccountAccess(accessed);
 
-    try state.setBalance(target, 12);
+    try state.setBalance(.fromAddress(target), 12);
     try oracle.recordBalanceWrite(.{
         .address = target,
         .previous = 10,
         .value = 12,
     });
-    try state.setNonce(target, 4);
+    try state.setNonce(.fromAddress(target), 4);
     try oracle.recordNonceWrite(.{
         .address = target,
         .previous = 3,
         .value = 4,
     });
-    try state.setCode(target, &replacement_code);
+    try state.setCode(.fromAddress(target), &replacement_code);
     try oracle.recordCodeWrite(.{
         .address = target,
         .previous_hash = crypto.keccak256(&original_code),
         .size = replacement_code.len,
         .code = &replacement_code,
     });
-    _ = try state.setStorage(target, 7, 13);
+    _ = try state.setStorage(.fromAddress(target), 7, 13);
     try oracle.recordStorageWrite(.{
         .address = target,
         .key = 7,
         .previous = 11,
         .value = 13,
     });
-    _ = try state.getStorage(target, 8);
+    _ = try state.getStorage(.fromAddress(target), 8);
     try oracle.recordStorageRead(.{
         .address = target,
         .key = 8,
@@ -1266,20 +1270,20 @@ test "tracked observations match recorder after inner rollback" {
         .journal_len = 0,
         .logs_len = 0,
     });
-    try state.setBalance(reverted, 9);
+    try state.setBalance(.fromAddress(reverted), 9);
     try oracle.recordBalanceWrite(.{
         .address = reverted,
         .previous = 0,
         .value = 9,
     });
-    _ = try state.setStorage(target, 7, 15);
+    _ = try state.setStorage(.fromAddress(target), 7, 15);
     try oracle.recordStorageWrite(.{
         .address = target,
         .key = 7,
         .previous = 13,
         .value = 15,
     });
-    try state.markCreatedContract(reverted);
+    try state.markCreatedContract(.fromAddress(reverted));
     try oracle.recordLifecycle(.created_contract, reverted);
     state.revertToCheckpoint(checkpoint);
     try oracle.checkpoint(.{
@@ -1314,8 +1318,12 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     const original_code = [_]u8{ 0x60, 0x01 };
     const replacement_code = [_]u8{ 0x60, 0x02 };
 
-    var state = State.init(allocator);
+    var state = State.init(allocator, .init(allocator, null));
     defer state.deinit();
+    defer if (state.transaction_active) {
+        if (state.scopeActive()) state.closeScope();
+        state.discard(state.active_attempt_id.?);
+    };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;
     seeded.account.nonce = 3;
@@ -1329,21 +1337,21 @@ test "selfdestruct finalization projects post-transaction BAL state" {
 
     const attempt = state.beginObservedTransaction();
     state.beginScope();
-    try state.setBalance(target, 12);
+    try state.setBalance(.fromAddress(target), 12);
     try oracle.recordBalanceWrite(.{
         .address = target,
         .previous = 10,
         .value = 0,
     });
-    try state.setNonce(target, 4);
-    try state.setCode(target, &replacement_code);
-    _ = try state.setStorage(target, 7, 13);
+    try state.setNonce(.fromAddress(target), 4);
+    try state.setCode(.fromAddress(target), &replacement_code);
+    _ = try state.setStorage(.fromAddress(target), 7, 13);
     try oracle.recordStorageRead(.{
         .address = target,
         .key = 7,
         .value = 11,
     });
-    try state.markSelfdestructed(target);
+    try state.markSelfdestructed(.fromAddress(target));
     try oracle.recordLifecycle(.selfdestruct, target);
     try state.finalize(.{ .existing_account = .{
         .delete_account = true,

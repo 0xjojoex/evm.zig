@@ -383,7 +383,7 @@ pub const MockHost = struct {
     }
 
     fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
-        if (Host.precheckResult(msg)) |result| return result;
+        if (Host.precheckResult(&msg)) |result| return result;
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.call_error) |err| return err;
         return .{
@@ -497,54 +497,6 @@ pub fn testAuthorization(signer: Address, target: Address) evmz.transaction.Auth
         .legacy_v = null,
         .r = 1,
         .s = 1,
-    };
-}
-
-pub fn CaptureFixture(comptime ExecutorType: type) type {
-    return struct {
-        const Self = @This();
-
-        executor: *ExecutorType = undefined,
-        context: evmz.executor.CaptureContext = undefined,
-        open: bool = false,
-        bound: bool = false,
-
-        pub fn init(
-            self: *Self,
-            executor: *ExecutorType,
-            state_target: ?evmz.executor.CaptureStateTarget,
-        ) !void {
-            self.* = .{
-                .executor = executor,
-                .context = evmz.executor.CaptureContext.init(executor.allocator, null, state_target),
-            };
-            executor.setCaptureContext(&self.context);
-            self.bound = true;
-            errdefer {
-                executor.setCaptureContext(null);
-                self.bound = false;
-                self.context.deinit();
-            }
-            try self.context.begin();
-            self.open = true;
-        }
-
-        pub fn finish(self: *Self) !void {
-            _ = try self.context.finish();
-            self.open = false;
-            self.executor.setCaptureContext(null);
-            self.bound = false;
-        }
-
-        pub fn deinit(self: *Self) void {
-            if (self.open) {
-                self.context.abort() catch |err| @panic(@errorName(err));
-                self.open = false;
-            }
-            if (self.bound) self.executor.setCaptureContext(null);
-            self.context.deinit();
-            self.* = undefined;
-        }
     };
 }
 

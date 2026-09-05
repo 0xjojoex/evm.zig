@@ -140,7 +140,11 @@ test countSignificantBytesSize {
     try std.testing.expectEqual(countSignificantBytesSize(std.math.maxInt(u256)), 32);
 }
 
+/// Ceiling division. Asserts `denominator != 0`. No overflow is possible:
+/// `denominator == 1` leaves a zero remainder and `denominator > 1` bounds
+/// the quotient by half the range.
 pub inline fn ceilDiv(value: u256, denominator: u256) u256 {
+    std.debug.assert(denominator != 0);
     return @divFloor(value, denominator) + @intFromBool(value % denominator != 0);
 }
 
@@ -1106,4 +1110,12 @@ test ceilDiv {
     try std.testing.expectEqual(@as(u256, 1), ceilDiv(1, 8));
     try std.testing.expectEqual(@as(u256, 1), ceilDiv(8, 8));
     try std.testing.expectEqual(@as(u256, 2), ceilDiv(9, 8));
+    // Overflow-free at the extremes: `denominator == 1` leaves a zero
+    // remainder, `denominator > 1` bounds the quotient by half the range.
+    try std.testing.expectEqual(std.math.maxInt(u256), ceilDiv(std.math.maxInt(u256), 1));
+    try std.testing.expectEqual(
+        (std.math.maxInt(u256) / 2) + 1,
+        ceilDiv(std.math.maxInt(u256), 2),
+    );
+    try std.testing.expectEqual(@as(u256, 1), ceilDiv(1, std.math.maxInt(u256)));
 }
