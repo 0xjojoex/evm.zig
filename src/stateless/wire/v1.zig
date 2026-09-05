@@ -671,6 +671,8 @@ pub const StatelessInput = struct {
     }
 };
 
+/// A zero schema id marks the all-zero sentinel when decoding or request-root
+/// computation fails. Later validation failures retain the input's root and ids.
 pub const StatelessValidationResult = struct {
     new_payload_request_root: [32]u8,
     successful_validation: bool,
@@ -1135,7 +1137,7 @@ fn validateStatelessUsing(
 ) Error!StatelessValidationResult {
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(input.chain_id, schema_id, [_]u8{0} ** 32),
+        else => return failureResult(0, 0, [_]u8{0} ** 32),
     };
     var normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1296,6 +1298,19 @@ fn sszUint256FromBytes(bytes: [32]u8) u256 {
 
 fn evmWordFromBytes32(bytes: [32]u8) u256 {
     return uint256.fromBytes32(&bytes);
+}
+
+test "stateless wire v1 request root failure returns the complete sentinel" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var input = try @import("v1_smoke.zig").smokeInput(scratch);
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.extra_data = &([_]u8{0} ** 33);
+
+    // A typed input can exceed the SSZ bound and fail the actual root computation.
+    try std.testing.expectError(error.InvalidListLength, input.new_payload_request.hashTreeRoot(scratch));
+    const result = try validateStatelessUsing(AmsterdamValidator, scratch, input);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 43), try result.encode(scratch));
 }
 
 test "borrowed witness decoding keeps byte lists in the wire input" {
