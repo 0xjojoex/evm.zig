@@ -671,6 +671,8 @@ pub const StatelessInput = struct {
     }
 };
 
+/// A zero schema id marks the all-zero sentinel when decoding or request-root
+/// computation fails. Later validation failures retain the input's root and ids.
 pub const StatelessValidationResult = struct {
     new_payload_request_root: [32]u8,
     successful_validation: bool,
@@ -1139,7 +1141,7 @@ fn validateStatelessUsing(
 ) Error!StatelessValidationResult {
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(input.chain_id, schema_id, [_]u8{0} ** 32),
+        else => return failureResult(0, 0, [_]u8{0} ** 32),
     };
     var normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
