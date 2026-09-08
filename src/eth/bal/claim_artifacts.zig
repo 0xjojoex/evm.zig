@@ -30,21 +30,7 @@ pub const ParentCode = struct {
 
 pub const IntroducedCodeId = enum(u32) { _ };
 
-/// Stable block-lifetime index into `CodeStore`. Parent and introduced code
-/// share one numeric namespace; the two highest values are reserved for the
-/// canonical empty code and an unresolved non-empty commitment.
-pub const CodeRef = enum(u32) {
-    missing = std.math.maxInt(u32) - 1,
-    empty = std.math.maxInt(u32),
-    _,
-
-    pub const max_indexed: usize = @intFromEnum(CodeRef.missing);
-
-    pub fn fromIndex(index: usize) CodeRef {
-        std.debug.assert(index < CodeRef.max_indexed);
-        return @enumFromInt(index);
-    }
-};
+pub const CodeRef = @import("../../state.zig").CodeRef;
 
 pub const CodeStore = struct {
     const Entry = ParentCode;
@@ -131,6 +117,7 @@ pub const CodeStore = struct {
         if (ref == .empty) return .{
             .code_hash = crypto.keccak256_empty,
             .bytes = &.{},
+            .ref = .empty,
         };
         if (ref == .missing) return null;
         const index: usize = @intFromEnum(ref);
@@ -141,7 +128,7 @@ pub const CodeStore = struct {
             const introduced = self.introduced.entryAt(introduced_index);
             break :blk Entry{ .hash = introduced.key_ptr.*, .bytes = introduced.value_ptr.* };
         };
-        return .{ .code_hash = entry.hash, .bytes = entry.bytes };
+        return .{ .code_hash = entry.hash, .bytes = entry.bytes, .ref = ref };
     }
 
     pub fn cacheIntroduced(
@@ -150,7 +137,7 @@ pub const CodeStore = struct {
         bytes: []const u8,
     ) CacheError!CacheResult {
         if (bytes.len == 0) return .{
-            .view = .{ .code_hash = crypto.keccak256_empty, .bytes = &.{} },
+            .view = .{ .code_hash = crypto.keccak256_empty, .bytes = &.{}, .ref = .empty },
             .ref = .empty,
             .newly_introduced = null,
         };
@@ -175,16 +162,21 @@ pub const CodeStore = struct {
         };
         const id: IntroducedCodeId = @enumFromInt(self.introduced.count());
         self.introduced.putAssumeCapacityNoClobber(hash, owned);
+        const ref: CodeRef = .fromIndex(self.parent.items.len + @intFromEnum(id));
         return .{
-            .view = .{ .code_hash = hash, .bytes = owned },
-            .ref = .fromIndex(self.parent.items.len + @intFromEnum(id)),
+            .view = .{ .code_hash = hash, .bytes = owned, .ref = ref },
+            .ref = ref,
             .newly_introduced = id,
         };
     }
 
     pub fn introducedView(self: *const CodeStore, id: IntroducedCodeId) CodeView {
         const entry = self.introduced.entryAt(@intFromEnum(id));
-        return .{ .code_hash = entry.key_ptr.*, .bytes = entry.value_ptr.* };
+        return .{
+            .code_hash = entry.key_ptr.*,
+            .bytes = entry.value_ptr.*,
+            .ref = .fromIndex(self.parent.items.len + @intFromEnum(id)),
+        };
     }
 
     pub fn truncateIntroduced(self: *CodeStore, allocator: Allocator, len: usize) void {

@@ -297,11 +297,11 @@ pub fn contractFromAddress(target: Address) ?Contract {
 
 pub fn contractFromAddressWord(target: AddressWord) ?Contract {
     // Same rejection in the word domain: the 18 zero bytes are words[0],
-    // words[1], and the low half of words[2]; the big-endian selector is the
-    // byteswapped upper half. words[2]'s top four bytes are zero by invariant.
+    // words[1], and the upper half of words[2]'s big-endian u32; the selector
+    // is its low half. words[2]'s top four bytes are zero by invariant.
     if (target.words[0] != 0 or target.words[1] != 0) return null;
-    if (target.words[2] & 0xffff != 0) return null;
-    const contract_id = @byteSwap(@as(u16, @intCast(target.words[2] >> 16)));
+    if (target.words[2] >> 16 != 0) return null;
+    const contract_id: u16 = @intCast(target.words[2] & 0xffff);
     return contractFromSelector(contract_id);
 }
 

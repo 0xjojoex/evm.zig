@@ -52,9 +52,6 @@ pub const ClaimPlan = struct {
     storage_trie_keys: AlignedHashes = &.{},
     account_trie_order: []AccountId = &.{},
     storage_trie_order: []StorageId = &.{},
-    /// Open-addressed AccountId + 1; zero marks an empty slot. The table is
-    /// built at no more than 50% load and every hit verifies the full address.
-    account_positions: []u32 = &.{},
 
     /// Construct from a BAL already accepted by `bal.validate`.
     pub fn initAssumeValidated(
@@ -96,13 +93,6 @@ pub const ClaimPlan = struct {
         const storage_trie_order = try allocator.alloc(StorageId, storage_slots.len);
         errdefer allocator.free(storage_trie_order);
 
-        const account_positions = try allocator.alloc(
-            u32,
-            try accountTableCapacity(account_addresses.len),
-        );
-        errdefer allocator.free(account_positions);
-        @memset(account_positions, 0);
-
         var storage_index: usize = 0;
         for (block_access_list, 0..) |account, account_index| {
             const id: AccountId = @enumFromInt(account_index);
@@ -140,7 +130,10 @@ pub const ClaimPlan = struct {
                 .len = @intCast(storage_index - storage_start),
             };
             account_trie_order[account_index] = id;
-            insertAccountPosition(account_positions, account_addresses, id);
+            // Validated BAL order is byte-lexicographic, which is word order:
+            // the address column is the lookup index as stored.
+            std.debug.assert(account_index == 0 or
+                address.AddressWord.order(account_addresses[account_index - 1], account_addresses[account_index]) == .lt);
         }
         std.debug.assert(storage_index == storage_slots.len);
 
@@ -161,7 +154,6 @@ pub const ClaimPlan = struct {
             .storage_trie_keys = storage_trie_keys,
             .account_trie_order = account_trie_order,
             .storage_trie_order = storage_trie_order,
-            .account_positions = account_positions,
         };
     }
 
@@ -174,7 +166,6 @@ pub const ClaimPlan = struct {
         allocator.free(self.storage_trie_keys);
         allocator.free(self.account_trie_order);
         allocator.free(self.storage_trie_order);
-        allocator.free(self.account_positions);
         self.* = .{};
     }
 
@@ -224,18 +215,20 @@ pub const ClaimPlan = struct {
         return self.storage_trie_order[range.start..range.end()];
     }
 
-    /// Resolve one full address in canonical raw BAL order.
+    /// Resolve one full address to its raw BAL id: a binary search over the
+    /// BAL-ordered address column. Not a hash table on purpose. BAL addresses
+    /// are payload-chosen and a guest has no per-run seed, so any
+    /// deterministic hash lets one offline-ground address set turn every
+    /// resolution into a linear scan; the search is logarithmic on every
+    /// input.
     pub fn accountIdWord(self: *const ClaimPlan, target: address.AddressWord) ?AccountId {
-        if (self.account_positions.len == 0) return null;
-        const mask: u64 = self.account_positions.len - 1;
-        var slot: usize = @intCast(accountPositionHash(target) & mask);
-        while (true) {
-            const entry = self.account_positions[slot];
-            if (entry == 0) return null;
-            const id: AccountId = @enumFromInt(entry - 1);
-            if (address.AddressWord.eql(self.account_addresses[@intFromEnum(id)], target)) return id;
-            slot = @intCast((slot + 1) & mask);
-        }
+        const index = std.sort.binarySearch(
+            address.AddressWord,
+            self.account_addresses,
+            target,
+            address.AddressWord.order,
+        ) orelse return null;
+        return @enumFromInt(index);
     }
 
     /// Resolve one full raw slot inside its account's canonical BAL range.
@@ -260,41 +253,9 @@ pub const ClaimPlan = struct {
             self.storage_slots.len * @sizeOf(u256) +
             self.storage_trie_keys.len * @sizeOf(Hash) +
             self.account_trie_order.len * @sizeOf(AccountId) +
-            self.storage_trie_order.len * @sizeOf(StorageId) +
-            self.account_positions.len * @sizeOf(u32);
+            self.storage_trie_order.len * @sizeOf(StorageId);
     }
 };
-
-/// Mix an address into the initial slot of `account_positions`.
-/// This is not cryptographic; lookups verify the full address before returning an ID.
-inline fn accountPositionHash(value: address.AddressWord) u64 {
-    var mixed = value.words[0] ^ std.math.rotl(u64, value.words[1], 23) ^
-        value.words[2] *% 0x9e3779b97f4a7c15;
-    mixed ^= mixed >> 30;
-    mixed *%= 0xbf58476d1ce4e5b9;
-    mixed ^= mixed >> 27;
-    mixed *%= 0x94d049bb133111eb;
-    return mixed ^ (mixed >> 31);
-}
-
-fn accountTableCapacity(account_count: usize) InitError!usize {
-    if (account_count == 0) return 0;
-    const doubled = std.math.mul(usize, account_count, 2) catch
-        return error.ResourceLimitExceeded;
-    return std.math.ceilPowerOfTwo(usize, doubled) catch
-        return error.ResourceLimitExceeded;
-}
-
-fn insertAccountPosition(
-    positions: []u32,
-    addresses: []const address.AddressWord,
-    id: AccountId,
-) void {
-    const mask: u64 = positions.len - 1;
-    var slot: usize = @intCast(accountPositionHash(addresses[@intFromEnum(id)]) & mask);
-    while (positions[slot] != 0) slot = @intCast((slot + 1) & mask);
-    positions[slot] = @intFromEnum(id) + 1;
-}
 
 fn accountTrieLessThan(trie_keys: []const Hash, lhs: AccountId, rhs: AccountId) bool {
     return std.mem.order(
@@ -358,7 +319,7 @@ test "claim plan assigns raw IDs and separate trie order" {
     try expectAccountTrieOrder(plan);
     try expectStorageTrieOrder(plan, @enumFromInt(0));
     try expectStorageTrieOrder(plan, @enumFromInt(1));
-    try std.testing.expectEqual(@as(usize, 512), plan.allocationBytes());
+    try std.testing.expectEqual(@as(usize, 496), plan.allocationBytes());
     try std.testing.expectEqual(@as(?AccountId, @enumFromInt(0)), plan.accountIdWord(.fromAddress(address.addr(1))));
     try std.testing.expectEqual(@as(?AccountId, @enumFromInt(1)), plan.accountIdWord(.fromAddress(address.addr(2))));
     try std.testing.expectEqual(@as(?AccountId, null), plan.accountIdWord(.fromAddress(address.addr(3))));
@@ -386,40 +347,54 @@ test "claim plan cleans every allocation failure position" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
 }
 
-test "account position table resolves collisions and terminates on a colliding miss" {
-    var first: [4]?address.Address = .{null} ** 4;
-    var second: [4]?address.Address = .{null} ** 4;
-    var collision: [3]address.Address = undefined;
-    var found = false;
-    for (1..100) |value| {
-        const candidate = address.addr(@as(u64, @intCast(value)));
-        const slot: usize = @intCast(accountPositionHash(.fromAddress(candidate)) & 3);
-        if (first[slot] == null) {
-            first[slot] = candidate;
-        } else if (second[slot] == null) {
-            second[slot] = candidate;
-        } else {
-            collision = .{ first[slot].?, second[slot].?, candidate };
-            found = true;
-            break;
+test "account lookup resolves a shared-prefix address set and misses at every boundary" {
+    // Most of these addresses share their first sixteen bytes and differ
+    // only in the last word, with the byte that separates the two halves
+    // placed so that a first-word shortcut cannot decide. The search must
+    // stay exact and logarithmic on this shape.
+    const count = 64;
+    var addresses: [count]address.Address = undefined;
+    for (&addresses, 0..) |*entry, index| {
+        var bytes = [_]u8{0xab} ** address.Address.len;
+        bytes[0] = @intCast(index / 32);
+        bytes[7] = @intCast((index * 37) & 0xff);
+        bytes[19] = @intCast(index % 32);
+        entry.* = .fromBytes(bytes);
+    }
+    std.mem.sort(address.Address, &addresses, {}, struct {
+        fn lessThan(_: void, lhs: address.Address, rhs: address.Address) bool {
+            return address.Address.order(lhs, rhs) == .lt;
         }
-    }
-    try std.testing.expect(found);
-
-    if (address.Address.order(collision[0], collision[1]) == .gt) {
-        std.mem.swap(address.Address, &collision[0], &collision[1]);
-    }
-    const claims = [_]bal.AccountChanges{
-        .{ .address = collision[0] },
-        .{ .address = collision[1] },
-    };
+    }.lessThan);
+    var claims: [count]bal.AccountChanges = undefined;
+    for (&claims, addresses) |*claim, entry| claim.* = .{ .address = entry };
     try bal.validate(&claims, .{});
 
     var plan = try ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     defer plan.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(?AccountId, @enumFromInt(0)), plan.accountIdWord(.fromAddress(collision[0])));
-    try std.testing.expectEqual(@as(?AccountId, @enumFromInt(1)), plan.accountIdWord(.fromAddress(collision[1])));
-    try std.testing.expectEqual(@as(?AccountId, null), plan.accountIdWord(.fromAddress(collision[2])));
+    for (addresses, 0..) |entry, index| {
+        try std.testing.expectEqual(
+            @as(?AccountId, @enumFromInt(index)),
+            plan.accountIdWord(.fromAddress(entry)),
+        );
+    }
+
+    const below = [_]u8{0} ** address.Address.len;
+    const above = [_]u8{0xff} ** address.Address.len;
+    var between = addresses[count / 2].bytes;
+    between[10] ^= 0x01;
+    for ([_][address.Address.len]u8{ below, above, between }) |miss| {
+        try std.testing.expectEqual(
+            @as(?AccountId, null),
+            plan.accountIdWord(.fromAddress(.fromBytes(miss))),
+        );
+    }
+}
+
+test "empty claim plan resolves nothing" {
+    var plan = try ClaimPlan.initAssumeValidated(std.testing.allocator, &.{});
+    defer plan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?AccountId, null), plan.accountIdWord(.fromAddress(address.addr(1))));
 }
 
 fn expectAccountTrieOrder(plan: ClaimPlan) !void {

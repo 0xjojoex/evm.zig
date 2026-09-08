@@ -88,11 +88,33 @@ pub const FinalizationRules = struct {
     created_account: execution.SelfDestructFinalization = .{},
 };
 
+/// Stable block-lifetime index into a lane's code store. Parent and introduced
+/// code share one numeric namespace; the two highest values are reserved for
+/// the canonical empty code and an unresolved non-empty commitment. An
+/// introduced index can be reassigned to different bytes after a revert, so a
+/// consumer that caches by index must verify the code hash on every hit.
+pub const CodeRef = enum(u32) {
+    missing = std.math.maxInt(u32) - 1,
+    empty = std.math.maxInt(u32),
+    _,
+
+    pub const max_indexed: usize = @intFromEnum(CodeRef.missing);
+
+    pub fn fromIndex(index: usize) CodeRef {
+        std.debug.assert(index < CodeRef.max_indexed);
+        return @enumFromInt(index);
+    }
+};
+
 /// Canonical code resolved for execution. The borrowed bytes stay valid for as
 /// long as the lane that produced the view keeps its code storage alive.
+/// `ref` is the producing code store's dense index when it has one; a lane
+/// that resolves code by hash alone leaves it `.missing`. Prepared-code
+/// caches can use it to avoid hash-table probes on repeated lookups.
 pub const CodeView = struct {
     code_hash: [32]u8,
     bytes: []const u8,
+    ref: CodeRef = .missing,
 };
 
 /// One post-state account value, or `null` where the account is deleted.

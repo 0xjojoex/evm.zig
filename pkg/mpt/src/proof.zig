@@ -229,8 +229,7 @@ pub fn indexWitness(
     return @ptrCast(data);
 }
 
-/// Table capacity for `node_count` records: a power of two with at most 50%
-/// load, so probe chains stay short and the mask is one AND.
+/// Table capacity for `node_count` records: a power of two with at most 50% load.
 pub fn tableCapacity(node_count: usize) usize {
     if (node_count == 0) return 0;
     return std.math.ceilPowerOfTwo(usize, node_count * 2) catch unreachable;
@@ -239,8 +238,8 @@ pub fn tableCapacity(node_count: usize) usize {
 const IndexData = struct {
     records: []const NodeRecord = &.{},
     /// Open-addressing position table: record position + 1, 0 = empty slot.
-    /// Slots are addressed by digest word 0 — keccak output is uniform, so no
-    /// second hash is needed. Length is a power of two (`tableCapacity`).
+    /// Slots are addressed by digest word 0. Length is a power of two
+    /// (`tableCapacity`). This unseeded table has no adversarial probe bound;
     table: []const u32 = &.{},
 
     /// The node whose hash equals `digest`, or null.

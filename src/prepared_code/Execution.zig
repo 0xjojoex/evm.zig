@@ -11,6 +11,13 @@ pub const ResolvePolicy = struct {
     admit: bool = true,
 };
 
+/// Largest value `resolve` treats as a dense code index. Anything above it
+/// means "no index": the caller passes its `CodeRef` bit pattern unchanged,
+/// so a memo hit never spends instructions classifying it.
+pub const max_index: u32 = std.math.maxInt(u32) - 2;
+/// A value above `max_index`, for callers that resolve by hash alone.
+pub const no_index: u32 = std.math.maxInt(u32);
+
 backend: ?Backend,
 scratch_allocator: std.mem.Allocator,
 transient_entries: std.AutoHashMap([32]u8, Bytecode.View),
@@ -65,6 +72,7 @@ pub inline fn resolve(
     self: *Execution,
     code_hash: [32]u8,
     raw_code: []const u8,
+    index: u32,
     policy: ResolvePolicy,
 ) !Bytecode.View {
     if (raw_code.len == 0) return .empty;
@@ -75,7 +83,7 @@ pub inline fn resolve(
             return self.memo_views[entry];
         }
     }
-    const bytecode = try self.resolveUncached(code_hash, raw_code, policy);
+    const bytecode = try self.resolveUncached(code_hash, raw_code, index, policy);
     const victim = self.memo_victim;
     self.memo_hashes[victim] = code_hash;
     self.memo_views[victim] = bytecode;
@@ -84,12 +92,31 @@ pub inline fn resolve(
     return bytecode;
 }
 
+/// Indexed views try the backend's indexed lane first. The backend owns any
+/// hash-based deduplication on admission; this execution's hash map is only
+/// needed when indexed resolution cannot serve the view.
 fn resolveUncached(
     self: *Execution,
     code_hash: [32]u8,
     raw_code: []const u8,
+    index: u32,
     policy: ResolvePolicy,
 ) !Bytecode.View {
+    if (index <= max_index) {
+        if (self.backend) |backend| {
+            if (backend.supportsIndexed()) {
+                if (backend.lookupIndexed(index, code_hash)) |bytecode| return bytecode;
+                if (policy.admit) {
+                    const admitted = backend.admitIndexed(index, code_hash, raw_code) catch |err| switch (err) {
+                        error.CodeHashMismatch => return err,
+                        else => null,
+                    };
+                    if (admitted) |bytecode| return bytecode;
+                }
+            }
+        }
+    }
+
     if (self.transient_entries.get(code_hash)) |bytecode| return bytecode;
 
     if (self.backend) |backend| {
@@ -168,8 +195,8 @@ test "backend failure falls back to one transient artifact" {
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
     const code_hash = crypto.keccak256(&raw_code);
-    const first = try execution.resolve(code_hash, &raw_code, .{});
-    const second = try execution.resolve(code_hash, &raw_code, .{});
+    const first = try execution.resolve(code_hash, &raw_code, no_index, .{});
+    const second = try execution.resolve(code_hash, &raw_code, no_index, .{});
     try std.testing.expectEqual(first.bytes.ptr, second.bytes.ptr);
 }
 
@@ -201,14 +228,102 @@ test "resolve memo returns stable views across alternation and eviction" {
     var first: [3]Bytecode.View = undefined;
     for (codes, 0..) |code, index| {
         std.crypto.hash.sha3.Keccak256.hash(code, &hashes[index], .{});
-        first[index] = try execution.resolve(hashes[index], code, .{});
+        first[index] = try execution.resolve(hashes[index], code, no_index, .{});
     }
     // Alternation plus eviction revisits: every hit must return the same
     // prepared artifact bytes the first resolution produced.
     const sequence = [_]usize{ 0, 1, 0, 1, 2, 0, 1, 2, 2, 0 };
     for (sequence) |index| {
-        const view = try execution.resolve(hashes[index], codes[index], .{});
+        const view = try execution.resolve(hashes[index], codes[index], no_index, .{});
         try std.testing.expectEqual(first[index].bytes.ptr, view.bytes.ptr);
         try std.testing.expectEqualSlices(u8, first[index].bytes, view.bytes);
     }
+}
+
+test "indexed views resolve through the indexed lane and never reach the hash lane" {
+    const IndexedBackend = struct {
+        indexed_lookups: usize = 0,
+        indexed_admits: usize = 0,
+        retained_index: ?u32 = null,
+        retained: ?Bytecode = null,
+
+        fn backend(self: *@This()) Backend {
+            return .{ .ptr = self, .vtable = &.{
+                .beginExecution = beginExecution,
+                .endExecution = endExecution,
+                .lookup = lookup,
+                .admit = admit,
+                .lookupIndexed = lookupIndexed,
+                .admitIndexed = admitIndexed,
+            } };
+        }
+
+        fn beginExecution(ptr: *anyopaque) !void {
+            _ = ptr;
+        }
+
+        fn endExecution(ptr: *anyopaque) void {
+            _ = ptr;
+        }
+
+        fn lookup(ptr: *anyopaque, code_hash: [32]u8) !?Bytecode.View {
+            _ = ptr;
+            _ = code_hash;
+            return error.HashLaneTouched;
+        }
+
+        fn admit(ptr: *anyopaque, code_hash: [32]u8, raw_code: []const u8) !?Bytecode.View {
+            _ = ptr;
+            _ = code_hash;
+            _ = raw_code;
+            return error.HashLaneTouched;
+        }
+
+        fn lookupIndexed(ptr: *anyopaque, index: u32, code_hash: [32]u8) ?Bytecode.View {
+            _ = code_hash;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.indexed_lookups += 1;
+            if (self.retained_index != index) return null;
+            return self.retained.?.view();
+        }
+
+        fn admitIndexed(ptr: *anyopaque, index: u32, code_hash: [32]u8, raw_code: []const u8) !?Bytecode.View {
+            _ = code_hash;
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.indexed_admits += 1;
+            self.retained = try Bytecode.init(std.testing.allocator, raw_code);
+            self.retained_index = index;
+            return self.retained.?.view();
+        }
+    };
+
+    var indexed = IndexedBackend{};
+    defer if (indexed.retained) |*bytecode| bytecode.deinit(std.testing.allocator);
+    var execution = Execution.init(std.testing.allocator, indexed.backend());
+    defer execution.deinit();
+
+    const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
+    const code_hash = crypto.keccak256(&raw_code);
+    const admitted = try execution.resolve(code_hash, &raw_code, 5, .{});
+    try std.testing.expectEqual(@as(usize, 1), indexed.indexed_lookups);
+    try std.testing.expectEqual(@as(usize, 1), indexed.indexed_admits);
+
+    // Memo hit: no backend traffic at all.
+    const memoized = try execution.resolve(code_hash, &raw_code, 5, .{});
+    try std.testing.expectEqual(admitted.bytes.ptr, memoized.bytes.ptr);
+    try std.testing.expectEqual(@as(usize, 1), indexed.indexed_lookups);
+
+    // Evict the memo with two other hashes, then come back through the
+    // indexed lookup rather than admission or the hash lane.
+    const other_a = [_]u8{ 0x60, 0x02, 0x00 };
+    const other_b = [_]u8{ 0x60, 0x03, 0x00 };
+    // Ref-less views must not consult the hash lane of a backend that
+    // reports the error above, so they fall back to transient preparation.
+    _ = try execution.resolve(crypto.keccak256(&other_a), &other_a, no_index, .{ .admit = false });
+    _ = try execution.resolve(crypto.keccak256(&other_b), &other_b, no_index, .{ .admit = false });
+    const looked_up = try execution.resolve(code_hash, &raw_code, 5, .{});
+    try std.testing.expectEqual(admitted.bytes.ptr, looked_up.bytes.ptr);
+    try std.testing.expectEqual(@as(usize, 2), indexed.indexed_lookups);
+    try std.testing.expectEqual(@as(usize, 1), indexed.indexed_admits);
+    try std.testing.expectEqual(@as(usize, 2), execution.transient_entries.count());
 }
