@@ -1,0 +1,16 @@
+// Data pins are separate from package dependencies so Zig does not extract
+// cached archives into each worktree before the conformance step runs.
+.{
+    .general = .{
+        .url = "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/general.tar.gz",
+        .hash = "N-V-__8AAAh02Q_AEV27HvU0UEh6vLPZL8pyBOJg4tSeFHjA",
+    },
+    .mainnet = .{
+        .url = "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/mainnet.tar.gz",
+        .hash = "N-V-__8AAOoTQKarh26RvesLPlYYWb1BoVor67JUOSHWCymK",
+    },
+    .minimal = .{
+        .url = "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-alpha.13/minimal.tar.gz",
+        .hash = "N-V-__8AAMAcXCwz8BarazhC9QdenPB_b0B6mlZ3CrFO6a7P",
+    },
+}

@@ -1,4 +1,4 @@
-//! Generated from the consensus-specs resolved pyspec pinned by eest/build.zig.zon.
+//! Generated from the consensus-specs resolved pyspec pinned by eest/consensus.zon.
 //! Unique named schema shapes first required at electra.
 //! Regenerate with scripts/generate-consensus-ssz-schemas.py.
 

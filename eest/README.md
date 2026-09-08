@@ -118,8 +118,8 @@ general fixture consumer or a coverage proof.
 ## Consensus SSZ fixtures
 
 Consensus SSZ is not an execution-spec fixture format. The EEST Zig package
-pins the General, Mainnet, and Minimal archives as lazy data dependencies in
-`build.zig.zon`:
+pins the General, Mainnet, and Minimal archives in
+`consensus.zon`:
 
 ```sh
 zig build ssz-conformance
@@ -138,7 +138,32 @@ invalid generic fixtures must reject.
 Static preset/fork schemas are generated into `src/ssz_static/` from the
 matching resolved consensus-spec pyspec. The generated index records their
 source release, which must match the archive release in
-`build.zig.zon`.
+`consensus.zon`.
+
+### Shared fixture storage
+
+`zig build ssz-conformance` automatically prepares the pinned fixtures in
+`${XDG_CACHE_HOME:-$HOME/.cache}/evmz/consensus/<hash>/` and passes those shared
+paths to the runner. New worktrees reuse the roughly 5 GB of extracted fixtures
+without setup commands, local copies, or symlinks. Explicit fixture paths after
+`--` bypass shared-cache preparation.
+
+These pins stay outside package dependencies because Zig 0.16 extracts cached
+lazy packages into each worktree while constructing the dependency graph.
+The Zig build reads the URLs and hashes directly from `consensus.zon`. A custom
+`std.Build.Step` in `build/ConsensusFixtures.zig` prepares missing packages when
+the conformance step runs. It asks Zig to fetch and verify them in a temporary
+directory, reusing Zig's global download cache, then publishes complete
+extractions atomically under their hashes. A file lock serializes preparation
+across worktrees and is released before tests run. The step exposes fixture
+directories as `LazyPath`s to the normal artifact runner. Different pins coexist
+automatically; the pinned corpus run requires no Python.
+
+Treat shared fixtures as immutable. For fixture experiments, make a separate
+copy and pass its path after `--`. Existing worktree-local extractions are not
+used or modified. Deleting a worktree leaves the shared packages intact. The
+store has no automatic garbage collection; remove an old hash only when no
+worktree needs it.
 
 ## Ownership summary
 
