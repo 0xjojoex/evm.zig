@@ -8,6 +8,7 @@ const Spec = @import("../spec.zig").Spec;
 const BlockPreparedCode = @import("../eth/BlockPreparedCode.zig");
 const Withdrawal = @import("../eth/Withdrawal.zig");
 const Vm = @import("../vm.zig");
+const bal = @import("../eth/bal/model.zig");
 const block_stf = @import("../eth/block_stf.zig");
 const crypto = @import("../crypto.zig");
 const eth_header = @import("../eth/header.zig");
@@ -22,6 +23,27 @@ const uint256 = @import("../uint256.zig");
 const Backend = @import("../backend.zig").Backend;
 
 const max_rlp_block_size = 8 * 1024 * 1024;
+
+/// Longest node path a 32-byte trie key can need, plus the one sibling a
+/// deletion re-encodes: 64 nibble-consuming nodes and one neighbour.
+const max_witness_nodes_per_key = 65;
+/// Keys a block touches without paying gas for them: coinbase, withdrawals,
+/// and the system contracts with their storage. Generous on purpose.
+const gas_free_witness_keys = 64;
+
+/// Upper bound on state witness nodes a block of `gas_limit` can need. Every
+/// touched key is a BAL item, and BAL admission already caps items at
+/// `gas_limit / item_cost`; each key is proven by one path. A witness above
+/// this bound cannot be minimal, and indexing it is work the payload never
+/// paid for, so it is refused before any node is hashed. Coarse: a real
+/// witness sits far below it. This bounds admitted node count, not hash-table
+/// probe length.
+fn maxWitnessStateNodes(gas_limit: u64) usize {
+    const paid_keys = gas_limit / bal.item_cost;
+    const keys = paid_keys +| gas_free_witness_keys;
+    const nodes = keys *| max_witness_nodes_per_key;
+    return std.math.lossyCast(usize, nodes);
+}
 
 pub const Error = std.mem.Allocator.Error || rlp.ParseError || trie.Error || stateless_tx.Error || error{
     MissingParentHeader,
@@ -153,6 +175,9 @@ fn validateWithScratchExact(
     if (!blockShapeValid(ExactBlockStf.fork, block)) return .{ .status = .invalid_block_body };
     if (ExactBlockStf.fork.isImpl(.osaka) and !blockRlpSizeValid(ExactBlockStf.fork, block, max_rlp_block_size)) {
         return .{ .status = .invalid_block_body };
+    }
+    if (input.witness.state.len > maxWitnessStateNodes(block.gas_limit)) {
+        return .{ .status = .invalid_witness };
     }
     var header_chain = try HeaderChain.init(
         allocator,
@@ -449,14 +474,21 @@ const HeaderChain = struct {
         } };
     }
 
+    /// Constant time: the chain is hash-linked to the payload's parent, so
+    /// real ancestors have consecutive numbers and the position is an offset.
+    /// BLOCKHASH is cheap enough that a scan would let one block force
+    /// millions of full passes over the ancestry.
     fn getBlockHash(ptr: *anyopaque, number: u64) !?u256 {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (number >= self.current_number or self.current_number - number > 256) return null;
-        for (self.headers) |header| {
-            if (header.number != number) continue;
-            return std.mem.readInt(u256, &header.hash, .big);
-        }
-        return error.InvalidWitness;
+        if (self.headers.len == 0) return error.InvalidWitness;
+        const first_number = self.headers[0].number;
+        if (number < first_number) return error.InvalidWitness;
+        const offset = number - first_number;
+        if (offset >= self.headers.len) return error.InvalidWitness;
+        const header = self.headers[offset];
+        if (header.number != number) return error.InvalidWitness;
+        return std.mem.readInt(u256, &header.hash, .big);
     }
 };
 
@@ -694,4 +726,95 @@ test "recent block hash lookup rejects a missing authenticated ancestor" {
     try std.testing.expectError(error.InvalidWitness, HeaderChain.getBlockHash(&chain, 299));
     try std.testing.expectEqual(@as(?u256, null), try HeaderChain.getBlockHash(&chain, 300));
     try std.testing.expectEqual(@as(?u256, null), try HeaderChain.getBlockHash(&chain, 43));
+}
+
+test "witness node bound scales with gas and keeps a gas-free floor" {
+    const floor = gas_free_witness_keys * max_witness_nodes_per_key;
+    try std.testing.expectEqual(@as(usize, floor), maxWitnessStateNodes(0));
+    try std.testing.expectEqual(@as(usize, floor), maxWitnessStateNodes(bal.item_cost - 1));
+    try std.testing.expectEqual(
+        @as(usize, floor + max_witness_nodes_per_key),
+        maxWitnessStateNodes(bal.item_cost),
+    );
+    try std.testing.expectEqual(
+        @as(usize, (60_000_000 / bal.item_cost + gas_free_witness_keys) * max_witness_nodes_per_key),
+        maxWitnessStateNodes(60_000_000),
+    );
+    try std.testing.expectEqual(
+        @as(usize, (std.math.maxInt(u64) / bal.item_cost + gas_free_witness_keys) * max_witness_nodes_per_key),
+        maxWitnessStateNodes(std.math.maxInt(u64)),
+    );
+}
+
+test "oversized state witness is refused before any node is hashed" {
+    const Amsterdam = Validator(@import("../eth/spec.zig").amsterdam);
+    const block = input_mod.Block{
+        .parent_hash = [_]u8{0} ** 32,
+        .fee_recipient = address.Address.fromBytes([_]u8{0} ** 20),
+        .state_root = [_]u8{0} ** 32,
+        .receipts_root = [_]u8{0} ** 32,
+        .logs_bloom = [_]u8{0} ** 256,
+        .prev_randao = 0,
+        .number = 1,
+        .gas_limit = 0,
+        .gas_used = 0,
+        .timestamp = 1,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1,
+        .block_hash = [_]u8{0} ** 32,
+        .blob_gas_used = 0,
+        .excess_blob_gas = 0,
+        .parent_beacon_block_root = [_]u8{0} ** 32,
+        .requests_hash = block_stf.empty_requests_hash,
+        .block_access_list = &.{},
+    };
+    const bound = maxWitnessStateNodes(block.gas_limit);
+    const nodes = try std.testing.allocator.alloc([]const u8, bound + 1);
+    defer std.testing.allocator.free(nodes);
+    @memset(nodes, &.{});
+
+    // No headers either: the bound must fire before the ancestry is parsed.
+    const oversized = try Amsterdam.validate(std.testing.allocator, .{
+        .chain_id = 1,
+        .block = block,
+        .witness = .{ .state = nodes },
+    });
+    try std.testing.expectEqual(block_stf.Status.invalid_witness, oversized.status);
+
+    try std.testing.expectError(error.MissingParentHeader, Amsterdam.validate(std.testing.allocator, .{
+        .chain_id = 1,
+        .block = block,
+        .witness = .{ .state = nodes[0..bound] },
+    }));
+}
+
+test "recent block hash lookup is positional over the authenticated ancestry" {
+    var headers: [4]ParsedHeader = undefined;
+    for (&headers, 0..) |*header, index| {
+        header.* = .{
+            .hash = [_]u8{@intCast(index + 1)} ** 32,
+            .parent_hash = [_]u8{0} ** 32,
+            .state_root = [_]u8{0} ** 32,
+            .number = 100 + index,
+            .gas_limit = 0,
+            .gas_used = 0,
+            .timestamp = 0,
+        };
+    }
+    var chain = HeaderChain{ .headers = &headers, .current_number = 104 };
+    for (headers) |header| {
+        try std.testing.expectEqual(
+            @as(?u256, std.mem.readInt(u256, &header.hash, .big)),
+            try HeaderChain.getBlockHash(&chain, header.number),
+        );
+    }
+    try std.testing.expectError(error.InvalidWitness, HeaderChain.getBlockHash(&chain, 99));
+    try std.testing.expectEqual(@as(?u256, null), try HeaderChain.getBlockHash(&chain, 104));
+
+    var short = HeaderChain{ .headers = headers[0..2], .current_number = 104 };
+    try std.testing.expectError(error.InvalidWitness, HeaderChain.getBlockHash(&short, 103));
+
+    headers[2].number = 250;
+    var skewed = HeaderChain{ .headers = &headers, .current_number = 104 };
+    try std.testing.expectError(error.InvalidWitness, HeaderChain.getBlockHash(&skewed, 102));
 }

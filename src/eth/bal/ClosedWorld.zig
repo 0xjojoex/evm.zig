@@ -37,6 +37,14 @@ const CodeHash = [32]u8;
 
 const ClosedWorld = @This();
 
+/// Address->id memo depth. Power of two so the round-robin victim wraps by
+/// overflow.
+const memo_account_entries = 2;
+
+comptime {
+    std.debug.assert(std.math.isPowerOfTwo(memo_account_entries));
+}
+
 pub const State = world_state.WorldState(ClosedWorld);
 
 pub const AccountId = claim_plan.AccountId;
@@ -61,23 +69,27 @@ plan: claim_plan.ClaimPlan,
 facts: ParentFacts,
 accounts: []AccountRow,
 storage: []StorageRow,
-/// Hot-translation memo: two remembered address→id entries and one
-/// (account, slot)→id entry. Full-key equality decides a hit. An account miss
-/// falls back to `ClaimPlan`'s deterministic linear-probe table and evicts a
+/// Hot-translation memo: `memo_account_entries` remembered address->id entries and one
+/// (account, slot)->id entry. Full-key equality decides a hit. An account miss
+/// falls back to `ClaimPlan`'s binary search and evicts a
 /// memo entry round-robin; a storage miss binary searches the account's slot
 /// window and replaces the one storage entry. Two account entries cover the
 /// caller/callee alternation of nested calls, which a single entry misses on
 /// every step. Memo keys are pre-assembled address words: the probe is
 /// assembled once per resolution and then compares in registers, instead of
 /// paying an align-1 byte ladder on every hit.
-translation_account_keys: [2]AddressWord = undefined,
-translation_account_ids: [2]AccountId = undefined,
-translation_account_valid: [2]bool = .{ false, false },
-translation_account_victim: u1 = 0,
-translation_storage_slot: u256 = undefined,
-translation_storage_account: AccountId = undefined,
-translation_storage_id: StorageId = undefined,
-translation_storage_valid: bool = false,
+translation_account: struct {
+    keys: [memo_account_entries]AddressWord = undefined,
+    ids: [memo_account_entries]AccountId = undefined,
+    valid: [memo_account_entries]bool = @splat(false),
+    victim: std.math.IntFittingRange(0, memo_account_entries - 1) = 0,
+} = .{},
+translation_storage: struct {
+    slot: u256 = undefined,
+    account: AccountId = undefined,
+    id: StorageId = undefined,
+    valid: bool = false,
+} = .{},
 
 /// Take ownership of `plan` and `facts`; both are released on failure.
 pub fn init(
@@ -203,34 +215,34 @@ pub fn resolveStorage(
 }
 
 inline fn lookupAccount(self: *ClosedWorld, address_word: AddressWord) ?AccountId {
-    inline for (0..2) |entry| {
-        if (self.translation_account_valid[entry] and
-            AddressWord.eql(self.translation_account_keys[entry], address_word))
+    inline for (0..memo_account_entries) |entry| {
+        if (self.translation_account.valid[entry] and
+            AddressWord.eql(self.translation_account.keys[entry], address_word))
         {
-            return self.translation_account_ids[entry];
+            return self.translation_account.ids[entry];
         }
     }
     const id = self.plan.accountIdWord(address_word) orelse return null;
-    const victim = self.translation_account_victim;
-    self.translation_account_keys[victim] = address_word;
-    self.translation_account_ids[victim] = id;
-    self.translation_account_valid[victim] = true;
-    self.translation_account_victim +%= 1;
+    const victim = self.translation_account.victim;
+    self.translation_account.keys[victim] = address_word;
+    self.translation_account.ids[victim] = id;
+    self.translation_account.valid[victim] = true;
+    self.translation_account.victim +%= 1;
     return id;
 }
 
 fn lookupStorage(self: *ClosedWorld, account: AccountId, slot: u256) ?StorageId {
-    if (self.translation_storage_valid and
-        self.translation_storage_account == account and
-        self.translation_storage_slot == slot)
+    if (self.translation_storage.valid and
+        self.translation_storage.account == account and
+        self.translation_storage.slot == slot)
     {
-        return self.translation_storage_id;
+        return self.translation_storage.id;
     }
     const id = self.plan.storageId(account, slot) orelse return null;
-    self.translation_storage_account = account;
-    self.translation_storage_slot = slot;
-    self.translation_storage_id = id;
-    self.translation_storage_valid = true;
+    self.translation_storage.account = account;
+    self.translation_storage.slot = slot;
+    self.translation_storage.id = id;
+    self.translation_storage.valid = true;
     return id;
 }
 

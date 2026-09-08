@@ -138,8 +138,11 @@ pub const Address = extern struct {
 };
 
 /// Word-aligned account identity used across execution callbacks and dense
-/// state translation. Its first 20 in-memory bytes are the canonical address;
-/// the final four bytes are always zero and never cross a protocol boundary.
+/// state translation. Each word holds eight canonical address bytes as a
+/// big-endian integer (`words[2]` holds the last four, so its upper half is
+/// always zero), which makes the word tuple order equal to `Address.order`:
+/// a BAL-ordered address column is binary-searchable without a byte swap,
+/// and the u256 stack form converts by shift and truncate alone.
 pub const AddressWord = extern struct {
     words: [3]u64,
 
@@ -150,34 +153,43 @@ pub const AddressWord = extern struct {
 
     pub inline fn fromAddress(value: Address) AddressWord {
         return .{ .words = .{
-            std.mem.readInt(u64, value.bytes[0..8], .little),
-            std.mem.readInt(u64, value.bytes[8..16], .little),
-            std.mem.readInt(u32, value.bytes[16..20], .little),
+            std.mem.readInt(u64, value.bytes[0..8], .big),
+            std.mem.readInt(u64, value.bytes[8..16], .big),
+            std.mem.readInt(u32, value.bytes[16..20], .big),
         } };
     }
 
     pub inline fn fromU256(value: u256) AddressWord {
         return .{ .words = .{
-            @byteSwap(@as(u64, @truncate(value >> 96))),
-            @byteSwap(@as(u64, @truncate(value >> 32))),
-            @byteSwap(@as(u32, @truncate(value))),
+            @truncate(value >> 96),
+            @truncate(value >> 32),
+            @as(u32, @truncate(value)),
         } };
     }
 
     pub inline fn address(self: AddressWord) Address {
         std.debug.assert(self.words[2] <= std.math.maxInt(u32));
         var bytes: [Address.len]u8 = undefined;
-        std.mem.writeInt(u64, bytes[0..8], self.words[0], .little);
-        std.mem.writeInt(u64, bytes[8..16], self.words[1], .little);
-        std.mem.writeInt(u32, bytes[16..20], @intCast(self.words[2]), .little);
+        std.mem.writeInt(u64, bytes[0..8], self.words[0], .big);
+        std.mem.writeInt(u64, bytes[8..16], self.words[1], .big);
+        std.mem.writeInt(u32, bytes[16..20], @intCast(self.words[2]), .big);
         return Address.fromBytes(bytes);
     }
 
     pub inline fn toU256(self: AddressWord) u256 {
         std.debug.assert(self.words[2] <= std.math.maxInt(u32));
-        return (@as(u256, @byteSwap(self.words[0])) << 96) |
-            (@as(u256, @byteSwap(self.words[1])) << 32) |
-            @byteSwap(@as(u32, @intCast(self.words[2])));
+        return (@as(u256, self.words[0]) << 96) |
+            (@as(u256, self.words[1]) << 32) |
+            self.words[2];
+    }
+
+    /// `Address.order` on the word form: byte-lexicographic, because every
+    /// word is big-endian.
+    pub fn order(a: AddressWord, b: AddressWord) std.math.Order {
+        inline for (a.words, b.words) |left, right| {
+            if (left != right) return std.math.order(left, right);
+        }
+        return .eq;
     }
 
     pub inline fn eql(a: AddressWord, b: AddressWord) bool {
@@ -298,6 +310,9 @@ test "address word preserves canonical bytes and truncates EVM words" {
     const from_address: AddressWord = .fromAddress(canonical);
     try std.testing.expectEqual(canonical, from_address.address());
     try std.testing.expectEqual(@as(u64, 0), from_address.words[2] >> 32);
+    try std.testing.expectEqual(@as(u64, 0x123456789abcdef0), from_address.words[0]);
+    try std.testing.expectEqual(@as(u64, 0x0123456789abcdef), from_address.words[1]);
+    try std.testing.expectEqual(@as(u64, 0x00123456), from_address.words[2]);
 
     const evm_word = (@as(u256, 0xdeadbeef) << 160) | canonical.toU256();
     const from_evm_word: AddressWord = .fromU256(evm_word);
@@ -313,6 +328,14 @@ test "address word preserves canonical bytes and truncates EVM words" {
         const word: AddressWord = .fromAddress(target);
         try std.testing.expectEqual(target.toU256(), word.toU256());
         try std.testing.expectEqual(target, AddressWord.fromU256(word.toU256()).address());
+
+        // Word order is byte order, so BAL-sorted columns need no permutation.
+        var other: Address = target;
+        random.bytes(other.bytes[random.uintLessThan(usize, Address.len)..]);
+        try std.testing.expectEqual(
+            Address.order(target, other),
+            AddressWord.order(word, .fromAddress(other)),
+        );
     }
 }
 

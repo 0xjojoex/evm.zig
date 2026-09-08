@@ -944,7 +944,14 @@ pub fn ExecutorType(
         pub fn resolveExecutionCodeView(self: *Executor, code: evmz.state.CodeView) !Bytecode.View {
             std.debug.assert(self.prepared_code_execution != null);
             const execution = &self.prepared_code_execution.?;
-            return execution.resolve(code.code_hash, code.bytes, .{
+            // The ref's bit pattern is the index; reserved values fall above
+            // `max_index`, so no classification runs on the memo-hit path.
+            comptime {
+                std.debug.assert(@intFromEnum(evmz.state.CodeRef.missing) > prepared_code.Execution.max_index);
+                std.debug.assert(@intFromEnum(evmz.state.CodeRef.empty) > prepared_code.Execution.max_index);
+                std.debug.assert(evmz.state.CodeRef.max_indexed - 1 <= prepared_code.Execution.max_index);
+            }
+            return execution.resolve(code.code_hash, code.bytes, @intFromEnum(code.ref), .{
                 .admit = true,
             });
         }

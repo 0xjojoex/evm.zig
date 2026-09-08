@@ -47,6 +47,7 @@ const Host = @import("../Host.zig");
 const state_types = @import("../state.zig");
 const Account = @import("./Account.zig");
 const sparse_hash_map = @import("./sparse_hash_map.zig");
+const ordered_map = @import("./ordered_map.zig");
 const artifacts = @import("../eth/bal/claim_artifacts.zig");
 
 const Allocator = std.mem.Allocator;
@@ -190,13 +191,27 @@ pub const TransientKey = extern struct {
         }
 
         pub inline fn eql(_: HashContext, a: TransientKey, b: TransientKey) bool {
-            return AddressWord.eql(a.address_word, b.address_word) and
-                a.slot_words[0] == b.slot_words[0] and
-                a.slot_words[1] == b.slot_words[1] and
-                a.slot_words[2] == b.slot_words[2] and
-                a.slot_words[3] == b.slot_words[3];
+            return TransientKey.eql(a, b);
         }
     };
+
+    /// Total order for the balanced-tree map: address words, then slot words.
+    pub fn order(a: TransientKey, b: TransientKey) std.math.Order {
+        const address_order = AddressWord.order(a.address_word, b.address_word);
+        if (address_order != .eq) return address_order;
+        inline for (a.slot_words, b.slot_words) |left, right| {
+            if (left != right) return std.math.order(left, right);
+        }
+        return .eq;
+    }
+
+    pub inline fn eql(a: TransientKey, b: TransientKey) bool {
+        return AddressWord.eql(a.address_word, b.address_word) and
+            a.slot_words[0] == b.slot_words[0] and
+            a.slot_words[1] == b.slot_words[1] and
+            a.slot_words[2] == b.slot_words[2] and
+            a.slot_words[3] == b.slot_words[3];
+    }
 
     comptime {
         std.debug.assert(std.meta.hasUniqueRepresentation(TransientKey));
@@ -296,11 +311,11 @@ pub fn WorldState(comptime World: type) type {
         pub const StorageId = World.StorageId;
         pub const ResolutionError = World.ResolutionError;
 
-        const TransientStorageMap = sparse_hash_map.WithContext(
-            TransientKey,
-            u256,
-            TransientKey.HashContext,
-        );
+        // Balanced tree, not a hash table: TSTORE keys are payload-chosen at
+        // 100 gas each and a guest has no per-run seed, so a hash table's cost
+        // is the attacker's choice. Real blocks touch a handful of transient
+        // slots, so the tree's per-op cost is invisible there.
+        const TransientStorageMap = ordered_map.OrderedMap(TransientKey, u256, TransientKey.order);
 
         const ResolvedStorage = struct {
             account: AccountId,
