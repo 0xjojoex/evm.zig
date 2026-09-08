@@ -1,4 +1,5 @@
 const std = @import("std");
+const ConsensusFixtures = @import("build/ConsensusFixtures.zig");
 
 // `b.option` validates these and lists them in `zig build --help`. The values
 // are forwarded verbatim to the evmz dependency, which resolves the accelerated
@@ -13,7 +14,7 @@ pub fn build(b: *std.Build) void {
     const pinned_consensus_fixtures = b.option(
         bool,
         "pinned-consensus-fixtures",
-        "Use consensus fixtures pinned in build.zig.zon when no path is given",
+        "Use consensus fixtures pinned in consensus.zon when no path is given",
     ) orelse false;
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
     const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
@@ -57,21 +58,11 @@ pub fn build(b: *std.Build) void {
         });
         b.installArtifact(ssz_conformance_exe);
         const run = b.addRunArtifact(ssz_conformance_exe);
-        run.setCwd(b.path(".."));
-        if (hasFixturePath(b.args)) {
-            run.addArgs(b.args.?);
-        } else if (pinned_consensus_fixtures) {
-            const general = b.lazyDependency("consensus_general", .{});
-            const mainnet = b.lazyDependency("consensus_mainnet", .{});
-            const minimal = b.lazyDependency("consensus_minimal", .{});
-            if (general == null or mainnet == null or minimal == null) return;
-            run.addDirectoryArg(general.?.path("general/phase0/ssz_generic"));
-            run.addDirectoryArg(mainnet.?.path("mainnet"));
-            run.addDirectoryArg(minimal.?.path("minimal"));
-            if (b.args) |args| run.addArgs(args);
-        } else if (b.args) |args| {
-            run.addArgs(args);
+        if (pinned_consensus_fixtures and !hasFixturePath(b.args)) {
+            for (ConsensusFixtures.create(b)) |path| run.addDirectoryArg(path);
         }
+        run.setCwd(b.path(".."));
+        if (b.args) |args| run.addArgs(args);
         b.step(
             "ssz-conformance",
             "Run consensus-spec General, Mainnet, and Minimal SSZ fixtures",
