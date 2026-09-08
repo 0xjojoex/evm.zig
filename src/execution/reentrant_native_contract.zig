@@ -9,7 +9,7 @@ const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const Host = @import("../Host.zig");
-const precompile = @import("../precompile.zig");
+const execution = @import("../execution.zig");
 
 /// Default address set for specifications without host-capable native code.
 pub const None = struct {
@@ -25,19 +25,29 @@ pub const Runtime = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        execute: *const fn (ptr: *anyopaque, call: Call) anyerror!precompile.Result,
+        execute: *const fn (ptr: *anyopaque, call: Call) anyerror!Result,
     };
 
-    pub fn execute(self: Runtime, call: Call) !precompile.Result {
+    pub fn execute(self: Runtime, call: Call) !Result {
         return self.vtable.execute(self.ptr, call);
     }
 };
 
+/// Semantic result returned by one host-capable native contract.
+///
+/// The runtime reports the EVM-visible call status, output, and remaining gas.
+/// Executor owns checkpoint settlement and converts this value into `Host.Result`.
+pub const Result = struct {
+    status: execution.Status,
+    output_data: []u8,
+    gas_left: i64,
+};
+
 /// Invocation-scoped capability for one reentrant native-contract call.
 ///
-/// Output must be allocated from `allocator`; the executor copies it into
-/// retained result storage before this invocation ends. Returning nonempty
-/// borrowed output is rejected.
+/// Nonempty output must be allocated from `allocator`; the executor copies it
+/// into retained result storage before this invocation ends. Empty output may
+/// use `&.{}`.
 pub const Call = struct {
     allocator: std.mem.Allocator,
     host: *Host,

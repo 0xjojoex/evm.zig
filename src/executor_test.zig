@@ -3446,7 +3446,7 @@ test "execution finalization phase covers native dispatch and restores after err
     };
     const Latest = evmz.t.CustomVm(.latest, .{ .reentrant_native_contract = Native }).?;
     const Runtime = struct {
-        fn execute(_: *anyopaque, call: execution_values.ReentrantNativeContractCall) !evmz.precompile.Result {
+        fn execute(_: *anyopaque, call: execution_values.ReentrantNativeContractCall) !execution_values.ReentrantNativeContractResult {
             const executor: *Latest.Executor = @ptrCast(@alignCast(call.host.ptr));
             try std.testing.expectEqual(.running, executor.execution_phase);
             _ = try call.host.call(.{

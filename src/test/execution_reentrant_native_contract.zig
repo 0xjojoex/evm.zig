@@ -5,29 +5,24 @@ const execution = evmz.execution;
 
 const StatefulRuntime = struct {
     tx_kind: u8,
-    fail: bool = false,
+    status: execution.Status = .success,
     service_error: ?anyerror = null,
-    invalid_borrow: bool = false,
-    borrowed: [1]u8 = .{0xff},
 
     fn service(self: *StatefulRuntime) execution.ReentrantNativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(ptr: *anyopaque, call: execution.ReentrantNativeContractCall) !evmz.precompile.Result {
+    fn execute(
+        ptr: *anyopaque,
+        call: execution.ReentrantNativeContractCall,
+    ) !execution.ReentrantNativeContractResult {
         const self: *StatefulRuntime = @ptrCast(@alignCast(ptr));
         if (self.service_error) |err| return err;
         _ = try call.host.setStorage(.fromAddress(call.message.recipient), 7, self.tx_kind);
-        if (self.invalid_borrow) return .{
-            .status = .success,
-            .output_data = &self.borrowed,
-            .gas_left = call.message.gas - 9,
-            .output_owned = false,
-        };
         const output = try call.allocator.alloc(u8, 1);
         output[0] = self.tx_kind;
         return .{
-            .status = if (self.fail) .failure else .success,
+            .status = self.status,
             .output_data = output,
             .gas_left = call.message.gas - 9,
         };
@@ -42,7 +37,10 @@ const ReentrantRuntime = struct {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(ptr: *anyopaque, call: execution.ReentrantNativeContractCall) !evmz.precompile.Result {
+    fn execute(
+        ptr: *anyopaque,
+        call: execution.ReentrantNativeContractCall,
+    ) !execution.ReentrantNativeContractResult {
         const self: *ReentrantRuntime = @ptrCast(@alignCast(ptr));
         const result = (try call.host.call(.{
             .depth = call.message.depth + 1,
@@ -57,12 +55,11 @@ const ReentrantRuntime = struct {
         }));
         self.called = true;
         return .{
-            .status = if (result.status() == .success) .success else .failure,
-            // Keep this empty and unowned: this test isolates stack-arena
-            // rebinding from the separate native-output lifetime.
+            .status = result.status(),
+            // Keep this empty: this test isolates stack-arena rebinding from
+            // the separate native-output lifetime.
             .output_data = &.{},
             .gas_left = result.gas_left,
-            .output_owned = false,
         };
     }
 };
@@ -72,7 +69,10 @@ const ReentrantOutputRuntime = struct {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(ptr: *anyopaque, call: execution.ReentrantNativeContractCall) !evmz.precompile.Result {
+    fn execute(
+        ptr: *anyopaque,
+        call: execution.ReentrantNativeContractCall,
+    ) !execution.ReentrantNativeContractResult {
         const self: *ReentrantOutputRuntime = @ptrCast(@alignCast(ptr));
         _ = self;
         const output = try call.allocator.alloc(u8, 1);
@@ -145,25 +145,19 @@ test "reentrant native contract can use host state and keeps EVM rollback semant
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.maxRowCount());
 
     runtime.tx_kind = 0x99;
-    runtime.fail = true;
+    runtime.status = .revert;
     const failure = (try executor.executeStandalone(
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
     ));
-    try std.testing.expectEqual(StatefulVm.Interpreter.Status.invalid, failure.status());
+    try std.testing.expectEqual(StatefulVm.Interpreter.Status.revert, failure.status());
+    try std.testing.expectEqualSlices(u8, &.{0x99}, failure.output_data);
     try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulNativeContract.target, 7));
 
-    runtime.fail = false;
+    runtime.status = .success;
     runtime.service_error = error.NotImplemented;
     try std.testing.expectError(
         error.NotImplemented,
-        executor.executeStandalone(request(sender, StatefulNativeContract.target, &.{}), .{}),
-    );
-
-    runtime.service_error = null;
-    runtime.invalid_borrow = true;
-    try std.testing.expectError(
-        error.InvalidNativeContractOutput,
         executor.executeStandalone(request(sender, StatefulNativeContract.target, &.{}), .{}),
     );
 }

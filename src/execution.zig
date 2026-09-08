@@ -14,6 +14,7 @@ const reentrant_native_contract = @import("./execution/reentrant_native_contract
 
 pub const ExecutionGas = @import("./execution/gas.zig").ExecutionGas;
 pub const ReentrantNativeContractCall = reentrant_native_contract.Call;
+pub const ReentrantNativeContractResult = reentrant_native_contract.Result;
 pub const ReentrantNativeContractRuntime = reentrant_native_contract.Runtime;
 pub const NoReentrantNativeContracts = reentrant_native_contract.None;
 pub const resources = @import("./execution/resources.zig");
