@@ -9,34 +9,36 @@ const Status = @import("../evm.zig").interpreter.Status;
 /// handed to a frame-store row. Dropping it open restores, so early error
 /// paths need no cleanup. LIFO order is enforced by the state's scope
 /// generations, not here. Treat as move-only.
-pub fn Guard(comptime State: type) type {
+/// `Owner` couples state and transaction-journal checkpoints through `openScope`,
+/// `commitScope`, and `revertScope`.
+pub fn Guard(comptime Owner: type) type {
     return struct {
         const Self = @This();
 
-        state: *State,
+        owner: *Owner,
         checkpoint: Checkpoint,
         open: bool = true,
 
-        pub fn init(state: *State, checkpoint: Checkpoint) Self {
-            return .{ .state = state, .checkpoint = checkpoint };
+        pub fn init(owner: *Owner, checkpoint: Checkpoint) Self {
+            return .{ .owner = owner, .checkpoint = checkpoint };
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.open) self.state.revertToCheckpoint(self.checkpoint);
+            if (self.open) self.owner.revertScope(self.checkpoint);
             self.* = undefined;
         }
 
-        pub fn begin(state: *State) Self {
-            return .{ .state = state, .checkpoint = state.checkpoint() };
+        pub fn begin(owner: *Owner) Self {
+            return .{ .owner = owner, .checkpoint = owner.openScope() };
         }
 
         pub fn commit(self: *Self) void {
-            self.state.commitCheckpoint(self.checkpoint);
+            self.owner.commitScope(self.checkpoint);
             self.open = false;
         }
 
         pub fn restore(self: *Self) void {
-            self.state.revertToCheckpoint(self.checkpoint);
+            self.owner.revertScope(self.checkpoint);
             self.open = false;
         }
 

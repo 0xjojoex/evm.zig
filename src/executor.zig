@@ -90,7 +90,27 @@ const ScopeRoot = struct {
 
 /// An open world may start empty or load through a reader. Other worlds must
 /// arrive as an admitted state, whose ownership transfers to the executor.
-fn ExecutorInitType(comptime World: type) type {
+fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) type {
+    if (TransactionJournal) |Journal| {
+        if (World == evmz.state.OpenWorld) {
+            return struct {
+                transaction_journal: *Journal,
+                state: struct { reader: ?evmz.state.Reader = null } = .{},
+                /// Caller-owned derived-artifact service. Its allocation, I/O,
+                /// synchronization, and capacity policy are outside executor bounds.
+                prepared_code_backend: ?prepared_code.Backend = null,
+                block_hash_source: ?BlockHashSource = null,
+                reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+            };
+        }
+        return struct {
+            state: evmz.state.WorldState(World),
+            transaction_journal: *Journal,
+            prepared_code_backend: ?prepared_code.Backend = null,
+            block_hash_source: ?BlockHashSource = null,
+            reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+        };
+    }
     if (World == evmz.state.OpenWorld) {
         return struct {
             state: struct { reader: ?evmz.state.Reader = null } = .{},
@@ -135,6 +155,12 @@ pub const CaptureContext = capture_context.Context;
 pub const CompileOptions = struct {
     /// Include opcode-step capture and its traced dispatch table.
     step_capture: bool = false,
+    /// Embedding-owned journal coupled to transaction and CALL/CREATE rollback.
+    /// The concrete type must provide the six infallible lifecycle methods used
+    /// by Executor. `null` removes its field and all calls from the generated type.
+    /// Executor borrows one instance; concurrent executors need distinct instances
+    /// unless the concrete journal provides its own synchronization.
+    transaction_journal: ?type = null,
 };
 
 /// Compile one exact executor over `WorldState(World)`. Admission, authenticated
@@ -163,7 +189,13 @@ pub fn ExecutorType(
 
         pub const BranchSnapshot = State.BranchSnapshot;
 
-        pub const Init = ExecutorInitType(World);
+        const transaction_journal_enabled = options_value.transaction_journal != null;
+        const TransactionJournal = if (transaction_journal_enabled)
+            *options_value.transaction_journal.?
+        else
+            void;
+
+        pub const Init = ExecutorInitType(World, options_value.transaction_journal);
 
         pub inline fn stateAddress(value: Address) StateAddress {
             return .fromAddress(value);
@@ -186,6 +218,7 @@ pub fn ExecutorType(
         next_block_execution_generation: u64 = 0,
         block_hash_source: ?BlockHashSource = null,
         reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+        transaction_journal: TransactionJournal,
         prepared_code_backend: ?prepared_code.Backend,
         prepared_code_execution: ?prepared_code.Execution = null,
         prepared_code_execution_depth: usize = 0,
@@ -205,6 +238,9 @@ pub fn ExecutorType(
                 .prepared_code_scratch = .init(allocator),
                 .block_hash_source = options.block_hash_source,
                 .reentrant_native_contract_runtime = options.reentrant_native_contract_runtime,
+                .transaction_journal = if (transaction_journal_enabled)
+                    options.transaction_journal
+                else {},
                 .prepared_code_backend = options.prepared_code_backend,
                 .last_call_output = .init(allocator),
             };
@@ -297,6 +333,7 @@ pub fn ExecutorType(
             else
                 self.state.beginTransaction();
             self.state.beginScope();
+            if (comptime transaction_journal_enabled) self.transaction_journal.beginTransaction();
             self.attempt = .{ .id = state_attempt_id, .mode = mode, .owner = .manual };
             self.execution_context = context;
             self.scope_root = null;
@@ -491,6 +528,7 @@ pub fn ExecutorType(
             std.debug.assert(self.state.scopeActive());
             const state_attempt_id = (self.attempt orelse unreachable).id;
             self.state.closeScope();
+            if (comptime transaction_journal_enabled) self.transaction_journal.discardTransaction();
             self.state.discard(state_attempt_id);
             self.closeManualTransactionLifetime();
         }
@@ -502,11 +540,13 @@ pub fn ExecutorType(
             self.state.seal(state_attempt_id);
             if (comptime @TypeOf(observer) != void)
                 observer.observe(self.currentObservation()) catch |err| {
+                    if (comptime transaction_journal_enabled) self.transaction_journal.discardTransaction();
                     self.state.discard(state_attempt_id);
                     self.closeManualTransactionLifetime();
                     return err;
                 };
             self.state.retain(state_attempt_id);
+            if (comptime transaction_journal_enabled) self.transaction_journal.retainTransaction();
             self.closeManualTransactionLifetime();
         }
 
@@ -529,6 +569,7 @@ pub fn ExecutorType(
         fn discardCurrentTransaction(self: *Executor) void {
             std.debug.assert(self.hasCurrentTransaction());
             defer self.finishCurrentTransaction(true);
+            if (comptime transaction_journal_enabled) self.transaction_journal.discardTransaction();
             self.state.discard(self.attempt.?.id);
         }
 
@@ -599,6 +640,7 @@ pub fn ExecutorType(
                 pub fn retain(self: Execution) void {
                     _ = self.state();
                     self.executor.state.retain(self.executor.attempt.?.id);
+                    if (comptime transaction_journal_enabled) self.executor.transaction_journal.retainTransaction();
                     self.executor.finishCurrentTransaction(false);
                 }
 
@@ -638,16 +680,36 @@ pub fn ExecutorType(
         /// Caller-owned journal checkpoint. Opened only inside an active
         /// transaction scope; it never finalizes or closes that scope, so the
         /// owning runtime can span prelude writes and payload execution.
-        pub const ExecutionCheckpoint = CheckpointGuard(State);
+        pub const ExecutionCheckpoint = CheckpointGuard(Executor);
 
         /// Open one journal-backed checkpoint inside the active execution scope.
         pub fn checkpoint(self: *Executor) ExecutionCheckpoint {
             self.requireTransactionScope();
-            return .begin(&self.state);
+            return .begin(self);
+        }
+
+        /// Interior scope checkpoint spanning EVM state and the transaction journal.
+        /// The journal is stack-addressed, so only the state checkpoint is stored.
+        pub const ScopeCheckpoint = Checkpoint;
+
+        pub fn openScope(self: *Executor) ScopeCheckpoint {
+            if (comptime transaction_journal_enabled) self.transaction_journal.checkpoint();
+            return self.state.checkpoint();
+        }
+
+        pub fn commitScope(self: *Executor, checkpoint_state: ScopeCheckpoint) void {
+            self.state.commitCheckpoint(checkpoint_state);
+            if (comptime transaction_journal_enabled) self.transaction_journal.commitCheckpoint();
+        }
+
+        pub fn revertScope(self: *Executor, checkpoint_state: ScopeCheckpoint) void {
+            self.state.revertToCheckpoint(checkpoint_state);
+            if (comptime transaction_journal_enabled) self.transaction_journal.revertCheckpoint();
         }
 
         /// Copy the accepted branch so a later `restoreBranch` can roll back
         /// across whole transactions. Allocates; only valid between them.
+        /// The embedding owns snapshots of retained transaction-journal data.
         pub fn branchSnapshot(self: *Executor) !BranchSnapshot {
             return self.state.branchSnapshot();
         }
@@ -1084,8 +1146,8 @@ pub fn ExecutorType(
                     const index = self.frames.len() - 1;
                     switch (self.frames.control(index).kind) {
                         .root_call => {},
-                        .call => |checkpoint_state| self.executor.state.revertToCheckpoint(checkpoint_state),
-                        .create => |child| self.executor.state.revertToCheckpoint(child.checkpoint_state),
+                        .call => |checkpoint_state| self.executor.revertScope(checkpoint_state),
+                        .create => |child| self.executor.revertScope(child.checkpoint_state),
                     }
                     self.dropFrame();
                 }
@@ -1328,7 +1390,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(self.executor, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCall(msg, child.bytecode, child.checkpoint_state, call_capture);
@@ -1360,7 +1422,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(self.executor, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCreate(child, call_capture);
@@ -1378,8 +1440,8 @@ pub fn ExecutorType(
                 const call_capture = control.call_capture;
                 var frame_checkpoint: ?ExecutionCheckpoint = switch (frame_kind) {
                     .root_call => null,
-                    .call => |checkpoint_state| ExecutionCheckpoint.init(&self.executor.state, checkpoint_state),
-                    .create => |child| ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state),
+                    .call => |checkpoint_state| ExecutionCheckpoint.init(self.executor, checkpoint_state),
+                    .create => |child| ExecutionCheckpoint.init(self.executor, child.checkpoint_state),
                 };
                 defer if (frame_checkpoint) |*guard| guard.deinit();
 
@@ -1436,7 +1498,7 @@ pub fn ExecutorType(
             if (resolved.delegated) try self.traceAccountAccess(resolved.address);
             const code = try self.resolvedCodeView(resolved);
 
-            var call_checkpoint = ExecutionCheckpoint.begin(&self.state);
+            var call_checkpoint = ExecutionCheckpoint.begin(self);
             defer call_checkpoint.deinit();
 
             if (msg.value > 0 and (msg.kind == .call or msg.kind == .callcode)) {
@@ -1499,8 +1561,8 @@ pub fn ExecutorType(
             const precompile = spec.precompile.resolve(msg.code_address);
             const reentrant = spec.reentrant_native_contract.active(msg.code_address);
             std.debug.assert(precompile == null or !reentrant);
-            const result = if (precompile) |entry|
-                spec.precompile.execute(entry, .{
+            if (precompile) |entry| {
+                const result = spec.precompile.execute(entry, .{
                     .allocator = scratch.allocator,
                     .input_data = msg.input_data,
                     .gas = msg.gas,
@@ -1513,46 +1575,66 @@ pub fn ExecutorType(
                         .gas_reservoir = msg.gas_reservoir,
                     },
                     else => return err,
-                }
-            else if (reentrant) blk: {
+                };
+                defer if (result.output_data.len != 0) scratch.allocator.free(result.output_data);
+                const output = try self.retainNativeOutput(result.output_data);
+                const status: evmz.TxStatus = switch (result.status) {
+                    .success => .success,
+                    .failure => .invalid,
+                    .out_of_gas => .out_of_gas,
+                };
+                return .{
+                    .outcome = .{
+                        .status = status,
+                        .cause = switch (status) {
+                            .success => .none,
+                            .out_of_gas => .out_of_gas,
+                            .invalid => .invalid,
+                            .revert => unreachable,
+                        },
+                    },
+                    .output_data = output,
+                    .gas_left = if (status == .success) result.gas_left else 0,
+                    .gas_refund = 0,
+                    .gas_reservoir = msg.gas_reservoir,
+                };
+            }
+            if (reentrant) {
                 const runtime = self.reentrant_native_contract_runtime orelse
                     return error.MissingReentrantNativeContractRuntime;
                 var host_iface = self.host();
-                break :blk try runtime.execute(.{
+                const result = try runtime.execute(.{
                     .allocator = scratch.allocator,
                     .host = &host_iface,
                     .message = msg,
                 });
-            } else return null;
-
-            defer if (result.output_owned) scratch.allocator.free(result.output_data);
-            const output = if (result.output_owned) output: {
-                break :output try self.setLastOutput(result.output_data);
-            } else if (result.output_data.len == 0) output: {
-                break :output &.{};
-            } else {
-                return error.InvalidNativeContractOutput;
-            };
-            const status: evmz.TxStatus = switch (result.status) {
-                .success => .success,
-                .failure => .invalid,
-                .out_of_gas => .out_of_gas,
-            };
-            return .{
-                .outcome = .{
-                    .status = status,
-                    .cause = switch (status) {
-                        .success => .none,
-                        .out_of_gas => .out_of_gas,
-                        .invalid => .invalid,
-                        .revert => unreachable,
+                defer if (result.output_data.len != 0) scratch.allocator.free(result.output_data);
+                const output = try self.retainNativeOutput(result.output_data);
+                return .{
+                    .outcome = .{
+                        .status = result.status,
+                        .cause = switch (result.status) {
+                            .revert => .revert,
+                            .success => .none,
+                            .out_of_gas => .out_of_gas,
+                            .invalid => .invalid,
+                        },
                     },
-                },
-                .output_data = output,
-                .gas_left = if (status == .success) result.gas_left else 0,
-                .gas_refund = 0,
-                .gas_reservoir = msg.gas_reservoir,
-            };
+                    .output_data = output,
+                    .gas_left = switch (result.status) {
+                        .success, .revert => result.gas_left,
+                        .invalid, .out_of_gas => 0,
+                    },
+                    .gas_refund = 0,
+                    .gas_reservoir = msg.gas_reservoir,
+                };
+            }
+            return null;
+        }
+
+        fn retainNativeOutput(self: *Executor, output_data: []u8) ![]u8 {
+            if (output_data.len == 0) return &.{};
+            return self.setLastOutput(output_data);
         }
 
         fn touchEmptyCallRecipient(self: *Executor, msg: *const Host.Message) !void {
@@ -1583,7 +1665,7 @@ pub fn ExecutorType(
             return switch (try begin(self, &msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
-                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(self, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -1634,7 +1716,7 @@ pub fn ExecutorType(
 
         fn beginPreparedCreate(self: *Executor, msg: *const Host.Message) !StartedCreate {
             const create_address = msg.recipient;
-            var create_checkpoint = ExecutionCheckpoint.begin(&self.state);
+            var create_checkpoint = ExecutionCheckpoint.begin(self);
             defer create_checkpoint.deinit();
 
             if (try self.createCollision(create_address)) {
@@ -1792,7 +1874,7 @@ pub fn ExecutorType(
             } else switch (try self.beginCall(&msg)) {
                 .immediate => |immediate| immediate,
                 .child => |child| blk: {
-                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(self, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -2511,14 +2593,14 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
     }
 
     {
-        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor);
         defer checkpoint.deinit();
         try executor.state.addBalance(.fromAddress(address), 7);
     }
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(address)));
 
     {
-        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor);
         defer checkpoint.deinit();
         try executor.state.addBalance(.fromAddress(address), 9);
         checkpoint.commit();
@@ -2563,13 +2645,13 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     try call.prepare();
     try call.pushRootCall(&root_message, bytecode.view());
 
-    const parent_checkpoint = executor.state.checkpoint();
+    const parent_checkpoint = executor.openScope();
     try executor.state.addBalance(.fromAddress(parent_write), 7);
     var parent_message = root_message;
     parent_message.depth = 1;
     try call.pushChildCall(&parent_message, bytecode.view(), parent_checkpoint, null);
 
-    const child_checkpoint = executor.state.checkpoint();
+    const child_checkpoint = executor.openScope();
     try executor.state.addBalance(.fromAddress(child_write), 9);
     var child_message = root_message;
     child_message.depth = 2;

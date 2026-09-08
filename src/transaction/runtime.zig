@@ -35,6 +35,8 @@ pub fn begin(executor: anytype, mode: Mode) !void {
         executor.state.beginObservedTransaction()
     else
         executor.state.beginTransaction();
+    if (comptime @TypeOf(executor.transaction_journal) != void)
+        executor.transaction_journal.beginTransaction();
     std.debug.assert(executor.next_transaction_generation != std.math.maxInt(u64));
     executor.next_transaction_generation += 1;
     executor.attempt = .{
@@ -227,6 +229,8 @@ pub fn discard(executor: anytype) void {
     requireActive(executor);
     const state_attempt_id = executor.attempt.?.id;
     closeExecutionScope(executor);
+    if (comptime @TypeOf(executor.transaction_journal) != void)
+        executor.transaction_journal.discardTransaction();
     executor.state.discard(state_attempt_id);
     executor.clearLastOutput();
     executor.attempt = null;

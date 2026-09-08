@@ -13,6 +13,7 @@
         "build.zig.zon",
         "basic.zig",
         "bal_parallel.zig",
+        "transaction_journal.zig",
         "op",
         "custom_fork",
     },
