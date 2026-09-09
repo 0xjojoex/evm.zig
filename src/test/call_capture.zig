@@ -39,10 +39,6 @@ fn seedCode(executor: anytype, address: evmz.Address, code: []const u8, balance:
     try executor.state.seedAccount(address, account);
 }
 
-test {
-    _ = @import("geth_calltracer_projection.zig");
-}
-
 test "call capture exports client-independent primitives without a projection" {
     try std.testing.expect(@hasDecl(evmz.trace, "CallArena"));
     try std.testing.expect(@hasDecl(evmz.trace, "CallSpan"));

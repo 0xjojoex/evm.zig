@@ -101,24 +101,29 @@ fn gasLimitValid(gas_limit: u64, parent_gas_limit: u64) bool {
 }
 
 fn expectedBaseFee(parent: ParentHeaderContext) ?u256 {
-    const target = parent.gas_limit / elasticity_multiplier;
-    if (target == 0) return null;
-    if (parent.gas_used == target) return parent.base_fee_per_gas;
+    return nextBaseFee(parent.gas_limit, parent.gas_used, parent.base_fee_per_gas);
+}
 
-    const gas_delta = if (parent.gas_used > target)
-        parent.gas_used - target
+/// Derive a post-London child base fee from the parent header gas fields.
+pub fn nextBaseFee(parent_gas_limit: u64, parent_gas_used: u64, parent_base_fee: u256) ?u256 {
+    const target = parent_gas_limit / elasticity_multiplier;
+    if (target == 0) return null;
+    if (parent_gas_used == target) return parent_base_fee;
+
+    const gas_delta = if (parent_gas_used > target)
+        parent_gas_used - target
     else
-        target - parent.gas_used;
-    const fee_delta_product = uint256.checkedMul(parent.base_fee_per_gas, @as(u256, gas_delta)) orelse return null;
+        target - parent_gas_used;
+    const fee_delta_product = uint256.checkedMul(parent_base_fee, @as(u256, gas_delta)) orelse return null;
     const target_fee_delta = @divFloor(fee_delta_product, @as(u256, target));
     var base_fee_delta = @divFloor(target_fee_delta, base_fee_max_change_denominator);
 
-    if (parent.gas_used > target) {
+    if (parent_gas_used > target) {
         base_fee_delta = @max(base_fee_delta, 1);
-        return uint256.checkedAdd(parent.base_fee_per_gas, base_fee_delta);
+        return uint256.checkedAdd(parent_base_fee, base_fee_delta);
     }
-    if (base_fee_delta > parent.base_fee_per_gas) return null;
-    return parent.base_fee_per_gas - base_fee_delta;
+    if (base_fee_delta > parent_base_fee) return null;
+    return parent_base_fee - base_fee_delta;
 }
 
 pub fn blockContextValid(comptime revision: Revision, input: anytype) bool {

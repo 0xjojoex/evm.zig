@@ -332,5 +332,5 @@ test "Spec.extend creates a distinct exact VM from static values" {
             .gas_limit = 21_000,
         },
     });
-    try std.testing.expectEqual(Strict.Rejection.gas_allowance_exceeded, try expectRejected(outcome));
+    try std.testing.expectEqual(Strict.Rejection.gas_limit_exceeds_maximum, try expectRejected(outcome));
 }

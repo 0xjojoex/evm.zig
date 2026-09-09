@@ -20,6 +20,7 @@ pub const ValidationError = enum {
     insufficient_max_fee_per_gas,
     priority_greater_than_max_fee_per_gas,
     insufficient_max_fee_per_blob_gas,
+    gas_limit_exceeds_maximum,
     gas_allowance_exceeded,
     nonce_is_max,
     nonce_too_low,
@@ -125,7 +126,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
             if (input.is_create and input.input.len > self.gasPlanner().maxInitcodeSize())
                 return .initcode_size_exceeded;
             if (transaction.total_gas_limit) |limit| {
-                if (input.gas_limit > limit) return .gas_allowance_exceeded;
+                if (input.gas_limit > limit) return .gas_limit_exceeds_maximum;
             }
             if (self.exceedsBlockGasAllowance(input)) return .gas_allowance_exceeded;
             if (input.kind == .blob) {
@@ -539,7 +540,7 @@ test "transaction validation applies Osaka transaction gas cap" {
         .gas_price = 1,
         .sender_balance = eth_eip7825.max_transaction_gas_limit,
     }));
-    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, testRuntime(@import("../eth/spec.zig").osaka).validate(.{
+    try std.testing.expectEqual(ValidationError.gas_limit_exceeds_maximum, testRuntime(@import("../eth/spec.zig").osaka).validate(.{
         .gas_limit = eth_eip7825.max_transaction_gas_limit + 1,
         .gas_price = 1,
         .sender_balance = eth_eip7825.max_transaction_gas_limit + 1,
@@ -589,7 +590,7 @@ test "transaction validation uses comptime policy" {
         .kind = .access_list,
         .gas_limit = 21_000,
     }));
-    try std.testing.expectEqual(ValidationError.gas_allowance_exceeded, runtime(custom_spec).validate(.{
+    try std.testing.expectEqual(ValidationError.gas_limit_exceeds_maximum, runtime(custom_spec).validate(.{
         .kind = .access_list,
         .gas_limit = 25_001,
     }).?);

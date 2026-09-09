@@ -849,7 +849,7 @@ test "exact spec owns total transaction gas limit as a value" {
     };
     const strict_result = try strict_vm.transact(input);
     try std.testing.expectEqual(
-        EthValidationError.gas_allowance_exceeded,
+        EthValidationError.gas_limit_exceeds_maximum,
         try expectRejected(strict_result),
     );
 

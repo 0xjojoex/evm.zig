@@ -280,35 +280,31 @@ pub fn build(b: *std.Build) void {
         b.step("debug", debug_description).dependOn(&b.addFail("debug is native-only").step);
     }
 
-    const call_fixture_oracle_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli.zig"),
+    const t8n_mod = b.createModule(.{
+        .root_source_file = b.path("tools/t8n/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libcpp = is_native_profile,
+        .link_libcpp = true,
+        .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
     });
-    call_fixture_oracle_mod.addOptions("build_options", build_options);
-    call_fixture_oracle_mod.addImport("stateless_profile", stateless_profile_none_mod);
-    call_fixture_oracle_mod.addImport("ssz", ssz_mod);
-    call_fixture_oracle_mod.addImport("rlp", rlp_mod);
-    call_fixture_oracle_mod.addImport("mpt", mpt_mod);
-    call_fixture_oracle_mod.addImport("stdx", packages.stdx);
-    call_fixture_oracle_mod.addIncludePath(b.path("include"));
-    if (is_native_profile) addPrecompileNative(b, call_fixture_oracle_mod, native_precompile_deps);
-    addNativeKeccak(call_fixture_oracle_mod, xkcp_object);
-    addNativeSecp256k1(call_fixture_oracle_mod, libsecp256k1_object);
-    const call_fixture_oracle = b.addExecutable(.{
-        .name = "call-fixture-oracle",
-        .root_module = call_fixture_oracle_mod,
+    const t8n = b.addExecutable(.{
+        .name = "evmz-t8n",
+        .root_module = t8n_mod,
     });
-    // The VM's tail-dispatch path requires LLVM on x86_64 with Zig 0.16.
-    call_fixture_oracle.use_llvm = true;
-    const run_call_fixture_oracle = b.addRunArtifact(call_fixture_oracle);
-    if (b.args) |args| run_call_fixture_oracle.addArgs(args);
-    const call_fixture_oracle_step = b.step(
-        "call-fixture-oracle",
-        "Diff curated call fixtures against a local Geth evm binary",
+    t8n.use_llvm = true;
+    const install_t8n = b.addInstallArtifact(t8n, .{});
+    b.getInstallStep().dependOn(&install_t8n.step);
+    const run_t8n = b.addRunArtifact(t8n);
+    if (b.args) |args| run_t8n.addArgs(args);
+    b.step("t8n", "Run the evmz execution-specs transition tool").dependOn(&run_t8n.step);
+
+    addT8nSteps(
+        b,
+        install_t8n,
+        b.option([]const u8, "eest-source", "Path to an execution-specs source checkout"),
+        b.option([]const u8, "t8n-reference-bin", "Reference t8n binary; defaults to EELS"),
+        b.option([]const u8, "t8n-diff-output", "Directory for t8n mismatch artifacts"),
     );
-    call_fixture_oracle_step.dependOn(&run_call_fixture_oracle.step);
 
     const tests = addTests(b, .{
         .target = target,
@@ -543,6 +539,82 @@ pub fn build(b: *std.Build) void {
         addExamplesDelegate(b, "example-test", "Run tests in the selected Zig example", "example-test", example_name, target, optimize_name, evmz_build, null);
         addExamplesDelegate(b, "examples-test-all", "Run tests in all Zig examples", "test", example_name, target, optimize_name, evmz_build, null);
     }
+}
+
+fn addT8nSteps(
+    b: *std.Build,
+    install_t8n: *std.Build.Step.InstallArtifact,
+    execution_specs_source: ?[]const u8,
+    reference_binary: ?[]const u8,
+    mismatch_output: ?[]const u8,
+) void {
+    const fill_step = b.step("t8n-fill", "Fill execution-specs source tests with evmz-t8n");
+    const diff_step = b.step("t8n-diff", "Diff EEST-generated transitions against another t8n");
+    const source = execution_specs_source orelse {
+        const fail = &b.addFail(
+            "t8n-fill and t8n-diff require -Deest-source=/path/to/execution-specs",
+        ).step;
+        fill_step.dependOn(fail);
+        diff_step.dependOn(fail);
+        return;
+    };
+
+    const fill = addEestFill(b, install_t8n, source, "eest-fill");
+    if (b.args) |args| fill.addArgs(args) else fill.addArgs(&.{
+        "--fork",
+        "Shanghai",
+        "tests/shanghai/eip3855_push0/test_push0.py",
+        "-k",
+        "key_sstore",
+    });
+    fill_step.dependOn(&fill.step);
+
+    const diff = addEestFill(b, install_t8n, source, "eest-diff");
+    diff.addArgs(&.{
+        "-p",
+        "evmz_differential",
+        "--evmz-diff-output",
+        mismatch_output orelse b.pathFromRoot(".zig-cache/eest-diff/mismatches"),
+        "-x",
+    });
+    if (reference_binary) |reference| diff.addArgs(&.{ "--evmz-diff-reference", reference });
+    if (b.args) |args| diff.addArgs(args) else diff.addArg("tests");
+    diff_step.dependOn(&diff.step);
+}
+
+/// `uv run fill` inside the execution-specs checkout with the installed
+/// evmz-t8n; every output lives under `.zig-cache/<cache_name>/`.
+fn addEestFill(
+    b: *std.Build,
+    install_t8n: *std.Build.Step.InstallArtifact,
+    source: []const u8,
+    cache_name: []const u8,
+) *std.Build.Step.Run {
+    const cache = b.pathFromRoot(b.fmt(".zig-cache/{s}", .{cache_name}));
+    const fill = b.addSystemCommand(&.{ "uv", "run", "--frozen", "--project" });
+    fill.addDirectoryArg(b.path("eest/consume"));
+    fill.addArgs(&.{ "fill", "--evm-bin" });
+    fill.addArg(b.getInstallPath(.bin, install_t8n.dest_sub_path));
+    fill.step.dependOn(&install_t8n.step);
+    fill.addArgs(&.{
+        "-p",
+        "evmz_transition_tool",
+        "--filler-path",
+        "tests",
+        "--output",
+        b.fmt("{s}/fixtures", .{cache}),
+        "--log-to",
+        b.fmt("{s}/logs", .{cache}),
+        "-o",
+        b.fmt("cache_dir={s}/pytest-cache", .{cache}),
+        "--clean",
+        "--no-html",
+        "-q",
+    });
+    fill.setEnvironmentVariable("GIT_ALLOW_PROTOCOL", "file:https");
+    fill.setEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1");
+    fill.setCwd(.{ .cwd_relative = source });
+    return fill;
 }
 
 fn addZiskConfig(b: *std.Build) void {

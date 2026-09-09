@@ -107,6 +107,14 @@ pub fn getOrCreateAccount(self: *MemoryStore, address: Address) !*MemoryAccount 
     return self.accounts.getPtr(address).?;
 }
 
+/// Remove one materialized account and release its owned storage and code bytes.
+pub fn removeAccount(self: *MemoryStore, address: Address) bool {
+    const removed = self.accounts.fetchRemove(address) orelse return false;
+    var account = removed.value;
+    account.deinit();
+    return true;
+}
+
 /// Copy an account into the in-memory pre-state using the store allocator.
 pub fn putAccount(self: *MemoryStore, address: Address, account: *const MemoryAccount) !void {
     // `code` and `account.code_hash` are both public, so a caller can hand over
