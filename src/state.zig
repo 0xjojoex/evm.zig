@@ -51,6 +51,10 @@ pub const storageStatus = storage.status;
 pub const Checkpoint = struct {
     /// An attempt is identified by the generation its root took from the
     /// State's clock. Scope checkpoints are only valid within that attempt.
+    /// Epoch-local: the clock restarts at `discardAccepted`, and a copy kept
+    /// across it is not detected. `discardAccepted` asserts no attempt is
+    /// live, so such a copy is already resolved; only branch snapshots are
+    /// meant to outlive an attempt, and they carry `world_epoch`.
     pub const AttemptId = Generation;
 
     /// Retained log-buffer lengths at scope open.
@@ -61,8 +65,10 @@ pub const Checkpoint = struct {
     };
 
     /// Generation this checkpoint opened. It must be active when the checkpoint
-    /// closes; one clock issues every attempt and scope, so a checkpoint from
-    /// another attempt can never match.
+    /// closes; one clock issues every attempt and scope, so within an epoch a
+    /// checkpoint from another attempt can never match. Across
+    /// `discardAccepted` the value is reissued and not checked; see
+    /// `AttemptId`. Guard ownership keeps every checkpoint inside its attempt.
     scope: Generation,
     /// Generation that becomes active after close. Lanes whose generation is
     /// per transaction rather than per scope restore the same value.
