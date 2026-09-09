@@ -178,7 +178,7 @@ test "rows survive scope rollback while current mutations revert" {
     const storage_row = state.world.storageRow(id);
     try std.testing.expectEqual(@as(u256, 7), storage_row.transaction_original);
     try std.testing.expectEqual(@as(u256, 7), storage_row.current);
-    const observed = state.observed_storage.items[storage_row.observation_index];
+    const observed = state.observed_storage.items[storage_row.observation.index];
     try std.testing.expect(observed.observation.accessed);
     try std.testing.expect(observed.observation.value_read);
     try std.testing.expect(!observed.effect.written);
@@ -860,6 +860,56 @@ test "pending changes are transaction local and accepted changes accumulate" {
     try std.testing.expectEqual(@as(u32, 2), accepted_second.storage_writes.len());
     try std.testing.expectEqualSlices(u8, &first_code, accepted_second.introducedCode(first_hash).?.bytes);
     try std.testing.expectEqualSlices(u8, &second_code, accepted_second.introducedCode(second_hash).?.bytes);
+}
+
+test "first storage undo preserves accepted baseline across scopes and attempts" {
+    var state = initState(std.testing.allocator, null);
+    defer state.deinit();
+    defer abandon(&state);
+
+    const first = state.beginTransaction();
+    state.beginScope();
+    _ = try state.setStorage(word(1), 1, 11);
+    _ = try state.setStorage(word(1), 2, 22);
+    state.closeScope();
+    state.seal(first);
+    state.retain(first);
+
+    const second = state.beginTransaction();
+    state.beginScope();
+    // This slot's first undo occupied index 1 in the previous attempt. The new
+    // journal starts empty, and observing the slot must not supply an undo.
+    const loaded = try state.loadStorage(word(1), 2);
+    try std.testing.expectEqual(@as(u256, 22), loaded.value);
+    const outer = state.checkpoint();
+    _ = try state.setStorage(word(1), 2, 33);
+    const inner = state.checkpoint();
+    _ = try state.setStorage(word(1), 2, 44);
+    state.revertToCheckpoint(inner);
+    try std.testing.expectEqual(@as(u256, 33), try state.getStorage(word(1), 2));
+    state.revertToCheckpoint(outer);
+    try std.testing.expectEqual(@as(u256, 22), try state.getStorage(word(1), 2));
+
+    // Recapture after the first write was reverted, then preserve that baseline
+    // when a later scope commits another write.
+    _ = try state.setStorage(word(1), 2, 55);
+    const committed = state.checkpoint();
+    _ = try state.setStorage(word(1), 2, 66);
+    state.commitCheckpoint(committed);
+    state.closeScope();
+    state.seal(second);
+
+    const pending = state.pendingView().changes().storage_writes;
+    try std.testing.expectEqual(@as(u32, 1), pending.len());
+    try std.testing.expectEqual(@as(u256, 2), pending.at(0).key);
+    try std.testing.expectEqual(@as(u256, 66), pending.at(0).value);
+    const accepted = state.pendingView().accepted().changes().storage_writes;
+    try std.testing.expectEqual(@as(u32, 2), accepted.len());
+    try std.testing.expectEqual(@as(u256, 11), accepted.at(0).value);
+    try std.testing.expectEqual(@as(u256, 2), accepted.at(1).key);
+    try std.testing.expectEqual(@as(u256, 22), accepted.at(1).value);
+    state.discard(second);
+    try std.testing.expectEqual(@as(u256, 22), try state.getStorage(word(1), 2));
 }
 
 test "checkpoint rollback truncates dense change ids" {

@@ -45,6 +45,17 @@ pub const MemoryStore = @import("./state/MemoryStore.zig");
 pub const StorageKey = storage.Key;
 pub const storageStatus = storage.status;
 
+/// Identifies a scope within one attempt of the owning State. Checkpoint close
+/// asserts both fields match the active scope; the caller supplies the owner.
+pub const ScopeHandle = struct {
+    attempt_id: Checkpoint.AttemptId,
+    generation: u32,
+
+    comptime {
+        std.debug.assert(@sizeOf(ScopeHandle) == 16);
+    }
+};
+
 /// One call-scope rollback record, shared by every execution state model.
 pub const Checkpoint = struct {
     /// Identifies one transaction attempt; scope checkpoints are only valid within
@@ -58,12 +69,10 @@ pub const Checkpoint = struct {
         data_len: u32,
     };
 
-    attempt_id: AttemptId,
-    /// Generation that must be active when this checkpoint is closed.
-    scope_generation: u64,
+    scope: ScopeHandle,
     /// Generation that becomes active after close. Lanes whose generation is
     /// per transaction rather than per scope restore the same value.
-    parent_scope_generation: u64,
+    parent_scope_generation: u32,
     journal_len: u32,
     changed_accounts_len: u32,
     changed_storage_len: u32,
@@ -71,6 +80,10 @@ pub const Checkpoint = struct {
     /// block lifetime and unwind them through the journal.
     storage_wipes_len: u32,
     logs: Log,
+
+    comptime {
+        std.debug.assert(@sizeOf(Checkpoint) == 48);
+    }
 };
 
 /// Capacity advice for the containers a state lane keeps per transaction
