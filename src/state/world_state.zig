@@ -356,7 +356,6 @@ pub fn WorldState(comptime World: type) type {
         observed_storage: std.ArrayList(StorageObservationRow) = .empty,
         journal: Journal = .{},
         transaction_generation: u32 = 0,
-        accepted_generation: u64 = 0,
         /// Advanced by `discardAccepted` and seeding; a branch snapshot is only valid
         /// within the epoch that captured it.
         world_epoch: u64 = 0,
@@ -733,7 +732,6 @@ pub fn WorldState(comptime World: type) type {
             dirty_storage: []StorageId,
             block_introduced_codes_len: u32,
             introduced_code_len: u32,
-            accepted_generation: u64,
             world_epoch: u64,
             resolved: bool = false,
 
@@ -760,7 +758,6 @@ pub fn WorldState(comptime World: type) type {
                     .dirty_storage = dirty_storage,
                     .block_introduced_codes_len = self.block_introduced_codes_len,
                     .introduced_code_len = self.introduced_code_len,
-                    .accepted_generation = self.accepted_generation,
                     .world_epoch = self.world_epoch,
                 };
             }
@@ -1140,7 +1137,6 @@ pub fn WorldState(comptime World: type) type {
             if (self.transaction_scope_reverted) self.compactAcceptedStorageWipes();
             if (self.transaction_scope_reverted or self.transaction_storage_wipes.items.len != 0)
                 self.compactAcceptedStorageChanges();
-            self.accepted_generation += 1;
             self.finishTransaction();
         }
 
@@ -1183,7 +1179,6 @@ pub fn WorldState(comptime World: type) type {
                 .dirty_storage = dirty_storage,
                 .block_introduced_codes_len = @intCast(self.block_introduced_codes.items.len),
                 .introduced_code_len = @intCast(self.code.introducedLen()),
-                .accepted_generation = self.accepted_generation,
                 .world_epoch = self.world_epoch,
             };
         }
@@ -1205,7 +1200,6 @@ pub fn WorldState(comptime World: type) type {
             self.block_introduced_codes.items.len = snapshot.block_introduced_codes_len;
             self.code.truncateIntroduced(self.allocator, snapshot.introduced_code_len);
             std.mem.swap(LogBuffer, &self.retained_logs, &snapshot.retained_logs);
-            self.accepted_generation = snapshot.accepted_generation;
             snapshot.resolved = true;
         }
 
@@ -1786,7 +1780,6 @@ pub fn WorldState(comptime World: type) type {
             self.dirty_storage.clearRetainingCapacity();
             self.block_introduced_codes.clearRetainingCapacity();
             self.retained_logs.clearRetainingCapacity();
-            self.accepted_generation += 1;
             self.world_epoch += 1;
         }
 
