@@ -266,14 +266,14 @@ test "successive checkpoints receive distinct scope generations" {
     defer executor.discardStateTransition();
 
     var first = executor.checkpoint();
-    const first_generation = first.checkpoint.scope.generation;
+    const first_generation = first.checkpoint.scope;
     _ = try executor.state.setStorage(.fromAddress(contract), 7, 1);
     first.commit();
     first.deinit();
 
     var current = executor.checkpoint();
     defer current.deinit();
-    try std.testing.expect(first_generation != current.checkpoint.scope.generation);
+    try std.testing.expect(first_generation != current.checkpoint.scope);
     _ = try executor.state.setStorage(.fromAddress(contract), 7, 2);
 
     try std.testing.expectEqual(@as(u256, 2), try executor.getStorage(contract, 7));

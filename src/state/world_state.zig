@@ -390,18 +390,24 @@ pub fn WorldState(comptime World: type) type {
         observed_accounts: std.ArrayList(AccountObservationRow) = .empty,
         observed_storage: std.ArrayList(StorageObservationRow) = .empty,
         journal: Journal = .{},
+        /// Last generation issued. Every attempt root, execution root, and
+        /// checkpoint scope takes the next tick, so no two lifetimes share a
+        /// value while rows carry stamps. Only `discardAccepted` rewinds it,
+        /// together with the rows.
+        clock: Generation = .none,
+        /// Root generation of the current or most recent attempt. Transaction
+        /// stamps compare with it; it keeps its last value between attempts so a
+        /// stamp that was never set (`none`) cannot match.
         transaction_generation: Generation = .none,
         /// Advanced by `discardAccepted` and seeding; a branch snapshot is only valid
         /// within the epoch that captured it.
         world_epoch: u64 = 0,
-        next_attempt_id: u32 = 0,
         active_attempt_id: ?AttemptId = null,
         observed_attempt: bool = false,
         sealed: bool = false,
         /// `transaction_active and !sealed`, kept as one byte because every
         /// read consults it.
         attempt_open: bool = false,
-        next_scope_generation: Generation = .none,
         active_scope_generation: Generation = .none,
         execution_scope_generation: Generation = .none,
         scope_depth: u32 = 0,
@@ -1039,10 +1045,8 @@ pub fn WorldState(comptime World: type) type {
         fn beginTransactionMode(self: *State, observe: bool) AttemptId {
             std.debug.assert(!self.transaction_active);
             std.debug.assert(self.journal.isEmpty());
-            std.debug.assert(self.next_attempt_id != std.math.maxInt(u32));
-            self.next_attempt_id += 1;
-            const id: AttemptId = @enumFromInt(self.next_attempt_id);
-            self.transaction_generation = self.transaction_generation.next();
+            self.transaction_generation = self.tick();
+            const id: AttemptId = self.transaction_generation;
             self.active_attempt_id = id;
             self.observed_attempt = observe;
             self.sealed = false;
@@ -1053,7 +1057,7 @@ pub fn WorldState(comptime World: type) type {
             // by `discard` and never by a scope checkpoint. It doubles as the
             // execution generation until `beginScope`, so original capture is
             // one compare on every path.
-            self.active_scope_generation = self.allocateScopeGeneration();
+            self.active_scope_generation = self.tick();
             self.execution_scope_generation = self.active_scope_generation;
             self.transaction_dirty_accounts_start = @intCast(self.dirty_accounts.items.len);
             self.transaction_block_changed_accounts_start = @intCast(self.block_changed_accounts.items.len);
@@ -1076,14 +1080,14 @@ pub fn WorldState(comptime World: type) type {
         pub fn beginScope(self: *State) void {
             self.assertMutable();
             std.debug.assert(self.scope_depth == 0);
-            self.active_scope_generation = self.allocateScopeGeneration();
+            self.active_scope_generation = self.tick();
             self.execution_scope_generation = self.active_scope_generation;
             self.scope_depth = 1;
         }
 
         pub fn closeScope(self: *State) void {
             self.assertRootScope();
-            self.active_scope_generation = self.allocateScopeGeneration();
+            self.active_scope_generation = self.tick();
             self.execution_scope_generation = self.active_scope_generation;
             self.scope_depth = 0;
         }
@@ -1112,16 +1116,13 @@ pub fn WorldState(comptime World: type) type {
         pub fn checkpoint(self: *State) Checkpoint {
             self.assertTransaction();
             std.debug.assert(self.scope_depth != std.math.maxInt(u32));
-            const parent_generation = self.active_scope_generation;
-            const generation = self.allocateScopeGeneration();
+            const parent = self.active_scope_generation;
+            const scope = self.tick();
             self.scope_depth += 1;
-            self.active_scope_generation = generation;
+            self.active_scope_generation = scope;
             return .{
-                .scope = .{
-                    .attempt_id = self.active_attempt_id.?,
-                    .generation = generation,
-                },
-                .parent_scope_generation = parent_generation,
+                .scope = scope,
+                .parent_scope = parent,
                 .journal_len = @intCast(self.journal.entries.items.len),
                 .changed_accounts_len = @intCast(self.changed_accounts.items.len),
                 .changed_storage_len = @intCast(self.changed_storage.items.len),
@@ -1132,7 +1133,7 @@ pub fn WorldState(comptime World: type) type {
 
         pub fn commitCheckpoint(self: *State, checkpoint_state: Checkpoint) void {
             self.validateCheckpoint(checkpoint_state);
-            self.active_scope_generation = checkpoint_state.parent_scope_generation;
+            self.active_scope_generation = checkpoint_state.parent_scope;
             self.scope_depth -= 1;
         }
 
@@ -1147,7 +1148,7 @@ pub fn WorldState(comptime World: type) type {
             self.changed_accounts.items.len = checkpoint_state.changed_accounts_len;
             self.changed_storage.items.len = checkpoint_state.changed_storage_len;
             self.logs.truncate(checkpoint_state.logs);
-            self.active_scope_generation = checkpoint_state.parent_scope_generation;
+            self.active_scope_generation = checkpoint_state.parent_scope;
             self.scope_depth -= 1;
         }
 
@@ -2058,8 +2059,7 @@ pub fn WorldState(comptime World: type) type {
         fn validateCheckpoint(self: *const State, checkpoint_state: Checkpoint) void {
             self.assertTransaction();
             std.debug.assert(self.scope_depth >= 1);
-            std.debug.assert(checkpoint_state.scope.attempt_id == self.active_attempt_id.?);
-            std.debug.assert(checkpoint_state.scope.generation == self.active_scope_generation);
+            std.debug.assert(checkpoint_state.scope == self.active_scope_generation);
             std.debug.assert(checkpoint_state.journal_len <= self.journal.entries.items.len);
             std.debug.assert(checkpoint_state.changed_accounts_len <= self.changed_accounts.items.len);
             std.debug.assert(checkpoint_state.changed_storage_len <= self.changed_storage.items.len);
@@ -2390,9 +2390,12 @@ pub fn WorldState(comptime World: type) type {
             row.journaled_scope = self.active_scope_generation;
         }
 
-        fn allocateScopeGeneration(self: *State) Generation {
-            self.next_scope_generation = self.next_scope_generation.next();
-            return self.next_scope_generation;
+        /// Issue the next generation. A stamp taken from an earlier attempt or
+        /// scope can never equal a later tick, so one compare answers "is this
+        /// row current in that lifetime" without knowing which attempt set it.
+        fn tick(self: *State) Generation {
+            self.clock = self.clock.next();
+            return self.clock;
         }
 
         /// Drop slots whose generation a wipe left behind so the transaction delta

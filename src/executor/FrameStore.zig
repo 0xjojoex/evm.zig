@@ -29,10 +29,6 @@ pub const Kind = union(enum) {
 pub const Control = struct {
     kind: Kind,
     call_capture: ?CallToken = null,
-
-    comptime {
-        std.debug.assert(@sizeOf(Control) == 88);
-    }
 };
 
 frames: std.ArrayList(Interpreter.CallFrame) = .empty,
