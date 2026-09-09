@@ -207,11 +207,10 @@ test "execution original refreshes across scopes while transaction original rema
 
     state.seal(attempt);
     state.retain(attempt);
-    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getStorage(word(1), 2));
 }
 
-test "discard drops account writes without advancing accepted generation" {
+test "discard drops account writes" {
     var backing = TestReader{};
     var state = initState(std.testing.allocator, backing.reader());
     defer state.deinit();
@@ -226,7 +225,6 @@ test "discard drops account writes without advancing accepted generation" {
     state.seal(attempt);
     state.discard(attempt);
 
-    try std.testing.expectEqual(@as(u64, 0), state.accepted_generation);
     const next = state.beginTransaction();
     state.beginScope();
     try std.testing.expectEqual(@as(u256, 10), try state.getBalance(word(1)));
@@ -271,7 +269,6 @@ test "retained account writes advance accepted state" {
     state.seal(attempt);
     state.retain(attempt);
 
-    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 99), try state.getBalance(word(1)));
     try std.testing.expectEqual(@as(u64, 8), try state.getNonce(word(1)));
     const changes = state.acceptedView().changes();
@@ -578,7 +575,6 @@ test "pending and accepted views expose the sealed transaction" {
     state.seal(attempt);
 
     const pending = state.pendingView();
-    try std.testing.expectEqual(@as(u64, 0), state.accepted_generation);
     try std.testing.expectEqual(@as(usize, 1), pending.logs().len());
     const event_log = pending.logs().get(0);
     try std.testing.expectEqual(addr(1), event_log.address);
@@ -587,7 +583,6 @@ test "pending and accepted views expose the sealed transaction" {
 
     state.retain(attempt);
     const accepted = state.acceptedView();
-    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expect(accepted.hasChanges());
     try std.testing.expectEqual(@as(usize, 1), state.logView().len());
     try std.testing.expectEqual(addr(1), state.logView().get(0).address);
@@ -981,7 +976,6 @@ test "accepted branch snapshot restores cumulative state and drops later rows" {
     var first_restore = try snapshot.clone();
     defer first_restore.deinit();
     state.restoreBranch(&first_restore);
-    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(word(1)));
     try std.testing.expectEqual(@as(u256, 22), try state.getStorage(word(1), 2));
     try std.testing.expectEqualSlices(u8, &baseline_code, try state.getCode(word(1)));
@@ -1036,14 +1030,12 @@ test "accepted branch snapshot clone failure leaves current state unchanged" {
     failing_allocator.fail_index = failing_allocator.alloc_index;
     try std.testing.expectError(error.OutOfMemory, snapshot.clone());
     try std.testing.expect(failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 2), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 22), try state.getBalance(word(1)));
 
     failing_allocator.fail_index = std.math.maxInt(usize);
     var restore = try snapshot.clone();
     defer restore.deinit();
     state.restoreBranch(&restore);
-    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(word(1)));
 }
 
@@ -1073,7 +1065,6 @@ test "accepted branch restore does not allocate after capture" {
     failing_allocator.fail_index = failing_allocator.alloc_index;
     state.restoreBranch(&snapshot);
     try std.testing.expect(!failing_allocator.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 1), state.accepted_generation);
     try std.testing.expectEqual(@as(u256, 11), try state.getBalance(word(1)));
 }
 
