@@ -158,12 +158,15 @@ pub const TransactionUndoHandle = struct {
 /// this point of the block: `null` is absent. The world seeds it from parent
 /// state when the row is admitted and never leaves it unset.
 ///
-/// A fact that lives as long as the row is a bool in `flags`. A fact with a
-/// shorter lifetime is a stamp: the row is warm, journaled, dirty, or observed
-/// exactly when the stamp equals the State's current generation for that
-/// lifetime, so ending a lifetime clears every row at once by moving the
-/// clock. Nested revert treats stamps three ways, noted per field: restored
-/// from the undo record, cleared to `none`, or never unwound.
+/// A fact is a stamp when a clock move should invalidate it lazily: the row
+/// is warm, journaled, dirty, or observed exactly when the stamp equals the
+/// State's current generation for that lifetime, so ending a lifetime clears
+/// every row at once without touching it. A fact is a bool when explicit
+/// transitions already maintain its lifetime: most `flags` live with the row,
+/// `created` and `selfdestructed` are cleared by `finalize`, and
+/// `lifecycle_listed` by the list that owns it. Nested revert treats stamps
+/// three ways, noted per field: restored from the undo record, cleared to
+/// `none`, or never unwound.
 pub const AccountRow = struct {
     current: ?Account,
     code_ref: CodeRef,
@@ -425,14 +428,21 @@ pub fn WorldState(comptime World: type) type {
         /// value while rows carry stamps. `discardAccepted` rewinds it together
         /// with the rows; seeding does not, because rows keep their stamps.
         ///
-        /// Bound: an attempt ticks once for its root, once each for the scope
-        /// open and close, and once per checkpoint. Checkpoints follow call and
-        /// create frames, each of which costs gas, so one block of gas limit G
-        /// issues fewer than G / 100 + 3 * G / 21000 ticks. A u32 therefore
-        /// covers any block, and the block claim's `discardAccepted` starts
-        /// the next one from zero. A State that never claims a block runs on
-        /// the same u32 for its whole life; `Generation.next` asserts before
-        /// it wraps.
+        /// Ticks per attempt: two at begin (the root and the pre-scope
+        /// journaling scope), one each for scope open and close, one per
+        /// checkpoint. A family attempt opens a fixed handful of checkpoints
+        /// (preparation, execution, finalize) plus one per call or create
+        /// frame, and a discarded attempt still spends its fixed ticks. Within
+        /// one block every frame costs at least the cheapest call and every
+        /// attempt at least the intrinsic gas, so a block of gas limit G issues
+        /// fewer than G / 100 + 12 * G / 21000 ticks, far inside u32.
+        ///
+        /// That is a bound per epoch, and an epoch is at most one claimed
+        /// block: `block.Claim.begin` refuses a non-empty accepted branch, so a
+        /// fold reaches its next claim only through `discardAccepted`. A State
+        /// driven without block claims (manual attempts, simulation) has no
+        /// reset and no gas bound; `Generation.next` asserts before the clock
+        /// wraps, and such a consumer must supply its own epoch boundary.
         clock: Generation = .none,
         /// Root generation of the current or most recent attempt. Transaction
         /// stamps compare with it; it keeps its last value between attempts so a
@@ -1858,6 +1868,9 @@ pub fn WorldState(comptime World: type) type {
             self.world_epoch += 1;
             // Every row is back to its admitted stamps, so no generation issued
             // in the previous epoch can match anything; the clock restarts.
+            // Attempt ids and checkpoints are epoch-local and are not checked
+            // against the epoch: a copy kept across this call is reissued
+            // meaning. Only branch snapshots cross it, and they carry the epoch.
             self.clock = .none;
         }
 
