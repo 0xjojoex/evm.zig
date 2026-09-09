@@ -38,6 +38,8 @@ pub const RootProvider = @import("./state/RootProvider.zig");
 pub const sparse_hash_map = @import("./state/sparse_hash_map.zig");
 pub const world_state = @import("./state/world_state.zig");
 pub const WorldState = world_state.WorldState;
+pub const Generation = world_state.Generation;
+pub const Incarnation = world_state.Incarnation;
 pub const OpenWorld = @import("./state/OpenWorld.zig");
 pub const OpenState = WorldState(OpenWorld);
 pub const MemoryStore = @import("./state/MemoryStore.zig");
@@ -49,7 +51,7 @@ pub const storageStatus = storage.status;
 /// asserts both fields match the active scope; the caller supplies the owner.
 pub const ScopeHandle = struct {
     attempt_id: Checkpoint.AttemptId,
-    generation: u32,
+    generation: Generation,
 
     comptime {
         std.debug.assert(@sizeOf(ScopeHandle) == 16);
@@ -72,7 +74,7 @@ pub const Checkpoint = struct {
     scope: ScopeHandle,
     /// Generation that becomes active after close. Lanes whose generation is
     /// per transaction rather than per scope restore the same value.
-    parent_scope_generation: u32,
+    parent_scope_generation: Generation,
     journal_len: u32,
     changed_accounts_len: u32,
     changed_storage_len: u32,
