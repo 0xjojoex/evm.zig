@@ -13,6 +13,7 @@ pub fn eestExceptionName(error_value: ValidationError) []const u8 {
         .insufficient_max_fee_per_gas => "TransactionException.INSUFFICIENT_MAX_FEE_PER_GAS",
         .priority_greater_than_max_fee_per_gas => "TransactionException.PRIORITY_GREATER_THAN_MAX_FEE_PER_GAS",
         .insufficient_max_fee_per_blob_gas => "TransactionException.INSUFFICIENT_MAX_FEE_PER_BLOB_GAS",
+        .gas_limit_exceeds_maximum => "TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM",
         .gas_allowance_exceeded => "TransactionException.GAS_ALLOWANCE_EXCEEDED",
         .nonce_is_max => "TransactionException.NONCE_IS_MAX",
         .nonce_too_low => "TransactionException.NONCE_MISMATCH_TOO_LOW",
@@ -37,7 +38,6 @@ pub fn eestExceptionName(error_value: ValidationError) []const u8 {
 pub fn validationErrorMatchesEest(error_value: ValidationError, expected: []const u8) bool {
     const name = eestExceptionName(error_value);
     if (error_value == .intrinsic_gas_below_floor_gas_cost and exceptionNameMatches("TransactionException.INTRINSIC_GAS_TOO_LOW", expected)) return true;
-    if (error_value == .gas_allowance_exceeded and exceptionNameMatches("TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM", expected)) return true;
     return exceptionNameMatches(name, expected);
 }
 
@@ -94,10 +94,6 @@ test "EEST tx validation matches pipe-separated expected exceptions" {
     try std.testing.expect(validationErrorMatchesEest(
         .intrinsic_gas_below_floor_gas_cost,
         "TransactionException.INTRINSIC_GAS_TOO_LOW",
-    ));
-    try std.testing.expect(validationErrorMatchesEest(
-        .gas_allowance_exceeded,
-        "TransactionException.GAS_LIMIT_EXCEEDS_MAXIMUM",
     ));
     try std.testing.expect(validationErrorMatchesEest(
         .nonce_too_low,
