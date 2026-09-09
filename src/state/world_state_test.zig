@@ -1091,6 +1091,60 @@ test "discard accepted resets the world and invalidates earlier snapshots" {
     try std.testing.expectEqual(@as(u64, 1), state.world_epoch);
 }
 
+test "discard accepted rewinds the clock with the rows" {
+    var backing = TestReader{};
+    var state = initState(std.testing.allocator, backing.reader());
+    defer state.deinit();
+    defer abandon(&state);
+
+    const first = state.beginTransaction();
+    state.beginScope();
+    try state.warmAccount(word(1));
+    try std.testing.expect(state.isAccountWarm(word(1)));
+    state.closeScope();
+    state.seal(first);
+    state.retain(first);
+    try std.testing.expect(state.clock != .none);
+
+    state.discardAccepted();
+    try std.testing.expectEqual(state_types.Generation.none, state.clock);
+
+    // The root generation `first` took is reissued. The rows it stamped were
+    // reset with the epoch, so the reuse cannot resurrect their warmth.
+    const second = state.beginTransaction();
+    state.beginScope();
+    try std.testing.expectEqual(first, second);
+    try std.testing.expect(!state.isAccountWarm(word(1)));
+}
+
+test "seeding advances the epoch without rewinding the clock" {
+    var backing = TestReader{};
+    var state = initState(std.testing.allocator, backing.reader());
+    defer state.deinit();
+    defer abandon(&state);
+
+    const first = state.beginTransaction();
+    state.beginScope();
+    try state.warmAccount(word(1));
+    state.closeScope();
+    state.seal(first);
+    state.retain(first);
+
+    // Retain keeps the row and its warm stamp. Seeding another account bumps
+    // the epoch for snapshots but must not reissue `first`: a rewound clock
+    // would make the surviving stamp read as warm in the next attempt.
+    var seeded = MemoryAccount.init(std.testing.allocator);
+    seeded.account = .{ .balance = 5 };
+    defer seeded.deinit();
+    try state.seedAccount(addr(2), seeded);
+    try std.testing.expect(state.clock != .none);
+
+    const second = state.beginTransaction();
+    state.beginScope();
+    try std.testing.expect(first != second);
+    try std.testing.expect(!state.isAccountWarm(word(1)));
+}
+
 test "pre-Spurious-Dragon world keeps a loaded empty account" {
     var backing = TestReader{ .account = .{} };
     var state = initState(std.testing.allocator, backing.reader());

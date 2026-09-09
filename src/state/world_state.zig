@@ -392,8 +392,17 @@ pub fn WorldState(comptime World: type) type {
         journal: Journal = .{},
         /// Last generation issued. Every attempt root, execution root, and
         /// checkpoint scope takes the next tick, so no two lifetimes share a
-        /// value while rows carry stamps. Only `discardAccepted` rewinds it,
-        /// together with the rows.
+        /// value while rows carry stamps. `discardAccepted` rewinds it together
+        /// with the rows; seeding does not, because rows keep their stamps.
+        ///
+        /// Bound: an attempt ticks once for its root, once each for the scope
+        /// open and close, and once per checkpoint. Checkpoints follow call and
+        /// create frames, each of which costs gas, so one block of gas limit G
+        /// issues fewer than G / 100 + 3 * G / 21000 ticks. A u32 therefore
+        /// covers any block, and the block claim's `discardAccepted` starts
+        /// the next one from zero. A State that never claims a block runs on
+        /// the same u32 for its whole life; `Generation.next` asserts before
+        /// it wraps.
         clock: Generation = .none,
         /// Root generation of the current or most recent attempt. Transaction
         /// stamps compare with it; it keeps its last value between attempts so a
@@ -1817,6 +1826,9 @@ pub fn WorldState(comptime World: type) type {
             self.block_introduced_codes.clearRetainingCapacity();
             self.retained_logs.clearRetainingCapacity();
             self.world_epoch += 1;
+            // Every row is back to its admitted stamps, so no generation issued
+            // in the previous epoch can match anything; the clock restarts.
+            self.clock = .none;
         }
 
         pub fn journalEntryCount(self: *const State) usize {
