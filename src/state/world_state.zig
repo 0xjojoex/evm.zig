@@ -157,6 +157,13 @@ pub const TransactionUndoHandle = struct {
 /// One block-lifetime account row. `current` is the value the world holds at
 /// this point of the block: `null` is absent. The world seeds it from parent
 /// state when the row is admitted and never leaves it unset.
+///
+/// A fact that lives as long as the row is a bool in `flags`. A fact with a
+/// shorter lifetime is a stamp: the row is warm, journaled, dirty, or observed
+/// exactly when the stamp equals the State's current generation for that
+/// lifetime, so ending a lifetime clears every row at once by moving the
+/// clock. Nested revert treats stamps three ways, noted per field: restored
+/// from the undo record, cleared to `none`, or never unwound.
 pub const AccountRow = struct {
     current: ?Account,
     code_ref: CodeRef,
@@ -164,11 +171,22 @@ pub const AccountRow = struct {
     /// Outside `flags` on purpose: membership in `lifecycle_accounts` is not
     /// journaled and is cleared once per transaction.
     lifecycle_listed: bool = false,
+    /// Scope that already holds this row's undo record. Restored by undo.
     journaled_scope: Generation = .none,
+    /// Transaction in which the row became warm (EIP-2929). Warmth only grows
+    /// within a transaction, so revert clears it to `none`: the row cannot
+    /// have been warm before the scope that journaled it.
     warm_transaction: Generation = .none,
+    /// Never unwound: a read that happened stays observed after revert; only
+    /// the observed effect reverts.
     observation: ObservationHandle = .{},
+    /// Transaction in which the account changed. Restored by undo.
     dirty_transaction: Generation = .none,
+    /// Advanced by each storage wipe; slots whose incarnation trails it read
+    /// as zero. Restored by undo.
     storage_incarnation: Incarnation = .parent,
+    /// Transaction in which storage was wiped; deduplicates the wipe list.
+    /// Restored by undo.
     wiped_transaction: Generation = .none,
 
     /// Row for a value the world just admitted; code binds lazily.
@@ -184,19 +202,31 @@ pub const AccountRow = struct {
 };
 
 /// One block-lifetime storage row. `current` is the raw value written under
-/// `storage_incarnation`; a slot is effectively zero when its generation trails
-/// the owning account's, which is how a storage wipe hides every row at once.
+/// `storage_incarnation`; a slot is effectively zero when its incarnation
+/// trails the owning account's, which is how a storage wipe hides every row
+/// at once. Stamps follow the rules on `AccountRow`.
 pub const StorageRow = struct {
     current: u256,
+    /// EIP-2200 original for the transaction in `original_transaction`.
+    /// Captured once per transaction, never unwound.
     transaction_original: u256 = 0,
+    /// EIP-2200 original for the execution root in `execution_original_scope`.
+    /// Captured once per root, never unwound. Both originals stay flat next
+    /// to their stamps: nesting each as a value/stamp struct pads the row
+    /// from 144 to 160 bytes (u256 aligns to 16 on native and rv64).
     execution_original: u256 = 0,
     flags: StorageFlags = .{},
+    /// Scope that already holds this row's undo record. Restored by undo.
     journaled_scope: Generation = .none,
+    /// Cleared to `none` by revert; see `AccountRow.warm_transaction`.
     warm_transaction: Generation = .none,
+    /// Never unwound; see `AccountRow.observation`.
     observation: ObservationHandle = .{},
     original_transaction: Generation = .none,
     execution_original_scope: Generation = .none,
+    /// Restored by undo together with the value.
     transaction_undo: TransactionUndoHandle = .{},
+    /// Incarnation `current` was written under. Restored by undo.
     storage_incarnation: Incarnation = .parent,
 };
 
