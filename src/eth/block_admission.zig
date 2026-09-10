@@ -101,7 +101,7 @@ fn validate(
 }
 
 /// Authenticate a validated claim and take ownership of its execution state.
-/// Plan and parent facts are released on every failure path.
+/// Plan and parent state are released on every failure path.
 pub fn closedState(
     allocator: std.mem.Allocator,
     backend: *Backend,
@@ -118,16 +118,16 @@ pub fn closedState(
             else => return error.InvalidWitness,
         };
     };
-    var facts = authenticated orelse {
+    var parent_state = authenticated orelse {
         plan.deinit(allocator);
         return error.InvalidWitness;
     };
     const codes = backend.parentCodes() orelse {
-        facts.deinit(allocator);
+        parent_state.deinit(allocator);
         plan.deinit(allocator);
         return error.InvalidWitness;
     };
-    return ClosedWorld.initStateHashed(allocator, plan, facts, codes) catch |err| switch (err) {
+    return ClosedWorld.initStateHashed(allocator, plan, parent_state, codes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ResourceLimitExceeded => return error.ResourceLimitExceeded,
         error.CodeHashCollision => return error.InvalidWitness,

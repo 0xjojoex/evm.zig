@@ -59,7 +59,7 @@ pub const ResolutionError = anyerror;
 pub const options: world_state.Options = .{
     // Rows are admitted as execution touches state, so capacity hints are meaningful.
     .grows_on_touch = true,
-    // Parent facts come from a reader the world does not authenticate; the
+    // Parent values come from a reader the world does not authenticate; the
     // committer resolves parents from the witness by key.
     .authenticated_parents = false,
     // Parent code loads through the reader into the world's own cache.

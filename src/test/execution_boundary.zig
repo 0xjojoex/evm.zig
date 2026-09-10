@@ -183,11 +183,11 @@ test "checkpoint commit retains state and restore rolls back without closing sco
             const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const fact = storage.at(index) orelse continue;
-                if (!evmz.Address.eql(fact.address, self.contract) or fact.key != 7) continue;
-                try std.testing.expectEqual(@as(u256, 0), fact.original);
-                try std.testing.expectEqual(@as(u256, 1), fact.current);
-                try std.testing.expect(fact.effect.written);
+                const record = storage.at(index) orelse continue;
+                if (!evmz.Address.eql(record.address, self.contract) or record.key != 7) continue;
+                try std.testing.expectEqual(@as(u256, 0), record.original);
+                try std.testing.expectEqual(@as(u256, 1), record.current);
+                try std.testing.expect(record.effect.written);
                 self.found = true;
                 return;
             }
@@ -293,11 +293,11 @@ test "checkpoint revert preserves reads without retaining storage effects" {
             const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const fact = storage.at(index) orelse continue;
-                if (!evmz.Address.eql(fact.address, self.contract) or fact.key != 8) continue;
-                try std.testing.expect(fact.observation.value_read);
-                try std.testing.expect(!fact.effect.written);
-                try std.testing.expectEqual(fact.original, fact.current);
+                const record = storage.at(index) orelse continue;
+                if (!evmz.Address.eql(record.address, self.contract) or record.key != 8) continue;
+                try std.testing.expect(record.observation.value_read);
+                try std.testing.expect(!record.effect.written);
+                try std.testing.expectEqual(record.original, record.current);
                 self.found = true;
                 return;
             }
