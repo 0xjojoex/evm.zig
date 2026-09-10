@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use revm::context::{BlockEnv, CfgEnv, TxEnv};
+use revm::context_interface::cfg::gas_params::Eip2780TxInfo;
 use revm::context_interface::cfg::GasParams;
 use revm::context_interface::context::{SStoreResult, SelfDestructResult, StateLoad};
 use revm::context_interface::host::{Host, LoadError};
@@ -24,7 +25,6 @@ const DEFAULT_REPEATS: usize = 5;
 const DEFAULT_WARMUPS: usize = 1;
 const DEFAULT_VM_LOOP_WARMUP_MS: usize = 100;
 const DEFAULT_FIXTURES_DIR: &str = "fixtures/kernel";
-const TX_BASE_GAS: u64 = 21_000;
 const MAX_GAS: u64 = 1_000_000_000_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -373,7 +373,7 @@ Options:
   --call-data <hex>            calldata hex for each runtime call
   --num-runs, -n <n>           number of timed calls
   --warmup-ms <n>              discarded warmup duration in milliseconds, default 100; 0 disables
-  --spec <name>                osaka, prague, cancun, shanghai, latest; default osaka
+  --spec <name>                amsterdam, osaka, prague, cancun, shanghai, latest; default osaka
   --host-profile <null|mock>   fixture host profile label, default null
   --summary                    print fixture metadata to stderr
 "
@@ -555,6 +555,7 @@ fn reject_null_host_touches(profile: HostProfile, counters: HostCounters) -> Res
 }
 
 struct BenchHost {
+    spec: SpecId,
     gas_params: GasParams,
     storage: HashMap<(Address, StorageKey), StorageSlot>,
     original_storage: HashMap<(Address, StorageKey), StorageValue>,
@@ -572,6 +573,7 @@ struct StorageSlot {
 impl BenchHost {
     fn new(spec: SpecId) -> Self {
         Self {
+            spec,
             gas_params: GasParams::new_spec(spec),
             storage: HashMap::new(),
             original_storage: HashMap::new(),
@@ -661,7 +663,7 @@ impl Host for BenchHost {
     }
 
     fn is_amsterdam_eip8037_enabled(&self) -> bool {
-        false
+        self.spec.is_enabled_in(SpecId::AMSTERDAM)
     }
 
     fn block_hash(&mut self, _number: u64) -> Option<B256> {
@@ -769,6 +771,7 @@ fn contract_address() -> Address {
 
 fn spec_name(spec: SpecId) -> &'static str {
     match spec {
+        SpecId::AMSTERDAM => "amsterdam",
         SpecId::OSAKA => "osaka",
         SpecId::PRAGUE => "prague",
         SpecId::CANCUN => "cancun",
@@ -790,7 +793,7 @@ Options:
   --iterations, -n <n>    repeated opcode pattern count, default 100000
   --repeats <n>           printed samples per case, default 5
   --warmups <n>           unprinted samples before repeats, default 1
-  --spec <name>           osaka, prague, cancun, shanghai, default osaka
+  --spec <name>           amsterdam, osaka, prague, cancun, shanghai, latest; default osaka
   --fixtures-dir <path>   kernel fixture directory, default fixtures/kernel
   --no-header             omit CSV header
 "
@@ -825,6 +828,15 @@ fn measure(
         ..Default::default()
     };
 
+    let eip2780 = cfg.enable_amsterdam_eip2780.then_some(Eip2780TxInfo {
+        value: tx.value,
+        is_self_transfer: tx.kind == TxKind::Call(tx.caller),
+    });
+    let intrinsic_gas = cfg
+        .gas_params
+        .initial_tx_gas_for_tx(&tx, eip2780)
+        .initial_total_gas();
+
     let mut evm = Context::mainnet()
         .with_db(db)
         .with_block(block)
@@ -835,7 +847,7 @@ fn measure(
     let output = evm.transact(tx).map_err(|err| format!("{err:?}"))?;
     let elapsed_ns = start.elapsed().as_nanos();
     let total_gas = output.result.gas().total_gas_spent();
-    let gas_used = total_gas.saturating_sub(TX_BASE_GAS);
+    let gas_used = total_gas.saturating_sub(intrinsic_gas);
 
     Ok(Measurement {
         elapsed_ns,
@@ -1035,7 +1047,8 @@ fn parse_tier(value: &str) -> Option<KernelTier> {
 
 fn parse_spec(value: &str) -> Option<SpecId> {
     Some(match value {
-        "latest" | "osaka" => SpecId::OSAKA,
+        "latest" | "amsterdam" => SpecId::AMSTERDAM,
+        "osaka" => SpecId::OSAKA,
         "prague" => SpecId::PRAGUE,
         "cancun" => SpecId::CANCUN,
         "shanghai" => SpecId::SHANGHAI,
