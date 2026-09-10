@@ -453,22 +453,24 @@ pub const Catalog = struct {
         ) BuildError!u32 {
             var branch: Branch = undefined;
             for (references, 0..) |compact_reference, index| {
-                const child_reference = compact_reference.reference(encoded);
-                branch.reference_lengths[index] = switch (child_reference) {
+                branch.reference_lengths[index] = switch (compact_reference.kind) {
                     .empty => 1,
-                    .embedded => |child| @intCast(child.len),
+                    .embedded => compact_reference.len,
                     .hashed => 33,
                 };
-                switch (child_reference) {
-                    .empty => {
-                        branch.links[index] = .empty;
-                        branch.reference_offsets[index] = 0;
-                    },
-                    else => {
-                        branch.links[index] = try self.linkReference(child_reference);
-                        branch.reference_offsets[index] = @intCast(compact_reference.offset);
-                    },
-                }
+                branch.reference_offsets[index] = if (compact_reference.kind == .empty)
+                    0
+                else
+                    @intCast(compact_reference.offset);
+                branch.links[index] = switch (compact_reference.kind) {
+                    .empty => .empty,
+                    .embedded => Link.fromNode(try self.appendNode(
+                        encoded[compact_reference.offset..][0..compact_reference.len],
+                    )),
+                    .hashed => try self.linkReference(.{ .hashed = @ptrCast(
+                        encoded[compact_reference.offset..][0..32].ptr,
+                    ) }),
+                };
             }
             if (self.branches.items.len > std.math.maxInt(u32)) return error.ResourceLimitExceeded;
             const index: u32 = @intCast(self.branches.items.len);

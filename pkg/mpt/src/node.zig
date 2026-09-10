@@ -57,14 +57,6 @@ pub const CatalogReference = struct {
         hashed,
     };
 
-    pub fn reference(self: CatalogReference, encoded: []const u8) Reference {
-        return switch (self.kind) {
-            .empty => .empty,
-            .embedded => .{ .embedded = encoded[self.offset..][0..self.len] },
-            .hashed => .{ .hashed = @ptrCast(encoded[self.offset..][0..32].ptr) },
-        };
-    }
-
     comptime {
         std.debug.assert(@sizeOf(CatalogReference) == 8);
         std.debug.assert(@alignOf(CatalogReference) == 8);
