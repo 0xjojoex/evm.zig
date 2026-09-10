@@ -14,6 +14,7 @@ const std = @import("std");
 pub const ExactSlab = @import("ExactSlab.zig");
 pub const ScopedArenaAllocator = @import("ScopedArenaAllocator.zig");
 pub const range = @import("range.zig");
+pub const struct_layout = @import("struct_layout.zig");
 pub const Range = @import("range.zig").Range;
 
 pub const no_growth_allocator: std.mem.Allocator = .{
