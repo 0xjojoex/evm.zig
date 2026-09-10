@@ -503,6 +503,7 @@ fn execute_raw_interpreter(
         caller_address: caller_address(),
         input: CallInput::Bytes(Bytes::from(call_data.to_vec())),
         call_value: U256::ZERO,
+        depth: 0,
     };
     let mut host = BenchHost::new(spec);
     let mut interpreter = Interpreter::new(
