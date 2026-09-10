@@ -115,7 +115,7 @@ pub const Generation = enum(u32) {
     /// Asserts the clock has not run out; exhaustion is a programmer error
     /// until an epoch reset bounds it.
     pub inline fn next(self: Generation) Generation {
-        return @enumFromInt(advanceCounter(@intFromEnum(self)));
+        return @enumFromInt(@intFromEnum(self) + 1);
     }
 };
 
@@ -127,16 +127,9 @@ pub const Incarnation = enum(u32) {
     _,
 
     pub inline fn next(self: Incarnation) Incarnation {
-        return @enumFromInt(advanceCounter(@intFromEnum(self)));
+        return @enumFromInt(@intFromEnum(self) + 1);
     }
 };
-
-/// The one outlined counter step both clocks share; the wrappers above only
-/// convert. Asserts the counter has not reached its maximum.
-fn advanceCounter(raw: u32) u32 {
-    std.debug.assert(raw != std.math.maxInt(u32));
-    return raw + 1;
-}
 
 /// Index into the containing row's account or storage observation list, valid
 /// only in the transaction matching `transaction`. Scope rollback preserves the
@@ -350,18 +343,6 @@ pub fn checkWorld(comptime World: type) void {
 
         const options: Options = World.options;
 
-        const methods = [_][]const u8{
-            "deinit",          "accountCount",   "accountRow",      "storageRow",
-            "accountAddress",  "storageAccount", "storageSlot",     "findAccount",
-            "findStorage",     "resolveAccount", "resolveStorage",  "cachedCode",
-            "loadCode",        "resetRows",      "allocationBytes", "captureSnapshot",
-            "restoreSnapshot",
-        };
-        for (methods) |method| {
-            if (!std.meta.hasMethod(World, method)) @compileError(
-                "world " ++ @typeName(World) ++ " is missing '" ++ method ++ "'",
-            );
-        }
         if (options.grows_on_touch and !std.meta.hasMethod(World, "reserveRows")) @compileError(
             "world " ++ @typeName(World) ++ " grows on touch but has no 'reserveRows'",
         );
@@ -1181,7 +1162,7 @@ pub fn WorldState(comptime World: type) type {
         }
 
         pub fn commitCheckpoint(self: *State, checkpoint_state: Checkpoint) void {
-            self.validateCheckpoint(checkpoint_state);
+            self.assertCheckpoint(checkpoint_state);
             self.active_scope_generation = checkpoint_state.parent_scope;
             self.scope_depth -= 1;
         }
@@ -1191,7 +1172,7 @@ pub fn WorldState(comptime World: type) type {
         /// (flag-false) rather than being truncated here; `retain` compacts them.
         /// Introduced codes unwind through their own journal entries.
         pub fn revertToCheckpoint(self: *State, checkpoint_state: Checkpoint) void {
-            self.validateCheckpoint(checkpoint_state);
+            self.assertCheckpoint(checkpoint_state);
             self.transaction_scope_reverted = true;
             self.revertJournalTo(checkpoint_state.journal_len);
             self.changed_accounts.items.len = checkpoint_state.changed_accounts_len;
@@ -1309,42 +1290,27 @@ pub fn WorldState(comptime World: type) type {
             return self.world.accountRow(id).current;
         }
 
-        pub fn getAccountOrLoad(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!?Account {
+        pub fn getAccountOrLoad(self: *State, address: AccountKey) !?Account {
             return self.readAccount(address, .{ .accessed = true, .value_read = true });
         }
 
-        pub fn accountExists(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!bool {
+        pub fn accountExists(self: *State, address: AccountKey) !bool {
             return (try self.readAccount(address, .{ .accessed = true, .existence_read = true })) != null;
         }
 
-        pub fn getBalance(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!u256 {
+        pub fn getBalance(self: *State, address: AccountKey) !u256 {
             const account = (try self.readAccount(address, .{ .accessed = true, .value_read = true })) orelse
                 return 0;
             return account.balance;
         }
 
-        pub fn getNonce(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!u64 {
+        pub fn getNonce(self: *State, address: AccountKey) !u64 {
             const account = (try self.readAccount(address, .{ .accessed = true, .value_read = true })) orelse
                 return 0;
             return account.nonce;
         }
 
-        pub fn getCodeView(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error || error{InvalidWitness})!CodeView {
+        pub fn getCodeView(self: *State, address: AccountKey) !CodeView {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             if (self.attemptOpen())
                 try self.observeAccount(id, .{ .accessed = true, .code_read = true });
@@ -1357,10 +1323,7 @@ pub fn WorldState(comptime World: type) type {
         /// found by hash anywhere else is returned unbound, because an
         /// introduced reference is only as durable as the scope that made it
         /// and the world's own cache is content-addressed already.
-        noinline fn bindCode(
-            self: *State,
-            row: *AccountRow,
-        ) (ResolutionError || error{InvalidWitness})!CodeView {
+        noinline fn bindCode(self: *State, row: *AccountRow) !CodeView {
             const code_hash = accountCodeHash(row.current);
             if (self.code.bindParent(code_hash)) |ref| {
                 row.code_ref = ref;
@@ -1373,36 +1336,23 @@ pub fn WorldState(comptime World: type) type {
             return view;
         }
 
-        pub fn getCode(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error || error{InvalidWitness})![]const u8 {
+        pub fn getCode(self: *State, address: AccountKey) ![]const u8 {
             return (try self.getCodeView(address)).bytes;
         }
 
-        pub fn getCodeHash(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!u256 {
+        pub fn getCodeHash(self: *State, address: AccountKey) !u256 {
             const account = (try self.readAccount(address, .{ .accessed = true, .value_read = true })) orelse
                 return 0;
             return std.mem.readInt(u256, &account.code_hash, .big);
         }
 
-        pub fn accountHasCode(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!bool {
+        pub fn accountHasCode(self: *State, address: AccountKey) !bool {
             const account = (try self.readAccount(address, .{ .accessed = true, .value_read = true })) orelse
                 return false;
             return !std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty);
         }
 
-        pub fn setBalance(
-            self: *State,
-            address: AccountKey,
-            balance: u256,
-        ) (ResolutionError || Allocator.Error)!void {
+        pub fn setBalance(self: *State, address: AccountKey, balance: u256) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             const current = self.world.accountRow(id).current;
             var account = current orelse Account{};
@@ -1411,11 +1361,7 @@ pub fn WorldState(comptime World: type) type {
             try self.writeAccount(id, account);
         }
 
-        pub fn addBalance(
-            self: *State,
-            address: AccountKey,
-            value: u256,
-        ) (ResolutionError || Allocator.Error || error{BalanceOverflow})!void {
+        pub fn addBalance(self: *State, address: AccountKey, value: u256) !void {
             if (value == 0) return;
             const balance = try self.getBalance(address);
             try self.setBalance(
@@ -1424,11 +1370,7 @@ pub fn WorldState(comptime World: type) type {
             );
         }
 
-        pub fn subtractBalance(
-            self: *State,
-            address: AccountKey,
-            value: u256,
-        ) (ResolutionError || Allocator.Error)!bool {
+        pub fn subtractBalance(self: *State, address: AccountKey, value: u256) !bool {
             if (value == 0) return true;
             const balance = try self.getBalance(address);
             if (balance < value) return false;
@@ -1436,11 +1378,7 @@ pub fn WorldState(comptime World: type) type {
             return true;
         }
 
-        pub fn setNonce(
-            self: *State,
-            address: AccountKey,
-            nonce: u64,
-        ) (ResolutionError || Allocator.Error)!void {
+        pub fn setNonce(self: *State, address: AccountKey, nonce: u64) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             const current = self.world.accountRow(id).current;
             var account = current orelse Account{};
@@ -1449,11 +1387,7 @@ pub fn WorldState(comptime World: type) type {
             try self.writeAccount(id, account);
         }
 
-        pub fn setCode(
-            self: *State,
-            address: AccountKey,
-            code_bytes: []const u8,
-        ) (ResolutionError || CodeError)!void {
+        pub fn setCode(self: *State, address: AccountKey, code_bytes: []const u8) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             try self.observeAccount(id, .{
                 .accessed = true,
@@ -1497,17 +1431,11 @@ pub fn WorldState(comptime World: type) type {
             return view;
         }
 
-        pub fn clearCode(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || CodeError)!void {
+        pub fn clearCode(self: *State, address: AccountKey) !void {
             try self.setCode(address, &.{});
         }
 
-        pub fn touchAccount(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!void {
+        pub fn touchAccount(self: *State, address: AccountKey) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             try self.observeAccount(id, .{ .accessed = true });
             if (self.world.accountRow(id).flags.touched) return;
@@ -1519,10 +1447,7 @@ pub fn WorldState(comptime World: type) type {
             row.flags.touched = true;
         }
 
-        pub fn accessAccount(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!execution.AccessStatus {
+        pub fn accessAccount(self: *State, address: AccountKey) !execution.AccessStatus {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
             return if (try self.warmAccountId(id)) .cold else .warm;
@@ -1530,15 +1455,12 @@ pub fn WorldState(comptime World: type) type {
 
         /// Record an account access after instruction gas/admission has succeeded.
         /// This does not alter warmth.
-        pub fn observeAccountAccess(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!void {
+        pub fn observeAccountAccess(self: *State, address: AccountKey) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
         }
 
-        pub fn warmAccount(self: *State, address: AccountKey) (ResolutionError || Allocator.Error)!void {
+        pub fn warmAccount(self: *State, address: AccountKey) !void {
             _ = try self.warmAccountAddress(address, .optional_warm_only);
         }
 
@@ -1547,11 +1469,7 @@ pub fn WorldState(comptime World: type) type {
             return self.accountWarm(id);
         }
 
-        pub fn warmAccountAddress(
-            self: *State,
-            address: AccountKey,
-            policy: ResolutionPolicy,
-        ) (ResolutionError || Allocator.Error)!?bool {
+        pub fn warmAccountAddress(self: *State, address: AccountKey, policy: ResolutionPolicy) !?bool {
             const id = (try self.world.resolveAccount(address, policy)) orelse {
                 if (comptime options.grows_on_touch) return try self.deferAccountWarm(address);
                 return null;
@@ -1559,12 +1477,7 @@ pub fn WorldState(comptime World: type) type {
             return try self.warmAccountId(id);
         }
 
-        pub fn warmStorageSlot(
-            self: *State,
-            account: AccountId,
-            key: u256,
-            policy: ResolutionPolicy,
-        ) (ResolutionError || Allocator.Error)!?bool {
+        pub fn warmStorageSlot(self: *State, account: AccountId, key: u256, policy: ResolutionPolicy) !?bool {
             const id = (try self.world.resolveStorage(account, key, policy)) orelse {
                 if (comptime options.grows_on_touch)
                     return try self.deferStorageWarm(.fromAddress(self.world.accountAddress(account)), key);
@@ -1573,7 +1486,7 @@ pub fn WorldState(comptime World: type) type {
             return try self.warmStorageId(id);
         }
 
-        pub fn warmAccountId(self: *State, id: AccountId) Allocator.Error!bool {
+        pub fn warmAccountId(self: *State, id: AccountId) !bool {
             self.assertTransaction();
             const row = self.world.accountRow(id);
             if (row.warm_transaction == self.transaction_generation) return false;
@@ -1584,7 +1497,7 @@ pub fn WorldState(comptime World: type) type {
             return !was_warm;
         }
 
-        pub fn warmStorageId(self: *State, id: StorageId) Allocator.Error!bool {
+        pub fn warmStorageId(self: *State, id: StorageId) !bool {
             self.assertTransaction();
             const row = self.world.storageRow(id);
             if (row.warm_transaction == self.transaction_generation) return false;
@@ -1611,31 +1524,19 @@ pub fn WorldState(comptime World: type) type {
                 );
         }
 
-        pub fn getStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-        ) (ResolutionError || Allocator.Error)!u256 {
+        pub fn getStorage(self: *State, address: AccountKey, key: u256) !u256 {
             const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
             if (!self.attemptOpen()) return self.effectiveStorage(resolved.storage);
             try self.observeAccount(resolved.account, .{ .accessed = true });
             return self.readResolvedStorage(resolved);
         }
 
-        pub fn accessStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-        ) (ResolutionError || Allocator.Error)!execution.AccessStatus {
+        pub fn accessStorage(self: *State, address: AccountKey, key: u256) !execution.AccessStatus {
             const was_cold = (try self.warmStorageAddress(address, key)) orelse return .cold;
             return if (was_cold) .cold else .warm;
         }
 
-        pub fn loadStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-        ) (ResolutionError || Allocator.Error)!Host.StorageLoadResult {
+        pub fn loadStorage(self: *State, address: AccountKey, key: u256) !Host.StorageLoadResult {
             const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
             try self.observeAccount(resolved.account, .{ .accessed = true });
             const access_status = try self.accessResolvedStorage(resolved);
@@ -1645,23 +1546,13 @@ pub fn WorldState(comptime World: type) type {
             };
         }
 
-        pub fn setStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-            value: u256,
-        ) (ResolutionError || Allocator.Error)!execution.StorageStatus {
+        pub fn setStorage(self: *State, address: AccountKey, key: u256, value: u256) !execution.StorageStatus {
             const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
             try self.observeAccount(resolved.account, .{ .accessed = true });
             return self.setResolvedStorage(resolved, value);
         }
 
-        pub fn storeStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-            value: u256,
-        ) (ResolutionError || Allocator.Error)!Host.StorageStoreResult {
+        pub fn storeStorage(self: *State, address: AccountKey, key: u256, value: u256) !Host.StorageStoreResult {
             const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
             try self.observeAccount(resolved.account, .{ .accessed = true });
             const access_status = try self.accessResolvedStorage(resolved);
@@ -1671,11 +1562,7 @@ pub fn WorldState(comptime World: type) type {
             };
         }
 
-        pub fn originalStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-        ) (ResolutionError || Allocator.Error)!u256 {
+        pub fn originalStorage(self: *State, address: AccountKey, key: u256) !u256 {
             const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
             try self.observeAccount(resolved.account, .{ .accessed = true });
             self.captureStorageOriginal(resolved.storage);
@@ -1684,11 +1571,7 @@ pub fn WorldState(comptime World: type) type {
             return self.world.storageRow(resolved.storage).execution_original;
         }
 
-        pub fn warmStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-        ) (ResolutionError || Allocator.Error)!void {
+        pub fn warmStorage(self: *State, address: AccountKey, key: u256) !void {
             _ = try self.warmStorageAddress(address, key);
         }
 
@@ -1698,7 +1581,7 @@ pub fn WorldState(comptime World: type) type {
             return self.storageWarm(id);
         }
 
-        fn warmStorageAddress(self: *State, address: AccountKey, key: u256) (ResolutionError || Allocator.Error)!?bool {
+        fn warmStorageAddress(self: *State, address: AccountKey, key: u256) !?bool {
             const account = (try self.world.resolveAccount(address, .optional_warm_only)) orelse {
                 if (comptime options.grows_on_touch) return try self.deferStorageWarm(address, key);
                 return null;
@@ -1741,12 +1624,7 @@ pub fn WorldState(comptime World: type) type {
             return self.transient_storage.get(.init(address, key)) orelse 0;
         }
 
-        pub fn setTransientStorage(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-            value: u256,
-        ) !void {
+        pub fn setTransientStorage(self: *State, address: AccountKey, key: u256, value: u256) !void {
             self.assertTransaction();
             const storage_key = TransientKey.init(address, key);
             const previous_entry = self.transient_storage.get(storage_key);
@@ -1772,32 +1650,26 @@ pub fn WorldState(comptime World: type) type {
             logs.clearRetainingCapacity();
         }
 
-        pub fn markCreatedContract(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!void {
+        pub fn markCreatedContract(self: *State, address: AccountKey) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             if (self.world.accountRow(id).flags.created) return;
             try self.markCreatedId(id);
         }
 
-        pub fn markSelfdestructed(
-            self: *State,
-            address: AccountKey,
-        ) (ResolutionError || Allocator.Error)!void {
+        pub fn markSelfdestructed(self: *State, address: AccountKey) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             if (self.world.accountRow(id).flags.selfdestructed) return;
             try self.markSelfdestructedId(id);
         }
 
-        pub fn markCreatedId(self: *State, id: AccountId) Allocator.Error!void {
+        pub fn markCreatedId(self: *State, id: AccountId) !void {
             try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
             const row = try self.prepareLifecycleMutation(id);
             row.flags.created = true;
             self.observed_accounts.items[row.observation.index].effect.created_contract = true;
         }
 
-        pub fn markSelfdestructedId(self: *State, id: AccountId) Allocator.Error!void {
+        pub fn markSelfdestructedId(self: *State, id: AccountId) !void {
             try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
             const row = try self.prepareLifecycleMutation(id);
             row.flags.selfdestructed = true;
@@ -1926,11 +1798,7 @@ pub fn WorldState(comptime World: type) type {
             self.observed_accounts.items[row.observation.index].effect.storage_wiped = true;
         }
 
-        pub fn writeAccount(
-            self: *State,
-            id: AccountId,
-            value: ?Account,
-        ) Allocator.Error!void {
+        pub fn writeAccount(self: *State, id: AccountId, value: ?Account) !void {
             self.assertMutable();
             try self.observeAccount(id, .{
                 .accessed = true,
@@ -1948,11 +1816,7 @@ pub fn WorldState(comptime World: type) type {
             recordAccountEffect(&self.observed_accounts.items[row.observation.index], previous, value);
         }
 
-        pub fn writeStorage(
-            self: *State,
-            id: StorageId,
-            value: u256,
-        ) Allocator.Error!void {
+        pub fn writeStorage(self: *State, id: StorageId, value: u256) !void {
             self.assertMutable();
             const account = self.world.storageAccount(id);
             try self.observeAccount(account, .{ .accessed = true });
@@ -2001,11 +1865,7 @@ pub fn WorldState(comptime World: type) type {
 
         /// Merge `observation` into the row's observation, creating it on first touch
         /// in this transaction. Every attempt observes; there is no opt-out.
-        pub fn observeAccount(
-            self: *State,
-            id: AccountId,
-            observation: AccountObservation,
-        ) Allocator.Error!void {
+        pub fn observeAccount(self: *State, id: AccountId, observation: AccountObservation) !void {
             self.assertMutable();
             const row = self.world.accountRow(id);
             if (row.observation.transaction == self.transaction_generation) {
@@ -2020,7 +1880,7 @@ pub fn WorldState(comptime World: type) type {
             id: AccountId,
             row: *AccountRow,
             observation: AccountObservation,
-        ) Allocator.Error!void {
+        ) !void {
             try self.observed_accounts.ensureUnusedCapacity(self.allocator, 1);
             row.observation = .{
                 .transaction = self.transaction_generation,
@@ -2035,11 +1895,7 @@ pub fn WorldState(comptime World: type) type {
             });
         }
 
-        pub fn observeStorage(
-            self: *State,
-            id: StorageId,
-            observation: StorageObservation,
-        ) Allocator.Error!void {
+        pub fn observeStorage(self: *State, id: StorageId, observation: StorageObservation) !void {
             self.assertMutable();
             const row = self.world.storageRow(id);
             if (row.observation.transaction == self.transaction_generation) {
@@ -2072,14 +1928,14 @@ pub fn WorldState(comptime World: type) type {
             });
         }
 
-        fn assertTransaction(self: *const State) void {
+        inline fn assertTransaction(self: *const State) void {
             self.assertAttempt();
             std.debug.assert(self.scope_depth != 0);
         }
 
         /// An open, unsealed attempt: what a write needs. A scope is only
         /// needed by what a scope owns (checkpoints, warmth, logs, transient).
-        fn assertMutable(self: *const State) void {
+        inline fn assertMutable(self: *const State) void {
             self.assertAttempt();
             std.debug.assert(!self.sealed);
             std.debug.assert(self.attempt_open);
@@ -2090,28 +1946,28 @@ pub fn WorldState(comptime World: type) type {
             return self.attempt_open;
         }
 
-        fn assertAttempt(self: *const State) void {
+        inline fn assertAttempt(self: *const State) void {
             std.debug.assert(self.transaction_active);
             std.debug.assert(self.active_attempt_id != null);
         }
 
-        fn assertRootScope(self: *const State) void {
+        inline fn assertRootScope(self: *const State) void {
             self.assertTransaction();
             std.debug.assert(self.scope_depth == 1);
         }
 
-        fn assertSealed(self: *const State) void {
+        inline fn assertSealed(self: *const State) void {
             std.debug.assert(self.transaction_active);
             std.debug.assert(self.sealed);
             std.debug.assert(!self.scopeActive());
         }
 
-        fn assertCurrent(self: *const State, id: AttemptId) void {
+        inline fn assertCurrent(self: *const State, id: AttemptId) void {
             self.assertAttempt();
             std.debug.assert(self.active_attempt_id.? == id);
         }
 
-        fn validateCheckpoint(self: *const State, checkpoint_state: Checkpoint) void {
+        inline fn assertCheckpoint(self: *const State, checkpoint_state: Checkpoint) void {
             self.assertTransaction();
             std.debug.assert(self.scope_depth >= 1);
             std.debug.assert(checkpoint_state.scope == self.active_scope_generation);
@@ -2216,11 +2072,7 @@ pub fn WorldState(comptime World: type) type {
             }
         }
 
-        fn readAccount(
-            self: *State,
-            address: AccountKey,
-            observation: AccountObservation,
-        ) (ResolutionError || Allocator.Error)!?Account {
+        fn readAccount(self: *State, address: AccountKey, observation: AccountObservation) !?Account {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
             // Block-system-call admission may inspect code presence before opening the
             // managed system-call attempt. The actual call records the access.
@@ -2228,12 +2080,7 @@ pub fn WorldState(comptime World: type) type {
             return self.world.accountRow(id).current;
         }
 
-        fn resolveStorageKey(
-            self: *State,
-            address: AccountKey,
-            key: u256,
-            policy: ResolutionPolicy,
-        ) ResolutionError!?ResolvedStorage {
+        fn resolveStorageKey(self: *State, address: AccountKey, key: u256, policy: ResolutionPolicy) !?ResolvedStorage {
             const account = (try self.world.resolveAccount(address, policy)) orelse return null;
             const storage = (try self.world.resolveStorage(account, key, policy)) orelse return null;
             return .{ .account = account, .storage = storage };
@@ -2272,11 +2119,7 @@ pub fn WorldState(comptime World: type) type {
             return if (storage_incarnation == account_incarnation) value else 0;
         }
 
-        fn recordAccountEffect(
-            observation: *AccountObservationRow,
-            previous: ?Account,
-            current: ?Account,
-        ) void {
+        fn recordAccountEffect(observation: *AccountObservationRow, previous: ?Account, current: ?Account) void {
             observation.effect_current = current;
             const value = current orelse {
                 observation.effect.account_deleted = previous != null;
@@ -2300,24 +2143,17 @@ pub fn WorldState(comptime World: type) type {
             }
         }
 
-        fn accessResolvedStorage(
-            self: *State,
-            resolved: ResolvedStorage,
-        ) Allocator.Error!execution.AccessStatus {
+        fn accessResolvedStorage(self: *State, resolved: ResolvedStorage) !execution.AccessStatus {
             return if (try self.warmStorageId(resolved.storage)) .cold else .warm;
         }
 
-        fn readResolvedStorage(self: *State, resolved: ResolvedStorage) Allocator.Error!u256 {
+        fn readResolvedStorage(self: *State, resolved: ResolvedStorage) !u256 {
             self.captureStorageOriginal(resolved.storage);
             try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
             return self.effectiveStorage(resolved.storage);
         }
 
-        fn setResolvedStorage(
-            self: *State,
-            resolved: ResolvedStorage,
-            value: u256,
-        ) Allocator.Error!execution.StorageStatus {
+        fn setResolvedStorage(self: *State, resolved: ResolvedStorage, value: u256) !execution.StorageStatus {
             self.captureStorageOriginal(resolved.storage);
             try self.observeStorage(resolved.storage, .{ .accessed = true, .value_read = true });
             self.captureExecutionOriginal(resolved.storage);

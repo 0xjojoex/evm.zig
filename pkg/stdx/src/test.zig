@@ -4,4 +4,5 @@ comptime {
     _ = @import("ExactSlab.zig");
     _ = @import("ScopedArenaAllocator.zig");
     _ = @import("range.zig");
+    _ = @import("struct_layout.zig");
 }
