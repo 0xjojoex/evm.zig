@@ -315,7 +315,7 @@ fn addEvmoneVm(
         "-fomit-frame-pointer",
         "-fno-exceptions",
         "-fno-rtti",
-        "-DPROJECT_VERSION=\"0.23.0-dev\"",
+        "-DPROJECT_VERSION=\"0.23.0\"",
     };
     const c_flags = &[_][]const u8{
         "-Wall",

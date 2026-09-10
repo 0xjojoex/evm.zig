@@ -599,8 +599,10 @@ std::optional<evmc_revision> parse_spec(std::string_view value) noexcept
         return EVMC_CANCUN;
     if (value == "prague")
         return EVMC_PRAGUE;
-    if (value == "osaka" || value == "latest")
+    if (value == "osaka")
         return EVMC_OSAKA;
+    if (value == "amsterdam" || value == "latest")
+        return EVMC_AMSTERDAM;
     return std::nullopt;
 }
 
@@ -636,6 +638,8 @@ const char* spec_name(evmc_revision spec) noexcept
         return "prague";
     case EVMC_OSAKA:
         return "osaka";
+    case EVMC_AMSTERDAM:
+        return "amsterdam";
     default:
         return "unknown";
     }
@@ -681,7 +685,7 @@ void print_usage()
         << "  --call-data <hex>            calldata hex for each runtime call\n"
         << "  --num-runs, -n <n>           number of timed calls\n"
         << "  --warmup-ms <n>              discarded warmup duration in milliseconds, default 100; 0 disables\n"
-        << "  --spec <name>                osaka, prague, cancun, shanghai, latest; default osaka\n"
+        << "  --spec <name>                amsterdam, osaka, prague, cancun, shanghai, latest; default osaka\n"
         << "  --host-profile <null|mock>   fixture host profile label, default null\n"
         << "  --mode <advanced|baseline>   evmone mode, default advanced\n"
         << "  --summary                    print fixture metadata to stderr\n";

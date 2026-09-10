@@ -16,13 +16,13 @@ on:
         required: true
         default: "osaka"
       bench_support_min:
-        description: "Minimum compiled evmz benchmark fork"
-        required: true
-        default: "osaka"
+        description: "Minimum compiled evmz benchmark fork (blank uses spec)"
+        required: false
+        default: ""
       bench_support_max:
-        description: "Maximum compiled evmz benchmark fork"
-        required: true
-        default: "osaka"
+        description: "Maximum compiled evmz benchmark fork (blank uses spec)"
+        required: false
+        default: ""
       fixture:
         description: "Optional single fixture path, for example fixtures/vm-loop/erc20-transfer"
         required: false
@@ -50,8 +50,8 @@ jobs:
       NUM_RUNS: ${{ inputs.num_runs }}
       WARMUP_MS: ${{ inputs.warmup_ms }}
       SPEC: ${{ inputs.spec }}
-      BENCH_SUPPORT_MIN: ${{ inputs.bench_support_min }}
-      BENCH_SUPPORT_MAX: ${{ inputs.bench_support_max }}
+      BENCH_SUPPORT_MIN: ${{ inputs.bench_support_min || inputs.spec }}
+      BENCH_SUPPORT_MAX: ${{ inputs.bench_support_max || inputs.spec }}
       FIXTURE: ${{ inputs.fixture }}
       ENGINES: ${{ inputs.engines }}
 
@@ -95,7 +95,7 @@ jobs:
             cargo -V
           } | tee "bench/${OUT_DIR}/environment.txt"
 
-      - name: Run fixed-Osaka comparison
+      - name: Run selected-fork comparison
         run: |
           set -euo pipefail
 
