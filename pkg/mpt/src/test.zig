@@ -1099,6 +1099,52 @@ test "sparse update validates the full batch before mutation" {
     try std.testing.expectError(error.EmptyValue, trie.updateSorted(mpt.empty_root, mpt.WitnessIndex.empty, &empty));
 }
 
+test "catalog byte references agree with the general proof decoder" {
+    const trie = mpt.init(std.testing.allocator);
+    // Byte prefixes cover empty/hash references and their malformed alternatives.
+    // Keep child zero empty so the proof validates the branch without following
+    // an opaque hash. The branch value and child one make it non-degenerate.
+    for (0..0xc0) |prefix| {
+        for (0..35) |payload_len| {
+            var buffer: [128]u8 = @splat(0x55);
+            const start = 1 + payload_len % 8;
+            var end = start + 2;
+            const child_index = 2 + prefix % 14;
+            for (0..16) |index| {
+                if (index == 1) {
+                    buffer[end] = 0xa0;
+                    end += 33;
+                } else if (index == child_index) {
+                    buffer[end] = @intCast(prefix);
+                    end += 1 + payload_len;
+                } else {
+                    buffer[end] = 0x80;
+                    end += 1;
+                }
+            }
+            buffer[end] = 1;
+            end += 1;
+            const len = end - start - 2;
+            buffer[start] = 0xf8;
+            buffer[start + 1] = if (len < 56) @intCast(0xc0 + len) else @intCast(len);
+            const encoded = buffer[start + @intFromBool(len < 56) .. end];
+            const digest = mpt.StdKeccak256Context.keccak256(.{}, encoded);
+            var indexed = try trie.indexWitness(&.{encoded});
+            defer indexed.deinit();
+            var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
+            defer builder.deinit();
+            const actual = builder.authenticateRoot(digest);
+            if (indexed.lookup(digest, &.{0})) |expected| {
+                var catalog = try builder.finish();
+                defer catalog.deinit();
+                try expectSameLookup(expected, try catalog.lookup(try actual, &.{0}));
+            } else |_| {
+                if (actual) |_| return error.ExpectedInvalidReference else |_| {}
+            }
+        }
+    }
+}
+
 fn expectAbsence(expected: mpt.Absence, lookup: mpt.Lookup) !void {
     switch (lookup) {
         .present => return error.ExpectedAbsent,
