@@ -47,14 +47,12 @@ pub const MemoryStore = @import("./state/MemoryStore.zig");
 pub const StorageKey = storage.Key;
 pub const storageStatus = storage.status;
 
-/// One call-scope rollback record, shared by every execution state model.
+/// Rollback boundary owned by one State and attempt. Close in LIFO order.
+/// Checkpoints carry no owner or epoch qualifier; callers must not use them
+/// with another State or after `discardAccepted` resets the generation clock.
 pub const Checkpoint = struct {
-    /// An attempt is identified by the generation its root took from the
-    /// State's clock. Scope checkpoints are only valid within that attempt.
-    /// Epoch-local: the clock restarts at `discardAccepted`, and a copy kept
-    /// across it is not detected. `discardAccepted` asserts no attempt is
-    /// live, so such a copy is already resolved; only branch snapshots are
-    /// meant to outlive an attempt, and they carry `world_epoch`.
+    /// Generation issued at attempt begin. Valid only for that attempt on its
+    /// owning State; copies retained across a clock reset are not detected.
     pub const AttemptId = Generation;
 
     /// Retained log-buffer lengths at scope open.
@@ -64,25 +62,17 @@ pub const Checkpoint = struct {
         data_len: u32,
     };
 
-    /// Generation this checkpoint opened. It must be active when the checkpoint
-    /// closes; one clock issues every attempt and scope, so within an epoch a
-    /// checkpoint from another attempt can never match. Across
-    /// `discardAccepted` the value is reissued and not checked; see
-    /// `AttemptId`. Guard ownership keeps every checkpoint inside its attempt.
+    /// Generation that must be active when this checkpoint closes.
     scope: Generation,
-    /// Generation that becomes active after close. Lanes whose generation is
-    /// per transaction rather than per scope restore the same value.
+    /// Generation restored when this checkpoint closes.
     parent_scope: Generation,
     journal_len: u32,
     changed_accounts_len: u32,
     changed_storage_len: u32,
-    /// Transaction-scoped wipe list length; zero for lanes that keep wipes at
-    /// block lifetime and unwind them through the journal.
-    storage_wipes_len: u32,
     logs: Log,
 
     comptime {
-        std.debug.assert(@sizeOf(Checkpoint) == 36);
+        std.debug.assert(@sizeOf(Checkpoint) == 32);
     }
 };
 
