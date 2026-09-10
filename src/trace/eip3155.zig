@@ -121,8 +121,10 @@ fn writeStep(
     );
     try writeHexBytes(writer, view.state.return_data);
     try writer.print(",\"refund\":{d}", .{refund});
-    if (std.enums.fromInt(Opcode, view.row.opcode)) |opcode| {
-        try writer.print(",\"opName\":\"{s}\"", .{@tagName(opcode)});
+    // Opcode is non-exhaustive, so every byte converts; only named opcodes get
+    // an opName. @tagName on an unnamed value is a safety panic.
+    if (std.enums.tagName(Opcode, @as(Opcode, @enumFromInt(view.row.opcode)))) |name| {
+        try writer.print(",\"opName\":\"{s}\"", .{name});
     }
     try writer.writeAll("}\n");
 }
@@ -218,6 +220,42 @@ test "EIP-3155 replay writes required step fields in canonical order" {
     try std.testing.expectEqualStrings(
         "{\"pc\":0,\"op\":96,\"gas\":\"0x64\",\"gasCost\":\"0x3\",\"memSize\":0,\"stack\":[],\"depth\":1,\"returnData\":\"0x\",\"refund\":2,\"opName\":\"PUSH1\"}\n" ++
             "{\"pc\":2,\"op\":0,\"gas\":\"0x61\",\"gasCost\":\"0x0\",\"memSize\":0,\"stack\":[\"0x2a\"],\"depth\":1,\"returnData\":\"0x\",\"refund\":2,\"opName\":\"STOP\"}\n",
+        output.written(),
+    );
+}
+
+test "EIP-3155 replay omits opName for undefined opcodes" {
+    var trace_tape = tape.TraceTape.initGrowable(std.testing.allocator);
+    defer trace_tape.deinit();
+    const mark = try trace_tape.begin(.{});
+    const frame = try trace_tape.appendFrame(.{
+        .frame_id = 0,
+        .parent_frame_id = null,
+        .depth = 0,
+        .kind = .root,
+    });
+    const undefined_op = try trace_tape.appendStep(.{
+        .frame_id = 0,
+        .pc = 0,
+        .opcode = 0x0c,
+        .gas_before = 100,
+        .refund_before = 0,
+        .stack_len = 0,
+        .memory_size = 0,
+    });
+    try trace_tape.finishStep(undefined_op, .{ .pc_next = 1, .gas_after = 0, .outcome = .invalid, .stack = &.{} });
+    try trace_tape.finishFrame(frame, .{
+        .outcome = .invalid,
+        .memory_size = 0,
+    });
+    const span = try trace_tape.finish(mark);
+    defer trace_tape.resolve(span) catch unreachable;
+
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeSteps(&output.writer, span);
+    try std.testing.expectEqualStrings(
+        "{\"pc\":0,\"op\":12,\"gas\":\"0x64\",\"gasCost\":\"0x64\",\"memSize\":0,\"stack\":[],\"depth\":1,\"returnData\":\"0x\",\"refund\":0}\n",
         output.written(),
     );
 }
