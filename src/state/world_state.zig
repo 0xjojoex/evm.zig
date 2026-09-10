@@ -1,43 +1,23 @@
-//! One execution-state machine over a `World`.
+//! Transaction and scope lifecycle over a `World` that owns execution rows.
 //!
-//! `WorldState(World)` owns everything that does not depend on how a key
-//! becomes a row: the scope journal, scope generations, warmth stamps,
-//! transient storage, observation rows, the dirty and changed id lists,
-//! retain compaction, lifecycle settlement, logs, and branch snapshots. The
-//! `World` owns the rows and answers what actually varies between the open
-//! and the closed lane (`checkWorld`): how a key resolves to a row id, what a
-//! miss means, where pre-state comes from, and whether trie order is known
-//! up front.
+//! `WorldState(World)` owns rollback, observations, and accepted branch tracking.
+//! `World` supplies row, key resolution, parent reads, and optional trie
+//! ordering.
+//! Rows retain their id across attempts and hold a value from admission
 //!
-//! Parent code is the world's when it caches one (`caches_parent_code`): the
-//! state's `CodeStore` then holds only block-introduced code. A closed world
-//! hands the witness's parent code to the store at init instead.
+//! `findAccount`/`findStorage` query existing rows and may update lookup memos.
+//! `resolveAccount`/`resolveStorage` may admit rows.
+//! reader and trie boundaries use `Address`. Open-world warmth for keys without
+//! rows is tracked separately, so warming does not require parent I/O.
 //!
-//! `findAccount`/`findStorage` answer only for rows the world already holds
-//! and may keep a lookup memo, so they take the world mutably;
-//! `resolveAccount`/`resolveStorage` may also admit.
+//! A world with `caches_parent_code` owns cached parent code; the State's code
+//! store holds introduced code. Otherwise parent code is supplied to the store
+//! at initialization.
 //!
-//! Accounts are keyed by `AddressWord` in both worlds: the interpreter already
-//! holds addresses as words, so the key reaches the row with no conversion,
-//! and a word key compares in registers where twenty bytes would not
-//! (measured on RV64 with unaligned scalar loads enabled, and native).
-//! `Address` appears only at the reader and trie boundary.
-//!
-//! Rows are dense and block-lifetime. Every row holds a real value from the
-//! moment it exists. Open-world warmth for keys without rows lives separately
-//! until the transaction ends, so warming never requires parent I/O. Transaction
-//! dirtiness is a generation stamp on the row, the accepted layer is block flags plus
-//! journal reconstruction, and `retain` is list compaction rather than a copy
-//! between maps. Every attempt records observations; `beginObservedTransaction`
-//! only marks the attempt as one whose observations a projector may read.
-//!
-//! An attempt may be written before its execution scope opens: family
-//! lifecycle effects (an OP deposit mint, gas prepayment) are the baseline the
-//! scope's checkpoints restore to, and only `discard` reverts them. Every
-//! attempt therefore starts on a root scope generation of its own. Reads with
-//! no attempt open, or on a sealed attempt, are allowed and record nothing:
-//! block-lifecycle admission inspects state before it opens the managed
-//! attempt, and a sealed attempt is inspected before it resolves.
+//! An attempt permits writes before its execution scope opens. Those writes
+//! survive scope rollback and are undone by discarding the attempt. Reads outside
+//! an open, unsealed attempt do not record observations. Every attempt tracks
+//! observations; `beginObservedTransaction` also enables their sealed view.
 
 const std = @import("std");
 
@@ -103,29 +83,29 @@ pub const StorageFlags = packed struct {
     _padding: u7 = 0,
 };
 
-/// One tick of a State's lifetime clock. Issued for every attempt, execution
-/// root, and checkpoint scope, and never reissued while the State's rows live.
-/// Rows keep copies as stamps and compare them with the clock value for the
-/// lifetime in question; `none` is the stamp of a row no lifetime has touched,
-/// so a fresh row never matches a live generation.
+/// A lifetime identifier issued by the State clock. Nonzero values are unique
+/// between clock resets; row stamps compare with the active lifetime's value.
+/// `none` denotes an unset or cleared stamp and is never issued by the clock.
 pub const Generation = enum(u32) {
     none = 0,
     _,
 
-    /// Asserts the clock has not run out; exhaustion is a programmer error
-    /// until an epoch reset bounds it.
+    /// Return the successor. Requires a value below `maxInt(u32)`; overflow is
+    /// safety-checked illegal behavior, with no wrap or reset policy here.
     pub inline fn next(self: Generation) Generation {
         return @enumFromInt(@intFromEnum(self) + 1);
     }
 };
 
-/// Version of one account's storage. Every admitted row starts on `parent`;
-/// a wipe advances the account's incarnation, and a slot whose incarnation
-/// trails its account reads as zero. Rewinds with the rows it describes.
+/// Version of one account's storage, initially `parent`. A wipe advances the
+/// account's incarnation; a slot with a different incarnation reads as zero.
+/// Restored alongside row values by rollback and branch restoration.
 pub const Incarnation = enum(u32) {
     parent = 0,
     _,
 
+    /// Return the successor. Requires a value below `maxInt(u32)`; overflow is
+    /// safety-checked illegal behavior, with no wrap or reset policy here.
     pub inline fn next(self: Incarnation) Incarnation {
         return @enumFromInt(@intFromEnum(self) + 1);
     }
@@ -139,7 +119,7 @@ pub const ObservationHandle = struct {
     index: u32 = 0,
 };
 
-/// First storage undo record for the transaction matching `transaction`. A
+/// Index of the first storage undo record in the transaction matching `transaction`. A
 /// current handle also marks the slot as transaction-dirty. The first write
 /// captures it; scope rollback restores the previous handle with the value.
 pub const TransactionUndoHandle = struct {
@@ -147,19 +127,10 @@ pub const TransactionUndoHandle = struct {
     index: u32 = 0,
 };
 
-/// One block-lifetime account row. `current` is the value the world holds at
-/// this point of the block: `null` is absent. The world seeds it from parent
-/// state when the row is admitted and never leaves it unset.
-///
-/// Use a stamp when a clock move should invalidate tracking information lazily: the row
-/// is warm, journaled, dirty, or observed exactly when the stamp equals the
-/// State's current generation for that lifetime, so ending a lifetime clears
-/// every row at once without touching it. Use a bool when explicit
-/// transitions already maintain the flag: most `flags` live with the row,
-/// `created` and `selfdestructed` are cleared by `finalize`, and
-/// `lifecycle_listed` by the list that owns it. Nested revert treats stamps
-/// three ways, noted per field: restored from the undo record, cleared to
-/// `none`, or never unwound.
+/// Account value and tracking metadata retained across attempts until rows reset.
+/// `current` is initialized on admission; `null` means absent, never unloaded.
+/// Each stamp is qualified by its named lifetime and follows the rollback rule
+/// documented on that field.
 pub const AccountRow = struct {
     current: ?Account,
     code_ref: CodeRef,
@@ -169,21 +140,24 @@ pub const AccountRow = struct {
     lifecycle_listed: bool = false,
     /// Scope that already holds this row's undo record. Restored by undo.
     journaled_scope: Generation = .none,
-    /// Transaction in which the row became warm (EIP-2929). Warmth only grows
-    /// within a transaction, so revert clears it to `none`: the row cannot
-    /// have been warm before the scope that journaled it.
+    /// Transaction in which the row became warm. Only a cold-to-warm transition
+    /// adds a warmth undo entry; reverting that entry clears this stamp to `none`.
     warm_transaction: Generation = .none,
-    /// Never unwound: a read that happened stays observed after revert; only
-    /// the observed effect reverts.
+    /// Membership and recorded reads survive scope rollback; effects revert.
+    /// Observation records are released when the attempt ends.
     observation: ObservationHandle = .{},
-    /// Transaction in which the account changed. Restored by undo.
+    /// Transaction in which the account was marked dirty. Restored by undo.
     dirty_transaction: Generation = .none,
-    /// Advanced by each storage wipe; slots whose incarnation trails it read
+    /// Advanced by each storage wipe; slots with a different incarnation read
     /// as zero. Restored by undo.
     storage_incarnation: Incarnation = .parent,
     /// Transaction in which storage was wiped; deduplicates the wipe list.
     /// Restored by undo.
     wiped_transaction: Generation = .none,
+
+    comptime {
+        std.debug.assert(@sizeOf(AccountRow) == 144);
+    }
 
     /// Row for a value the world just admitted; code binds lazily.
     pub fn admitted(current: ?Account) AccountRow {
@@ -197,26 +171,23 @@ pub const AccountRow = struct {
     }
 };
 
-/// One block-lifetime storage row. `current` is the raw value written under
-/// `storage_incarnation`; a slot is effectively zero when its incarnation
-/// trails the owning account's, which is how a storage wipe hides every row
-/// at once. Stamps follow the rules on `AccountRow`.
+/// Storage value and tracking metadata retained across attempts until rows reset.
+/// `current` was written under `storage_incarnation`; the effective value is zero
+/// when that incarnation differs from the owning account's.
 pub const StorageRow = struct {
     current: u256,
     /// EIP-2200 original for the transaction in `original_transaction`.
-    /// Captured once per transaction, never unwound.
+    /// Captured on first use in that transaction; preserved across scope rollback.
     transaction_original: u256 = 0,
     /// EIP-2200 original for the execution root in `execution_original_scope`.
-    /// Captured once per root, never unwound. Both originals stay flat next
-    /// to their stamps: nesting each as a value/stamp struct pads the row
-    /// from 144 to 160 bytes (u256 aligns to 16 on native and rv64).
+    /// Captured on first use in that execution root; preserved across nested rollback.
     execution_original: u256 = 0,
     flags: StorageFlags = .{},
     /// Scope that already holds this row's undo record. Restored by undo.
     journaled_scope: Generation = .none,
     /// Cleared to `none` by revert; see `AccountRow.warm_transaction`.
     warm_transaction: Generation = .none,
-    /// Never unwound; see `AccountRow.observation`.
+    /// Preserved across scope rollback; see `AccountRow.observation`.
     observation: ObservationHandle = .{},
     original_transaction: Generation = .none,
     execution_original_scope: Generation = .none,
@@ -224,6 +195,10 @@ pub const StorageRow = struct {
     transaction_undo: TransactionUndoHandle = .{},
     /// Incarnation `current` was written under. Restored by undo.
     storage_incarnation: Incarnation = .parent,
+
+    comptime {
+        std.debug.assert(@sizeOf(StorageRow) == 144);
+    }
 };
 
 /// Heap-owned values for every world row at one branch boundary. The world
@@ -271,7 +246,7 @@ pub const TransientKey = extern struct {
 
     /// Total order for the balanced-tree map: address words, then slot words.
     pub fn order(a: TransientKey, b: TransientKey) std.math.Order {
-        const address_order = AddressWord.order(a.address_word, b.address_word);
+        const address_order = a.address_word.order(b.address_word);
         if (address_order != .eq) return address_order;
         inline for (a.slot_words, b.slot_words) |left, right| {
             if (left != right) return std.math.order(left, right);
@@ -280,7 +255,7 @@ pub const TransientKey = extern struct {
     }
 
     pub inline fn eql(a: TransientKey, b: TransientKey) bool {
-        return AddressWord.eql(a.address_word, b.address_word) and
+        return a.address_word.eql(b.address_word) and
             a.slot_words[0] == b.slot_words[0] and
             a.slot_words[1] == b.slot_words[1] and
             a.slot_words[2] == b.slot_words[2] and
@@ -404,30 +379,14 @@ pub fn WorldState(comptime World: type) type {
         observed_accounts: std.ArrayList(AccountObservationRow) = .empty,
         observed_storage: std.ArrayList(StorageObservationRow) = .empty,
         journal: Journal = .{},
-        /// Last generation issued. Every attempt root, execution root, and
-        /// checkpoint scope takes the next tick, so no two lifetimes share a
-        /// value while rows carry stamps. `discardAccepted` rewinds it together
-        /// with the rows; seeding does not, because rows keep their stamps.
-        ///
-        /// Ticks per attempt: two at begin (the root and the pre-scope
-        /// journaling scope), one each for scope open and close, one per
-        /// checkpoint. A family attempt opens a fixed handful of checkpoints
-        /// (preparation, execution, finalize) plus one per call or create
-        /// frame, and a discarded attempt still spends its fixed ticks. Within
-        /// one block every frame costs at least the cheapest call and every
-        /// attempt at least the intrinsic gas, so a block of gas limit G issues
-        /// fewer than G / 100 + 12 * G / 21000 ticks, far inside u32.
-        ///
-        /// That is a bound per epoch, and an epoch is at most one claimed
-        /// block: `block.Claim.begin` refuses a non-empty accepted branch, so a
-        /// fold reaches its next claim only through `discardAccepted`. A State
-        /// driven without block claims (manual attempts, simulation) has no
-        /// reset and no gas bound; `Generation.next` asserts before the clock
-        /// wraps, and such a consumer must supply its own epoch boundary.
+        /// Last issued lifetime identifier. Advances for attempt setup, execution
+        /// scope boundaries, and checkpoints; rollback never rewinds it.
+        /// `discardAccepted` resets it together with the rows. Seeding and branch
+        /// restoration preserve it because retained rows may carry old stamps.
+        /// The caller must bound total ticks between resets below u32 exhaustion.
         clock: Generation = .none,
-        /// Root generation of the current or most recent attempt. Transaction
-        /// stamps compare with it; it keeps its last value between attempts so a
-        /// stamp that was never set (`none`) cannot match.
+        /// Generation qualifying transaction stamps. Set at attempt begin and
+        /// retained after completion; reset rows have `none` stamps.
         transaction_generation: Generation = .none,
         /// Advanced by `discardAccepted` and seeding; a branch snapshot is only valid
         /// within the epoch that captured it.
@@ -789,9 +748,10 @@ pub fn WorldState(comptime World: type) type {
             }
         };
 
-        /// Heap copy of every row and the lists that retain compacts in place. Capture
-        /// allocates; restore is allocation-free and copies the rows back. Only valid
-        /// between transactions and within one `world_epoch`.
+        /// Owned snapshot of accepted rows, logs, and change lists. Capture requires
+        /// no active attempt. Restore requires the same State and `world_epoch`,
+        /// consumes this snapshot, and may discard an attempt whose scope is closed.
+        /// Capture and clone allocate; restore does not. Call `deinit` after use.
         pub const BranchSnapshot = struct {
             owner: *const State,
             allocator: Allocator,
@@ -1064,15 +1024,21 @@ pub fn WorldState(comptime World: type) type {
             try self.world.reserveRows(hint);
         }
 
+        /// Start a mutable attempt on the accepted branch, with no execution scope.
+        /// Asserts no attempt is active and the journal is empty. The returned id
+        /// is valid only for this attempt; finish it with `retain` or `discard`.
+        /// Observations are tracked internally but not exposed through the pending view.
         pub fn beginTransaction(self: *State) AttemptId {
             return self.beginTransactionMode(false);
         }
 
+        /// Start an attempt as in `beginTransaction`, enabling observation access
+        /// through the pending view after sealing.
         pub fn beginObservedTransaction(self: *State) AttemptId {
             return self.beginTransactionMode(true);
         }
 
-        fn beginTransactionMode(self: *State, observe: bool) AttemptId {
+        fn beginTransactionMode(self: *State, comptime observe: bool) AttemptId {
             std.debug.assert(!self.transaction_active);
             std.debug.assert(self.journal.isEmpty());
             self.transaction_generation = self.tick();
@@ -1107,6 +1073,9 @@ pub fn WorldState(comptime World: type) type {
             return id;
         }
 
+        /// Open an execution root and establish a fresh execution-original lifetime.
+        /// Asserts a mutable attempt with no open scope. Earlier attempt writes
+        /// remain outside this root's checkpoints.
         pub fn beginScope(self: *State) void {
             self.assertMutable();
             std.debug.assert(self.scope_depth == 0);
@@ -1115,6 +1084,9 @@ pub fn WorldState(comptime World: type) type {
             self.scope_depth = 1;
         }
 
+        /// Close the execution root without reverting writes or ending the attempt.
+        /// Asserts the root is active with no nested checkpoints. Subsequent writes
+        /// use a fresh journaling scope and execution-original lifetime.
         pub fn closeScope(self: *State) void {
             self.assertRootScope();
             self.active_scope_generation = self.tick();
@@ -1140,9 +1112,10 @@ pub fn WorldState(comptime World: type) type {
             return self.scope_depth > 1;
         }
 
-        /// The returned value is the complete scope record. The block-lifetime dirty
-        /// and wipe lists need no saved lengths because revert restores row flags
-        /// through the journal and stale entries are compacted out at `retain`.
+        /// Open a nested rollback scope. Asserts an active attempt and scope.
+        /// Commit or revert the returned checkpoint in LIFO order on this State,
+        /// within the same attempt. Block dirty lists use undo-restored row flags
+        /// and retain-time compaction rather than saved lengths.
         pub fn checkpoint(self: *State) Checkpoint {
             self.assertTransaction();
             std.debug.assert(self.scope_depth != std.math.maxInt(u32));
@@ -1156,21 +1129,22 @@ pub fn WorldState(comptime World: type) type {
                 .journal_len = @intCast(self.journal.entries.items.len),
                 .changed_accounts_len = @intCast(self.changed_accounts.items.len),
                 .changed_storage_len = @intCast(self.changed_storage.items.len),
-                .storage_wipes_len = 0,
                 .logs = self.logs.checkpoint(),
             };
         }
 
+        /// Close the active checkpoint while retaining its writes and undo records
+        /// for any enclosing rollback. Asserts that this checkpoint is current.
         pub fn commitCheckpoint(self: *State, checkpoint_state: Checkpoint) void {
             self.assertCheckpoint(checkpoint_state);
             self.active_scope_generation = checkpoint_state.parent_scope;
             self.scope_depth -= 1;
         }
 
-        /// Journal unwind restores row values and flags, so entries appended to the
-        /// block-lifetime dirty lists inside the reverted scope become stale
-        /// (flag-false) rather than being truncated here; `retain` compacts them.
-        /// Introduced codes unwind through their own journal entries.
+        /// Undo and close the active checkpoint, restoring its parent scope.
+        /// Asserts that this checkpoint is current. Recorded reads survive;
+        /// values, effects, and introduced warmth unwind through the journal.
+        /// Block dirty lists retain stale entries until retain-time compaction.
         pub fn revertToCheckpoint(self: *State, checkpoint_state: Checkpoint) void {
             self.assertCheckpoint(checkpoint_state);
             self.transaction_scope_reverted = true;
@@ -1182,6 +1156,9 @@ pub fn WorldState(comptime World: type) type {
             self.scope_depth -= 1;
         }
 
+        /// Freeze the current attempt for pending-view access without accepting it.
+        /// Asserts a matching id, an unsealed attempt, and no open scope.
+        /// The sealed attempt must still be retained or discarded.
         pub fn seal(self: *State, id: AttemptId) void {
             self.assertCurrent(id);
             std.debug.assert(!self.sealed);
@@ -1192,7 +1169,9 @@ pub fn WorldState(comptime World: type) type {
             self.attempt_open = false;
         }
 
-        /// Retain block-current values and observations; discard rollback payloads.
+        /// Accept the current attempt's values, retain its logs, and end it.
+        /// Release transaction observations and undo records.
+        /// Asserts a matching id, a sealed attempt, and no open scope.
         pub fn retain(self: *State, id: AttemptId) void {
             self.assertCurrent(id);
             std.debug.assert(self.sealed);
@@ -1206,7 +1185,9 @@ pub fn WorldState(comptime World: type) type {
             self.finishTransaction();
         }
 
-        /// Restore the block state before this transaction and discard its observations.
+        /// Undo the entire attempt, including writes before its execution root.
+        /// Release its logs and observations. Asserts a matching id and no open
+        /// scope; sealing is not required.
         pub fn discard(self: *State, id: AttemptId) void {
             self.assertCurrent(id);
             std.debug.assert(!self.scopeActive());
@@ -1222,6 +1203,8 @@ pub fn WorldState(comptime World: type) type {
             self.finishTransaction();
         }
 
+        /// Allocate a snapshot of the accepted branch. Asserts no active attempt.
+        /// The caller owns the snapshot and must deinitialize it after use.
         pub fn branchSnapshot(self: *State) Allocator.Error!BranchSnapshot {
             std.debug.assert(!self.transaction_active);
             var rows = try self.world.captureSnapshot(self.allocator);
@@ -1249,6 +1232,10 @@ pub fn WorldState(comptime World: type) type {
             };
         }
 
+        /// Restore an unresolved snapshot without allocation. Asserts the same
+        /// owner and epoch. If an attempt is active, its scope must be closed;
+        /// that attempt is discarded first. Marks the snapshot resolved without
+        /// freeing it. The generation clock remains advanced.
         pub fn restoreBranch(self: *State, snapshot: *BranchSnapshot) void {
             std.debug.assert(snapshot.owner == self);
             std.debug.assert(snapshot.world_epoch == self.world_epoch);
@@ -1725,8 +1712,10 @@ pub fn WorldState(comptime World: type) type {
             self.commitCheckpoint(checkpoint_state);
         }
 
-        /// Reset the branch to parent state; introduced code is reclaimed and
-        /// every row goes back to the value the world admitted it with.
+        /// Reset rows to parent state and release accepted changes and introduced
+        /// code. Asserts no active attempt. Advances `world_epoch`, invalidating
+        /// branch snapshots, and resets the generation clock. Attempt ids and
+        /// checkpoints must not be reused across this boundary; they carry no epoch.
         pub fn discardAccepted(self: *State) void {
             std.debug.assert(!self.transaction_active);
             self.code.truncateIntroduced(self.allocator, 0);
@@ -1738,11 +1727,7 @@ pub fn WorldState(comptime World: type) type {
             self.block_introduced_codes.clearRetainingCapacity();
             self.retained_logs.clearRetainingCapacity();
             self.world_epoch += 1;
-            // Every row is back to its admitted stamps, so no generation issued
-            // in the previous epoch can match anything; the clock restarts.
-            // Attempt ids and checkpoints are epoch-local and are not checked
-            // against the epoch: a copy kept across this call is reissued
-            // meaning. Only branch snapshots cross it, and they carry the epoch.
+            // Reset rows carry only initial stamps, so the clock may restart.
             self.clock = .none;
         }
 
@@ -2096,7 +2081,7 @@ pub fn WorldState(comptime World: type) type {
             return self.observed_accounts.items[row.observation.index].original;
         }
 
-        /// Storage value as the accepted branch sees it, honoring a wipe generation
+        /// Storage value as the accepted branch sees it, honoring a storage incarnation
         /// that the active transaction may have advanced.
         fn acceptedStorageValue(self: *const State, id: StorageId) u256 {
             if (!self.transaction_active) return self.effectiveStorage(id);
@@ -2191,8 +2176,8 @@ pub fn WorldState(comptime World: type) type {
         }
 
         /// Reserve, journal, and list the row for its first change at every layer;
-        /// the caller applies the change to the returned row. Assumes the row was
-        /// observed in this transaction, which every mutation path guarantees.
+        /// the caller applies the change to the returned row. Asserts the row was
+        /// observed in this transaction.
         fn prepareAccountMutation(self: *State, id: AccountId) Allocator.Error!*AccountRow {
             const row = self.world.accountRow(id);
             std.debug.assert(row.observation.transaction == self.transaction_generation);
@@ -2281,15 +2266,13 @@ pub fn WorldState(comptime World: type) type {
             row.journaled_scope = self.active_scope_generation;
         }
 
-        /// Issue the next generation. A stamp taken from an earlier attempt or
-        /// scope can never equal a later tick, so one compare answers "is this
-        /// row current in that lifetime" without knowing which attempt set it.
+        /// Advance the State clock and return the issued generation.
         fn tick(self: *State) Generation {
             self.clock = self.clock.next();
             return self.clock;
         }
 
-        /// Drop slots whose generation a wipe left behind so the transaction delta
+        /// Drop slots whose incarnation a wipe left behind so the transaction delta
         /// carries only slots the retained branch will keep.
         fn compactTransactionStorageChanges(self: *State) void {
             var write: usize = 0;
@@ -2322,7 +2305,7 @@ pub fn WorldState(comptime World: type) type {
         /// already false). Only scope reverts can create revert-then-redirty repeats;
         /// that path consumes each row's flag so only the first live occurrence
         /// survives, then restores the flag on the kept entries. Wipe-only compaction
-        /// preserves unique membership and filters stale generations in one pass.
+        /// preserves unique membership and filters stale incarnations in one pass.
         fn compactAcceptedStorageChanges(self: *State) void {
             const deduplicate = self.transaction_scope_reverted;
             var write: usize = 0;
