@@ -170,10 +170,10 @@ test "Amsterdam invalid loaded authorization authority is a semantic access" {
     const accounts = executed.observations().accounts;
     var index: u32 = 0;
     while (index < accounts.len()) : (index += 1) {
-        const fact = accounts.at(index);
-        if (!Address.eql(fact.address, authority)) continue;
-        try std.testing.expect(fact.observation.semantic_access);
-        try std.testing.expect(!fact.effect.any());
+        const record = accounts.at(index);
+        if (!Address.eql(record.address, authority)) continue;
+        try std.testing.expect(record.observation.semantic_access);
+        try std.testing.expect(!record.effect.any());
         found = true;
         break;
     }
@@ -392,9 +392,9 @@ const AccountObservation = struct {
         const accounts = observation.observations().accounts;
         var index: u32 = 0;
         while (index < accounts.len()) : (index += 1) {
-            const fact = accounts.at(index);
-            if (Address.eql(fact.address, self.address)) {
-                try std.testing.expect(fact.observation.semantic_access);
+            const record = accounts.at(index);
+            if (Address.eql(record.address, self.address)) {
+                try std.testing.expect(record.observation.semantic_access);
                 self.found = true;
                 return;
             }

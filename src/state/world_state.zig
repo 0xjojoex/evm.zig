@@ -69,8 +69,8 @@ const StorageEffect = state_types.StorageEffect;
 const ChangeLayer = state_types.ChangeLayer;
 const AccountChange = state_types.AccountChange;
 const StorageChange = state_types.StorageChange;
-const AccountObservationFact = state_types.AccountObservationFact;
-const StorageObservationFact = state_types.StorageObservationFact;
+const AccountObservationRecord = state_types.AccountObservationRecord;
+const StorageObservationRecord = state_types.StorageObservationRecord;
 const StorageObservationMetadata = state_types.StorageObservationMetadata;
 const CodeHash = [32]u8;
 
@@ -140,7 +140,7 @@ fn advanceCounter(raw: u32) u32 {
 
 /// Index into the containing row's account or storage observation list, valid
 /// only in the transaction matching `transaction`. Scope rollback preserves the
-/// handle and read facts; observation effects unwind separately.
+/// handle and recorded reads; observation effects unwind separately.
 pub const ObservationHandle = struct {
     transaction: Generation = .none,
     index: u32 = 0,
@@ -158,11 +158,11 @@ pub const TransactionUndoHandle = struct {
 /// this point of the block: `null` is absent. The world seeds it from parent
 /// state when the row is admitted and never leaves it unset.
 ///
-/// A fact is a stamp when a clock move should invalidate it lazily: the row
+/// Use a stamp when a clock move should invalidate tracking information lazily: the row
 /// is warm, journaled, dirty, or observed exactly when the stamp equals the
 /// State's current generation for that lifetime, so ending a lifetime clears
-/// every row at once without touching it. A fact is a bool when explicit
-/// transitions already maintain its lifetime: most `flags` live with the row,
+/// every row at once without touching it. Use a bool when explicit
+/// transitions already maintain the flag: most `flags` live with the row,
 /// `created` and `selfdestructed` are cleared by `finalize`, and
 /// `lifecycle_listed` by the list that owns it. Nested revert treats stamps
 /// three ways, noted per field: restored from the undo record, cleared to
@@ -368,7 +368,7 @@ pub fn checkWorld(comptime World: type) void {
 
         if (options.authenticated_parents) {
             const commit_methods = [_][]const u8{
-                "accountTrieOrder", "storageTrieOrder", "accountTrieKey", "storageTrieKey", "accountFact",
+                "accountTrieOrder", "storageTrieOrder", "accountTrieKey", "storageTrieKey", "parentAccount",
             };
             for (commit_methods) |method| {
                 if (!std.meta.hasMethod(World, method)) @compileError(
@@ -616,7 +616,7 @@ pub fn WorldState(comptime World: type) type {
             }
         };
 
-        /// Dense transaction-local account facts. Ordering is internal; projectors own
+        /// Dense transaction-local account observation records. Ordering is internal; projectors own
         /// sorting and any retained representation.
         pub const AccountObservations = struct {
             state: *const State,
@@ -625,7 +625,7 @@ pub fn WorldState(comptime World: type) type {
                 return @intCast(self.state.observed_accounts.items.len);
             }
 
-            pub fn at(self: AccountObservations, index: u32) AccountObservationFact {
+            pub fn at(self: AccountObservations, index: u32) AccountObservationRecord {
                 const observed = &self.state.observed_accounts.items[index];
                 return .{
                     .address = self.state.world.accountAddress(observed.account),
@@ -642,7 +642,7 @@ pub fn WorldState(comptime World: type) type {
         };
 
         /// Dense transaction-local storage observations. Every observed slot carries a
-        /// complete value fact because a row holds a value from admission.
+        /// complete value record because a row holds a value from admission.
         pub const StorageObservations = struct {
             state: *const State,
 
@@ -650,7 +650,7 @@ pub fn WorldState(comptime World: type) type {
                 return @intCast(self.state.observed_storage.items.len);
             }
 
-            pub fn at(self: StorageObservations, index: u32) ?StorageObservationFact {
+            pub fn at(self: StorageObservations, index: u32) ?StorageObservationRecord {
                 const observed = &self.state.observed_storage.items[index];
                 const account = self.state.world.storageAccount(observed.storage);
                 return .{
@@ -700,7 +700,7 @@ pub fn WorldState(comptime World: type) type {
             }
         };
 
-        /// Borrowed cumulative branch facts. Projectors own output policy and
+        /// Borrowed cumulative branch changes. Projectors own output policy and
         /// allocation; this view only exposes the accepted state representation.
         pub const AcceptedView = struct {
             state: *const State,
@@ -744,8 +744,8 @@ pub fn WorldState(comptime World: type) type {
                 return self.state.world.storageTrieKey(id);
             }
 
-            pub fn accountFact(self: CommitView, id: AccountId) @TypeOf(self.state.world.accountFact(id)) {
-                return self.state.world.accountFact(id);
+            pub fn parentAccount(self: CommitView, id: AccountId) @TypeOf(self.state.world.parentAccount(id)) {
+                return self.state.world.parentAccount(id);
             }
 
             pub fn accountValue(self: CommitView, id: AccountId) ?Account {

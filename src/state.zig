@@ -145,7 +145,7 @@ pub const StorageChange = struct {
 
 /// One sealed account observation: what a transaction read or wrote for one
 /// address, with the value it started from and ended at. `null` is absent.
-pub const AccountObservationFact = struct {
+pub const AccountObservationRecord = struct {
     address: Address,
     original: ?Account,
     current: ?Account,
@@ -153,8 +153,8 @@ pub const AccountObservationFact = struct {
     effect: AccountEffect,
 };
 
-/// One sealed storage observation with a complete value fact.
-pub const StorageObservationFact = struct {
+/// One sealed storage observation with original and current values.
+pub const StorageObservationRecord = struct {
     address: Address,
     key: u256,
     original: u256,
@@ -164,7 +164,7 @@ pub const StorageObservationFact = struct {
 };
 
 /// The identity and flags of a storage observation without its values; gas-only
-/// access rows in the open lane have no value fact.
+/// access rows in the open lane have no captured values.
 pub const StorageObservationMetadata = struct {
     address: Address,
     key: u256,
@@ -270,7 +270,7 @@ pub fn checkChangesView(comptime View: type) void {
 /// provides one; `eth.commit` is the consumer.
 ///
 /// `authenticated_parents` says whether the view carries the parent trie
-/// facts itself through `accountFact(id)` (a closed world authenticated at
+/// records itself through `parentAccount(id)` (a closed world authenticated at
 /// admission) or the committer resolves parents from the witness by
 /// `accountTrieKey(id)`.
 pub fn checkCommitView(comptime Commit: type) void {
@@ -291,8 +291,8 @@ pub fn checkCommitView(comptime Commit: type) void {
                 "commit view " ++ @typeName(Commit) ++ " is missing '" ++ method ++ "'",
             );
         }
-        if (Commit.authenticated_parents and !std.meta.hasMethod(Commit, "accountFact")) @compileError(
-            "commit view " ++ @typeName(Commit) ++ " authenticates parents but has no 'accountFact'",
+        if (Commit.authenticated_parents and !std.meta.hasMethod(Commit, "parentAccount")) @compileError(
+            "commit view " ++ @typeName(Commit) ++ " authenticates parents but has no 'parentAccount'",
         );
     }
 }

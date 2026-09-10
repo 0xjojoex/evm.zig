@@ -9,7 +9,7 @@
 //! nonzero nonce, nonzero balance, or non-empty code - because from Amsterdam
 //! no legacy empty account survives and none can be created. `EXTCODEHASH` and
 //! `EXTCODESIZE` already treat absent and EIP-161-empty accounts identically,
-//! so the claim never needs an indexed lifecycle fact to separate them.
+//! so the claim never needs an indexed lifecycle record to separate them.
 //!
 //! This lane is speculative: its output is gated by the observed BAL hash
 //! matching the claimed BAL commitment and by the block's roots. A claim that

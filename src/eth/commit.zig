@@ -75,7 +75,7 @@ fn normalizeRootError(err: anyerror) RootError {
     };
 }
 
-/// Commit sealed rows through a witness catalog. Parent facts stay borrowed
+/// Commit sealed rows through a witness catalog. Parent records stay borrowed
 /// from the view when it authenticated them at admission, otherwise they are
 /// resolved from the catalog by hashed key; either way the catalog receives
 /// pre-hashed sorted updates.
@@ -169,7 +169,7 @@ fn parentAccount(
     account_id: anytype,
 ) trie.UpdateError!trie.Account {
     if (comptime @TypeOf(commit).authenticated_parents) {
-        return switch (commit.accountFact(account_id).parent) {
+        return switch (commit.parentAccount(account_id).parent) {
             .absent => .{},
             .present => |parent| parent,
         };

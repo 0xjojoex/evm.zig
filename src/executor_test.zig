@@ -23,7 +23,7 @@ const OpenState = evmz.state.OpenState;
 const prepared_code = evmz.prepared_code;
 const eip7702 = executor_module.eip7702;
 const ClaimPlan = @import("./eth/bal/ClaimPlan.zig").ClaimPlan;
-const ParentFacts = @import("./eth/bal/ParentFacts.zig");
+const ParentState = @import("./eth/bal/ParentState.zig");
 
 /// Standalone-message conveniences mirroring the executor's private
 /// `runStandalone*` forms: explicit (context, message, gas) with default scope.
@@ -126,10 +126,10 @@ test "closed world executor matches open world checkpoint discard" {
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_changes = &slots }};
     try bal.validate(&claims, .{ .transaction_count = 1 });
     const plan = try ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]ParentFacts.AccountFact{.{
+    const account_records = [_]ParentState.AccountRecord{.{
         .parent = .{ .present = .{ .nonce = 1, .balance = 10 } },
     }};
-    const storage_facts = [_]ParentFacts.StorageFact{.{
+    const storage_records = [_]ParentState.StorageRecord{.{
         .value = 3,
     }};
 
@@ -144,15 +144,15 @@ test "closed world executor matches open world checkpoint discard" {
         .state = .{ .reader = backing.reader() },
     });
     defer tracked.deinit();
-    const claim_facts = try ParentFacts.initCopy(
+    const parent_state = try ParentState.initCopy(
         std.testing.allocator,
-        &account_facts,
-        &storage_facts,
+        &account_records,
+        &storage_records,
     );
     const claim_state = try evmz.eth.bal.ClosedWorld.initState(
         std.testing.allocator,
         plan,
-        claim_facts,
+        parent_state,
         &.{},
     );
     const Closed = evmz.Executor(Latest.spec, evmz.eth.bal.ClosedWorld, .{});
@@ -696,9 +696,9 @@ test "top-level delegated target is a semantic account access" {
             const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
-                const fact = accounts.at(index);
-                if (evmz.Address.eql(fact.address, self.target)) {
-                    try std.testing.expect(fact.observation.semantic_access);
+                const record = accounts.at(index);
+                if (evmz.Address.eql(record.address, self.target)) {
+                    try std.testing.expect(record.observation.semantic_access);
                     self.found = true;
                 }
             }
@@ -744,10 +744,10 @@ test "delegated target is observed before insufficient call balance" {
             const accounts = observation.observations().accounts;
             var index: u32 = 0;
             while (index < accounts.len()) : (index += 1) {
-                const fact = accounts.at(index);
-                if (!evmz.Address.eql(fact.address, self.target)) continue;
-                try std.testing.expect(fact.observation.semantic_access);
-                try std.testing.expect(fact.observation.code_read);
+                const record = accounts.at(index);
+                if (!evmz.Address.eql(record.address, self.target)) continue;
+                try std.testing.expect(record.observation.semantic_access);
+                try std.testing.expect(record.observation.code_read);
                 self.found = true;
             }
         }
@@ -1020,14 +1020,14 @@ const CodeObservation = struct {
         var required_found = false;
         var index: u32 = 0;
         while (index < view.accounts.len()) : (index += 1) {
-            const fact = view.accounts.at(index);
-            if (!fact.observation.code_read) continue;
+            const record = view.accounts.at(index);
+            if (!record.observation.code_read) continue;
             code_reads += 1;
-            if (evmz.Address.eql(fact.address, self.required)) {
+            if (evmz.Address.eql(record.address, self.required)) {
                 required_found = true;
             }
             if (self.forbidden) |forbidden| {
-                try std.testing.expect(!evmz.Address.eql(fact.address, forbidden));
+                try std.testing.expect(!evmz.Address.eql(record.address, forbidden));
             }
         }
 
@@ -3131,12 +3131,12 @@ test "sealed observations expose storage state without a trace tape" {
             const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const fact = storage.at(index) orelse continue;
-                if (!evmz.Address.eql(fact.address, self.address) or fact.key != self.key) continue;
-                try std.testing.expect(fact.observation.value_read);
-                try std.testing.expect(fact.effect.written);
-                try std.testing.expectEqual(@as(u256, 0), fact.original);
-                try std.testing.expectEqual(self.expected, fact.current);
+                const record = storage.at(index) orelse continue;
+                if (!evmz.Address.eql(record.address, self.address) or record.key != self.key) continue;
+                try std.testing.expect(record.observation.value_read);
+                try std.testing.expect(record.effect.written);
+                try std.testing.expectEqual(@as(u256, 0), record.original);
+                try std.testing.expectEqual(self.expected, record.current);
                 return;
             }
             return error.ExpectedStorageObservationMissing;

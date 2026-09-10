@@ -153,9 +153,9 @@ test "gas-only storage access warms without loading or observing a row" {
     try std.testing.expectEqual(@as(u256, 2), metadata.key);
     try std.testing.expect(metadata.observation.value_read);
     try std.testing.expect(!metadata.effect.written);
-    const fact = storage.at(0).?;
-    try std.testing.expectEqual(@as(u256, 7), fact.original);
-    try std.testing.expectEqual(@as(u256, 7), fact.current);
+    const record = storage.at(0).?;
+    try std.testing.expectEqual(@as(u256, 7), record.original);
+    try std.testing.expectEqual(@as(u256, 7), record.current);
 }
 
 test "rows survive scope rollback while current mutations revert" {
@@ -667,9 +667,9 @@ test "slot first materialized after an accepted wipe starts from zero" {
     try std.testing.expectEqual(@as(u256, 0), state.world.storageRow(slot(&state, addr(1), 2)).transaction_original);
     state.closeScope();
     state.seal(attempt);
-    const fact = state.pendingView().observations().storage.at(0).?;
-    try std.testing.expectEqual(@as(u256, 0), fact.original);
-    try std.testing.expectEqual(@as(u256, 5), fact.current);
+    const record = state.pendingView().observations().storage.at(0).?;
+    try std.testing.expectEqual(@as(u256, 0), record.original);
+    try std.testing.expectEqual(@as(u256, 5), record.current);
     state.retain(attempt);
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_writes.len());
 }

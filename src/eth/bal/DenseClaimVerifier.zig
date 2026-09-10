@@ -161,8 +161,8 @@ pub fn append(
 
     var account_index: u32 = 0;
     while (account_index < view.accounts.len()) : (account_index += 1) {
-        const fact = view.accounts.at(account_index);
-        const fields = try observation.accountFields(view, fact) orelse continue;
+        const record = view.accounts.at(account_index);
+        const fields = try observation.accountFields(view, record) orelse continue;
         const id = view.accounts.idAt(account_index);
         const index = @intFromEnum(id);
         const state = &self.accounts[index];
@@ -201,7 +201,7 @@ pub fn append(
     while (storage_index < view.storage.len()) : (storage_index += 1) {
         const metadata = view.storage.metadataAt(storage_index);
         if (!metadata.observation.value_read and !metadata.effect.written) continue;
-        const fact = view.storage.at(storage_index) orelse
+        const record = view.storage.at(storage_index) orelse
             return error.IncompleteStorageObservation;
         const id = view.storage.idAt(storage_index);
         const index = @intFromEnum(id);
@@ -209,12 +209,12 @@ pub fn append(
         if (state.active_generation != self.active_generation) {
             state.active_generation = self.active_generation;
             self.active_storage[index] = .{
-                .original = fact.original,
-                .current = fact.current,
+                .original = record.original,
+                .current = record.current,
             };
             self.active_storage_ids.appendAssumeCapacity(id);
         } else {
-            self.active_storage[index].current = fact.current;
+            self.active_storage[index].current = record.current;
         }
     }
 }
@@ -386,7 +386,7 @@ const TestStorageEffect = struct {
     written: bool = false,
 };
 
-const TestAccountFact = struct {
+const TestAccountRecord = struct {
     address: bal.Address,
     original: ?Account,
     current: ?Account,
@@ -394,7 +394,7 @@ const TestAccountFact = struct {
     effect: TestAccountEffect = .{},
 };
 
-const TestStorageFact = struct {
+const TestStorageRecord = struct {
     address: bal.Address,
     key: u256,
     original: u256,
@@ -405,12 +405,12 @@ const TestStorageFact = struct {
 
 const TestAccountEntry = struct {
     id: AccountId,
-    fact: TestAccountFact,
+    record: TestAccountRecord,
 };
 
 const TestStorageEntry = struct {
     id: StorageId,
-    fact: TestStorageFact,
+    record: TestStorageRecord,
 };
 
 const TestView = struct {
@@ -421,8 +421,8 @@ const TestView = struct {
             return @intCast(self.items.len);
         }
 
-        pub fn at(self: Accounts, index: u32) TestAccountFact {
-            return self.items[index].fact;
+        pub fn at(self: Accounts, index: u32) TestAccountRecord {
+            return self.items[index].record;
         }
 
         pub fn idAt(self: Accounts, index: u32) AccountId {
@@ -437,16 +437,16 @@ const TestView = struct {
             return @intCast(self.items.len);
         }
 
-        pub fn at(self: Storage, index: u32) ?TestStorageFact {
-            return self.items[index].fact;
+        pub fn at(self: Storage, index: u32) ?TestStorageRecord {
+            return self.items[index].record;
         }
 
         pub fn idAt(self: Storage, index: u32) StorageId {
             return self.items[index].id;
         }
 
-        pub fn metadataAt(self: Storage, index: u32) TestStorageFact {
-            return self.items[index].fact;
+        pub fn metadataAt(self: Storage, index: u32) TestStorageRecord {
+            return self.items[index].record;
         }
     };
 
@@ -556,7 +556,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     const read_eight: StorageId = @enumFromInt(2);
     const first_accounts = [_]TestAccountEntry{.{
         .id = account_id,
-        .fact = .{
+        .record = .{
             .address = address,
             .original = .{},
             .current = .{ .balance = 100 },
@@ -565,14 +565,14 @@ test "dense claim verification matches generic coalescing and mutation rejection
         },
     }};
     const first_storage = [_]TestStorageEntry{
-        .{ .id = read_five, .fact = .{
+        .{ .id = read_five, .record = .{
             .address = address,
             .key = 5,
             .original = 4,
             .current = 4,
             .observation = .{ .value_read = true },
         } },
-        .{ .id = write_seven, .fact = .{
+        .{ .id = write_seven, .record = .{
             .address = address,
             .key = 7,
             .original = 0,
@@ -582,7 +582,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     };
     const third_accounts_a = [_]TestAccountEntry{.{
         .id = account_id,
-        .fact = .{
+        .record = .{
             .address = address,
             .original = .{ .balance = 100 },
             .current = .{ .balance = 110, .code_hash = code_hash_a },
@@ -591,7 +591,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     }};
     const third_storage_a = [_]TestStorageEntry{.{
         .id = write_seven,
-        .fact = .{
+        .record = .{
             .address = address,
             .key = 7,
             .original = 9,
@@ -601,7 +601,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     }};
     const third_accounts_b = [_]TestAccountEntry{.{
         .id = account_id,
-        .fact = .{
+        .record = .{
             .address = address,
             .original = .{ .balance = 110, .code_hash = code_hash_a },
             .current = .{ .balance = 120, .nonce = 1, .code_hash = code_hash_b },
@@ -610,7 +610,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     }};
     const third_storage_b = [_]TestStorageEntry{.{
         .id = write_seven,
-        .fact = .{
+        .record = .{
             .address = address,
             .key = 7,
             .original = 10,
@@ -620,7 +620,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     }};
     const fourth_accounts = [_]TestAccountEntry{.{
         .id = account_id,
-        .fact = .{
+        .record = .{
             .address = address,
             .original = .{ .balance = 120, .nonce = 1 },
             .current = .{ .balance = 120, .nonce = 2 },
@@ -629,7 +629,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     }};
     const wipe_accounts = [_]TestAccountEntry{.{
         .id = account_id,
-        .fact = .{
+        .record = .{
             .address = address,
             .original = .{ .balance = 120, .nonce = 2 },
             .current = .{},
@@ -638,7 +638,7 @@ test "dense claim verification matches generic coalescing and mutation rejection
     }};
     const wipe_storage = [_]TestStorageEntry{.{
         .id = read_eight,
-        .fact = .{
+        .record = .{
             .address = address,
             .key = 8,
             .original = 4,

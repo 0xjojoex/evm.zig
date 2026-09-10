@@ -25,7 +25,7 @@ const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || mpt.Error;
 const Pair = mpt.Entry;
 const Account = trie.Account;
-const AccountFacts = trie.AccountFacts;
+const AccountCache = trie.AccountCache;
 const Update = trie.Update;
 const empty_root_hash = trie.empty_root_hash;
 const root = trie.root;
@@ -399,15 +399,15 @@ test "MPT update root inserts into empty trie" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
-test "authenticated account facts preserve cached absence" {
-    var facts = AccountFacts.init(std.testing.allocator);
-    defer facts.deinit();
+test "authenticated account cache preserves cached absence" {
+    var cache = AccountCache.init(std.testing.allocator);
+    defer cache.deinit();
 
-    try facts.put(address.addr(1), null);
-    const cached = facts.get(address.addr(1));
+    try cache.put(address.addr(1), null);
+    const cached = cache.get(address.addr(1));
     try std.testing.expect(cached != null);
     try std.testing.expect(cached.? == null);
-    try std.testing.expect(facts.get(address.addr(2)) == null);
+    try std.testing.expect(cache.get(address.addr(2)) == null);
 }
 
 test "MPT proof lookup resolves a root leaf" {

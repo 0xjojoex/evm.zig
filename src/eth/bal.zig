@@ -7,7 +7,7 @@
 //! - `ClosedWorld`: the world for the closed lane, keyed by `ClaimPlan` IDs over
 //!   the universe the list declares; `ClosedState` is `state.WorldState` over
 //!   it and the executor's state lane for BAL forks (the open lane is
-//!   `evmz.state.OpenState`). `ParentFacts` and `claim_artifacts` are its
+//!   `evmz.state.OpenState`). `ParentState` and `claim_artifacts` are its
 //!   ID-native inputs and code store; it commits through `eth.commit` like the
 //!   open lane.
 //!
@@ -32,7 +32,7 @@ pub const ClaimView = @import("bal/ClaimView.zig");
 pub const diff = @import("bal/diff.zig");
 pub const ClosedWorld = @import("bal/ClosedWorld.zig");
 pub const ClosedState = ClosedWorld.State;
-pub const ParentFacts = @import("bal/ParentFacts.zig");
+pub const ParentState = @import("bal/ParentState.zig");
 pub const claim_artifacts = @import("bal/claim_artifacts.zig");
 
 pub const Address = model.Address;
@@ -110,7 +110,7 @@ test "BAL executor releases an unconsumed state backend" {
 test {
     std.testing.refAllDecls(claim_plan);
     std.testing.refAllDecls(projector);
-    std.testing.refAllDecls(ParentFacts);
+    std.testing.refAllDecls(ParentState);
     std.testing.refAllDecls(ClosedWorld);
     _ = @import("bal/ClosedWorld_test.zig");
 }
