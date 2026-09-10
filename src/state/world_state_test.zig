@@ -176,9 +176,9 @@ test "rows survive scope rollback while current mutations revert" {
 
     const id = slot(&state, addr(1), 2);
     const storage_row = state.world.storageRow(id);
-    try std.testing.expectEqual(@as(u256, 7), storage_row.transaction_original);
     try std.testing.expectEqual(@as(u256, 7), storage_row.current);
     const observed = state.observed_storage.items[storage_row.observation.index];
+    try std.testing.expectEqual(@as(u256, 7), observed.original);
     try std.testing.expect(observed.observation.accessed);
     try std.testing.expect(observed.observation.value_read);
     try std.testing.expect(!observed.effect.written);
@@ -201,7 +201,10 @@ test "execution original refreshes across scopes while transaction original rema
     try std.testing.expectEqual(@as(u256, 9), try state.originalStorage(word(1), 2));
     try std.testing.expectEqual(.modified, try state.setStorage(word(1), 2, 11));
     const storage_row = state.world.storageRow(slot(&state, addr(1), 2));
-    try std.testing.expectEqual(@as(u256, 7), storage_row.transaction_original);
+    try std.testing.expectEqual(
+        @as(u256, 7),
+        state.observed_storage.items[storage_row.observation.index].original,
+    );
     try std.testing.expectEqual(@as(u256, 11), storage_row.current);
     state.closeScope();
 
@@ -400,8 +403,10 @@ test "compact journal order unwinds typed undo arenas" {
     try std.testing.expectEqual(.modified, try state.setStorage(word(1), 2, 9));
     try state.setTransientStorage(word(1), 4, 12);
 
+    // Warmth, the account record, the storage record with the account's
+    // storage-dirty bit as its own entry, and the transient write.
     const journal = &state.journal;
-    try std.testing.expectEqual(@as(usize, 4), journal.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 5), journal.entries.items.len);
     try std.testing.expectEqual(@as(usize, 1), journal.accounts.items.len);
     try std.testing.expectEqual(@as(usize, 1), journal.storage.items.len);
     try std.testing.expectEqual(@as(usize, 1), journal.transient.items.len);
@@ -664,7 +669,6 @@ test "slot first materialized after an accepted wipe starts from zero" {
     // The row carries the parent value it was admitted with; only its
     // generation hides it.
     try std.testing.expectEqual(@as(u256, 5), state.world.storageRow(slot(&state, addr(1), 2)).current);
-    try std.testing.expectEqual(@as(u256, 0), state.world.storageRow(slot(&state, addr(1), 2)).transaction_original);
     state.closeScope();
     state.seal(attempt);
     const record = state.pendingView().observations().storage.at(0).?;
@@ -1203,7 +1207,7 @@ test "pre-scope writes are the scope baseline and revert only with the attempt" 
     const attempt = state.beginObservedTransaction();
     try state.setBalance(word(1), 17);
     _ = try state.setStorage(word(1), 2, 9);
-    try std.testing.expectEqual(@as(usize, 2), state.journalEntryCount());
+    try std.testing.expectEqual(@as(usize, 3), state.journalEntryCount());
 
     state.beginScope();
     const checkpoint = state.checkpoint();
