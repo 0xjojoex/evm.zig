@@ -79,7 +79,8 @@ pub fn bindAssumeSorted(
                         if (path.len != remaining) return error.InvalidNode;
                         const value = node.value() orelse return error.InvalidNode;
                         for (frame.begin..frame.end) |key_index| {
-                            results[key_index] = if (path.matchesKey(&keys[key_index], frame.depth))
+                            const key = &keys[key_index];
+                            results[key_index] = if (path.matchesKey(key, frame.depth))
                                 .{ .present = value }
                             else
                                 .{ .absent = .divergent_path };

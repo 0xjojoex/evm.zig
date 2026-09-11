@@ -9,6 +9,69 @@ test {
     std.testing.refAllDecls(mpt);
 }
 
+test "compact path matcher preserves prefixes and agrees with nibble oracle" {
+    var prng = std.Random.DefaultPrng.init(0x706174686d617463);
+    var source: [80]u8 = undefined;
+    var encoded: [40]u8 = undefined;
+    for (0..4) |pattern| {
+        switch (pattern) {
+            0 => @memset(&source, 0),
+            1 => @memset(&source, 0xff),
+            2 => @memset(&source, 0xa5),
+            else => prng.random().bytes(&source),
+        }
+        for ([_]usize{ 0, 1, 2, 3, 7, 8, 15, 16, 31, 32, 33 }) |key_len| {
+            const key = source[0..key_len];
+            for ([_]bool{ false, true }) |terminal| {
+                for (0..key_len * 2 + 2) |depth| {
+                    for (0..key_len * 2 + 2) |len| {
+                        const bytes = try mpt.nibble.encodeCompact(&encoded, .{
+                            .key = &source,
+                            .start = depth,
+                            .len = len,
+                        }, terminal);
+                        const path = try mpt.nibble.CompactPath.decode(bytes);
+                        try std.testing.expectEqual(
+                            compactMatchesNibbles(path, key, depth),
+                            path.matchesKey(key, depth),
+                        );
+                        try std.testing.expect(!path.matchesKey(key, std.math.maxInt(usize)));
+                        if (depth > key_len * 2 or len > key_len * 2 - depth) continue;
+                        for (0..len) |i| {
+                            var mismatch = source;
+                            const absolute = depth + i;
+                            const shift: u3 = @intCast((i % 4) + if (absolute % 2 == 0) @as(usize, 4) else 0);
+                            mismatch[absolute / 2] ^= @as(u8, 1) << shift;
+                            try std.testing.expect(!compactMatchesNibbles(path, mismatch[0..key_len], depth));
+                            try std.testing.expect(!path.matchesKey(mismatch[0..key_len], depth));
+                        }
+                        // A matching extension is a prefix, not a full-key equality.
+                        if (depth + len < key_len * 2) {
+                            var longer = source;
+                            const after = depth + len;
+                            longer[after / 2] ^= if (after % 2 == 0) @as(u8, 0x10) else 1;
+                            try std.testing.expect(path.matchesKey(longer[0..key_len], depth));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn compactMatchesNibbles(path: mpt.nibble.CompactPath, key: []const u8, depth: usize) bool {
+    if (depth > key.len * 2 or path.len > key.len * 2 - depth) return false;
+    for (0..path.len) |i| {
+        const path_pos = path.nibble_offset + i;
+        const key_pos = depth + i;
+        const path_shift: u3 = if (path_pos % 2 == 0) 4 else 0;
+        const key_shift: u3 = if (key_pos % 2 == 0) 4 else 0;
+        if ((path.encoded[path_pos / 2] >> path_shift) & 15 !=
+            (key[key_pos / 2] >> key_shift) & 15) return false;
+    }
+    return true;
+}
+
 test "empty root is canonical" {
     try expectHex(&(try mpt.init(std.testing.allocator).rootSorted(&.{})), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
 }

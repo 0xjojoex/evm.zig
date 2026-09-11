@@ -2,6 +2,58 @@ const std = @import("std");
 const mpt = @import("mpt");
 const fixed_key_nibbles = @sizeOf(mpt.FixedKey) * 2;
 
+test "catalog leaf byte matching agrees with proof lookup at every depth" {
+    var prng = std.Random.DefaultPrng.init(0x6c65616662797465);
+    const trie = mpt.init(std.testing.allocator);
+    for (0..fixed_key_nibbles + 1) |depth| {
+        var key: mpt.FixedKey = undefined;
+        prng.random().bytes(&key);
+        for (0..depth) |i| key[i / 2] &= if (i % 2 == 0) @as(u8, 0x0f) else 0xf0;
+
+        const leaf = try encodeZeroLeaf(fixed_key_nibbles - depth, 1);
+        defer std.testing.allocator.free(leaf);
+        const path_start: usize = if (depth >= 63) 1 else 2;
+        _ = try mpt.nibble.encodeCompact(leaf[path_start .. leaf.len - 1], .{
+            .key = &key,
+            .start = depth,
+            .len = fixed_key_nibbles - depth,
+        }, true);
+        const branch = try encodeBranch01(leaf, leaf);
+        defer std.testing.allocator.free(branch);
+        const extension = try encodeZeroExtension(if (depth > 1) depth - 1 else 1, branch);
+        defer std.testing.allocator.free(extension);
+        const root_node = if (depth == 0) leaf else if (depth == 1) branch else extension;
+        const nodes = [_][]const u8{ leaf, branch, extension };
+        var indexed = try trie.indexWitness(&nodes);
+        defer indexed.deinit();
+        var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
+        defer builder.deinit();
+        const digest = mpt.StdKeccak256Context.keccak256(.{}, root_node);
+        const root = try builder.authenticateRoot(digest);
+        var catalog = try builder.finishAssumeCollisionResistant();
+        defer catalog.deinit();
+
+        var workspace: mpt.Catalog.BindWorkspace = .{};
+        var results: [1]mpt.FixedLookup = undefined;
+        try catalog.bindSorted(root, &.{key}, &results, &workspace);
+        try std.testing.expectEqualSlices(u8, &.{1}, results[0].present);
+        // Flip each suffix bit, including both halves of the first/last byte.
+        // Both public readers must still reject each mismatch. The separate
+        // compact-path test checks their shared matcher against a nibble oracle.
+        for (depth..fixed_key_nibbles) |i| {
+            for (0..4) |bit| {
+                var mismatch = key;
+                const shift: u3 = @intCast(bit + if (i % 2 == 0) @as(usize, 4) else 0);
+                mismatch[i / 2] ^= @as(u8, 1) << shift;
+                try catalog.bindSorted(root, &.{mismatch}, &results, &workspace);
+                try expectAbsence(.divergent_path, results[0]);
+                try std.testing.expectEqual(mpt.Absence.divergent_path, (try indexed.lookup(digest, &mismatch)).absent);
+                try std.testing.expectEqual(@as(u7, 0), workspace.len);
+            }
+        }
+    }
+}
+
 test "catalog fixed batch binds shared prefixes without allocation" {
     const leaf0 = try encodeZeroLeaf(63, 1);
     defer std.testing.allocator.free(leaf0);
@@ -161,6 +213,24 @@ fn encodeBranch01(child0: []const u8, child1: []const u8) ![]u8 {
     cursor += writeReference(encoded[cursor..], child0);
     cursor += writeReference(encoded[cursor..], child1);
     @memset(encoded[cursor..], 0x80);
+    return encoded;
+}
+
+fn encodeZeroExtension(prefix_nibbles: usize, child: []const u8) ![]u8 {
+    const compact_len = 1 + prefix_nibbles / 2;
+    const compact_prefix_len: usize = if (compact_len == 1) 0 else 1;
+    const payload_len = compact_prefix_len + compact_len + referenceLen(child);
+    const list_prefix_len: usize = if (payload_len <= 55) 1 else 2;
+    const encoded = try std.testing.allocator.alloc(u8, list_prefix_len + payload_len);
+    var cursor = writeListPrefix(encoded, payload_len);
+    if (compact_prefix_len != 0) {
+        encoded[cursor] = 0x80 + @as(u8, @intCast(compact_len));
+        cursor += 1;
+    }
+    encoded[cursor] = @as(u8, @intCast(prefix_nibbles & 1)) << 4;
+    @memset(encoded[cursor + 1 .. cursor + compact_len], 0);
+    cursor += compact_len;
+    _ = writeReference(encoded[cursor..], child);
     return encoded;
 }
 
