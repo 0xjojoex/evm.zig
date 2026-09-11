@@ -72,7 +72,7 @@ fn initState(allocator: std.mem.Allocator, reader: ?Reader) OpenState {
 fn abandon(state: *OpenState) void {
     if (!state.transaction_active) return;
     if (state.scopeActive()) state.closeScope();
-    state.discard(state.transaction_generation);
+    state.discard(state.lifetime.transaction);
 }
 
 fn row(state: *OpenState, address: Address) OpenState.AccountId {
@@ -1183,10 +1183,10 @@ test "discard accepted rewinds the clock with the rows" {
     state.closeScope();
     state.seal(first);
     state.retain(first);
-    try std.testing.expect(state.clock != .none);
+    try std.testing.expect(state.clock != 0);
 
     state.discardAccepted();
-    try std.testing.expectEqual(state_types.Generation.none, state.clock);
+    try std.testing.expectEqual(@as(u32, 0), state.clock);
 
     // The root generation `first` took is reissued. The rows it stamped were
     // reset with the epoch, so the reuse cannot resurrect their warmth.
@@ -1216,7 +1216,7 @@ test "seeding advances the epoch without rewinding the clock" {
     seeded.account = .{ .balance = 5 };
     defer seeded.deinit();
     try state.seedAccount(addr(2), seeded);
-    try std.testing.expect(state.clock != .none);
+    try std.testing.expect(state.clock != 0);
 
     const second = state.beginTransaction();
     state.beginScope();

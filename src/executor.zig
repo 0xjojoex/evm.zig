@@ -236,7 +236,7 @@ pub fn ExecutorType(
         /// attempts, `transaction/runtime.zig` resolves `transaction` ones
         /// through an `Executed` handle.
         const Attempt = struct {
-            id: evmz.state.Generation,
+            id: evmz.state.Generation(.transaction),
             mode: InstrumentationMode,
             owner: Owner,
 

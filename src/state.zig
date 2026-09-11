@@ -39,7 +39,6 @@ pub const sparse_hash_map = @import("./state/sparse_hash_map.zig");
 pub const world_state = @import("./state/world_state.zig");
 pub const WorldState = world_state.WorldState;
 pub const Generation = world_state.Generation;
-pub const Incarnation = world_state.Incarnation;
 pub const OpenWorld = @import("./state/OpenWorld.zig");
 pub const OpenState = WorldState(OpenWorld);
 pub const MemoryStore = @import("./state/MemoryStore.zig");
@@ -59,9 +58,9 @@ pub const Checkpoint = struct {
     };
 
     /// Generation that must be active when this checkpoint closes.
-    scope: Generation,
+    scope: Generation(.scope),
     /// Generation restored when this checkpoint closes.
-    parent_scope: Generation,
+    parent_scope: Generation(.scope),
     journal_len: u32,
     changed_accounts_len: u32,
     changed_storage_len: u32,
