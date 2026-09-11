@@ -126,7 +126,7 @@ jobs:
           zig build -Doptimize=ReleaseFast eest-consume --summary all -- \
             --cache-folder=${{ runner.temp }}/execution-spec-tests \
             --no-html \
-            -n 8 \
+            -n 4 \
             -q \
             2>&1 | tee eest-consume.log
 
