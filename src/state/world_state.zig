@@ -80,19 +80,26 @@ pub const StorageFlags = packed struct {
     _padding: u7 = 0,
 };
 
-/// A lifetime identifier issued by the State clock. Nonzero values are unique
-/// between clock resets; row stamps compare with the active lifetime's value.
-/// `none` denotes an unset or cleared stamp and is never issued by the clock.
-pub const Generation = enum(u32) {
-    none = 0,
-    _,
+/// The State lifetimes that issue stamps. Each is a distinct `Generation`
+/// type, so a row stamp compares only with its own lifetime's active value.
+pub const Lifetime = enum { transaction, scope, root };
 
-    /// Return the successor. Requires a value below `maxInt(u32)`; overflow is
-    /// safety-checked illegal behavior, with no wrap or reset policy here.
-    pub inline fn next(self: Generation) Generation {
-        return @enumFromInt(@intFromEnum(self) + 1);
-    }
-};
+/// A lifetime identifier issued by the State clock. Nonzero values are unique
+/// between clock resets; a row stamp matches when equal to the active value of
+/// its lifetime. `none` denotes an unset or cleared stamp and is never issued.
+pub fn Generation(comptime of: Lifetime) type {
+    return enum(u32) {
+        none = 0,
+        _,
+
+        /// Referenced so each lifetime is a distinct type, not one interned enum.
+        pub const lifetime = of;
+    };
+}
+
+comptime {
+    std.debug.assert(Generation(.transaction) != Generation(.scope));
+}
 
 /// Version of one account's storage, initially `parent`. A wipe advances the
 /// account's incarnation; a slot with a different incarnation reads as zero.
@@ -112,7 +119,7 @@ pub const Incarnation = enum(u32) {
 /// only in the transaction matching `transaction`. Scope rollback preserves the
 /// handle and recorded reads; observation effects unwind separately.
 pub const ObservationHandle = struct {
-    transaction: Generation = .none,
+    transaction: Generation(.transaction) = .none,
     index: u32 = 0,
 };
 
@@ -120,7 +127,7 @@ pub const ObservationHandle = struct {
 /// current handle also marks the slot as transaction-dirty. The first write
 /// captures it; scope rollback restores the previous handle with the value.
 pub const TransactionUndoHandle = struct {
-    transaction: Generation = .none,
+    transaction: Generation(.transaction) = .none,
     index: u32 = 0,
 };
 
@@ -134,23 +141,23 @@ pub const AccountRow = struct {
     flags: AccountFlags = .{},
     /// Transaction that listed the row in `lifecycle_accounts`. Outside `flags`
     /// on purpose: the listing is not journaled.
-    lifecycle_transaction: Generation = .none,
+    lifecycle_transaction: Generation(.transaction) = .none,
     /// Scope that already holds this row's undo record. Restored by undo.
-    journaled_scope: Generation = .none,
+    journaled_scope: Generation(.scope) = .none,
     /// Transaction in which the row became warm. Only a cold-to-warm transition
     /// adds a warmth undo entry; reverting that entry clears this stamp to `none`.
-    warm_transaction: Generation = .none,
+    warm_transaction: Generation(.transaction) = .none,
     /// Membership and recorded reads survive scope rollback; effects revert.
     /// Observation records are released when the attempt ends.
     observation: ObservationHandle = .{},
     /// Transaction in which the account was marked dirty. Restored by undo.
-    dirty_transaction: Generation = .none,
+    dirty_transaction: Generation(.transaction) = .none,
     /// Advanced by each storage wipe; slots with a different incarnation read
     /// as zero. Restored by undo.
     storage_incarnation: Incarnation = .parent,
     /// Transaction in which storage was wiped; deduplicates the wipe list.
     /// Restored by undo.
-    wiped_transaction: Generation = .none,
+    wiped_transaction: Generation(.transaction) = .none,
 
     comptime {
         std.debug.assert(@sizeOf(AccountRow) == 144);
@@ -173,18 +180,18 @@ pub const AccountRow = struct {
 /// when that incarnation differs from the owning account's.
 pub const StorageRow = struct {
     current: u256,
-    /// EIP-2200 original for the execution root in `execution_original_scope`.
+    /// EIP-2200 original for the execution root in `execution_original_root`.
     /// Captured on first use in that execution root; preserved across nested rollback.
     execution_original: u256 = 0,
     flags: StorageFlags = .{},
     /// Scope that already holds this row's undo record. Restored by undo.
-    journaled_scope: Generation = .none,
+    journaled_scope: Generation(.scope) = .none,
     /// Cleared to `none` by revert; see `AccountRow.warm_transaction`.
-    warm_transaction: Generation = .none,
+    warm_transaction: Generation(.transaction) = .none,
     /// Preserved across scope rollback; see `AccountRow.observation`. The
     /// observation row also holds the transaction original.
     observation: ObservationHandle = .{},
-    execution_original_scope: Generation = .none,
+    execution_original_root: Generation(.root) = .none,
     /// Restored by undo together with the value.
     transaction_undo: TransactionUndoHandle = .{},
     /// Incarnation `current` was written under. Restored by undo.
@@ -379,15 +386,24 @@ pub fn WorldState(comptime World: type) type {
         observed_accounts: std.ArrayList(AccountObservationRow) = .empty,
         observed_storage: std.ArrayList(StorageObservationRow) = .empty,
         journal: Journal = .{},
-        /// Last issued lifetime identifier. Advances for attempt setup, execution
-        /// scope boundaries, and checkpoints; rollback never rewinds it.
+        /// Last issued value; every lifetime draws from it, so a value is unique
+        /// within its lifetime between resets. Rollback never rewinds it;
         /// `discardAccepted` resets it together with the rows. Seeding and branch
         /// restoration preserve it because retained rows may carry old stamps.
         /// The caller must bound total ticks between resets below u32 exhaustion.
-        clock: Generation = .none,
-        /// Attempt identity and qualifier for transaction stamps. Set at begin and
-        /// retained after completion; identity checks also require `transaction_active`.
-        transaction_generation: Generation = .none,
+        clock: u32 = 0,
+        /// The active value of each lifetime, a row stamp matches when equal.
+        /// Both clear at attempt end. Stale row stamps are never cleared: a moved
+        /// lifetime invalidates them lazily.
+        lifetime: struct {
+            /// Issued at attempt begin and retained after, also require `transaction_active`.
+            transaction: Generation(.transaction) = .none,
+            /// Issued at begin, `beginScope`, `closeScope`, and every checkpoint,
+            /// restored to the parent on commit and revert.
+            scope: Generation(.scope) = .none,
+            /// Moves with `scope` except at checkpoints, so execution originals survive nested rollback.
+            root: Generation(.root) = .none,
+        } = .{},
         /// Advanced by `discardAccepted` and seeding; a branch snapshot is only valid
         /// within the epoch that captured it.
         world_epoch: u64 = 0,
@@ -396,8 +412,6 @@ pub fn WorldState(comptime World: type) type {
         /// `transaction_active and !sealed`, kept as one byte because every
         /// read consults it.
         attempt_open: bool = false,
-        active_scope_generation: Generation = .none,
-        execution_scope_generation: Generation = .none,
         scope_depth: u32 = 0,
         transaction_active: bool = false,
         /// Set by `revertToCheckpoint`; only then can block or transaction ID lists
@@ -839,10 +853,10 @@ pub fn WorldState(comptime World: type) type {
                 current: ?Account,
                 code_ref: CodeRef,
                 flags: AccountFlags,
-                journaled_scope: Generation,
+                journaled_scope: Generation(.scope),
                 storage_incarnation: Incarnation,
-                wiped_transaction: Generation,
-                dirty_transaction: Generation,
+                wiped_transaction: Generation(.transaction),
+                dirty_transaction: Generation(.transaction),
                 effect: AccountEffect,
             };
 
@@ -850,7 +864,7 @@ pub fn WorldState(comptime World: type) type {
                 storage: StorageId,
                 current: u256,
                 flags: StorageFlags,
-                journaled_scope: Generation,
+                journaled_scope: Generation(.scope),
                 storage_incarnation: Incarnation,
                 transaction_undo: TransactionUndoHandle,
                 effect: StorageEffect,
@@ -998,31 +1012,29 @@ pub fn WorldState(comptime World: type) type {
         /// generation identifies this attempt on this State; finish it with
         /// `retain` or `discard`. Copies must not be reused after a clock reset.
         /// Observations are tracked internally but not exposed through the pending view.
-        pub fn beginTransaction(self: *State) Generation {
+        pub fn beginTransaction(self: *State) Generation(.transaction) {
             return self.beginTransactionMode(false);
         }
 
         /// Start an attempt as in `beginTransaction`, enabling observation access
         /// through the pending view after sealing.
-        pub fn beginObservedTransaction(self: *State) Generation {
+        pub fn beginObservedTransaction(self: *State) Generation(.transaction) {
             return self.beginTransactionMode(true);
         }
 
-        fn beginTransactionMode(self: *State, comptime observe: bool) Generation {
+        fn beginTransactionMode(self: *State, comptime observe: bool) Generation(.transaction) {
             std.debug.assert(!self.transaction_active);
             std.debug.assert(self.journal.isEmpty());
-            self.transaction_generation = self.tick();
+            self.lifetime.transaction = self.tick(.transaction);
             self.observed_attempt = observe;
             self.sealed = false;
             self.transaction_active = true;
             self.attempt_open = true;
-            // Pre-scope writes journal against this generation; a fresh row's
-            // zero stamp never matches it, so the first write is always undone
-            // by `discard` and never by a scope checkpoint. It doubles as the
-            // execution generation until `beginScope`, so original capture is
-            // one compare on every path.
-            self.active_scope_generation = self.tick();
-            self.execution_scope_generation = self.active_scope_generation;
+            // Pre-scope writes journal against this scope; a fresh row's zero
+            // stamp never matches it, so the first write is always undone by
+            // `discard` and never by a scope checkpoint. The root is issued
+            // too, so original capture is one compare on every path.
+            self.openRoot();
             self.accepted_len = .{
                 .block_changed_accounts = @intCast(self.block_changed_accounts.items.len),
                 .block_storage_wipes = @intCast(self.block_storage_wipes.items.len),
@@ -1038,7 +1050,7 @@ pub fn WorldState(comptime World: type) type {
             self.logs.clearRetainingCapacity();
             self.retained_logs.clearRetainingCapacity();
             std.debug.assert(self.transient_storage.count() == 0);
-            return self.transaction_generation;
+            return self.lifetime.transaction;
         }
 
         /// Open an execution root and establish a fresh execution-original lifetime.
@@ -1047,8 +1059,7 @@ pub fn WorldState(comptime World: type) type {
         pub fn beginScope(self: *State) void {
             self.assertMutable();
             std.debug.assert(self.scope_depth == 0);
-            self.active_scope_generation = self.tick();
-            self.execution_scope_generation = self.active_scope_generation;
+            self.openRoot();
             self.scope_depth = 1;
         }
 
@@ -1057,8 +1068,7 @@ pub fn WorldState(comptime World: type) type {
         /// use a fresh journaling scope and execution-original lifetime.
         pub fn closeScope(self: *State) void {
             self.assertRootScope();
-            self.active_scope_generation = self.tick();
-            self.execution_scope_generation = self.active_scope_generation;
+            self.openRoot();
             self.scope_depth = 0;
         }
 
@@ -1087,10 +1097,10 @@ pub fn WorldState(comptime World: type) type {
         pub fn checkpoint(self: *State) Checkpoint {
             self.assertTransaction();
             std.debug.assert(self.scope_depth != std.math.maxInt(u32));
-            const parent = self.active_scope_generation;
-            const scope = self.tick();
+            const parent = self.lifetime.scope;
+            const scope = self.tick(.scope);
             self.scope_depth += 1;
-            self.active_scope_generation = scope;
+            self.lifetime.scope = scope;
             return .{
                 .scope = scope,
                 .parent_scope = parent,
@@ -1105,7 +1115,7 @@ pub fn WorldState(comptime World: type) type {
         /// for any enclosing rollback. Asserts that this checkpoint is current.
         pub fn commitCheckpoint(self: *State, checkpoint_state: Checkpoint) void {
             self.assertCheckpoint(checkpoint_state);
-            self.active_scope_generation = checkpoint_state.parent_scope;
+            self.lifetime.scope = checkpoint_state.parent_scope;
             self.scope_depth -= 1;
         }
 
@@ -1120,14 +1130,14 @@ pub fn WorldState(comptime World: type) type {
             self.changed_accounts.items.len = checkpoint_state.changed_accounts_len;
             self.changed_storage.items.len = checkpoint_state.changed_storage_len;
             self.logs.truncate(checkpoint_state.logs);
-            self.active_scope_generation = checkpoint_state.parent_scope;
+            self.lifetime.scope = checkpoint_state.parent_scope;
             self.scope_depth -= 1;
         }
 
         /// Freeze the current attempt for pending-view access without accepting it.
         /// Asserts a matching attempt generation, an unsealed attempt, and no open scope.
         /// The sealed attempt must still be retained or discarded.
-        pub fn seal(self: *State, attempt: Generation) void {
+        pub fn seal(self: *State, attempt: Generation(.transaction)) void {
             self.assertCurrent(attempt);
             std.debug.assert(!self.sealed);
             std.debug.assert(!self.scopeActive());
@@ -1140,7 +1150,7 @@ pub fn WorldState(comptime World: type) type {
         /// Accept the current attempt's values, retain its logs, and end it.
         /// Release transaction observations and undo records.
         /// Asserts a matching attempt generation, a sealed attempt, and no open scope.
-        pub fn retain(self: *State, attempt: Generation) void {
+        pub fn retain(self: *State, attempt: Generation(.transaction)) void {
             self.assertCurrent(attempt);
             std.debug.assert(self.sealed);
             std.debug.assert(!self.scopeActive());
@@ -1155,7 +1165,7 @@ pub fn WorldState(comptime World: type) type {
         /// Undo the entire attempt, including writes before its execution root.
         /// Release its logs and observations. Asserts a matching attempt generation
         /// and no open scope; sealing is not required.
-        pub fn discard(self: *State, attempt: Generation) void {
+        pub fn discard(self: *State, attempt: Generation(.transaction)) void {
             self.assertCurrent(attempt);
             std.debug.assert(!self.scopeActive());
             self.revertJournalTo(0);
@@ -1200,7 +1210,7 @@ pub fn WorldState(comptime World: type) type {
             std.debug.assert(snapshot.owner == self);
             std.debug.assert(snapshot.world_epoch == self.world_epoch);
             std.debug.assert(!snapshot.resolved);
-            if (self.transaction_active) self.discard(self.transaction_generation);
+            if (self.transaction_active) self.discard(self.lifetime.transaction);
             self.world.restoreSnapshot(&snapshot.rows);
             self.block_changed_accounts.clearRetainingCapacity();
             self.block_changed_accounts.appendSliceAssumeCapacity(snapshot.block_changed_accounts);
@@ -1429,35 +1439,35 @@ pub fn WorldState(comptime World: type) type {
         pub fn warmAccountId(self: *State, id: AccountId) !bool {
             self.assertTransaction();
             const row = self.world.accountRow(id);
-            if (row.warm_transaction == self.transaction_generation) return false;
+            if (row.warm_transaction == self.lifetime.transaction) return false;
             const was_warm = self.deferredAccountWarm(.fromAddress(self.world.accountAddress(id)));
             try self.journal.ensureWarm(self.allocator);
             self.journal.entries.appendAssumeCapacity(.{ .warm_account = id });
-            row.warm_transaction = self.transaction_generation;
+            row.warm_transaction = self.lifetime.transaction;
             return !was_warm;
         }
 
         pub fn warmStorageId(self: *State, id: StorageId) !bool {
             self.assertTransaction();
             const row = self.world.storageRow(id);
-            if (row.warm_transaction == self.transaction_generation) return false;
+            if (row.warm_transaction == self.lifetime.transaction) return false;
             const was_warm = self.deferredStorageWarm(
                 .fromAddress(self.world.accountAddress(self.world.storageAccount(id))),
                 self.world.storageSlot(id),
             );
             try self.journal.ensureWarm(self.allocator);
             self.journal.entries.appendAssumeCapacity(.{ .warm_storage = id });
-            row.warm_transaction = self.transaction_generation;
+            row.warm_transaction = self.lifetime.transaction;
             return !was_warm;
         }
 
         pub fn accountWarm(self: *const State, id: AccountId) bool {
-            return self.world.accountRow(id).warm_transaction == self.transaction_generation or
+            return self.world.accountRow(id).warm_transaction == self.lifetime.transaction or
                 self.deferredAccountWarm(.fromAddress(self.world.accountAddress(id)));
         }
 
         pub fn storageWarm(self: *const State, id: StorageId) bool {
-            return self.world.storageRow(id).warm_transaction == self.transaction_generation or
+            return self.world.storageRow(id).warm_transaction == self.lifetime.transaction or
                 self.deferredStorageWarm(
                     .fromAddress(self.world.accountAddress(self.world.storageAccount(id))),
                     self.world.storageSlot(id),
@@ -1680,7 +1690,7 @@ pub fn WorldState(comptime World: type) type {
             self.retained_logs.clearRetainingCapacity();
             self.world_epoch += 1;
             // Reset rows carry only initial stamps, so the clock may restart.
-            self.clock = .none;
+            self.clock = 0;
         }
 
         pub fn journalEntryCount(self: *const State) usize {
@@ -1716,7 +1726,7 @@ pub fn WorldState(comptime World: type) type {
             const original = self.world.accountRow(id);
             const first_block_wipe = !original.flags.storage_wiped;
             const first_transaction_wipe = original.wiped_transaction !=
-                self.transaction_generation;
+                self.lifetime.transaction;
             if (first_block_wipe) try reserve(&self.block_storage_wipes, self.allocator, 1);
             if (first_transaction_wipe) try reserve(&self.transaction_storage_wipes, self.allocator, 1);
             const row = try self.prepareAccountMutation(id);
@@ -1725,7 +1735,7 @@ pub fn WorldState(comptime World: type) type {
             row.flags.storage_dirty = true;
             row.flags.storage_wiped = true;
             row.storage_incarnation = row.storage_incarnation.next();
-            row.wiped_transaction = self.transaction_generation;
+            row.wiped_transaction = self.lifetime.transaction;
             self.observed_accounts.items[row.observation.index].effect.storage_wiped = true;
         }
 
@@ -1762,12 +1772,12 @@ pub fn WorldState(comptime World: type) type {
         fn writeResolvedStorage(self: *State, resolved: ResolvedStorage, value: u256) Allocator.Error!void {
             const account_row = self.world.accountRow(resolved.account);
             const row = self.world.storageRow(resolved.storage);
-            std.debug.assert(row.observation.transaction == self.transaction_generation);
-            const needs_undo = row.journaled_scope != self.active_scope_generation;
+            std.debug.assert(row.observation.transaction == self.lifetime.transaction);
+            const needs_undo = row.journaled_scope != self.lifetime.scope;
             const first_dirty = !row.flags.block_dirty;
-            const first_transaction_write = row.transaction_undo.transaction != self.transaction_generation;
+            const first_transaction_write = row.transaction_undo.transaction != self.lifetime.transaction;
             const needs_account_flag_undo = !account_row.flags.storage_dirty and
-                account_row.journaled_scope != self.active_scope_generation;
+                account_row.journaled_scope != self.lifetime.scope;
 
             if (needs_undo)
                 try self.journal.ensureStorage(self.allocator)
@@ -1795,7 +1805,7 @@ pub fn WorldState(comptime World: type) type {
         pub fn observeAccount(self: *State, id: AccountId, observation: AccountObservation) !void {
             self.assertMutable();
             const row = self.world.accountRow(id);
-            if (row.observation.transaction == self.transaction_generation) {
+            if (row.observation.transaction == self.lifetime.transaction) {
                 self.observed_accounts.items[row.observation.index].observation.merge(observation);
                 return;
             }
@@ -1810,7 +1820,7 @@ pub fn WorldState(comptime World: type) type {
         ) !void {
             try reserve(&self.observed_accounts, self.allocator, 1);
             row.observation = .{
-                .transaction = self.transaction_generation,
+                .transaction = self.lifetime.transaction,
                 .index = @intCast(self.observed_accounts.items.len),
             };
             self.observed_accounts.appendAssumeCapacity(.{
@@ -1827,7 +1837,7 @@ pub fn WorldState(comptime World: type) type {
         fn observeStorage(self: *State, resolved: ResolvedStorage, observation: StorageObservation) !void {
             self.assertMutable();
             const row = self.world.storageRow(resolved.storage);
-            if (row.observation.transaction == self.transaction_generation) {
+            if (row.observation.transaction == self.lifetime.transaction) {
                 self.observed_storage.items[row.observation.index].observation.merge(observation);
                 return;
             }
@@ -1844,14 +1854,14 @@ pub fn WorldState(comptime World: type) type {
             const account = self.world.accountRow(resolved.account);
             const current = effectiveValue(account, row);
             row.observation = .{
-                .transaction = self.transaction_generation,
+                .transaction = self.lifetime.transaction,
                 .index = @intCast(self.observed_storage.items.len),
             };
             self.observed_storage.appendAssumeCapacity(.{
                 .storage = resolved.storage,
                 // A wipe earlier in this transaction hides the value the
                 // transaction started from; the row still holds it.
-                .original = if (account.wiped_transaction == self.transaction_generation)
+                .original = if (account.wiped_transaction == self.lifetime.transaction)
                     row.current
                 else
                     current,
@@ -1892,15 +1902,15 @@ pub fn WorldState(comptime World: type) type {
             std.debug.assert(!self.scopeActive());
         }
 
-        inline fn assertCurrent(self: *const State, attempt: Generation) void {
+        inline fn assertCurrent(self: *const State, attempt: Generation(.transaction)) void {
             self.assertAttempt();
-            std.debug.assert(self.transaction_generation == attempt);
+            std.debug.assert(self.lifetime.transaction == attempt);
         }
 
         inline fn assertCheckpoint(self: *const State, checkpoint_state: Checkpoint) void {
             self.assertTransaction();
             std.debug.assert(self.scope_depth >= 1);
-            std.debug.assert(checkpoint_state.scope == self.active_scope_generation);
+            std.debug.assert(checkpoint_state.scope == self.lifetime.scope);
             std.debug.assert(checkpoint_state.journal_len <= self.journal.entries.items.len);
             std.debug.assert(checkpoint_state.changed_accounts_len <= self.changed_accounts.items.len);
             std.debug.assert(checkpoint_state.changed_storage_len <= self.changed_storage.items.len);
@@ -1925,8 +1935,8 @@ pub fn WorldState(comptime World: type) type {
             self.observed_attempt = false;
             self.sealed = false;
             self.attempt_open = false;
-            self.active_scope_generation = .none;
-            self.execution_scope_generation = .none;
+            self.lifetime.scope = .none;
+            self.lifetime.root = .none;
             self.scope_depth = 0;
         }
 
@@ -2006,8 +2016,8 @@ pub fn WorldState(comptime World: type) type {
         fn acceptedAccountValue(self: *const State, id: AccountId) ?Account {
             const row = self.world.accountRow(id);
             if (!self.transaction_active or
-                row.dirty_transaction != self.transaction_generation) return row.current;
-            std.debug.assert(row.observation.transaction == self.transaction_generation);
+                row.dirty_transaction != self.lifetime.transaction) return row.current;
+            std.debug.assert(row.observation.transaction == self.lifetime.transaction);
             return self.observed_accounts.items[row.observation.index].original;
         }
 
@@ -2017,12 +2027,12 @@ pub fn WorldState(comptime World: type) type {
             if (!self.transaction_active) return self.effectiveStorage(id);
             const account = self.world.storageAccount(id);
             const account_row = self.world.accountRow(account);
-            const account_incarnation = if (account_row.observation.transaction == self.transaction_generation)
+            const account_incarnation = if (account_row.observation.transaction == self.lifetime.transaction)
                 self.observed_accounts.items[account_row.observation.index].original_storage_incarnation
             else
                 account_row.storage_incarnation;
             const row = self.world.storageRow(id);
-            const changed = row.transaction_undo.transaction == self.transaction_generation;
+            const changed = row.transaction_undo.transaction == self.lifetime.transaction;
             const value = if (changed)
                 self.journal.storage.items[row.transaction_undo.index].current
             else
@@ -2078,10 +2088,10 @@ pub fn WorldState(comptime World: type) type {
         }
 
         fn captureExecutionOriginal(self: *State, row: *StorageRow, current: u256) void {
-            if (row.execution_original_scope == self.execution_scope_generation) return;
-            std.debug.assert(self.execution_scope_generation != .none);
+            if (row.execution_original_root == self.lifetime.root) return;
+            std.debug.assert(self.lifetime.root != .none);
             row.execution_original = current;
-            row.execution_original_scope = self.execution_scope_generation;
+            row.execution_original_root = self.lifetime.root;
         }
 
         pub fn effectiveStorage(self: *const State, id: StorageId) u256 {
@@ -2103,11 +2113,11 @@ pub fn WorldState(comptime World: type) type {
         /// observed in this transaction.
         fn prepareAccountMutation(self: *State, id: AccountId) Allocator.Error!*AccountRow {
             const row = self.world.accountRow(id);
-            std.debug.assert(row.observation.transaction == self.transaction_generation);
-            const needs_undo = row.journaled_scope != self.active_scope_generation;
+            std.debug.assert(row.observation.transaction == self.lifetime.transaction);
+            const needs_undo = row.journaled_scope != self.lifetime.scope;
             const first_block_change = !row.flags.block_changed;
             const first_transaction_dirty =
-                row.dirty_transaction != self.transaction_generation;
+                row.dirty_transaction != self.lifetime.transaction;
             if (needs_undo) try self.journal.ensureAccount(self.allocator);
             if (first_block_change) try reserve(&self.block_changed_accounts, self.allocator, 1);
             if (first_transaction_dirty) try reserve(&self.changed_accounts, self.allocator, 1);
@@ -2117,7 +2127,7 @@ pub fn WorldState(comptime World: type) type {
                 self.block_changed_accounts.appendAssumeCapacity(id);
             }
             if (first_transaction_dirty) {
-                row.dirty_transaction = self.transaction_generation;
+                row.dirty_transaction = self.lifetime.transaction;
                 self.changed_accounts.appendAssumeCapacity(id);
             }
             return row;
@@ -2127,11 +2137,11 @@ pub fn WorldState(comptime World: type) type {
         /// on top of the full `prepareAccountMutation` bookkeeping.
         fn prepareLifecycleMutation(self: *State, id: AccountId) Allocator.Error!*AccountRow {
             const row = self.world.accountRow(id);
-            const first_lifecycle = row.lifecycle_transaction != self.transaction_generation;
+            const first_lifecycle = row.lifecycle_transaction != self.lifetime.transaction;
             if (first_lifecycle) try reserve(&self.lifecycle_accounts, self.allocator, 1);
             const mutable = try self.prepareAccountMutation(id);
             if (first_lifecycle) {
-                mutable.lifecycle_transaction = self.transaction_generation;
+                mutable.lifecycle_transaction = self.lifetime.transaction;
                 self.lifecycle_accounts.appendAssumeCapacity(id);
             }
             return mutable;
@@ -2150,7 +2160,7 @@ pub fn WorldState(comptime World: type) type {
                 .dirty_transaction = row.dirty_transaction,
                 .effect = self.observed_accounts.items[row.observation.index].effect,
             });
-            row.journaled_scope = self.active_scope_generation;
+            row.journaled_scope = self.lifetime.scope;
         }
 
         fn appendStorageUndo(self: *State, id: StorageId, row: *StorageRow) void {
@@ -2164,19 +2174,27 @@ pub fn WorldState(comptime World: type) type {
                 .transaction_undo = row.transaction_undo,
                 .effect = self.observed_storage.items[row.observation.index].effect,
             });
-            if (row.transaction_undo.transaction != self.transaction_generation) {
+            if (row.transaction_undo.transaction != self.lifetime.transaction) {
                 row.transaction_undo = .{
-                    .transaction = self.transaction_generation,
+                    .transaction = self.lifetime.transaction,
                     .index = undo_index,
                 };
             }
-            row.journaled_scope = self.active_scope_generation;
+            row.journaled_scope = self.lifetime.scope;
         }
 
-        /// Advance the State clock and return the issued generation.
-        fn tick(self: *State) Generation {
-            self.clock = self.clock.next();
-            return self.clock;
+        /// Advance the State clock and issue its value to `lifetime`. Asserts the
+        /// clock is below `maxInt(u32)`; there is no wrap or reset policy here.
+        fn tick(self: *State, comptime lifetime: Lifetime) Generation(lifetime) {
+            self.clock += 1;
+            return @enumFromInt(self.clock);
+        }
+
+        /// Open a scope that is also an execution root. One clock value serves
+        /// both lifetimes; their types keep the stamps apart.
+        fn openRoot(self: *State) void {
+            self.lifetime.scope = self.tick(.scope);
+            self.lifetime.root = @enumFromInt(@intFromEnum(self.lifetime.scope));
         }
 
         /// Drop slots whose incarnation a wipe left behind so the transaction delta
@@ -2197,14 +2215,14 @@ pub fn WorldState(comptime World: type) type {
             var write: usize = 0;
             for (self.transaction_storage_wipes.items) |id| {
                 const row = self.world.accountRow(id);
-                if (row.wiped_transaction != self.transaction_generation) continue;
+                if (row.wiped_transaction != self.lifetime.transaction) continue;
                 row.wiped_transaction = .none;
                 self.transaction_storage_wipes.items[write] = id;
                 write += 1;
             }
             for (self.transaction_storage_wipes.items[0..write]) |id|
                 self.world.accountRow(id).wiped_transaction =
-                    self.transaction_generation;
+                    self.lifetime.transaction;
             self.transaction_storage_wipes.items.len = write;
         }
 

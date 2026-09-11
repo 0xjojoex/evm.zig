@@ -446,7 +446,7 @@ test "existence-only semantic access does not require account fields" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.transaction_generation);
+        state.discard(state.lifetime.transaction);
     };
     const target = address.addr(1);
     const attempt = state.beginObservedTransaction();
@@ -470,7 +470,7 @@ test "gas-only storage access does not require storage values" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.transaction_generation);
+        state.discard(state.lifetime.transaction);
     };
     const attempt = state.beginObservedTransaction();
     state.beginScope();
@@ -535,7 +535,7 @@ test "block builder coalesces transitions at one access index" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.transaction_generation);
+        state.discard(state.lifetime.transaction);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;

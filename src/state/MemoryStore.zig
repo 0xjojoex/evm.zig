@@ -477,7 +477,7 @@ test "memory store exposes committer adapter" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.transaction_generation);
+        state.discard(state.lifetime.transaction);
     };
     const attempt = state.beginTransaction();
     state.beginScope();
@@ -505,7 +505,7 @@ test "memory store consumes cumulative wipe then write from a detached delta" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.transaction_generation);
+        state.discard(state.lifetime.transaction);
     };
 
     const wiped = state.beginTransaction();
