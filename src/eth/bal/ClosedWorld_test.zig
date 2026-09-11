@@ -5,9 +5,65 @@ const bal = @import("model.zig");
 const claim_plan = @import("ClaimPlan.zig");
 const crypto = @import("../../crypto.zig");
 const trie = @import("../trie.zig");
-const records = @import("ParentFacts.zig");
+const records = @import("ParentState.zig");
 const commit = @import("../commit.zig");
 const ClosedWorld = @import("ClosedWorld.zig");
+
+test "account dirtiness follows surviving account and storage changes" {
+    const Order = enum { storage_only, account_first, storage_first };
+    for ([_]bool{ false, true }) |parent_changed| {
+        for (std.enums.values(Order)) |order| {
+            const target = address.addr(1);
+            const key = address.AddressWord.fromAddress(target);
+            const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
+            const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
+            const parent_state = try records.initCopy(std.testing.allocator, &.{.{
+                .parent = .{ .present = .{ .balance = 10 } },
+            }}, &.{.{ .value = 3 }});
+            var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
+            defer state.deinit();
+            var snapshot = try state.branchSnapshot();
+            defer snapshot.deinit();
+
+            const attempt = state.beginTransaction();
+            state.beginScope();
+            if (parent_changed) try state.setBalance(key, 17);
+            const outer = state.checkpoint();
+            const inner = state.checkpoint();
+            if (order == .account_first) try state.setBalance(key, 99);
+            _ = try state.setStorage(key, 7, 9);
+            if (order == .storage_first) try state.setBalance(key, 99);
+            state.commitCheckpoint(inner);
+            state.revertToCheckpoint(outer);
+            try std.testing.expectEqual(@as(u256, if (parent_changed) 17 else 10), try state.getBalance(key));
+            try std.testing.expectEqual(@as(u256, 3), try state.getStorage(key, 7));
+            state.closeScope();
+            state.seal(attempt);
+            const reverted = state.pendingView().accepted().commit();
+            try std.testing.expectEqual(parent_changed, reverted.accountDirty(@enumFromInt(0)));
+            try std.testing.expectEqual(parent_changed, reverted.accountChanged(@enumFromInt(0)));
+            try std.testing.expect(!reverted.accountStorageDirty(@enumFromInt(0)));
+            state.discard(attempt);
+            try std.testing.expect(!state.acceptedView().commit().accountDirty(@enumFromInt(0)));
+
+            // Storage alone must still put the account in the commitment update.
+            const storage_attempt = state.beginTransaction();
+            state.beginScope();
+            _ = try state.setStorage(key, 7, 11);
+            state.closeScope();
+            state.seal(storage_attempt);
+            const storage_commit = state.pendingView().accepted().commit();
+            try std.testing.expect(storage_commit.accountDirty(@enumFromInt(0)));
+            try std.testing.expect(!storage_commit.accountChanged(@enumFromInt(0)));
+            try std.testing.expect(storage_commit.accountStorageDirty(@enumFromInt(0)));
+            state.retain(storage_attempt);
+            try std.testing.expect(state.acceptedView().commit().accountDirty(@enumFromInt(0)));
+            state.restoreBranch(&snapshot);
+            try std.testing.expect(!state.acceptedView().commit().accountDirty(@enumFromInt(0)));
+            try std.testing.expectEqual(@as(u256, 3), try state.getStorage(key, 7));
+        }
+    }
+}
 
 test "sealed dense views retain effects and observations with distinct lifetimes" {
     const target = address.addr(1);
@@ -19,21 +75,21 @@ test "sealed dense views retain effects and observations with distinct lifetimes
 
     const parent_code = [_]u8{ 0x60, 0x00 };
     const parent_hash = crypto.keccak256(&parent_code);
-    const account_facts = [_]records.AccountFact{.{
+    const account_records = [_]records.AccountRecord{.{
         .parent = .{ .present = .{
             .nonce = 1,
             .balance = 10,
             .code_hash = parent_hash,
         } },
     }};
-    const storage_facts = [_]records.StorageFact{.{
+    const storage_records = [_]records.StorageRecord{.{
         .value = 3,
     }};
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &storage_facts);
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &storage_records);
     var state = try ClosedWorld.initState(
         std.testing.allocator,
         plan,
-        facts,
+        parent_state,
         &.{&parent_code},
     );
     defer state.deinit();
@@ -88,7 +144,7 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     try std.testing.expectEqual(@as(u32, 1), pending.observations().storage.len());
     try std.testing.expect(pending.observations().accounts.at(0).observation.code_read);
     try std.testing.expect(pending.observations().accounts.at(0).effect.code_written);
-    try std.testing.expect(pending.observations().storage.at(0).?.effect.written);
+    try std.testing.expect(pending.observations().storage.at(0).effect.written);
     try std.testing.expectEqual(@as(usize, 1), pending.logs().len());
     try std.testing.expectEqual(@as(u256, 1), pending.logs().get(0).topics[0]);
     try std.testing.expectEqual(@as(u8, 2), pending.logs().get(0).data[0]);
@@ -114,13 +170,13 @@ test "claim state introduced code is reclaimed across rollback and discard" {
         .{ .address = targets[2] },
     };
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_records = [_]records.AccountRecord{
         .{ .parent = .{ .absent = .empty_trie } },
         .{ .parent = .{ .absent = .empty_trie } },
         .{ .parent = .{ .absent = .empty_trie } },
     };
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &.{});
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     const first_code = [_]u8{ 0x60, 0x01 };
@@ -169,19 +225,46 @@ test "claim state introduced code is reclaimed across rollback and discard" {
 
     state.closeScope();
     state.seal(discarded);
+    const first_hash = crypto.keccak256(&first_code);
+    const second_hash = crypto.keccak256(&second_code);
+    const third_hash = crypto.keccak256(&third_code);
+    const pending_codes = state.pendingView().changes();
+    const accepted_codes = state.pendingView().accepted().changes();
+    try std.testing.expect(accepted_codes.introducedCode(first_hash) != null);
+    try std.testing.expect(accepted_codes.introducedCode(second_hash) == null);
+    try std.testing.expect(pending_codes.introducedCode(first_hash) == null);
+    try std.testing.expectEqualSlices(u8, &second_code, pending_codes.introducedCode(second_hash).?.bytes);
+    try std.testing.expect(pending_codes.introducedCode(third_hash) == null);
     state.discard(discarded);
     try std.testing.expectEqual(@as(usize, 1), state.code.introducedLen());
     try std.testing.expectEqual(first_ref, state.world.accounts[0].code_ref);
     try std.testing.expectEqualSlices(u8, &first_code, state.code.view(first_ref).?.bytes);
+    try std.testing.expect(state.acceptedView().changes().introducedCode(second_hash) == null);
+
+    const retained = state.beginTransaction();
+    try state.setCode(.fromAddress(targets[1]), &second_code);
+    state.seal(retained);
+    try std.testing.expect(state.pendingView().changes().introducedCode(second_hash) != null);
+    state.retain(retained);
+    try std.testing.expect(state.acceptedView().changes().introducedCode(second_hash) != null);
+
+    // Reusing accepted code does not introduce it again in the next attempt.
+    const reused = state.beginTransaction();
+    try state.setCode(.fromAddress(targets[2]), &second_code);
+    state.seal(reused);
+    try std.testing.expect(state.pendingView().changes().introducedCode(first_hash) == null);
+    try std.testing.expect(state.pendingView().changes().introducedCode(second_hash) == null);
+    try std.testing.expect(state.pendingView().accepted().changes().introducedCode(second_hash) != null);
+    state.discard(reused);
 }
 
 test "discarding accepted dense state reclaims code for a clean retry" {
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{.{ .parent = .{ .absent = .empty_trie } }};
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const account_records = [_]records.AccountRecord{.{ .parent = .{ .absent = .empty_trie } }};
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &.{});
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     const code = [_]u8{ 0x60, 0x01 };
@@ -216,9 +299,9 @@ test "claim state branch restore preserves retained logs" {
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{.{ .parent = .{ .absent = .empty_trie } }};
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const account_records = [_]records.AccountRecord{.{ .parent = .{ .absent = .empty_trie } }};
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &.{});
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     const original_topics = [_]u256{1};
@@ -262,12 +345,12 @@ test "introduced code satisfies a later optional witness code read" {
         .{ .address = created },
     };
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{
+    const account_records = [_]records.AccountRecord{
         .{ .parent = .{ .present = .{ .nonce = 1, .code_hash = code_hash } } },
         .{ .parent = .{ .absent = .empty_trie } },
     };
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &.{});
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     const introduced = state.beginObservedTransaction();
@@ -289,14 +372,14 @@ test "claim state code reference preserves lazy invalid-witness rejection" {
     const missing_hash = [_]u8{0x77} ** 32;
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{.{
+    const account_records = [_]records.AccountRecord{.{
         .parent = .{ .present = .{ .nonce = 1, .code_hash = missing_hash } },
     }};
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &.{});
     var state = try ClosedWorld.initState(
         std.testing.allocator,
         plan,
-        facts,
+        parent_state,
         &.{},
     );
     defer state.deinit();
@@ -316,14 +399,14 @@ test "sealed storage wipe removes stale point writes" {
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{.{
+    const account_records = [_]records.AccountRecord{.{
         .parent = .{ .present = .{ .nonce = 1, .storage_root = [_]u8{0x77} ** 32 } },
     }};
-    const storage_facts = [_]records.StorageFact{.{
+    const storage_records = [_]records.StorageRecord{.{
         .value = 3,
     }};
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &storage_facts);
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &storage_records);
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     const attempt = state.beginObservedTransaction();
@@ -341,14 +424,14 @@ test "sealed discard preserves prior accepted storage projection" {
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{.{
+    const account_records = [_]records.AccountRecord{.{
         .parent = .{ .present = .{ .nonce = 1, .storage_root = [_]u8{0x77} ** 32 } },
     }};
-    const storage_facts = [_]records.StorageFact{.{
+    const storage_records = [_]records.StorageRecord{.{
         .value = 3,
     }};
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &storage_facts);
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &storage_records);
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     const accepted_attempt = state.beginObservedTransaction();
@@ -402,11 +485,11 @@ test "storage wipe projections deduplicate scope reverts" {
     const target = address.addr(1);
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const account_facts = [_]records.AccountFact{.{
+    const account_records = [_]records.AccountRecord{.{
         .parent = .{ .present = .{ .nonce = 1 } },
     }};
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &.{});
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     const attempt = state.beginObservedTransaction();
@@ -670,13 +753,13 @@ test "translation memo resolves alternating and evicted addresses to plan ids" {
     };
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
 
-    const account_facts = [_]records.AccountFact{
+    const account_records = [_]records.AccountRecord{
         .{ .parent = .{ .absent = .empty_trie } },
         .{ .parent = .{ .absent = .empty_trie } },
         .{ .parent = .{ .absent = .empty_trie } },
     };
-    const facts = try records.initCopy(std.testing.allocator, &account_facts, &.{});
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    const parent_state = try records.initCopy(std.testing.allocator, &account_records, &.{});
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
 
     // A,B alternation (both entries), then C forcing eviction, then a sweep
@@ -707,11 +790,11 @@ test "closed branch snapshot restores compacted storage changes and commit value
         .{ .address = address.addr(2), .storage_reads = &.{2} },
     };
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
-    const facts = try records.initCopy(std.testing.allocator, &.{
+    const parent_state = try records.initCopy(std.testing.allocator, &.{
         .{ .parent = .{ .present = .{ .balance = 1 } } },
         .{ .parent = .{ .present = .{ .balance = 1 } } },
     }, &.{ .{ .value = 0 }, .{ .value = 0 } });
-    var state = try ClosedWorld.initState(std.testing.allocator, plan, facts, &.{});
+    var state = try ClosedWorld.initState(std.testing.allocator, plan, parent_state, &.{});
     defer state.deinit();
     const baseline = state.beginTransaction();
     state.beginScope();

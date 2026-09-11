@@ -31,7 +31,7 @@ pub const CodeObservation = struct {
     current_code: []const u8,
 };
 
-/// Allocation-free BAL projection of one sealed account fact. Identity stays
+/// Allocation-free BAL projection of one sealed account observation record. Identity stays
 /// with the caller so address-keyed and dense-ID consumers share these rules.
 pub const AccountFields = struct {
     balance: ?ValueObservation = null,
@@ -45,22 +45,22 @@ pub inline fn accountValueRequired(effect: anytype) bool {
         (!effect.storage_wiped and (effect.nonce_written or effect.code_written));
 }
 
-pub fn accountFields(view: anytype, fact: anytype) !?AccountFields {
-    if (!fact.observation.semantic_access and !fact.effect.any()) return null;
+pub fn accountFields(view: anytype, record: anytype) !?AccountFields {
+    if (!record.observation.semantic_access and !record.effect.any()) return null;
 
-    var fields = AccountFields{ .storage_wiped = fact.effect.storage_wiped };
-    if (accountValueRequired(fact.effect)) {
-        const original = accountOrZero(fact.original);
-        const current = accountOrZero(fact.current);
-        if (fact.effect.balance_written) fields.balance = .{
+    var fields = AccountFields{ .storage_wiped = record.effect.storage_wiped };
+    if (accountValueRequired(record.effect)) {
+        const original = accountOrZero(record.original);
+        const current = accountOrZero(record.current);
+        if (record.effect.balance_written) fields.balance = .{
             .original = original.balance,
             .current = current.balance,
         };
-        if (fact.effect.nonce_written and !fact.effect.storage_wiped) fields.nonce = .{
+        if (record.effect.nonce_written and !record.effect.storage_wiped) fields.nonce = .{
             .original = original.nonce,
             .current = current.nonce,
         };
-        if (fact.effect.code_written and !fact.effect.storage_wiped) {
+        if (record.effect.code_written and !record.effect.storage_wiped) {
             const code = view.code(current.code_hash) orelse
                 return error.ObservationCodeUnavailable;
             fields.code = .{
@@ -111,7 +111,7 @@ pub const AccountObservation = struct {
     nonce: ?NonceObservation = null,
     code: ?CodeObservation = null,
     /// A destroyed contract's touched slots are BAL reads rather than writes to
-    /// zero, so the wipe has to survive as its own fact.
+    /// zero, so the wipe has to remain an explicit effect.
     storage_wiped: bool = false,
 };
 

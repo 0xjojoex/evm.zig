@@ -38,6 +38,7 @@ pub const RootProvider = @import("./state/RootProvider.zig");
 pub const sparse_hash_map = @import("./state/sparse_hash_map.zig");
 pub const world_state = @import("./state/world_state.zig");
 pub const WorldState = world_state.WorldState;
+pub const Generation = world_state.Generation;
 pub const OpenWorld = @import("./state/OpenWorld.zig");
 pub const OpenState = WorldState(OpenWorld);
 pub const MemoryStore = @import("./state/MemoryStore.zig");
@@ -45,12 +46,10 @@ pub const MemoryStore = @import("./state/MemoryStore.zig");
 pub const StorageKey = storage.Key;
 pub const storageStatus = storage.status;
 
-/// One call-scope rollback record, shared by every execution state model.
+/// Rollback boundary owned by one State and attempt. Close in LIFO order.
+/// Checkpoints carry no owner or epoch qualifier; callers must not use them
+/// with another State or after `discardAccepted` resets the generation clock.
 pub const Checkpoint = struct {
-    /// Identifies one transaction attempt; scope checkpoints are only valid within
-    /// the attempt that opened them.
-    pub const AttemptId = enum(u64) { _ };
-
     /// Retained log-buffer lengths at scope open.
     pub const Log = struct {
         rows_len: u32,
@@ -58,19 +57,18 @@ pub const Checkpoint = struct {
         data_len: u32,
     };
 
-    attempt_id: AttemptId,
-    /// Generation that must be active when this checkpoint is closed.
-    scope_generation: u64,
-    /// Generation that becomes active after close. Lanes whose generation is
-    /// per transaction rather than per scope restore the same value.
-    parent_scope_generation: u64,
+    /// Generation that must be active when this checkpoint closes.
+    scope: Generation(.scope),
+    /// Generation restored when this checkpoint closes.
+    parent_scope: Generation(.scope),
     journal_len: u32,
     changed_accounts_len: u32,
     changed_storage_len: u32,
-    /// Transaction-scoped wipe list length; zero for lanes that keep wipes at
-    /// block lifetime and unwind them through the journal.
-    storage_wipes_len: u32,
     logs: Log,
+
+    comptime {
+        std.debug.assert(@sizeOf(Checkpoint) == 32);
+    }
 };
 
 /// Capacity advice for the containers a state lane keeps per transaction
@@ -132,7 +130,7 @@ pub const StorageChange = struct {
 
 /// One sealed account observation: what a transaction read or wrote for one
 /// address, with the value it started from and ended at. `null` is absent.
-pub const AccountObservationFact = struct {
+pub const AccountObservationRecord = struct {
     address: Address,
     original: ?Account,
     current: ?Account,
@@ -140,8 +138,8 @@ pub const AccountObservationFact = struct {
     effect: AccountEffect,
 };
 
-/// One sealed storage observation with a complete value fact.
-pub const StorageObservationFact = struct {
+/// One sealed storage observation with original and current values.
+pub const StorageObservationRecord = struct {
     address: Address,
     key: u256,
     original: u256,
@@ -150,8 +148,8 @@ pub const StorageObservationFact = struct {
     effect: StorageEffect,
 };
 
-/// The identity and flags of a storage observation without its values; gas-only
-/// access rows in the open lane have no value fact.
+/// The identity and flags of a complete storage observation, projected without
+/// its values so consumers can filter records before reading them.
 pub const StorageObservationMetadata = struct {
     address: Address,
     key: u256,
@@ -257,7 +255,7 @@ pub fn checkChangesView(comptime View: type) void {
 /// provides one; `eth.commit` is the consumer.
 ///
 /// `authenticated_parents` says whether the view carries the parent trie
-/// facts itself through `accountFact(id)` (a closed world authenticated at
+/// records itself through `parentAccount(id)` (a closed world authenticated at
 /// admission) or the committer resolves parents from the witness by
 /// `accountTrieKey(id)`.
 pub fn checkCommitView(comptime Commit: type) void {
@@ -278,8 +276,8 @@ pub fn checkCommitView(comptime Commit: type) void {
                 "commit view " ++ @typeName(Commit) ++ " is missing '" ++ method ++ "'",
             );
         }
-        if (Commit.authenticated_parents and !std.meta.hasMethod(Commit, "accountFact")) @compileError(
-            "commit view " ++ @typeName(Commit) ++ " authenticates parents but has no 'accountFact'",
+        if (Commit.authenticated_parents and !std.meta.hasMethod(Commit, "parentAccount")) @compileError(
+            "commit view " ++ @typeName(Commit) ++ " authenticates parents but has no 'parentAccount'",
         );
     }
 }

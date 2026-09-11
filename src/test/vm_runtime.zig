@@ -83,10 +83,10 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
             const view = observation.observations();
             var index: u32 = 0;
             while (index < view.accounts.len()) : (index += 1) {
-                const fact = view.accounts.at(index);
-                if (!evmz.Address.eql(fact.address, self.address)) continue;
-                try std.testing.expect(fact.observation.code_read);
-                const loaded_account = fact.current orelse return error.ExpectedLoadedAccount;
+                const record = view.accounts.at(index);
+                if (!evmz.Address.eql(record.address, self.address)) continue;
+                try std.testing.expect(record.observation.code_read);
+                const loaded_account = record.current orelse return error.ExpectedLoadedAccount;
                 try std.testing.expectEqualSlices(u8, &self.code_hash, &loaded_account.code_hash);
                 return;
             }

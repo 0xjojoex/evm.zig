@@ -10,7 +10,7 @@ const commit = @import("../eth/commit.zig");
 const rlp = @import("rlp");
 const Account = @import("../state/Account.zig");
 const ClaimPlan = @import("../eth/bal/ClaimPlan.zig").ClaimPlan;
-pub const ParentFacts = @import("../eth/bal/ParentFacts.zig");
+pub const ParentState = @import("../eth/bal/ParentState.zig");
 const StateReader = @import("../state/Reader.zig");
 const claim_artifacts = @import("../eth/bal/claim_artifacts.zig");
 
@@ -29,7 +29,7 @@ catalog: trie.WitnessCatalog,
 codes: []CodeEntry = &.{},
 /// Accounts already decoded from the catalog, keyed by address; `null` is a
 /// proven absence.
-accounts: trie.AccountFacts,
+accounts: trie.AccountCache,
 
 /// Authenticate `state_root` over `witness` and adopt the resulting catalog.
 /// The index is released here: catalog nodes borrow the encoded witness
@@ -51,7 +51,7 @@ pub fn init(
         .state_root = state_root,
         .catalog = catalog,
         .codes = indexed_codes,
-        .accounts = trie.AccountFacts.init(allocator),
+        .accounts = trie.AccountCache.init(allocator),
     };
 }
 
@@ -100,8 +100,8 @@ pub fn authenticateClaimPlan(
     self: *WitnessReader,
     allocator: std.mem.Allocator,
     plan: ClaimPlan,
-) (std.mem.Allocator.Error || Error)!ParentFacts {
-    return ParentFacts.authenticate(allocator, plan, &self.catalog) catch |err| switch (err) {
+) (std.mem.Allocator.Error || Error)!ParentState {
+    return ParentState.authenticate(allocator, plan, &self.catalog) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidWitness,
     };
@@ -220,7 +220,7 @@ test "witness reader derives the root of tracked changes through a sorted commit
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.lifetime.transaction);
     };
     const attempt = state.beginTransaction();
     state.beginScope();

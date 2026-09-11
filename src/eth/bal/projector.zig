@@ -27,7 +27,7 @@ const linear_index_limit = 8;
 
 /// Detach one sealed observation view as an owned, sorted transition.
 ///
-/// This shares `ObservationFold` with the block builder so the fact-to-
+/// This shares `ObservationFold` with the block builder so the observation-to-
 /// observation mapping - notably the rule that a storage wipe suppresses the
 /// implied nonce and code finalization writes - exists exactly once.
 pub fn materialize(
@@ -202,9 +202,9 @@ const ObservationFold = struct {
     fn appendView(self: *ObservationFold, view: anytype) !void {
         var account_index: u32 = 0;
         while (account_index < view.accounts.len()) : (account_index += 1) {
-            const fact = view.accounts.at(account_index);
-            const fields = try observation.accountFields(view, fact) orelse continue;
-            const target = try self.accountFor(fact.address);
+            const record = view.accounts.at(account_index);
+            const fields = try observation.accountFields(view, record) orelse continue;
+            const target = try self.accountFor(record.address);
             try target.appendAccountFields(self.allocator, fields);
         }
 
@@ -214,19 +214,18 @@ const ObservationFold = struct {
         while (storage_index < view.storage.len()) : (storage_index += 1) {
             const metadata = view.storage.metadataAt(storage_index);
             if (!metadata.observation.value_read and !metadata.effect.written) continue;
-            const fact = view.storage.at(storage_index) orelse
-                return error.IncompleteStorageObservation;
+            const record = view.storage.at(storage_index);
             if (previous_address == null or
-                !Address.eql(previous_address.?, fact.address))
+                !Address.eql(previous_address.?, record.address))
             {
-                previous_address = fact.address;
-                previous_account_index = try self.accountIndexFor(fact.address);
+                previous_address = record.address;
+                previous_account_index = try self.accountIndexFor(record.address);
             }
             const target = &self.accounts.items[previous_account_index];
             try target.appendStorage(self.allocator, .{
-                .slot = fact.key,
-                .original = fact.original,
-                .current = fact.current,
+                .slot = record.key,
+                .original = record.original,
+                .current = record.current,
             });
         }
     }
@@ -447,7 +446,7 @@ test "existence-only semantic access does not require account fields" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.lifetime.transaction);
     };
     const target = address.addr(1);
     const attempt = state.beginObservedTransaction();
@@ -471,7 +470,7 @@ test "gas-only storage access does not require storage values" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.lifetime.transaction);
     };
     const attempt = state.beginObservedTransaction();
     state.beginScope();
@@ -536,7 +535,7 @@ test "block builder coalesces transitions at one access index" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.lifetime.transaction);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;

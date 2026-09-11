@@ -74,7 +74,7 @@ pub const Backend = union(enum) {
         self: *Backend,
         allocator: std.mem.Allocator,
         plan: ClaimPlan,
-    ) !?WitnessReader.ParentFacts {
+    ) !?WitnessReader.ParentState {
         return switch (self.*) {
             .witness => |*witness| try witness.authenticateClaimPlan(allocator, plan),
             .external => null,
