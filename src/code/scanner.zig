@@ -16,6 +16,11 @@ pub fn markJumpDests(map: *BitSet, bytes: []const u8) void {
 /// The same scan over raw bitset words, so comptime preparation shares it.
 /// `masks` must already be zeroed and cover every bit of `bytes`.
 pub fn markJumpDestWords(masks: []usize, bytes: []const u8) void {
+    const lengths = comptime blk: {
+        var result: [256]u8 = @splat(1);
+        for (0..32) |i| result[Opcode.PUSH1.toByte() + i] = @intCast(i + 2);
+        break :blk result;
+    };
     var pc: usize = 0;
     while (pc < bytes.len) {
         const opcode_byte = bytes[pc];
@@ -24,8 +29,7 @@ pub fn markJumpDestWords(masks: []usize, bytes: []const u8) void {
             masks[pc / @bitSizeOf(usize)] |= @as(usize, 1) << shift;
         }
 
-        const push_offset = opcode_byte -% Opcode.PUSH1.toByte();
-        pc += if (push_offset < 32) @as(usize, push_offset) + 2 else 1;
+        pc += lengths[opcode_byte];
     }
 }
 
