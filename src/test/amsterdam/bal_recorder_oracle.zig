@@ -1212,7 +1212,7 @@ test "tracked observations match recorder after inner rollback" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;
@@ -1322,7 +1322,7 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;

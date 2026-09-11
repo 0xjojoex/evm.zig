@@ -236,7 +236,7 @@ pub fn ExecutorType(
         /// attempts, `transaction/runtime.zig` resolves `transaction` ones
         /// through an `Executed` handle.
         const Attempt = struct {
-            id: Checkpoint.AttemptId,
+            id: evmz.state.Generation,
             mode: InstrumentationMode,
             owner: Owner,
 

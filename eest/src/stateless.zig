@@ -795,13 +795,12 @@ const GasTracePrinter = struct {
             const metadata = observations.storage.metadataAt(storage_index);
             if (!metadata.observation.value_read and !metadata.effect.written) {
                 std.debug.print(
-                    "    trace storage index={} addr={x} key={x} value=unloaded written=false\n",
+                    "    trace storage index={} addr={x} key={x} value_read=false written=false\n",
                     .{ block_access_index, metadata.address, metadata.key },
                 );
                 continue;
             }
-            const record = observations.storage.at(storage_index) orelse
-                return error.IncompleteStorageObservation;
+            const record = observations.storage.at(storage_index);
             std.debug.print(
                 "    trace storage index={} addr={x} key={x} previous={x} value={x} written={}\n",
                 .{
