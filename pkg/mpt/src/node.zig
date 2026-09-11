@@ -57,14 +57,6 @@ pub const CatalogReference = struct {
         hashed,
     };
 
-    pub fn reference(self: CatalogReference, encoded: []const u8) Reference {
-        return switch (self.kind) {
-            .empty => .empty,
-            .embedded => .{ .embedded = encoded[self.offset..][0..self.len] },
-            .hashed => .{ .hashed = @ptrCast(encoded[self.offset..][0..32].ptr) },
-        };
-    }
-
     comptime {
         std.debug.assert(@sizeOf(CatalogReference) == 8);
         std.debug.assert(@alignOf(CatalogReference) == 8);
@@ -120,7 +112,7 @@ pub fn decodeForCatalog(encoded: []const u8) Error!CatalogNode {
     if (branch.children[1].kind != .empty) occupied += 1;
     for (2..16) |index| {
         if (fields.isDone()) return error.InvalidNode;
-        branch.children[index] = try decodeCatalogReference(encoded, try fields.next());
+        branch.children[index] = try nextCatalogReference(encoded, &fields);
         if (branch.children[index].kind != .empty) occupied += 1;
     }
     if (fields.isDone()) return error.InvalidNode;
@@ -130,6 +122,26 @@ pub fn decodeForCatalog(encoded: []const u8) Error!CatalogNode {
     if (branch.value != null) occupied += 1;
     if (occupied < 2) return error.NonCanonicalNode;
     return .{ .branch = branch };
+}
+
+fn nextCatalogReference(encoded: []const u8, fields: *rlp.Cursor) Error!CatalogReference {
+    // Empty and hashed children have fixed canonical encodings. Read their
+    // compact spans directly; embedded children still use the general decoder.
+    const remaining = fields.input[fields.offset..];
+    if (remaining.len == 0) return error.InputTooShort;
+    switch (remaining[0]) {
+        0x80 => {
+            fields.offset += 1;
+            return .{ .offset = 0, .len = 0, .kind = .empty };
+        },
+        0xa0 => {
+            if (remaining.len < 33) return error.InputTooShort;
+            const offset = try catalogOffset(encoded, remaining[1..33]);
+            fields.offset += 33;
+            return .{ .offset = offset, .len = 32, .kind = .hashed };
+        },
+        else => return decodeCatalogReference(encoded, try fields.next()),
+    }
 }
 
 fn decodeCatalogReference(encoded: []const u8, item: rlp.Item) Error!CatalogReference {

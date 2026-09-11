@@ -72,9 +72,17 @@ pub const CompactPath = struct {
         };
     }
 
-    /// Whether the whole path matches `key` starting at nibble `depth`.
-    pub fn matchesKey(self: CompactPath, key: []const u8, depth: usize) bool {
+    /// Whether the whole path matches a prefix of `key`'s suffix at nibble `depth`.
+    pub inline fn matchesKey(self: CompactPath, key: []const u8, depth: usize) bool {
         if (depth > keyNibbleLen(key) or self.len > keyNibbleLen(key) - depth) return false;
+        if (self.nibble_offset % 2 == depth % 2) {
+            // A decoded compact path ends on a byte boundary. With matching
+            // parity, only its odd leading nibble needs a partial comparison.
+            if (depth % 2 != 0 and self.encoded[0] & 0x0f != key[depth / 2] & 0x0f)
+                return false;
+            const tail = self.encoded[1..];
+            return std.mem.eql(u8, tail, key[depth / 2 + depth % 2 ..][0..tail.len]);
+        }
         for (0..self.len) |index| {
             if (self.nibbleAt(index) != keyNibbleAt(key, depth + index)) return false;
         }
@@ -82,7 +90,7 @@ pub const CompactPath = struct {
     }
 
     /// The nibble at `index` within the decoded path.
-    pub fn nibbleAt(self: CompactPath, index: usize) u8 {
+    pub inline fn nibbleAt(self: CompactPath, index: usize) u8 {
         const absolute = self.nibble_offset + index;
         const byte = self.encoded[absolute / 2];
         return if (absolute % 2 == 0) byte >> 4 else byte & 0x0f;
@@ -98,23 +106,23 @@ pub fn commonPrefix(lhs: []const u8, rhs: []const u8) usize {
 }
 
 /// Whether nibble sequence `key` begins with `prefix`.
-pub fn startsWith(key: []const u8, prefix: []const u8) bool {
+pub inline fn startsWith(key: []const u8, prefix: []const u8) bool {
     return key.len >= prefix.len and std.mem.eql(u8, key[0..prefix.len], prefix);
 }
 
 /// Number of nibbles in `key` (two per byte).
-pub fn keyNibbleLen(key: []const u8) usize {
+pub inline fn keyNibbleLen(key: []const u8) usize {
     return key.len * 2;
 }
 
 /// The nibble at `index` in `key`, high nibble first.
-pub fn keyNibbleAt(key: []const u8, index: usize) u8 {
+pub inline fn keyNibbleAt(key: []const u8, index: usize) u8 {
     const byte = key[index / 2];
     return if (index % 2 == 0) byte >> 4 else byte & 0x0f;
 }
 
 /// Byte length of the hex-prefix encoding of a path of `path_len` nibbles.
-pub fn compactLen(path_len: usize) usize {
+pub inline fn compactLen(path_len: usize) usize {
     return 1 + path_len / 2;
 }
 

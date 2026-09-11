@@ -403,11 +403,18 @@ fn BasicSource(comptime Walker: type, comptime ElementCodec: type, comptime Valu
         }
 
         pub fn leaf(self: @This(), chunk_index: usize, path: *const TreePath) Walker.WalkError!Root {
-            var root = merkle.zero;
             const first = chunk_index * elements_per_chunk;
             // The merkleizer only requests chunks within count(), so first is in range.
             std.debug.assert(first < self.values.*.len);
             const end = first + @min(elements_per_chunk, self.values.*.len - first);
+            if (comptime ElementCodec == ssz.Fixed(u8)) {
+                var root: Root = undefined;
+                const bytes = self.values.*[first..end];
+                @memcpy(root[0..bytes.len], bytes);
+                @memset(root[bytes.len..], 0);
+                return self.walker.leaf(path, root);
+            }
+            var root = merkle.zero;
             for (self.values.*[first..end], 0..) |value, index| {
                 const start = index * element_size;
                 _ = try ElementCodec.encode(root[start .. start + element_size], value);
@@ -514,6 +521,75 @@ fn basicChunkCount(item_count: usize, element_size: usize) Error!usize {
 
 fn bitChunkCount(bit_count: usize) usize {
     return if (bit_count == 0) 0 else (bit_count - 1) / 256 + 1;
+}
+
+test "SSZ byte leaves preserve generic roots and tree traversal across chunk boundaries" {
+    const Identity = struct {
+        pub fn toWire(value: u8) u8 {
+            return value;
+        }
+        pub fn fromWire(value: u8) u8 {
+            return value;
+        }
+    };
+    // A distinct codec keeps the generic element-encoding path as the oracle.
+    const GenericByte = ssz.Mapped(u8, ssz.Fixed(u8), Identity);
+    const Record = struct { index: u256, node: TreeNode };
+    const Visitor = struct {
+        pub const Error = error{};
+
+        records: [128]Record = undefined,
+        len: usize = 0,
+
+        pub fn visit(self: *@This(), path: *const TreePath, node: TreeNode) @This().Error!void {
+            self.records[self.len] = .{ .index = path.generalizedIndex().?, .node = node };
+            self.len += 1;
+        }
+    };
+    var data: [519]u8 = undefined;
+    var random = std.Random.DefaultPrng.init(0x73737a);
+    random.random().bytes(&data);
+    inline for (.{ false, true }) |progressive| {
+        const Bytes = if (progressive) ssz.ProgressiveByteList else ssz.ByteList(512);
+        const Generic = if (progressive) ssz.ProgressiveListOf(GenericByte) else ssz.ListOf(GenericByte, 512);
+        for (0..513) |len| {
+            const offset = len % 8;
+            const value = data[offset..][0..len];
+            var actual = Visitor{};
+            var expected = Visitor{};
+            try std.testing.expectEqual(
+                try ssz.walkTree(Generic, value, &expected),
+                try ssz.walkTree(Bytes, value, &actual),
+            );
+            try std.testing.expectEqualDeep(expected.records[0..expected.len], actual.records[0..actual.len]);
+        }
+    }
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(ssz.VectorOf(GenericByte, 33), data[0..33].*),
+        try ssz.hashTreeRoot(ssz.ByteVector(33), data[0..33].*),
+    );
+}
+
+test "SSZ byte-valued custom codecs retain their encoding during Merkleization" {
+    const Invert = struct {
+        pub fn toWire(value: u8) u8 {
+            return ~value;
+        }
+        pub fn fromWire(value: u8) u8 {
+            return ~value;
+        }
+    };
+    const InvertedByte = ssz.Mapped(u8, ssz.Fixed(u8), Invert);
+    const input = [_]u8{0x35} ** 33;
+    const encoded = [_]u8{0xca} ** 33;
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(ssz.ByteList(64), &encoded),
+        try ssz.hashTreeRoot(ssz.ListOf(InvertedByte, 64), &input),
+    );
+    try std.testing.expectEqual(
+        try ssz.hashTreeRoot(ssz.ProgressiveByteList, &encoded),
+        try ssz.hashTreeRoot(ssz.ProgressiveListOf(InvertedByte), &input),
+    );
 }
 
 fn declaredBasicChunkLimit(

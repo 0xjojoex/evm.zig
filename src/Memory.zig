@@ -226,10 +226,46 @@ test nextSize {
 inline fn memoryCost(expand_size: usize) ?i64 {
     assert(expand_size % word_size == 0);
     const memory_size_word = expand_size / word_size;
+    // Avoid RV64's wide-arithmetic expansion for ordinary guest memory sizes.
+    // A u32 word count has a u64 square, and its total cost fits in i64.
+    if (comptime build_options.profile == .zkvm and builtin.target.cpu.arch == .riscv64) {
+        if (memory_size_word <= std.math.maxInt(u32)) {
+            const words: u64 = @intCast(memory_size_word);
+            return @intCast((words * words) / 512 + 3 * words);
+        }
+    }
     const words: u128 = memory_size_word;
     const cost = (words * words) / 512 + (3 * words);
     if (cost > std.math.maxInt(i64)) return null;
     return @intCast(cost);
+}
+
+test "memory gas matches the wide formula across arithmetic boundaries" {
+    const Oracle = struct {
+        fn check(words: usize) !void {
+            const wide: u128 = words;
+            const expected = std.math.cast(i64, wide * wide / 512 + 3 * wide);
+            try std.testing.expectEqual(expected, memoryCost(words * word_size));
+        }
+    };
+    const max_words = std.math.maxInt(usize) / word_size;
+    for (0..65_536) |words| try Oracle.check(words);
+    for ([_]u64{
+        std.math.maxInt(u32) - 1,
+        std.math.maxInt(u32),
+        @as(u64, std.math.maxInt(u32)) + 1,
+        68_719_475_968, // Last word count whose total cost fits in i64.
+        68_719_475_969,
+    }) |words| {
+        if (words <= max_words) try Oracle.check(@intCast(words));
+    }
+    try Oracle.check(max_words);
+    var prng = std.Random.DefaultPrng.init(0x6d656d676173);
+    for (0..10_000) |_| {
+        const words = prng.random().int(usize);
+        try Oracle.check(words / word_size);
+        try Oracle.check(@min(words & std.math.maxInt(u32), max_words));
+    }
 }
 
 test Memory {
