@@ -214,8 +214,7 @@ const ObservationFold = struct {
         while (storage_index < view.storage.len()) : (storage_index += 1) {
             const metadata = view.storage.metadataAt(storage_index);
             if (!metadata.observation.value_read and !metadata.effect.written) continue;
-            const record = view.storage.at(storage_index) orelse
-                return error.IncompleteStorageObservation;
+            const record = view.storage.at(storage_index);
             if (previous_address == null or
                 !Address.eql(previous_address.?, record.address))
             {
@@ -447,7 +446,7 @@ test "existence-only semantic access does not require account fields" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     const target = address.addr(1);
     const attempt = state.beginObservedTransaction();
@@ -471,7 +470,7 @@ test "gas-only storage access does not require storage values" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     const attempt = state.beginObservedTransaction();
     state.beginScope();
@@ -536,7 +535,7 @@ test "block builder coalesces transitions at one access index" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;

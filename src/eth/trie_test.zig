@@ -796,7 +796,7 @@ test "MPT state root is the same through a detached delta" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     const attempt = state.beginTransaction();
     state.beginScope();
@@ -826,7 +826,7 @@ test "MPT state root consumes tracked changes" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     const attempt = state.beginTransaction();
     state.beginScope();
@@ -884,7 +884,7 @@ test "MPT state root groups interleaved tracked storage writes by address" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     const attempt = state.beginTransaction();
     state.beginScope();
@@ -951,7 +951,7 @@ test "MPT state root loads the parent account from the catalog" {
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     var seeded = MemoryAccount.init(scratch);
     seeded.account.nonce = previous.nonce;

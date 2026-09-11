@@ -18,7 +18,6 @@ const Allocator = std.mem.Allocator;
 const DenseClaimVerifier = @This();
 
 pub const Error = Allocator.Error || error{
-    IncompleteStorageObservation,
     ObservationCodeUnavailable,
 };
 
@@ -201,8 +200,7 @@ pub fn append(
     while (storage_index < view.storage.len()) : (storage_index += 1) {
         const metadata = view.storage.metadataAt(storage_index);
         if (!metadata.observation.value_read and !metadata.effect.written) continue;
-        const record = view.storage.at(storage_index) orelse
-            return error.IncompleteStorageObservation;
+        const record = view.storage.at(storage_index);
         const id = view.storage.idAt(storage_index);
         const index = @intFromEnum(id);
         const state = &self.storage[index];
@@ -437,7 +435,7 @@ const TestView = struct {
             return @intCast(self.items.len);
         }
 
-        pub fn at(self: Storage, index: u32) ?TestStorageRecord {
+        pub fn at(self: Storage, index: u32) TestStorageRecord {
             return self.items[index].record;
         }
 

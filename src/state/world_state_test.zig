@@ -72,7 +72,7 @@ fn initState(allocator: std.mem.Allocator, reader: ?Reader) OpenState {
 fn abandon(state: *OpenState) void {
     if (!state.transaction_active) return;
     if (state.scopeActive()) state.closeScope();
-    state.discard(state.active_attempt_id.?);
+    state.discard(state.transaction_generation);
 }
 
 fn row(state: *OpenState, address: Address) OpenState.AccountId {
@@ -153,7 +153,7 @@ test "gas-only storage access warms without loading or observing a row" {
     try std.testing.expectEqual(@as(u256, 2), metadata.key);
     try std.testing.expect(metadata.observation.value_read);
     try std.testing.expect(!metadata.effect.written);
-    const record = storage.at(0).?;
+    const record = storage.at(0);
     try std.testing.expectEqual(@as(u256, 7), record.original);
     try std.testing.expectEqual(@as(u256, 7), record.current);
 }
@@ -264,7 +264,8 @@ test "retained account writes advance accepted state" {
     try state.setBalance(word(1), 10);
     const unchanged = state.world.accountRow(row(&state, addr(1)));
     try std.testing.expectEqual(@as(usize, 0), state.observed_accounts.items.len);
-    try std.testing.expect(!unchanged.flags.block_dirty);
+    try std.testing.expect(!unchanged.flags.block_changed);
+    try std.testing.expect(!unchanged.flags.storage_dirty);
 
     try state.setBalance(word(1), 99);
     try state.setNonce(word(1), 8);
@@ -321,7 +322,8 @@ test "account mutation rolls back but observation and row survive" {
 
     const account_row = state.world.accountRow(row(&state, addr(1)));
     try std.testing.expectEqual(@as(u64, 3), account_row.current.?.nonce);
-    try std.testing.expect(!account_row.flags.block_dirty);
+    try std.testing.expect(!account_row.flags.block_changed);
+    try std.testing.expect(!account_row.flags.storage_dirty);
     try std.testing.expectEqual(@as(u64, 3), try state.getNonce(word(1)));
     try std.testing.expectEqual(@as(usize, 1), state.observed_accounts.items.len);
 }
@@ -403,10 +405,9 @@ test "compact journal order unwinds typed undo arenas" {
     try std.testing.expectEqual(.modified, try state.setStorage(word(1), 2, 9));
     try state.setTransientStorage(word(1), 4, 12);
 
-    // Warmth, the account record, the storage record with the account's
-    // storage-dirty bit as its own entry, and the transient write.
+    // The account undo also covers the storage-dirty flag in this scope.
     const journal = &state.journal;
-    try std.testing.expectEqual(@as(usize, 5), journal.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 4), journal.entries.items.len);
     try std.testing.expectEqual(@as(usize, 1), journal.accounts.items.len);
     try std.testing.expectEqual(@as(usize, 1), journal.storage.items.len);
     try std.testing.expectEqual(@as(usize, 1), journal.transient.items.len);
@@ -671,7 +672,7 @@ test "slot first materialized after an accepted wipe starts from zero" {
     try std.testing.expectEqual(@as(u256, 5), state.world.storageRow(slot(&state, addr(1), 2)).current);
     state.closeScope();
     state.seal(attempt);
-    const record = state.pendingView().observations().storage.at(0).?;
+    const record = state.pendingView().observations().storage.at(0);
     try std.testing.expectEqual(@as(u256, 0), record.original);
     try std.testing.expectEqual(@as(u256, 5), record.current);
     state.retain(attempt);
@@ -787,6 +788,53 @@ test "finalization allocation failure preserves enclosing transaction" {
     try std.testing.expect(state.wasSelfdestructed(word(1)));
     try std.testing.expectEqual(@as(u256, 10), state.getAccount(word(1)).?.balance);
     try std.testing.expectEqual(@as(u256, 7), try state.getStorage(word(1), 2));
+}
+
+test "storage records keep the written value through a lifecycle wipe" {
+    var backing = TestReader{ .storage_value = 10 };
+    var state = initState(std.testing.allocator, backing.reader());
+    defer state.deinit();
+    defer abandon(&state);
+
+    const attempt = state.beginObservedTransaction();
+    state.beginScope();
+    try std.testing.expectEqual(.modified, try state.setStorage(word(1), 2, 5));
+    try state.wipeStorage(row(&state, addr(1)));
+    try std.testing.expectEqual(@as(u256, 0), try state.getStorage(word(1), 2));
+    try std.testing.expectEqual(.added, try state.setStorage(word(1), 3, 7));
+    state.closeScope();
+    state.seal(attempt);
+
+    const storage = state.pendingView().observations().storage;
+    // The wipe hides the write from execution but not from the record;
+    // the account's wipe effect makes consumers read every slot.
+    const hidden = storage.at(0);
+    try std.testing.expectEqual(@as(u256, 10), hidden.original);
+    try std.testing.expectEqual(@as(u256, 5), hidden.current);
+    try std.testing.expect(hidden.effect.written);
+    const rewritten = storage.at(1);
+    try std.testing.expectEqual(@as(u256, 0), rewritten.original);
+    try std.testing.expectEqual(@as(u256, 7), rewritten.current);
+    try std.testing.expect(state.pendingView().observations().accounts.at(0).effect.storage_wiped);
+}
+
+test "lifecycle listing is per transaction" {
+    var state = initState(std.testing.allocator, null);
+    defer state.deinit();
+    defer abandon(&state);
+
+    const discarded = state.beginTransaction();
+    state.beginScope();
+    try state.markSelfdestructed(word(1));
+    try std.testing.expectEqual(@as(usize, 1), state.lifecycle_accounts.items.len);
+    state.closeScope();
+    state.discard(discarded);
+    try std.testing.expectEqual(@as(usize, 0), state.lifecycle_accounts.items.len);
+
+    _ = state.beginTransaction();
+    state.beginScope();
+    try state.markSelfdestructed(word(1));
+    try std.testing.expectEqual(@as(usize, 1), state.lifecycle_accounts.items.len);
 }
 
 test "sparse lifecycle candidates are compact and survive marker rollback" {
@@ -1009,6 +1057,33 @@ test "accepted branch snapshot restores cumulative state and drops later rows" {
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().accounts.len());
 }
 
+test "branch restoration discards the active attempt and preserves identity progression" {
+    for ([_]bool{ false, true }) |sealed| {
+        var state = initState(std.testing.allocator, null);
+        defer state.deinit();
+        defer abandon(&state);
+        var snapshot = try state.branchSnapshot();
+        defer snapshot.deinit();
+
+        const abandoned = state.beginTransaction();
+        state.beginScope();
+        try state.setBalance(word(1), 11);
+        state.closeScope();
+        if (sealed) state.seal(abandoned);
+        state.restoreBranch(&snapshot);
+        try std.testing.expect(!state.transaction_active);
+        try std.testing.expect(!state.acceptedView().hasChanges());
+        try std.testing.expectEqual(@as(u32, 0), state.world.accountCount());
+
+        const next = state.beginTransaction();
+        try std.testing.expect(next != abandoned);
+        try state.setBalance(word(1), 22);
+        state.seal(next);
+        state.retain(next);
+        try std.testing.expectEqual(@as(u256, 22), try state.getBalance(word(1)));
+    }
+}
+
 test "accepted branch snapshot clone failure leaves current state unchanged" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var state = initState(failing_allocator.allocator(), null);
@@ -1207,7 +1282,7 @@ test "pre-scope writes are the scope baseline and revert only with the attempt" 
     const attempt = state.beginObservedTransaction();
     try state.setBalance(word(1), 17);
     _ = try state.setStorage(word(1), 2, 9);
-    try std.testing.expectEqual(@as(usize, 3), state.journalEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), state.journalEntryCount());
 
     state.beginScope();
     const checkpoint = state.checkpoint();

@@ -220,7 +220,7 @@ test "witness reader derives the root of tracked changes through a sorted commit
     defer state.deinit();
     defer if (state.transaction_active) {
         if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        state.discard(state.transaction_generation);
     };
     const attempt = state.beginTransaction();
     state.beginScope();

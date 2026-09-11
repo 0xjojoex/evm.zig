@@ -51,10 +51,6 @@ pub const storageStatus = storage.status;
 /// Checkpoints carry no owner or epoch qualifier; callers must not use them
 /// with another State or after `discardAccepted` resets the generation clock.
 pub const Checkpoint = struct {
-    /// Generation issued at attempt begin. Valid only for that attempt on its
-    /// owning State; copies retained across a clock reset are not detected.
-    pub const AttemptId = Generation;
-
     /// Retained log-buffer lengths at scope open.
     pub const Log = struct {
         rows_len: u32,
@@ -153,8 +149,8 @@ pub const StorageObservationRecord = struct {
     effect: StorageEffect,
 };
 
-/// The identity and flags of a storage observation without its values; gas-only
-/// access rows in the open lane have no captured values.
+/// The identity and flags of a complete storage observation, projected without
+/// its values so consumers can filter records before reading them.
 pub const StorageObservationMetadata = struct {
     address: Address,
     key: u256,

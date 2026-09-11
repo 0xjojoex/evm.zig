@@ -3131,7 +3131,7 @@ test "sealed observations expose storage state without a trace tape" {
             const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
-                const record = storage.at(index) orelse continue;
+                const record = storage.at(index);
                 if (!evmz.Address.eql(record.address, self.address) or record.key != self.key) continue;
                 try std.testing.expect(record.observation.value_read);
                 try std.testing.expect(record.effect.written);
