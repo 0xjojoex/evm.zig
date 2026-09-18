@@ -33,7 +33,7 @@ Experimental:
 zig fetch --save git+https://github.com/0xjojoex/evm.zig
 ```
 
-One fetch exports four modules; import the ones you need.
+The four core modules are `evmz`, `rlp`, `mpt`, and `ssz`; import the ones you need.
 
 ```zig
 // build.zig
@@ -97,6 +97,18 @@ block-level code can consume `vm.executor.acceptedChanges()` and persist it. See
 [`examples/basic.zig`](https://github.com/0xjojoex/evm.zig/blob/main/examples/basic.zig)
 for runnable transaction execution
 and provisional storage-change inspection.
+
+## Tools
+
+`zig build cli-build` installs `zig-out/bin/evmz`. Run `evmz --help` or
+`evmz help <command>` to see its commands and options. `zig build run -- <args>`
+runs the same binary. The former separate tool executables are replaced by
+subcommands:
+
+- [`evmz t8n`](tools/t8n/README.md) accepts alloc/env/transaction inputs and writes transition results.
+- [`evmz statetest`](tools/statetest/README.md) executes a General State Test vector and writes its observed root and optional opcode trace.
+- [`evmz blocktest`](tools/blocktest/README.md) imports encoded blocks and writes actual acceptance, committed state, and optional opcode traces.
+- `evmz debug` inspects controlled execution; add `-x` for a single command.
 
 ## Execution layers
 

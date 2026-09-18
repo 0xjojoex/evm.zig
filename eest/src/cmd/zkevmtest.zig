@@ -1,6 +1,6 @@
 const std = @import("std");
 const direct = @import("direct.zig");
-const fixture_common = @import("../fixture.zig");
+const fixture_common = @import("fixtures");
 const stateless = @import("../stateless.zig");
 
 pub const about = "Consume one EEST stateless zkEVM fixture file";

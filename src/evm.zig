@@ -22,6 +22,9 @@
 
 const std = @import("std");
 
+/// Opt-in controlled execution for debuggers and inspectors.
+pub const debug = @import("debug.zig");
+
 pub const address = @import("./address.zig");
 pub const block = @import("./block.zig");
 pub const BlockHashSource = block.HashSource;

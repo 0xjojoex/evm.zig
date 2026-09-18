@@ -1,4 +1,4 @@
-//! Shared JSON parsing and in-memory state seeding for EEST adapters.
+//! Shared JSON parsing and in-memory state seeding for Ethereum fixture tools and consumers.
 
 const std = @import("std");
 const evmz = @import("evmz");

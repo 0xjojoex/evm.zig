@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const fixture_common = @import("fixture.zig");
+const fixture_common = @import("fixtures");
 const stateless_report = @import("stateless_report.zig");
 const stateless_executor = @import("stateless_executor.zig");
 const stateless_metrics = @import("stateless_metrics.zig");

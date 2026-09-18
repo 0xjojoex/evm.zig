@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const fixture = @import("fixture.zig");
+const fixture = @import("fixtures");
 
 const block_stf = evmz.eth.BlockSTF;
 const wire = evmz.stateless.wire;

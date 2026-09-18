@@ -39,5 +39,6 @@
         "pkg/stdx",
         "README.md",
         "src",
+        "tools",
     },
 }

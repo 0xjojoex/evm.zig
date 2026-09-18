@@ -1,7 +1,7 @@
 const std = @import("std");
 const block_stf = @import("../block_stf.zig");
 const direct = @import("direct.zig");
-const fixture_common = @import("../fixture.zig");
+const fixture_common = @import("fixtures");
 
 pub const about = "Consume one EEST blockchain fixture file";
 

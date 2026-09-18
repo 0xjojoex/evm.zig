@@ -1,4 +1,4 @@
-# evmz-t8n
+# evmz t8n
 
 Transition tool for `ethereum/execution-specs` (EEST). Given a pre-state, a
 block environment, and a transaction list, it applies the block-level state
@@ -8,12 +8,12 @@ uses to fill fixtures. Paris through Amsterdam are supported.
 ## Run the binary
 
 ```sh
-zig build                      # installs zig-out/bin/evmz-t8n
+zig build cli-build            # installs zig-out/bin/evmz
 zig build t8n -- <flags>       # or run straight from the build
 ```
 
 ```sh
-zig-out/bin/evmz-t8n \
+zig-out/bin/evmz t8n \
   --input.alloc alloc.json --input.env env.json --input.txs txs.json \
   --state.fork Prague --state.chainid 1 --state.reward 0 \
   --output.basedir out --output.alloc alloc.json --output.result result.json \
@@ -60,8 +60,7 @@ zig build t8n-fill -Deest-source=$ES -- \
 zig build t8n-diff -Deest-source=$ES -Dt8n-reference-bin=/path/to/other-t8n -- tests/prague
 ```
 
-`t8n-diff` defaults to EELS as the reference. Any older `evmz-t8n` build works
-too, which is the cheapest way to prove a refactor output-identical. Mismatch
+`t8n-diff` defaults to EELS as the reference. Another `evmz` binary can also serve as the reference. Mismatch
 artifacts land in `.zig-cache/eest-diff/mismatches/`.
 
 ## Replay a single case
