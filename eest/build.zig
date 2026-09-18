@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
 
     {
         const eest_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/test.zig", target, optimize, evmz_mod),
+            .root_module = eestModule(b, "src/test.zig", target, optimize, evmz_mod, evmz_dep.module("fixtures"), evmz_dep.module("statetest"), evmz_dep.module("blocktest")),
             .filters = b.args orelse &.{},
         });
         // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
     {
         const eest_exe = b.addExecutable(.{
             .name = "evmz-eest",
-            .root_module = eestModule(b, "src/main.zig", target, optimize, evmz_mod),
+            .root_module = eestModule(b, "src/main.zig", target, optimize, evmz_mod, evmz_dep.module("fixtures"), evmz_dep.module("statetest"), evmz_dep.module("blocktest")),
         });
         b.installArtifact(eest_exe);
 
@@ -228,6 +228,9 @@ fn eestModule(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     evmz_mod: *std.Build.Module,
+    fixtures_mod: *std.Build.Module,
+    statetest_mod: *std.Build.Module,
+    blocktest_mod: *std.Build.Module,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(root),
@@ -236,6 +239,9 @@ fn eestModule(
         .link_libcpp = true,
         .imports = &.{
             .{ .name = "evmz", .module = evmz_mod },
+            .{ .name = "fixtures", .module = fixtures_mod },
+            .{ .name = "statetest", .module = statetest_mod },
+            .{ .name = "blocktest", .module = blocktest_mod },
         },
     });
 }

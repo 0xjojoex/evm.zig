@@ -36,17 +36,9 @@ const Inputs = struct {
     txs: []const u8,
 };
 
-pub fn main(init: std.process.Init) void {
-    run(init) catch |err| {
-        const code = exitCode(err);
-        std.debug.print("ERROR({d}): {s}\n", .{ code, @errorName(err) });
-        std.process.exit(code);
-    };
-}
-
-fn run(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const arena = init.arena.allocator();
-    const options = try parseOptions(init, arena) orelse return;
+    const options = try parseOptions(args);
     const inputs: Inputs = .{
         .alloc = try readInput(arena, init.io, options.input_alloc),
         .env = try readInput(arena, init.io, options.input_env),
@@ -55,21 +47,9 @@ fn run(init: std.process.Init) !void {
     try writeOutputs(arena, init.io, options, try transition(arena, options, inputs));
 }
 
-/// Returns null after serving `--help` or `--version`.
-fn parseOptions(init: std.process.Init, allocator: Allocator) !?Options {
-    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
-    _ = args.next();
-
+fn parseOptions(args: *std.process.Args.Iterator) !Options {
     var options: Options = .{};
     while (args.next()) |arg| {
-        if (eql(u8, arg, "--help") or eql(u8, arg, "-h")) {
-            try printUsage(init.io);
-            return null;
-        }
-        if (eql(u8, arg, "--version")) {
-            try printVersion(init.io);
-            return null;
-        }
         if (eql(u8, arg, "--trace.callframes")) {
             options.trace_callframes = true;
             continue;
@@ -1392,38 +1372,25 @@ fn readInput(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
         return classify(err, error.InputOutput);
 }
 
-fn printUsage(io: std.Io) !void {
-    const text =
-        \\usage: evmz-t8n [options]
-        \\
-        \\  --input.alloc <path>       pre-state alloc JSON
-        \\  --input.env <path>         block environment JSON
-        \\  --input.txs <path>         transaction array JSON
-        \\  --output.alloc <path>      post-state alloc JSON
-        \\  --output.result <path>     transition result JSON
-        \\  --output.body <path>       accepted transaction body
-        \\  --output.basedir <path>    base directory for relative outputs
-        \\  --state.fork <name>        Paris through Amsterdam
-        \\  --state.chainid <id>       positive chain ID
-        \\  --state.reward <-1|0>      disabled or zero reward
-        \\  --state-test               skip block-level system operations
-        \\  --trace.callframes         call-frame JSONL per accepted transaction
-        \\  -h, --help
-        \\  --version
-        \\
-    ;
-    var buffer: [4096]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
-    try stdout.interface.writeAll(text);
-    try stdout.interface.flush();
-}
-
-fn printVersion(io: std.Io) !void {
-    var buffer: [128]u8 = undefined;
-    var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
-    try stdout.interface.print("evmz-t8n 0.0.0 (zig {s})\n", .{@import("builtin").zig_version_string});
-    try stdout.interface.flush();
-}
+pub const usage =
+    \\usage: evmz t8n [options]
+    \\
+    \\  --input.alloc <path>       pre-state alloc JSON
+    \\  --input.env <path>         block environment JSON
+    \\  --input.txs <path>         transaction array JSON
+    \\  --output.alloc <path>      post-state alloc JSON
+    \\  --output.result <path>     transition result JSON
+    \\  --output.body <path>       accepted transaction body
+    \\  --output.basedir <path>    base directory for relative outputs
+    \\  --state.fork <name>        Paris through Amsterdam
+    \\  --state.chainid <id>       positive chain ID
+    \\  --state.reward <-1|0>      disabled or zero reward
+    \\  --state-test               skip block-level system operations
+    \\  --trace.callframes         call-frame JSONL per accepted transaction
+    \\  -h, --help
+    \\  --version
+    \\
+;
 
 fn parseJson(comptime T: type, allocator: Allocator, bytes: []const u8) !T {
     return std.json.parseFromSliceLeaky(T, allocator, bytes, .{}) catch |err|
@@ -1456,7 +1423,7 @@ fn classify(err: anyerror, class: anyerror) anyerror {
     return if (err == error.OutOfMemory) err else class;
 }
 
-fn exitCode(err: anyerror) u8 {
+pub fn exitCode(err: anyerror) u8 {
     return switch (err) {
         error.InvalidConfiguration => 3,
         error.MissingBlockHash => 4,
@@ -1464,4 +1431,21 @@ fn exitCode(err: anyerror) u8 {
         error.InputOutput => 11,
         else => 2,
     };
+}
+
+test "state-test mode skips block system calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const inputs = Inputs{
+        .alloc = "{\"0x000f3df6d732807ef1319fb7b8bb8522d0beac02\": {\"balance\": \"0x0\", \"nonce\": \"0x1\", \"code\": \"0x600160005500\", \"storage\": {}}}",
+        .env = "{\"currentCoinbase\": \"0x0000000000000000000000000000000000000000\", \"currentGasLimit\": \"0x1c9c380\", \"currentNumber\": \"0x1\", \"currentTimestamp\": \"0xc\", \"currentRandom\": \"0x0\", \"currentBaseFee\": \"0x7\", \"currentExcessBlobGas\": \"0x0\", \"currentBlobGasUsed\": \"0x0\", \"parentBeaconBlockRoot\": \"0x1111111111111111111111111111111111111111111111111111111111111111\", \"withdrawals\": []}",
+        .txs = "[]",
+    };
+    const normal = try transition(allocator, .{ .fork = .cancun }, inputs);
+    const state = try transition(allocator, .{ .fork = .cancun, .state_test = true }, inputs);
+    const beacon = "0x000f3df6d732807ef1319fb7b8bb8522d0beac02";
+    try std.testing.expectEqual(@as(usize, 1), normal.alloc.map.get(beacon).?.storage.?.map.count());
+    try std.testing.expect(state.alloc.map.get(beacon).?.storage == null);
+    try std.testing.expect(!std.mem.eql(u8, &normal.result.stateRoot.bytes, &state.result.stateRoot.bytes));
 }

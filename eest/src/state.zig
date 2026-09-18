@@ -1,28 +1,21 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const fixture_common = @import("fixture.zig");
+const fixture_common = @import("fixtures");
+const statetest = @import("statetest");
 const tx_validation = @import("tx_validation.zig");
 
-const Address = evmz.Address;
 const JsonValue = fixture_common.JsonValue;
-const transaction = evmz.transaction;
 
 const asArray = fixture_common.asArray;
 const asObject = fixture_common.asObject;
 const jsonString = fixture_common.jsonString;
 const parseAddress = fixture_common.parseAddress;
-const parseAddressFromValue = fixture_common.parseAddressFromValue;
-const parseBlobHashes = fixture_common.parseBlobHashes;
 const parseBytesFromValue = fixture_common.parseBytesFromValue;
 const parseFork = fixture_common.parseStateFork;
-const parseTransactionAccessList = fixture_common.parseTransactionAccessList;
-const parseTransactionAuthorizationList = fixture_common.parseTransactionAuthorizationList;
 const parseHexInt = fixture_common.parseHexInt;
 const parseU256FromValue = fixture_common.parseU256FromValue;
 const parseU64FromValue = fixture_common.parseU64FromValue;
 const rejectUnknownKeys = fixture_common.rejectUnknownKeys;
-const seedMemoryStore = fixture_common.seedMemoryStore;
-const strip0x = fixture_common.strip0x;
 
 pub const Options = struct {
     fork_filter: ?[]const u8 = null,
@@ -135,7 +128,7 @@ fn runFixture(
     _ = test_name;
 
     var fixture_obj = asObject(fixture) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&fixture_obj, &.{ "env", "pre", "transaction", "post", "config", "_info" });
+    try rejectUnknownKeys(&fixture_obj, &.{ "env", "pre", "transaction", "post", "config", "_info", "out" });
     var post_obj = asObject(fixture_obj.get("post") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
 
     var fork_it = post_obj.iterator();
@@ -202,83 +195,28 @@ fn runVectorExact(
     else
         null;
 
-    const tx = asObject(fixture.get("transaction") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-    const env = asObject(fixture.get("env") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-    const pre = asObject(fixture.get("pre") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-    const indexes = asObject(post_obj.get("indexes") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&tx, &.{
-        "nonce",
-        "chainId",
-        "gasLimit",
-        "to",
-        "value",
-        "data",
-        "sender",
-        "secretKey",
-        "gasPrice",
-        "accessLists",
-        "maxPriorityFeePerGas",
-        "maxFeePerGas",
-        "maxFeePerBlobGas",
-        "blobVersionedHashes",
-        "authorizationList",
-    });
-    try rejectUnknownKeys(&env, &.{
-        "currentCoinbase",
-        "currentGasLimit",
-        "currentNumber",
-        "currentTimestamp",
-        "currentDifficulty",
-        "currentBaseFee",
-        "currentRandom",
-        "slotNumber",
-        "currentExcessBlobGas",
-        "currentBlobBaseFee",
-        "currentChainId",
-    });
-    try rejectUnknownKeys(&indexes, &.{ "data", "gas", "value" });
-    const config = try parseFixtureConfig(fixture, revision, fork_name);
-
-    const data_index = try jsonIndex(indexes.get("data") orelse return error.MalformedFixture);
-    const gas_index = try jsonIndex(indexes.get("gas") orelse return error.MalformedFixture);
-    const value_index = try jsonIndex(indexes.get("value") orelse return error.MalformedFixture);
-
-    const to_string = jsonString(tx.get("to") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-    const is_create = strip0x(to_string).len == 0;
-
-    const sender_string = jsonString(tx.get("sender") orelse {
-        summary.countFail(.missing_sender);
-        return;
-    }) orelse return error.MalformedFixture;
-
-    const sender = try parseAddress(sender_string);
-    const input = try selectedBytes(allocator, &tx, "data", data_index);
-    defer allocator.free(input);
-    var access_list = if (try selectedAccessList(&tx, data_index)) |list|
-        try parseTransactionAccessList(allocator, list)
-    else
-        fixture_common.ParsedAccessList{};
-    defer access_list.deinit(allocator);
-    var authorization_list = try parseTransactionAuthorizationList(allocator, &tx, .ignore_malformed_list);
-    defer authorization_list.deinit(allocator);
-
-    const gas_limit = try selectedU64(&tx, "gasLimit", gas_index);
-    const value = try selectedU256(&tx, "value", value_index);
-    const blob_hashes = try parseBlobHashes(allocator, &tx);
-    defer allocator.free(blob_hashes);
-    const recipient = if (is_create) null else try parseAddress(to_string);
-    const vm_env = try parseVmEnv(revision, &env, config);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const vector = statetest.parseVector(revision, arena.allocator(), fixture, &post_obj, fork_name) catch |err| {
+        if (err == error.MissingSender) {
+            summary.countFail(.missing_sender);
+            return;
+        }
+        return err;
+    };
+    const pre = vector.pre;
+    const vm_env = vector.env;
     if (expected_exception) |expected| {
         if (try serializedTransactionExceptionMatches(allocator, &post_obj, expected)) {
-            var host = try FixtureHost(revision).init(allocator, &pre, vm_env);
+            var host = try statetest.Host(revision, false).init(allocator, &pre, vm_env);
             defer host.deinit();
             try finishPostAssertions(allocator, fixture, &post_obj, &host, 1, null, summary);
             return;
         }
     }
-    if (try optionalU256(&tx, "chainId")) |tx_chain_id| {
+    if (vector.tx.chain_id) |tx_chain_id| {
         if (tx_chain_id != vm_env.chain_id) {
-            var host = try FixtureHost(revision).init(allocator, &pre, vm_env);
+            var host = try statetest.Host(revision, false).init(allocator, &pre, vm_env);
             defer host.deinit();
             if (expected_exception) |expected| {
                 if (tx_validation.exceptionNameMatches("TransactionException.INVALID_CHAINID", expected)) {
@@ -292,27 +230,10 @@ fn runVectorExact(
             return;
         }
     }
-    const public_tx = evmz.Transaction{
-        .kind = inferTxKind(&tx),
-        .sender = sender,
-        .nonce = try optionalU256(&tx, "nonce"),
-        .gas_limit = gas_limit,
-        .to = recipient,
-        .input = input,
-        .value = value,
-        .max_fee_per_gas = try optionalU256(&tx, "maxFeePerGas"),
-        .max_priority_fee_per_gas = try optionalU256(&tx, "maxPriorityFeePerGas"),
-        .max_fee_per_blob_gas = try optionalU256(&tx, "maxFeePerBlobGas"),
-        .gas_price = try optionalU256(&tx, "gasPrice") orelse 0,
-        .blob_hashes = blob_hashes,
-        .access_list = access_list.entries,
-        .authorization_list = authorization_list.entries,
-        .authorization_count = authorization_list.count,
-    };
 
-    var host = try FixtureHost(revision).init(allocator, &pre, vm_env);
+    var host = try statetest.Host(revision, false).init(allocator, &pre, vm_env);
     defer host.deinit();
-    const result = try host.transact(public_tx);
+    const result = try host.transact(vector.tx, null);
     try finishVectorResult(allocator, fixture, &post_obj, &host, result, expected_exception, summary);
 }
 
@@ -430,13 +351,6 @@ fn hasUnsupportedPostAssertions(post_obj: *const std.json.ObjectMap) bool {
     return post_obj.get("logs") != null or post_obj.get("receipt") != null or post_obj.get("txbytes") != null;
 }
 
-fn selectedAccessList(tx: *const std.json.ObjectMap, index: usize) !?std.json.Array {
-    const access_lists_value = tx.get("accessLists") orelse return null;
-    const access_lists = asArray(access_lists_value) orelse return error.MalformedFixture;
-    if (index >= access_lists.items.len) return error.MalformedFixture;
-    return asArray(access_lists.items[index]) orelse return error.MalformedFixture;
-}
-
 fn comparePostState(
     allocator: std.mem.Allocator,
     host: anytype,
@@ -489,7 +403,6 @@ fn comparePostState(
     return null;
 }
 
-const FixtureConfig = fixture_common.FixtureConfig;
 const parseFixtureConfig = fixture_common.parseFixtureConfig;
 
 test "EEST fixture config selects Amsterdam blob params" {
@@ -544,25 +457,6 @@ test "EEST fork parser maps BPO names onto Osaka execution" {
     try std.testing.expectEqual(evmz.eth.Revision.osaka, fixture_common.parseStateFork("BPO2"));
 }
 
-fn parseVmEnv(
-    comptime revision: evmz.eth.Revision,
-    env: *const std.json.ObjectMap,
-    config: FixtureConfig,
-) !evmz.Env {
-    const base_fee = if (env.get("currentBaseFee")) |v| try parseU256FromValue(v) else 0;
-    return .{
-        .chain_id = if (env.get("currentChainId")) |v| try parseU256FromValue(v) else config.chain_id,
-        .coinbase = if (env.get("currentCoinbase")) |v| try parseAddressFromValue(v) else evmz.addr(0),
-        .number = if (env.get("currentNumber")) |v| try parseU64FromValue(v) else 0,
-        .slot_number = if (env.get("slotNumber")) |v| try parseU64FromValue(v) else 0,
-        .timestamp = if (env.get("currentTimestamp")) |v| try parseU64FromValue(v) else 0,
-        .gas_limit = if (env.get("currentGasLimit")) |v| try parseU64FromValue(v) else 0,
-        .prev_randao = if (env.get("currentRandom")) |v| try parseU256FromValue(v) else if (env.get("currentDifficulty")) |v| try parseU256FromValue(v) else 0,
-        .base_fee = base_fee,
-        .blob_base_fee = try parseBlobBaseFee(revision, env, config),
-    };
-}
-
 test "EEST env parser reads Amsterdam slotNumber" {
     const fixture =
         \\{
@@ -574,160 +468,13 @@ test "EEST env parser reads Amsterdam slotNumber" {
     defer parsed.deinit();
     const env = asObject(parsed.value) orelse return error.MalformedFixture;
 
-    const parsed_env = try parseVmEnv(.amsterdam, &env, .{});
+    const parsed_env = try statetest.parseEnv(.amsterdam, &env, .{});
     try std.testing.expectEqual(@as(u64, 1), parsed_env.number);
     try std.testing.expectEqual(@as(u64, 0x1234), parsed_env.slot_number);
 }
 
-fn parseBlobBaseFee(
-    comptime revision: evmz.eth.Revision,
-    env: *const std.json.ObjectMap,
-    config: FixtureConfig,
-) !u256 {
-    if (env.get("currentBlobBaseFee")) |value| return parseU256FromValue(value);
-    const excess_blob_gas = if (env.get("currentExcessBlobGas")) |value| try parseU256FromValue(value) else 0;
-    return fixture_common.blobBaseFee(revision, config.blob_params, excess_blob_gas) orelse error.Overflow;
-}
-
-fn selectedU256(tx: *const std.json.ObjectMap, key: []const u8, index: usize) !u256 {
-    const array = asArray(tx.get(key) orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-    if (index >= array.items.len) return error.MalformedFixture;
-    return parseU256FromValue(array.items[index]);
-}
-
-fn selectedU64(tx: *const std.json.ObjectMap, key: []const u8, index: usize) !u64 {
-    const value = try selectedU256(tx, key, index);
-    return std.math.cast(u64, value) orelse error.Overflow;
-}
-
-fn selectedBytes(allocator: std.mem.Allocator, tx: *const std.json.ObjectMap, key: []const u8, index: usize) ![]u8 {
-    const array = asArray(tx.get(key) orelse return error.MalformedFixture) orelse return error.MalformedFixture;
-    if (index >= array.items.len) return error.MalformedFixture;
-    return parseBytesFromValue(allocator, array.items[index]);
-}
-
-fn optionalU256(tx: *const std.json.ObjectMap, key: []const u8) !?u256 {
-    const value = tx.get(key) orelse return null;
-    return try parseU256FromValue(value);
-}
-
-fn inferTxKind(tx: *const std.json.ObjectMap) transaction.TxKind {
-    if (tx.get("authorizationList") != null) return .set_code;
-    if (tx.get("blobVersionedHashes") != null or tx.get("maxFeePerBlobGas") != null) return .blob;
-    if (tx.get("maxFeePerGas") != null or tx.get("maxPriorityFeePerGas") != null) return .dynamic_fee;
-    if (tx.get("accessLists") != null) return .access_list;
-    return .legacy;
-}
-
-fn FixtureHost(comptime revision: evmz.eth.Revision) type {
-    const ExactVm = evmz.Vm(evmz.eth.specAt(revision));
-    const TxResult = transaction.TransactOutcomeType(evmz.TxExecutionResult, ExactVm.Rejection);
-
-    return struct {
-        allocator: std.mem.Allocator,
-        store: *evmz.state.MemoryStore,
-        executor: ExactVm.Executor,
-        env: evmz.Env,
-
-        const Self = @This();
-
-        fn init(
-            allocator: std.mem.Allocator,
-            pre: *const std.json.ObjectMap,
-            env: evmz.Env,
-        ) !Self {
-            const store = try allocator.create(evmz.state.MemoryStore);
-            errdefer allocator.destroy(store);
-            store.* = evmz.state.MemoryStore.init(allocator);
-            errdefer store.deinit();
-
-            try seedMemoryStore(allocator, store, pre);
-
-            var executor = ExactVm.Executor.init(allocator, .{
-                .state = .{ .reader = store.reader() },
-                .block_hash_source = EestStateBlockHashSource.source(),
-            });
-            errdefer executor.deinit();
-
-            return .{
-                .allocator = allocator,
-                .store = store,
-                .executor = executor,
-                .env = env,
-            };
-        }
-
-        fn deinit(self: *Self) void {
-            self.executor.deinit();
-            self.store.deinit();
-            self.allocator.destroy(self.store);
-        }
-
-        fn getAccount(self: *Self, address: Address) !?evmz.AccountView {
-            return accountView(&self.executor, address);
-        }
-
-        fn getStorage(self: *Self, address: Address, key: u256) !u256 {
-            return self.executor.getStorage(address, key);
-        }
-
-        fn transact(self: *Self, tx: evmz.Transaction) !TxResult {
-            var block = try ExactVm.BlockExecution.init(
-                &self.executor,
-                self.env,
-            );
-            defer block.discardIfUnfinished();
-            const outcome = try block.transact(tx);
-            return switch (outcome) {
-                .included => |included| blk: {
-                    _ = block.finish();
-                    break :blk .{ .executed = included.result };
-                },
-                .rejected => |err| .{ .rejected = err },
-            };
-        }
-
-        fn stateRoot(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
-            // Same fork boundary the executor reads for account existence, so
-            // take it from the same fact rather than restating the revision.
-            var delta = try evmz.state.StateDelta.init(allocator, self.executor.acceptedChanges());
-            defer delta.deinit();
-            return self.store.stateRootAfterChangesWithOptions(allocator, delta.view(), .{
-                .empty_accounts = if (ExactVm.spec.retains_empty_accounts) .include else .omit,
-            });
-        }
-    };
-}
-
-fn accountView(executor: anytype, address: Address) !?evmz.AccountView {
-    const account = try executor.getAccountOrLoad(address) orelse return null;
-    return .{
-        .nonce = account.nonce,
-        .balance = account.balance,
-        .code = try executor.getCode(address),
-    };
-}
-
-const EestStateBlockHashSource = struct {
-    var anchor: u8 = 0;
-
-    fn source() evmz.BlockHashSource {
-        return .{ .ptr = &anchor, .vtable = &.{
-            .getBlockHash = getBlockHash,
-        } };
-    }
-
-    fn getBlockHash(_: *anyopaque, number: u64) !?u256 {
-        var decimal: [20]u8 = undefined;
-        const input = try std.fmt.bufPrint(&decimal, "{d}", .{number});
-        var hash: [32]u8 = undefined;
-        std.crypto.hash.sha3.Keccak256.hash(input, &hash, .{});
-        return evmz.uint256.fromBytes32(&hash);
-    }
-};
-
 test "EEST state block hash source uses state-test convention hashes" {
-    const source = EestStateBlockHashSource.source();
+    const source = statetest.BlockHashSource.source();
 
     var expected_zero: [32]u8 = undefined;
     std.crypto.hash.sha3.Keccak256.hash("0", &expected_zero, .{});
@@ -736,14 +483,6 @@ test "EEST state block hash source uses state-test convention hashes" {
     var expected_ancestor: [32]u8 = undefined;
     std.crypto.hash.sha3.Keccak256.hash("255", &expected_ancestor, .{});
     try std.testing.expectEqual(evmz.uint256.fromBytes32(&expected_ancestor), (try source.getBlockHash(255)).?);
-}
-
-fn jsonIndex(value: JsonValue) !usize {
-    return switch (value) {
-        .integer => |int| std.math.cast(usize, int) orelse error.Overflow,
-        .number_string => |string| try std.fmt.parseInt(usize, string, 10),
-        else => error.MalformedFixture,
-    };
 }
 
 test "runs a minimal EEST state fixture subset" {
@@ -1358,4 +1097,16 @@ test "EEST state comparison accepts rolled back execution failure" {
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 0), summary.skipped);
     try std.testing.expectEqual(@as(usize, 0), summary.unchecked);
+}
+
+test "EEST still checks output when using tool-owned execution" {
+    const fixture =
+        \\{"empty_call":{"env":{"currentGasLimit":"0x100000"},
+        \\"pre":{"0x000000000000000000000000000000000000aaaa":{"balance":"0xffff","nonce":"0x0","code":"0x","storage":{}}},
+        \\"transaction":{"sender":"0x000000000000000000000000000000000000aaaa","to":"0x000000000000000000000000000000000000bbbb","gasLimit":["0x186a0"],"gasPrice":"0x0","value":["0x0"],"data":["0x"]},
+        \\"out":"0x01","post":{"Cancun":[{"indexes":{"data":0,"gas":0,"value":0}}]}}}
+    ;
+    const summary = try runSlice(std.testing.allocator, fixture, .{});
+    try std.testing.expectEqual(@as(usize, 1), summary.failed);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.output_mismatch)]);
 }

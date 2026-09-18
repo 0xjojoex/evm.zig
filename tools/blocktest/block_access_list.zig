@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const fixture = @import("fixture.zig");
+const fixture = @import("fixtures");
 
 const JsonArray = std.json.Array;
 const JsonObject = std.json.ObjectMap;

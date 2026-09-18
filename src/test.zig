@@ -1,6 +1,6 @@
 test {
     _ = @import("./debug.zig");
-    // Only debug_cli consumes the disassembler, and that binary is not part of
+    // The debug command consumes the disassembler; its CLI module is not part of
     // the test build, so nothing else reaches these tests.
     _ = @import("./instruction/disassemble.zig");
     _ = @import("./test/vm_family.zig");

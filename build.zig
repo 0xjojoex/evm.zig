@@ -135,7 +135,6 @@ pub fn build(b: *std.Build) void {
     const native_test_options_all = buildOptions(b, .native, native_keccak, native_secp256k1, stateless_schemas, .all);
     const zkvm_test_options = buildOptions(b, .zkvm, .std, .std, stateless_schemas, test_forks);
     const zkvm_test_options_all = buildOptions(b, .zkvm, .std, .std, stateless_schemas, .all);
-    const build_options = if (is_native_profile) native_build_options else zkvm_build_options;
     const stateless_profile_none_mod = b.createModule(.{
         .root_source_file = b.path("guest/profile_none.zig"),
         .target = target,
@@ -232,8 +231,6 @@ pub fn build(b: *std.Build) void {
     addNativeKeccak(native_evmz_mod, xkcp_object);
     addNativeSecp256k1(native_evmz_mod, libsecp256k1_object);
 
-    const ssz_mod = packages.ssz;
-    const rlp_mod = packages.rlp;
     const mpt_mod = packages.mpt;
 
     const core_check = b.addObject(.{
@@ -249,36 +246,69 @@ pub fn build(b: *std.Build) void {
     const check_guest_elf_tests = addCheckGuestElf(b);
     const check_zisk_failure_status_tests = addCheckZiskFailureStatus(b);
 
-    const debug_description = "Run the interactive controlled-execution debugger";
-    if (is_native_profile) {
-        const debug_cli_mod = b.createModule(.{
-            .root_source_file = b.path("src/debug_cli.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libcpp = true,
-        });
-        debug_cli_mod.addOptions("build_options", build_options);
-        debug_cli_mod.addImport("ssz", ssz_mod);
-        debug_cli_mod.addImport("rlp", rlp_mod);
-        debug_cli_mod.addImport("mpt", mpt_mod);
-        debug_cli_mod.addImport("stdx", packages.stdx);
-        debug_cli_mod.addIncludePath(b.path("include"));
-        addPrecompileNative(b, debug_cli_mod, native_precompile_deps);
-        addNativeKeccak(debug_cli_mod, xkcp_object);
-        addNativeSecp256k1(debug_cli_mod, libsecp256k1_object);
+    const debug_cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/debug/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
+    });
 
-        const debug_cli = b.addExecutable(.{
-            .name = "evmz-debug",
-            .root_module = debug_cli_mod,
-        });
-        const run_debug_cli = b.addRunArtifact(debug_cli);
-        // The debugger reads commands from stdin, so it needs the real one.
-        run_debug_cli.stdio = .inherit;
-        if (b.args) |args| run_debug_cli.addArgs(args);
-        b.step("debug", debug_description).dependOn(&run_debug_cli.step);
-    } else {
-        b.step("debug", debug_description).dependOn(&b.addFail("debug is native-only").step);
-    }
+    const fixtures_mod = b.addModule("fixtures", .{
+        .root_source_file = b.path("tools/fixtures.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
+    });
+    const statetest_mod = b.addModule("statetest", .{
+        .root_source_file = b.path("tools/statetest/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = native_evmz_mod },
+            .{ .name = "fixtures", .module = fixtures_mod },
+        },
+    });
+    const statetest_cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/statetest/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = native_evmz_mod },
+            .{ .name = "statetest", .module = statetest_mod },
+        },
+    });
+    const statetest_tests = b.addTest(.{ .root_module = statetest_cli_mod });
+    statetest_tests.use_llvm = true;
+    const run_statetest_tests = b.addRunArtifact(statetest_tests);
+    b.step("statetest-test", "Test state-test tooling").dependOn(&run_statetest_tests.step);
+
+    const blocktest_mod = b.addModule("blocktest", .{
+        .root_source_file = b.path("tools/blocktest/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = native_evmz_mod },
+            .{ .name = "fixtures", .module = fixtures_mod },
+        },
+    });
+    const blocktest_cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/blocktest/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = native_evmz_mod },
+            .{ .name = "blocktest", .module = blocktest_mod },
+        },
+    });
+    const blocktest_tests = b.addTest(.{ .root_module = blocktest_cli_mod });
+    blocktest_tests.use_llvm = true;
+    const run_blocktest_tests = b.addRunArtifact(blocktest_tests);
+    const blocktest_module_tests = b.addTest(.{ .root_module = blocktest_mod });
+    blocktest_module_tests.use_llvm = true;
+    const run_blocktest_module_tests = b.addRunArtifact(blocktest_module_tests);
+    const blocktest_test_step = b.step("blocktest-test", "Test block-test tooling");
+    blocktest_test_step.dependOn(&run_blocktest_tests.step);
+    blocktest_test_step.dependOn(&run_blocktest_module_tests.step);
 
     const t8n_mod = b.createModule(.{
         .root_source_file = b.path("tools/t8n/main.zig"),
@@ -287,20 +317,40 @@ pub fn build(b: *std.Build) void {
         .link_libcpp = true,
         .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
     });
-    const t8n = b.addExecutable(.{
-        .name = "evmz-t8n",
-        .root_module = t8n_mod,
+    const cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "t8n", .module = t8n_mod },
+            .{ .name = "statetest", .module = statetest_cli_mod },
+            .{ .name = "blocktest", .module = blocktest_cli_mod },
+            .{ .name = "debug", .module = debug_cli_mod },
+        },
     });
-    t8n.use_llvm = true;
-    const install_t8n = b.addInstallArtifact(t8n, .{});
-    b.getInstallStep().dependOn(&install_t8n.step);
-    const run_t8n = b.addRunArtifact(t8n);
-    if (b.args) |args| run_t8n.addArgs(args);
-    b.step("t8n", "Run the evmz execution-specs transition tool").dependOn(&run_t8n.step);
-
+    const cli = b.addExecutable(.{ .name = "evmz", .root_module = cli_mod });
+    cli.use_llvm = true;
+    const install_cli = b.addInstallArtifact(cli, .{});
+    b.getInstallStep().dependOn(&install_cli.step);
+    b.step("cli-build", "Build the evmz command-line tool").dependOn(&install_cli.step);
+    const run_cli = b.addRunArtifact(cli);
+    run_cli.stdio = .inherit;
+    if (b.args) |args| run_cli.addArgs(args);
+    b.step("run", "Run evmz with subcommands").dependOn(&run_cli.step);
+    for ([_][]const u8{ "t8n", "statetest", "blocktest", "debug" }) |command| {
+        const run = b.addRunArtifact(cli);
+        run.addArg(command);
+        if (std.mem.eql(u8, command, "debug")) run.stdio = .inherit;
+        if (b.args) |args| run.addArgs(args);
+        b.step(command, b.fmt("Run evmz {s}", .{command})).dependOn(&run.step);
+    }
+    const t8n_tests = b.addTest(.{ .root_module = t8n_mod });
+    t8n_tests.use_llvm = true;
+    const run_t8n_tests = b.addRunArtifact(t8n_tests);
+    b.step("t8n-test", "Test transition tooling").dependOn(&run_t8n_tests.step);
     addT8nSteps(
         b,
-        install_t8n,
+        install_cli,
         b.option([]const u8, "eest-source", "Path to an execution-specs source checkout"),
         b.option([]const u8, "t8n-reference-bin", "Reference t8n binary; defaults to EELS"),
         b.option([]const u8, "t8n-diff-output", "Directory for t8n mismatch artifacts"),
@@ -323,6 +373,10 @@ pub fn build(b: *std.Build) void {
     });
     const ci_step = b.step("ci", "Run deterministic pull-request verification");
     ci_step.dependOn(&core_check.step);
+    ci_step.dependOn(&run_statetest_tests.step);
+    ci_step.dependOn(&run_t8n_tests.step);
+    ci_step.dependOn(&cli.step);
+    ci_step.dependOn(blocktest_test_step);
     // ci always verifies the full fork matrix; -Dtest-forks cannot weaken it.
     ci_step.dependOn(tests.native_all);
     ci_step.dependOn(tests.zkvm_all);
@@ -548,7 +602,7 @@ fn addT8nSteps(
     reference_binary: ?[]const u8,
     mismatch_output: ?[]const u8,
 ) void {
-    const fill_step = b.step("t8n-fill", "Fill execution-specs source tests with evmz-t8n");
+    const fill_step = b.step("t8n-fill", "Fill execution-specs source tests with evmz t8n");
     const diff_step = b.step("t8n-diff", "Diff EEST-generated transitions against another t8n");
     const source = execution_specs_source orelse {
         const fail = &b.addFail(
@@ -583,7 +637,7 @@ fn addT8nSteps(
 }
 
 /// `uv run fill` inside the execution-specs checkout with the installed
-/// evmz-t8n; every output lives under `.zig-cache/<cache_name>/`.
+/// evmz t8n; every output lives under `.zig-cache/<cache_name>/`.
 fn addEestFill(
     b: *std.Build,
     install_t8n: *std.Build.Step.InstallArtifact,

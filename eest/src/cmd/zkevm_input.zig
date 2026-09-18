@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("evmz");
-const fixture_common = @import("../fixture.zig");
+const fixture_common = @import("fixtures");
 const ere_io = @import("../stateless_ere_io.zig");
 
 pub const about = "Extract one EEST zkEVM stateless input for a zkVM guest";

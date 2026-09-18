@@ -1,0 +1,61 @@
+{
+  "local": {
+    "env": {
+      "currentCoinbase": "0xb94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x1000000",
+      "currentBaseFee": "0x10",
+      "currentRandom": "0x200000",
+      "currentExcessBlobGas": "0x0"
+    },
+    "pre": {
+      "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "nonce": "0x0",
+        "balance": "0x100000000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xc94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602a60005500",
+        "storage": {}
+      },
+      "0x0000000000000000000000000000000000000100": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602a60005500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+      "nonce": "0x0",
+      "gasLimit": [
+        "0x186a0"
+      ],
+      "gasPrice": "0x20",
+      "to": "0xc94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+      "value": [
+        "0x0"
+      ],
+      "data": [
+        "0x"
+      ]
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          }
+        }
+      ]
+    }
+  }
+}

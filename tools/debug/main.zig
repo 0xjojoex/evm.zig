@@ -5,17 +5,9 @@
 //! sharing builtin and custom semantics with production while materializing the
 //! frame after each opcode so the session can pause.
 //!
-//! This is deliberately not an example of a public API: it imports the internal
-//! session directly so the POC can be driven without exporting debugger
-//! vocabulary from `evm.zig`.
-//!
-//! It stays at `src/` rather than under `src/debug/` because it is its own build
-//! root: Zig scopes a module to its root source file's directory, and from
-//! `src/debug/` the `../evm.zig` import is outside the module path.
-
 const std = @import("std");
-const evmz = @import("./evm.zig");
-const debug = @import("./debug.zig");
+const evmz = @import("evmz");
+const debug = evmz.debug;
 
 const Address = evmz.Address;
 const Host = evmz.Host;
@@ -32,7 +24,7 @@ const sender = evmz.addr(0x1111);
 const recipient = evmz.addr(0x2222);
 const default_gas: u63 = 1_000_000;
 
-const usage =
+pub const usage =
     \\  load <hex> [--gas N] [--input HEX] [--run]  load root bytecode and arm a session
     \\  step [n]                                    execute n opcodes (default 1)
     \\  over                                        run the pending call out, back to here
@@ -54,12 +46,12 @@ const usage =
     \\the run.
     \\
     \\Non-interactive: pass a command as argv and add -x/--exit to print its
-    \\output and skip the REPL, e.g. `evmz-debug disasm 60aae680 -x` or
-    \\`evmz-debug 6001600101 --run -x`.
+    \\output and skip the REPL, e.g. `evmz debug disasm 60aae680 -x` or
+    \\`evmz debug 6001600101 --run -x`.
     \\
 ;
 
-pub fn main(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, args: *std.process.Args.Iterator) !void {
     const allocator = init.gpa;
 
     var executor = Executor.init(allocator, .{});
@@ -75,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer repl.unload();
 
-    const startup = try initialCommand(init, allocator);
+    const startup = try initialCommand(args, allocator);
     if (startup.command) |command| {
         defer allocator.free(command);
         if (!try repl.dispatch(command)) return;
@@ -100,14 +92,10 @@ const Startup = struct {
     once: bool = false,
 };
 
-/// Rejoin argv into one command line, so `evmz-debug 6001600101 --run` behaves
+/// Rejoin argv into one command line, so `evmz debug 6001600101 --run` behaves
 /// exactly like typing it. A leading non-command word is assumed to be
 /// bytecode. `-x`/`--exit` may appear anywhere and never reaches the command.
-fn initialCommand(init: std.process.Init, allocator: std.mem.Allocator) !Startup {
-    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
-    defer args.deinit();
-    _ = args.next();
-
+fn initialCommand(args: *std.process.Args.Iterator, allocator: std.mem.Allocator) !Startup {
     var startup: Startup = .{};
     var command: std.Io.Writer.Allocating = .init(allocator);
     defer command.deinit();
