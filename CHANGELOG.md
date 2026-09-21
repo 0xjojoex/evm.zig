@@ -36,6 +36,20 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
 
 ### EVM
 
+Added
+
+- `crypto.secp256k1`: keys, RFC 6979 recoverable signing, verification, and
+  raw-x ECDH over libsecp256k1 behind a seeded, allocator-backed `Context`,
+  so a node built on evmz shares one curve implementation with the EVM
+  instead of linking its own. Native profile only.
+
+Changed
+
+- libsecp256k1 is the only native secp256k1 provider and is always fetched
+  for native builds. `-Dnative-secp256k1` is removed; the std recovery path
+  survives only as a test oracle. Native builds already compile C for the
+  precompiles, so no consumer loses a C-free configuration.
+
 Removed
 
 - `error.TraceIndexOverflow` from `executor.errors.Error` and the trace tape.

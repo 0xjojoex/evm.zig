@@ -54,17 +54,16 @@ as earlier x86-64 context.
 
 ### Apple M1 Max / macOS arm64 — 2026-08-13
 
-This snapshot enables evmz's optional XKCP Keccak and libsecp256k1 providers for
-its maximum-performance configuration. It uses a 100 ms discarded warmup and five
-complete repeats; each cell is the median of five 100-run medians per
-deployed-runtime call. Run the command five times with a distinct `--out-dir`;
+This snapshot enables evmz's optional XKCP Keccak provider for its
+maximum-performance configuration. It uses a 100 ms discarded warmup and five complete repeats; each cell is the median of
+five 100-run medians per deployed-runtime call. Run the command five times with a distinct `--out-dir`;
 the table takes the median `median_ms` for each fixture/engine row from those
 five `summary.csv` files:
 
 ```sh
 zig build bench-compare -Dbench-optimize=ReleaseFast \
   -Dbench-support-min=osaka -Dbench-support-max=osaka \
-  -Dnative-keccak=xkcp -Dnative-secp256k1=libsecp256k1 \
+  -Dnative-keccak=xkcp \
   -- --spec osaka --num-runs 100 --warmup-ms 100
 ```
 

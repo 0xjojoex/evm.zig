@@ -5,7 +5,6 @@ const std = @import("std");
 // backends against the profile and target.
 const Profile = enum { native, zkvm };
 const KeccakBackend = enum { std, xkcp };
-const Secp256k1Backend = enum { std, libsecp256k1 };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -23,14 +22,12 @@ pub fn build(b: *std.Build) void {
     );
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
     const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
-    const native_secp256k1 = b.option(Secp256k1Backend, "native-secp256k1", "Native secp256k1 backend") orelse .std;
 
     const evmz_dep = b.dependency("evmz", .{
         .target = target,
         .optimize = optimize,
         .profile = profile,
         .@"native-keccak" = native_keccak,
-        .@"native-secp256k1" = native_secp256k1,
     });
     const evmone_dep = b.dependency("evmone", .{ .target = target, .optimize = optimize });
     const intx_dep = b.dependency("intx", .{ .target = target, .optimize = optimize });
@@ -189,8 +186,6 @@ pub fn build(b: *std.Build) void {
             @tagName(profile),
             "--native-keccak",
             @tagName(native_keccak),
-            "--native-secp256k1",
-            @tagName(native_secp256k1),
             "--support-min",
             vm_loop_support_min,
             "--support-max",
@@ -210,8 +205,6 @@ pub fn build(b: *std.Build) void {
             @tagName(profile),
             "--native-keccak",
             @tagName(native_keccak),
-            "--native-secp256k1",
-            @tagName(native_secp256k1),
         });
         run_report.setCwd(b.path("."));
         if (b.args) |args| run_report.addArgs(args);
@@ -224,7 +217,6 @@ pub fn build(b: *std.Build) void {
             .optimize = micro_optimize,
             .profile = profile,
             .@"native-keccak" = native_keccak,
-            .@"native-secp256k1" = native_secp256k1,
         });
         const micro_evmz_mod = micro_evmz_dep.module("evmz");
         micro_evmz_mod.omit_frame_pointer = true;
