@@ -606,6 +606,28 @@ test "transaction validation does not apply Osaka total gas cap after Amsterdam"
     }));
 }
 
+test "transaction validation caps total gas including the state reservoir" {
+    const Latest = @import("../t.zig").Vm(.latest).?;
+    const validator = testRuntime(Latest.spec);
+    const limit = Latest.spec.transaction.total_gas_limit.?;
+    for (std.enums.values(TxKind)) |kind| {
+        var input = ValidationInput{
+            .kind = kind,
+            .gas_limit = limit,
+            .block_gas_limit = 2 * limit,
+            .gas_price = 1,
+            .max_fee_per_gas = 1,
+            .max_fee_per_blob_gas = 1,
+            .sender_balance = 2 * limit,
+            .authorization_count = if (kind == .set_code) 1 else 0,
+            .blob_hashes = if (kind == .blob) &.{@as(u256, 1) << 248} else &.{},
+        };
+        try std.testing.expectEqual(@as(?ValidationError, null), validator.validate(input));
+        input.gas_limit += 1;
+        try std.testing.expectEqual(ValidationError.gas_limit_exceeds_maximum, validator.validate(input).?);
+    }
+}
+
 test "transaction validation caps Amsterdam intrinsic regular gas" {
     const eth_transaction = @import("../eth/transaction.zig");
     const eth_eip7825 = @import("../eth/eip/7825.zig");

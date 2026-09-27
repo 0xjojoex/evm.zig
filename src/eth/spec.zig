@@ -260,6 +260,7 @@ const semantics = struct {
                 .input = .{ .word = hash },
                 .gas = eth_system.system_call_gas,
                 .state_gas = state_gas,
+                .validation = .unchecked,
             });
         }
         return calls;
@@ -272,6 +273,7 @@ const semantics = struct {
             .input = .{ .word = root },
             .gas = eth_system.system_call_gas,
             .state_gas = state_gas,
+            .validation = .unchecked,
         });
     }
 
@@ -835,7 +837,7 @@ pub const amsterdam = osaka.extend(.{
         .authorization_intrinsic_gas = eip8037.regular_per_auth_base_cost,
         .floorGas = semantics.amsterdamFloor,
         .intrinsic_regular_gas_limit = .{ .replace = eip7825.max_transaction_gas_limit },
-        .total_gas_limit = .{ .replace = null },
+        .total_gas_limit = .{ .replace = eip8037.max_transaction_gas_limit },
     },
     .settlement = .{
         .uses_state_gas_accounting = true,

@@ -16,7 +16,7 @@ pub fn builderDepositFinalizeSystemCall(system_address: address.Address, gas: u6
             .recipient = builder_deposit_predeploy_address,
             .gas = gas,
             .state_gas = state_gas,
-            .require_code = true,
+            .validation = .checked,
         },
         .output_prefix = builder_deposit_request_type,
     };
@@ -29,7 +29,7 @@ pub fn builderExitFinalizeSystemCall(system_address: address.Address, gas: u64, 
             .recipient = builder_exit_predeploy_address,
             .gas = gas,
             .state_gas = state_gas,
-            .require_code = true,
+            .validation = .checked,
         },
         .output_prefix = builder_exit_request_type,
     };
