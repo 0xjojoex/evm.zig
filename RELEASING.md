@@ -23,8 +23,8 @@ a compatibility break exactly like renaming a function.
 | root | `-Dcore=false` | `rlp`, `mpt`, `ssz` | none |
 | root | `-Dprofile=zkvm` | `evmz` (guest) | none |
 
-Other options that consumers may set — `-Dnative-keccak`, `-Dnative-secp256k1`,
-`-Dstateless-schema`, `-Dpic`, `-Dguest-heap-bytes` — are part of the surface
+Other options that consumers may set — `-Dnative-keccak`, `-Dstateless-schema`,
+`-Dpic`, `-Dguest-heap-bytes` — are part of the surface
 with the same rules. Steps (`test`, `ci`, `bench-*`, …) are not: they are
 development entry points and may change freely.
 

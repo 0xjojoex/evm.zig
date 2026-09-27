@@ -5,7 +5,6 @@ const std = @import("std");
 // backends against the profile and target.
 const Profile = enum { native, zkvm };
 const KeccakBackend = enum { std, xkcp };
-const Secp256k1Backend = enum { std, libsecp256k1 };
 
 const Example = struct {
     name: []const u8,
@@ -24,7 +23,6 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
     const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
-    const native_secp256k1 = b.option(Secp256k1Backend, "native-secp256k1", "Native secp256k1 backend") orelse .std;
     const selected_path = b.option(
         []const u8,
         "example-name",
@@ -36,7 +34,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .profile = profile,
         .@"native-keccak" = native_keccak,
-        .@"native-secp256k1" = native_secp256k1,
     }).module("evmz");
 
     const run_selected_step = b.step("example", "Run the selected Zig example");

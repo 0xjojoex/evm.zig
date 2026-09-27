@@ -1300,6 +1300,24 @@ test "bn254 pairing rejects field elements outside modulus" {
     try std.testing.expectEqual(@as(i64, 0), invalid.gas_left);
 }
 
+test "bn254 pairing rejects G2 points outside subgroup" {
+    var input = [_]u8{0} ** bn254_pair_size;
+    _ = try std.fmt.hexToBytes(input[64..], "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "153a361d3c501ba172d1324812b5f5ea564d064be862f79fd1693e4d292972e1" ++
+        "2b4420ffb22973a83c3fee9458ae185da3f5596a56b81238473d8a651628c93b");
+
+    const invalid = (try executeEthereumPrecompileForTest(
+        std.testing.allocator,
+        .latest,
+        Contract.bn254_pairing.toAddress(),
+        &input,
+        std.math.maxInt(i64),
+    )).?;
+    try std.testing.expectEqual(Status.failure, invalid.status);
+    try std.testing.expectEqual(@as(i64, 0), invalid.gas_left);
+}
+
 test blake2f {
     var input: [blake2f_input_size]u8 = undefined;
     _ = try std.fmt.hexToBytes(&input, "0000000c" ++

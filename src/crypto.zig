@@ -1,13 +1,20 @@
-//! Hashing and signature primitives (keccak256, ecrecover).
+//! Hashing and signature primitives (keccak256, sha256, ecrecover) plus the
+//! secp256k1 key, signing, and ECDH surface in `secp256k1`.
 //!
 //! The backing provider is selected at build time by the crypto profile
 //! (`native` or `zkvm`). Native builds can select the `std` or `xkcp` Keccak
-//! backend and the `std` or `libsecp256k1` recovery backend independently;
-//! zkVM builds stay on their custom accelerator provider.
+//! backend; secp256k1 is always libsecp256k1 there. zkVM builds stay on their
+//! custom accelerator provider and only recover.
 
 const std = @import("std");
 const build_options = @import("build_options");
 const zkvm = @import("./crypto/zkvm_accelerators.zig");
+
+/// Keys, recoverable signing, verification, and ECDH. Native profile only.
+pub const secp256k1 = switch (build_options.profile) {
+    .native => @import("./crypto/secp256k1.zig"),
+    .zkvm => @compileError("crypto.secp256k1 needs the native profile; the zkVM profile only recovers"),
+};
 
 pub const provider_name = @tagName(build_options.profile);
 pub const keccak_provider_name = switch (build_options.profile) {
@@ -15,7 +22,7 @@ pub const keccak_provider_name = switch (build_options.profile) {
     .zkvm => "zkvm",
 };
 pub const secp256k1_provider_name = switch (build_options.profile) {
-    .native => @tagName(build_options.native_secp256k1),
+    .native => "libsecp256k1",
     .zkvm => "zkvm",
 };
 
@@ -35,11 +42,6 @@ const Provider = switch (build_options.profile) {
 const NativeKeccakProvider = switch (build_options.native_keccak) {
     .std => StdKeccakProvider,
     .xkcp => XkcpKeccakProvider,
-};
-
-const NativeSecp256k1Provider = switch (build_options.native_secp256k1) {
-    .std => StdSecp256k1Provider,
-    .libsecp256k1 => Libsecp256k1Provider,
 };
 
 pub inline fn keccak256(input: []const u8) [32]u8 {
@@ -80,11 +82,13 @@ const NativeProvider = struct {
     }
 
     fn ecrecoverPublicKey(message_hash: [32]u8, r: [32]u8, s: [32]u8, recovery_id: u8) ?[64]u8 {
-        return NativeSecp256k1Provider.ecrecoverPublicKey(message_hash, r, s, recovery_id);
+        return Libsecp256k1Provider.ecrecoverPublicKey(message_hash, r, s, recovery_id);
     }
 };
 
-const StdSecp256k1Provider = struct {
+/// Test oracle only: an independent recovery over `std.crypto.ecc` that the
+/// libsecp256k1 provider is checked against. Never a runtime backend.
+const StdSecp256k1Reference = struct {
     fn ecrecoverPublicKey(message_hash: [32]u8, r: [32]u8, s: [32]u8, recovery_id: u8) ?[64]u8 {
         if (recovery_id > 1) return null;
 
@@ -135,26 +139,8 @@ const XkcpKeccakProvider = struct {
 };
 
 const Libsecp256k1Provider = struct {
-    extern fn evmz_libsecp256k1_ecrecover(
-        message_hash: [*]const u8,
-        r: [*]const u8,
-        s: [*]const u8,
-        recovery_id: c_int,
-        output: [*]u8,
-    ) c_int;
-
     fn ecrecoverPublicKey(message_hash: [32]u8, r: [32]u8, s: [32]u8, recovery_id: u8) ?[64]u8 {
-        if (recovery_id > 1) return null;
-
-        var out: [64]u8 = undefined;
-        if (evmz_libsecp256k1_ecrecover(
-            &message_hash,
-            &r,
-            &s,
-            recovery_id,
-            &out,
-        ) != 1) return null;
-        return out;
+        return @import("./crypto/libsecp256k1.zig").ecrecover(&message_hash, &r, &s, recovery_id);
     }
 };
 
@@ -216,7 +202,7 @@ test sha256 {
     }, &sha256(""));
 }
 
-test "native secp256k1 backend matches std recovery semantics" {
+test "libsecp256k1 recovery matches the std reference" {
     if (build_options.profile != .native) return;
 
     const message_hash = [_]u8{
@@ -238,29 +224,34 @@ test "native secp256k1 backend matches std recovery semantics" {
         0x87, 0x56, 0xb7, 0xd7, 0x5a, 0x9c, 0x45, 0x49,
     };
 
-    const expected = StdSecp256k1Provider.ecrecoverPublicKey(message_hash, r, s, 1);
+    const expected = StdSecp256k1Reference.ecrecoverPublicKey(message_hash, r, s, 1);
+    try std.testing.expect(expected != null);
     try std.testing.expectEqual(expected, ecrecoverPublicKey(message_hash, r, s, 1));
 
     const zero = [_]u8{0} ** 32;
     try std.testing.expectEqual(
-        StdSecp256k1Provider.ecrecoverPublicKey(message_hash, zero, s, 1),
+        StdSecp256k1Reference.ecrecoverPublicKey(message_hash, zero, s, 1),
         ecrecoverPublicKey(message_hash, zero, s, 1),
     );
     try std.testing.expectEqual(
-        StdSecp256k1Provider.ecrecoverPublicKey(message_hash, r, zero, 1),
+        StdSecp256k1Reference.ecrecoverPublicKey(message_hash, r, zero, 1),
         ecrecoverPublicKey(message_hash, r, zero, 1),
     );
     const out_of_range = [_]u8{0xff} ** 32;
     try std.testing.expectEqual(
-        StdSecp256k1Provider.ecrecoverPublicKey(message_hash, out_of_range, s, 1),
+        StdSecp256k1Reference.ecrecoverPublicKey(message_hash, out_of_range, s, 1),
         ecrecoverPublicKey(message_hash, out_of_range, s, 1),
     );
     try std.testing.expectEqual(
-        StdSecp256k1Provider.ecrecoverPublicKey(message_hash, r, out_of_range, 1),
+        StdSecp256k1Reference.ecrecoverPublicKey(message_hash, r, out_of_range, 1),
         ecrecoverPublicKey(message_hash, r, out_of_range, 1),
     );
     try std.testing.expectEqual(
-        StdSecp256k1Provider.ecrecoverPublicKey(message_hash, r, s, 2),
+        StdSecp256k1Reference.ecrecoverPublicKey(message_hash, r, s, 2),
         ecrecoverPublicKey(message_hash, r, s, 2),
     );
+}
+
+test {
+    if (build_options.profile == .native) _ = secp256k1;
 }
