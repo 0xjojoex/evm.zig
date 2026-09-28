@@ -19,6 +19,9 @@ pub const state_bytes_per_storage_set: u64 = 64;
 /// Maximum SSTORE count assumed for an EIP-8037 Amsterdam system call.
 pub const system_max_sstores_per_call: u64 = 16;
 
+/// Maximum transaction gas limit, including the state-gas reservoir.
+pub const max_transaction_gas_limit: u64 = 0xffff_ffff;
+
 /// Amsterdam transaction base cost before calldata, access list, authorization, or create costs.
 pub const tx_base_cost: u64 = 12_000;
 

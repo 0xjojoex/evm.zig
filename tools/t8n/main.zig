@@ -893,7 +893,7 @@ fn executeFork(
     var requests: []const []const u8 = &.{};
     if (!state_test and block_exception == null) {
         for (finalize_calls.slice()) |call| {
-            if (call.call.require_code and !try executor.accountHasCode(call.call.recipient)) {
+            if (call.call.validation == .checked and !try executor.accountHasCode(call.call.recipient)) {
                 block_exception = "BlockException.SYSTEM_CONTRACT_EMPTY";
                 break;
             }

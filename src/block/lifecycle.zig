@@ -36,7 +36,16 @@ pub const BlockSystemCall = struct {
     input: BlockHookInput = .none,
     gas: u64,
     state_gas: u64 = 0,
-    require_code: bool = false,
+    validation: Validation,
+
+    /// Host and witness errors propagate under either policy. VM failure
+    /// always rolls back writes and retains access observations.
+    pub const Validation = enum {
+        /// Missing code and VM failure do not invalidate the block.
+        unchecked,
+        /// Code must exist and execution must succeed.
+        checked,
+    };
 };
 
 pub const BlockSystemCalls = struct {
@@ -101,7 +110,7 @@ pub const FinalizeSystemCall = struct {
                 .recipient = predeploy,
                 .gas = gas,
                 .state_gas = state_gas,
-                .require_code = true,
+                .validation = .checked,
             },
             .output_prefix = request_type,
         };
@@ -131,8 +140,8 @@ test "block hook collections preserve insertion order" {
     const second_sender = Address.fromBytes([_]u8{0x33} ** 20);
     const second_recipient = Address.fromBytes([_]u8{0x44} ** 20);
     var calls = BlockSystemCalls{};
-    calls.append(.{ .sender = first_sender, .recipient = first_recipient, .gas = 7 });
-    calls.append(.{ .sender = second_sender, .recipient = second_recipient, .gas = 11 });
+    calls.append(.{ .sender = first_sender, .recipient = first_recipient, .gas = 7, .validation = .unchecked });
+    calls.append(.{ .sender = second_sender, .recipient = second_recipient, .gas = 11, .validation = .checked });
 
     try std.testing.expectEqual(@as(usize, 2), calls.slice().len);
     try std.testing.expectEqual(first_sender, calls.slice()[0].sender);

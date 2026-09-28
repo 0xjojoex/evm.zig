@@ -724,19 +724,19 @@ test "Amsterdam finalize calls include builder request predeploys" {
     try std.testing.expectEqual(@as(usize, 4), calls.len);
     try std.testing.expectEqual(eth_system.withdrawal_request_predeploy_address, calls.items[0].call.recipient);
     try std.testing.expectEqual(eip7002.request_type, calls.items[0].output_prefix);
-    try std.testing.expect(calls.items[0].call.require_code);
+    try std.testing.expectEqual(.checked, calls.items[0].call.validation);
 
     try std.testing.expectEqual(eth_system.consolidation_request_predeploy_address, calls.items[1].call.recipient);
     try std.testing.expectEqual(eip7251.request_type, calls.items[1].output_prefix);
-    try std.testing.expect(calls.items[1].call.require_code);
+    try std.testing.expectEqual(.checked, calls.items[1].call.validation);
 
     try std.testing.expectEqual(eth_system.builder_deposit_request_predeploy_address, calls.items[2].call.recipient);
     try std.testing.expectEqual(eip8282.builder_deposit_request_type, calls.items[2].output_prefix);
-    try std.testing.expect(calls.items[2].call.require_code);
+    try std.testing.expectEqual(.checked, calls.items[2].call.validation);
 
     try std.testing.expectEqual(eth_system.builder_exit_request_predeploy_address, calls.items[3].call.recipient);
     try std.testing.expectEqual(eip8282.builder_exit_request_type, calls.items[3].output_prefix);
-    try std.testing.expect(calls.items[3].call.require_code);
+    try std.testing.expectEqual(.checked, calls.items[3].call.validation);
 }
 
 test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reachable" {

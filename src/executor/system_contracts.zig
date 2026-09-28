@@ -49,7 +49,7 @@ pub fn applyPreludeSystemCalls(
             call.input.slice(),
             call.gas,
             call.state_gas,
-            call.require_code,
+            call.validation,
         );
     }
 }
@@ -149,7 +149,7 @@ fn applyFinalizeBlockMode(
             call.gas,
             call.state_gas,
             finalize_call.output_prefix,
-            call.require_code,
+            call.validation,
             mode,
             observer,
         );
@@ -189,7 +189,7 @@ fn applySystemCalls(
             call.input.slice(),
             call.gas,
             call.state_gas,
-            call.require_code,
+            call.validation,
             mode,
             observer,
         );
@@ -204,12 +204,12 @@ fn callSystemContract(
     input: []const u8,
     gas: u64,
     state_gas: u64,
-    require_code: bool,
+    validation: block_lifecycle.BlockSystemCall.Validation,
     mode: InstrumentationMode,
     observer: anytype,
 ) !void {
     const has_code = try executor.accountHasCode(recipient);
-    if (!has_code and require_code) return error.SystemCallFailed;
+    if (validation == .checked and !has_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
             execution_context,
@@ -234,7 +234,7 @@ fn callSystemContract(
             observer,
         ),
     };
-    if (has_code and result.status() != .success) return error.SystemCallFailed;
+    if (validation == .checked and result.status() != .success) return error.SystemCallFailed;
 }
 
 fn callSystemContractInPrelude(
@@ -245,10 +245,10 @@ fn callSystemContractInPrelude(
     input: []const u8,
     gas: u64,
     state_gas: u64,
-    require_code: bool,
+    validation: block_lifecycle.BlockSystemCall.Validation,
 ) @TypeOf(prelude).Error!void {
     const has_code = (try prelude.code(recipient)).len != 0;
-    if (!has_code and require_code) return error.SystemCallFailed;
+    if (validation == .checked and !has_code) return error.SystemCallFailed;
 
     const result = try prelude.executeRequest(.{
         .context = execution_context,
@@ -262,7 +262,7 @@ fn callSystemContractInPrelude(
             .reservoir = state_gas,
         },
     });
-    if (has_code and result.status() != .success) return error.SystemCallFailed;
+    if (validation == .checked and result.status() != .success) return error.SystemCallFailed;
 }
 
 fn callRequestSystemContract(
@@ -275,12 +275,12 @@ fn callRequestSystemContract(
     gas: u64,
     state_gas: u64,
     request_type: u8,
-    require_code: bool,
+    validation: block_lifecycle.BlockSystemCall.Validation,
     mode: InstrumentationMode,
     observer: anytype,
 ) !?[]const u8 {
     const has_code = try executor.accountHasCode(recipient);
-    if (!has_code and require_code) return error.SystemCallFailed;
+    if (validation == .checked and !has_code) return error.SystemCallFailed;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
             execution_context,
@@ -305,8 +305,8 @@ fn callRequestSystemContract(
             observer,
         ),
     };
-    if (has_code and result.status() != .success) return error.SystemCallFailed;
-    if (!has_code or result.output_data.len == 0) return null;
+    if (validation == .checked and result.status() != .success) return error.SystemCallFailed;
+    if (!has_code or result.status() != .success or result.output_data.len == 0) return null;
 
     const request_len = std.math.add(usize, result.output_data.len, 1) catch return error.OutOfMemory;
     const request = try allocator.alloc(u8, request_len);
@@ -365,6 +365,104 @@ test "before block calls Prague and Cancun system contracts" {
     )).status());
 }
 
+test "before-block system call failures roll back writes and retain BAL reads" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const projector = evmz.eth.bal.projector;
+    const Observer = struct {
+        builder: *projector.BlockBuilder,
+
+        pub fn observe(self: *@This(), observation: anytype) !void {
+            try self.builder.append(observation.observations(), 0);
+        }
+    };
+    const codes = [_][]const u8{
+        // SSTORE(1, 1), then REVERT.
+        &.{ 0x60, 0x01, 0x60, 0x01, 0x55, 0x60, 0x00, 0x60, 0x00, 0xfd },
+        // SSTORE(1, 1), then exhaust gas through KECCAK256 memory expansion.
+        &.{ 0x60, 0x01, 0x60, 0x01, 0x55, 0x64, 0x17, 0x48, 0x76, 0xe8, 0x00, 0x60, 0x00, 0x20 },
+    };
+    const calls = Latest.spec.block.beforeBlock(.{
+        .number = 1,
+        .timestamp = 12,
+        .parent_hash = [_]u8{0xaa} ** 32,
+        .parent_beacon_block_root = [_]u8{0xbb} ** 32,
+    });
+    try std.testing.expectEqual(@as(usize, 2), calls.slice().len);
+    for (codes) |code| {
+        var executor = Latest.Executor.init(std.testing.allocator, .{});
+        defer executor.deinit();
+        for (calls.slice()) |call| {
+            try evmz.t.seedExecutorAccount(&executor, call.recipient, .{ .code = code });
+        }
+        var builder = projector.BlockBuilder.init(std.testing.allocator);
+        defer builder.deinit();
+        var observer = Observer{ .builder = &builder };
+        try applyBeforeBlockObserved(&executor, testExecutionContext(), calls.slice(), &observer);
+        var bal = try builder.finish();
+        defer bal.deinit(std.testing.allocator);
+        try std.testing.expectEqual(calls.slice().len, bal.accounts.len);
+        for (bal.accounts) |account| {
+            try std.testing.expectEqualSlices(u256, &.{1}, account.storage_reads);
+            try std.testing.expectEqual(@as(usize, 0), account.storage_changes.len);
+            try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(account.address, 1));
+        }
+
+        // Checked calls reject failure even in the before-block phase.
+        var strict_call = calls.items[0];
+        strict_call.validation = .checked;
+        try std.testing.expectError(error.SystemCallFailed, applyBeforeBlock(
+            &executor,
+            testExecutionContext(),
+            &.{strict_call},
+        ));
+    }
+}
+
+test "system call validation determines whether code is required" {
+    const Latest = evmz.t.Vm(.latest).?;
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    var call = block_lifecycle.BlockSystemCall{
+        .sender = evmz.eth.system_address,
+        .recipient = evmz.eth.beacon_roots_address,
+        .gas = evmz.eth.system_call_gas,
+        .validation = .checked,
+    };
+    try std.testing.expectError(error.SystemCallFailed, applyBeforeBlock(
+        &executor,
+        testExecutionContext(),
+        &.{call},
+    ));
+    call.validation = .unchecked;
+    try applyBeforeBlock(&executor, testExecutionContext(), &.{call});
+}
+
+test "finalize system calls reject VM failure" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const calls = Latest.spec.block.finalizeBlock(.{
+        .number = 1,
+        .timestamp = 12,
+        .transaction_count = 0,
+        .gas_used = 0,
+        .block_gas = 0,
+        .state_gas = 0,
+    });
+    try std.testing.expect(calls.slice().len > 0);
+    for (calls.slice()) |call| {
+        var executor = Latest.Executor.init(std.testing.allocator, .{});
+        defer executor.deinit();
+        try evmz.t.seedExecutorAccount(&executor, call.call.recipient, .{
+            .code = &.{ 0x60, 0x00, 0x60, 0x00, 0xfd }, // REVERT
+        });
+        try std.testing.expectError(error.SystemCallFailed, applyFinalizeBlock(
+            &executor,
+            testExecutionContext(),
+            std.testing.allocator,
+            &.{call},
+        ));
+    }
+}
+
 test "Amsterdam before-block system calls reserve state gas" {
     const ethereum = evmz.eth;
     const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
@@ -392,7 +490,7 @@ test "Amsterdam block hook executes state growth from the system-call reservoir"
                 .recipient = recipient,
                 .gas = 20_000,
                 .state_gas = ethereum.eip8037.storage_set_state_gas,
-                .require_code = true,
+                .validation = .checked,
             });
             return calls;
         }
@@ -433,6 +531,7 @@ test "finalize block copies successful system contract output into typed request
                     .sender = ethereum.system_address,
                     .recipient = recipient,
                     .gas = ethereum.system_call_gas,
+                    .validation = .checked,
                 },
                 .output_prefix = 0x01,
             });
@@ -492,7 +591,7 @@ test "finalize block rejects missing required system contract code" {
                     .sender = ethereum.system_address,
                     .recipient = evmz.addr(0x7002),
                     .gas = ethereum.system_call_gas,
-                    .require_code = true,
+                    .validation = .checked,
                 },
                 .output_prefix = 0x01,
             });
