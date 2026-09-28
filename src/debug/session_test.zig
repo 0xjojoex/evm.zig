@@ -51,6 +51,8 @@ fn expectCallParity(
     defer normal_executor.deinit();
     try normal_executor.beginTransaction(context, sender, recipient);
     defer normal_executor.discardStateTransition();
+    var normal_executor_checkpoint = normal_executor.checkpoint();
+    defer normal_executor_checkpoint.deinit();
     normal_executor.beginPreparedCodeExecution();
     defer normal_executor.endPreparedCodeExecution();
     var normal_code = try normal_executor.prepareBytecode(code);
@@ -61,6 +63,8 @@ fn expectCallParity(
     defer controlled_executor.deinit();
     try controlled_executor.beginTransaction(context, sender, recipient);
     defer controlled_executor.discardStateTransition();
+    var controlled_executor_checkpoint = controlled_executor.checkpoint();
+    defer controlled_executor_checkpoint.deinit();
     var controlled_code = try controlled_executor.prepareBytecode(code);
     defer controlled_code.deinit(std.testing.allocator);
     var controlled: Session = undefined;
@@ -154,6 +158,8 @@ test "debug session matches uninterrupted execution" {
         recipient,
     );
     defer normal_executor.discardStateTransition();
+    var normal_executor_checkpoint = normal_executor.checkpoint();
+    defer normal_executor_checkpoint.deinit();
     normal_executor.beginPreparedCodeExecution();
     defer normal_executor.endPreparedCodeExecution();
     var normal_code = try normal_executor.prepareBytecode(&code);
@@ -168,6 +174,8 @@ test "debug session matches uninterrupted execution" {
         recipient,
     );
     defer controlled_executor.discardStateTransition();
+    var controlled_executor_checkpoint = controlled_executor.checkpoint();
+    defer controlled_executor_checkpoint.deinit();
     var controlled_code = try controlled_executor.prepareBytecode(&code);
     defer controlled_code.deinit(std.testing.allocator);
 
@@ -241,6 +249,8 @@ test "debug session stops at the next instruction and jump target" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var executor_checkpoint = executor.checkpoint();
+    defer executor_checkpoint.deinit();
     var prepared = try executor.prepareBytecode(&code);
     defer prepared.deinit(std.testing.allocator);
 
@@ -392,6 +402,8 @@ test "debug session dispatches a child and resumes its parent" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var executor_checkpoint = executor.checkpoint();
+    defer executor_checkpoint.deinit();
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -481,6 +493,8 @@ test "debug session can substitute a call before continuing" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var executor_checkpoint = executor.checkpoint();
+    defer executor_checkpoint.deinit();
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -560,6 +574,8 @@ test "debug session can substitute a create before continuing" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var executor_checkpoint = executor.checkpoint();
+    defer executor_checkpoint.deinit();
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -662,6 +678,8 @@ test "debug session aborts at child and action boundaries" {
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
+    var root_checkpoint = executor.checkpoint();
+    defer root_checkpoint.deinit();
     var controlled: Session = undefined;
     try controlled.init(&executor, message, bytecode.view());
     defer controlled.deinit();
@@ -685,6 +703,7 @@ test "debug session aborts at child and action boundaries" {
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(recipient, 0));
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(child, 0));
 
+    root_checkpoint.restore();
     executor.discardStateTransition();
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(recipient, 0));
 
@@ -693,6 +712,8 @@ test "debug session aborts at child and action boundaries" {
         sender,
         recipient,
     );
+    var action_checkpoint = executor.checkpoint();
+    defer action_checkpoint.deinit();
     var at_action: Session = undefined;
     try at_action.init(&executor, message, bytecode.view());
     defer at_action.deinit();
@@ -705,6 +726,7 @@ test "debug session aborts at child and action boundaries" {
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(recipient, 0));
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(child, 0));
 
+    action_checkpoint.restore();
     executor.discardStateTransition();
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(recipient, 0));
 }
@@ -759,6 +781,8 @@ test "debug session resolves and executes a custom instruction" {
         recipient,
     );
     defer normal_executor.discardStateTransition();
+    var normal_executor_checkpoint = normal_executor.checkpoint();
+    defer normal_executor_checkpoint.deinit();
     normal_executor.beginPreparedCodeExecution();
     defer normal_executor.endPreparedCodeExecution();
     var normal_code = try normal_executor.prepareBytecode(&code);
@@ -773,6 +797,8 @@ test "debug session resolves and executes a custom instruction" {
         recipient,
     );
     defer controlled_executor.discardStateTransition();
+    var controlled_executor_checkpoint = controlled_executor.checkpoint();
+    defer controlled_executor_checkpoint.deinit();
     var controlled_code = try controlled_executor.prepareBytecode(&code);
     defer controlled_code.deinit(std.testing.allocator);
 
@@ -851,6 +877,8 @@ test "debug session rejects an active capture context" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var executor_checkpoint = executor.checkpoint();
+    defer executor_checkpoint.deinit();
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -900,6 +928,8 @@ test "debug session inspection rebinds to the active frame" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var executor_checkpoint = executor.checkpoint();
+    defer executor_checkpoint.deinit();
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -991,6 +1021,8 @@ test "failed debug session init leaves no prepared-code execution scope" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var executor_checkpoint = executor.checkpoint();
+    defer executor_checkpoint.deinit();
     var bytecode = try executor.prepareBytecode(&root_code);
     defer bytecode.deinit(failing.allocator());
 

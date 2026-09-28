@@ -298,7 +298,7 @@ pub fn Host(comptime revision: evmz.eth.Revision, comptime trace: bool) type {
 }
 
 fn accountView(executor: anytype, address: Address) !?evmz.AccountView {
-    const account = try executor.getAccountOrLoad(address) orelse return null;
+    const account = try executor.getAccount(address) orelse return null;
     return .{
         .nonce = account.nonce,
         .balance = account.balance,

@@ -476,14 +476,14 @@ test "memory store exposes committer adapter" {
     var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, memory.reader()));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.lifetime.transaction);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
-    const attempt = state.beginTransaction();
-    state.beginScope();
+    const attempt = state.beginAttempt();
+    state.openSession();
     _ = try state.setStorage(.fromAddress(address), 7, 99);
-    state.closeScope();
-    state.seal(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
 
     var delta = try StateDelta.init(std.testing.allocator, state.pendingView().changes());
     defer delta.deinit();
@@ -504,27 +504,36 @@ test "memory store consumes cumulative wipe then write from a detached delta" {
     var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, memory.reader()));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.lifetime.transaction);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
 
-    const wiped = state.beginTransaction();
-    state.beginScope();
-    try state.markSelfdestructed(.fromAddress(address));
-    try state.finalize(.{ .existing_account = .{
+    const wiped = state.beginAttempt();
+    state.openSession();
+    {
+        const destruction = state.checkpoint();
+        errdefer state.revertToCheckpoint(destruction);
+        _ = try state.applySelfDestruct(.fromAddress(address), .fromAddress(address), .{
+            .clear_balance = false,
+            .reset_nonce = false,
+            .mark_selfdestructed = true,
+        }, false);
+        state.commitCheckpoint(destruction);
+    }
+    try state.finalizeLifecycle(.{ .existing_account = .{
         .reset_account = true,
         .clear_storage = true,
     } });
-    state.closeScope();
-    state.seal(wiped);
-    state.retain(wiped);
+    state.closeSession();
+    state.sealAttempt(wiped);
+    state.retainAttempt(wiped);
 
-    const rewritten = state.beginTransaction();
-    state.beginScope();
+    const rewritten = state.beginAttempt();
+    state.openSession();
     _ = try state.setStorage(.fromAddress(address), 2, 33);
-    state.closeScope();
-    state.seal(rewritten);
-    state.retain(rewritten);
+    state.closeSession();
+    state.sealAttempt(rewritten);
+    state.retainAttempt(rewritten);
 
     var delta = try StateDelta.init(std.testing.allocator, state.acceptedView().changes());
     defer delta.deinit();

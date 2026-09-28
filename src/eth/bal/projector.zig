@@ -445,16 +445,16 @@ test "existence-only semantic access does not require account fields" {
     var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, Reader.reader()));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.lifetime.transaction);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
     const target = address.addr(1);
-    const attempt = state.beginObservedTransaction();
-    state.beginScope();
+    const attempt = state.beginObservedAttempt();
+    state.openSession();
     try std.testing.expect(try state.accountExists(.fromAddress(target)));
     _ = try state.accessAccount(.fromAddress(target));
-    state.closeScope();
-    state.seal(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
 
     var transition = try materialize(state.pendingView().observations(), std.testing.allocator);
     defer transition.deinit(std.testing.allocator);
@@ -469,14 +469,14 @@ test "gas-only storage access does not require storage values" {
     var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.lifetime.transaction);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
-    const attempt = state.beginObservedTransaction();
-    state.beginScope();
+    const attempt = state.beginObservedAttempt();
+    state.openSession();
     _ = try state.accessStorage(.fromAddress(address.addr(1)), 7);
-    state.closeScope();
-    state.seal(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
 
     var transition = try materialize(state.pendingView().observations(), std.testing.allocator);
     defer transition.deinit(std.testing.allocator);
@@ -534,8 +534,8 @@ test "block builder coalesces transitions at one access index" {
     var state = OpenState.init(allocator, .init(allocator, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.lifetime.transaction);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;
@@ -546,27 +546,27 @@ test "block builder coalesces transitions at one access index" {
     var reference_builder = BlockBuilder.init(allocator);
     defer reference_builder.deinit();
 
-    const first = state.beginObservedTransaction();
-    state.beginScope();
+    const first = state.beginObservedAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(target), 12);
-    state.closeScope();
-    state.seal(first);
+    state.closeSession();
+    state.sealAttempt(first);
     try builder.append(state.pendingView().observations(), 3);
     var first_transition = try materialize(state.pendingView().observations(), allocator);
     defer first_transition.deinit(allocator);
     try reference_builder.appendTransition(first_transition, 3);
-    state.retain(first);
+    state.retainAttempt(first);
 
-    const second = state.beginObservedTransaction();
-    state.beginScope();
+    const second = state.beginObservedAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(target), 15);
-    state.closeScope();
-    state.seal(second);
+    state.closeSession();
+    state.sealAttempt(second);
     try builder.append(state.pendingView().observations(), 3);
     var second_transition = try materialize(state.pendingView().observations(), allocator);
     defer second_transition.deinit(allocator);
     try reference_builder.appendTransition(second_transition, 3);
-    state.retain(second);
+    state.retainAttempt(second);
 
     var result = try builder.finish();
     defer result.deinit(allocator);

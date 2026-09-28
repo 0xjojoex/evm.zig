@@ -161,7 +161,7 @@ test "execution checkpoint preserves family pre-scope writes" {
     try executor.state.setBalance(.fromAddress(sender), 9);
     execution_checkpoint.restore();
 
-    try std.testing.expectEqual(@as(u256, 7), executor.getAccount(sender).?.balance);
+    try std.testing.expectEqual(@as(u256, 7), executor.cachedAccount(sender).?.balance);
     const executed = ShanghaiExecutor.Executed(void){
         .executor = &executor,
         .generation = transaction_runtime.finish(&executor),
@@ -512,4 +512,111 @@ fn request(sender: evmz.Address, recipient: evmz.Address) evmz.execution.Executi
         } },
         .gas = .legacy(100_000),
     };
+}
+
+test "execution checkpoints restore effects across multiple roots" {
+    const Executor = evmz.t.Vm(.latest).?.Executor;
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, contract, .{
+        .code = &.{ 0x60, 7, 0x5f, 0x55, 0x00 }, // store 7
+    });
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, request(sender, contract).context);
+
+    var outer = executor.checkpoint();
+    defer outer.deinit();
+    var first_request = request(sender, contract);
+    first_request.gas = .legacy(1_000_000);
+    const first = try transaction_runtime.runRoot(&executor, first_request, .{});
+    try std.testing.expectEqual(.success, first.result.status());
+    // A later failed root rolls back only itself.
+    var exhausted = request(sender, contract);
+    exhausted.gas = .legacy(0);
+    const failed = try transaction_runtime.runRoot(&executor, exhausted, .{});
+    try std.testing.expectEqual(.out_of_gas, failed.result.status());
+    try std.testing.expectEqual(@as(u256, 7), try executor.getStorage(contract, 0));
+    outer.restore();
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
+
+    const executed = Executor.Executed(void){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = {},
+    };
+    executed.retain();
+}
+
+test "manual execution retains after finalization or rollback" {
+    const Executor = evmz.t.Vm(.latest).?.Executor;
+    const sender = evmz.addr(0xaaaa);
+    const target = evmz.addr(0xbbbb);
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try executor.beginMessageScope(request(sender, target), .{});
+    defer executor.discardStateTransition();
+    // No bytecode ran: coordinator-only changes can be retained directly.
+    try executor.addBalance(target, 3);
+    executor.retainStateTransition();
+
+    try executor.beginMessageScope(request(sender, target), .{});
+    {
+        var checkpoint = executor.checkpoint();
+        defer checkpoint.deinit();
+        _ = try executor.executeTransactionRequest(request(sender, target));
+        try executor.addBalance(target, 5);
+        // An unresolved guard restores the dispatched state.
+    }
+    try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(target));
+    executor.retainStateTransition();
+
+    try executor.beginMessageScope(request(sender, target), .{});
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
+    _ = try executor.executeTransactionRequest(request(sender, target));
+    checkpoint.commit();
+    try executor.finalizeExecution();
+    executor.retainStateTransition();
+}
+
+test "rolling back finalization preserves closed dispatch and allows finalizing again" {
+    const Executor = evmz.t.Vm(.latest).?.Executor;
+    const sender = evmz.addr(0xaaaa);
+    const target = evmz.address.create(sender, 0);
+    var executor = Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .balance = 7 });
+    const creation: evmz.execution.ExecutionRequest = .{
+        .context = evmz.t.defaultExecutionContext(sender, 1_000_000),
+        .message = .{ .create = .{
+            .sender = sender,
+            .recipient = target,
+            .init_code = &.{ 0x60, 11, 0x60, 7, 0x55, 0x30, 0xff },
+        } },
+        .gas = .legacy(1_000_000),
+    };
+    try executor.beginMessageScope(creation, .{});
+    defer executor.discardStateTransition();
+    var payload = executor.checkpoint();
+    defer payload.deinit();
+    const result = try executor.executeTransactionRequest(creation);
+    try std.testing.expectEqual(.success, result.status());
+    payload.commit();
+    try std.testing.expectEqual(@as(u256, 11), try executor.getStorage(target, 7));
+
+    var settlement = executor.checkpoint();
+    defer settlement.deinit();
+    try executor.finalizeExecution();
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(target, 7));
+    settlement.restore();
+    try std.testing.expectEqual(.closed, executor.execution_phase);
+    try std.testing.expectEqual(@as(u256, 11), try executor.getStorage(target, 7));
+
+    try executor.finalizeExecution();
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(target, 7));
+    executor.retainStateTransition();
+    try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(target));
 }

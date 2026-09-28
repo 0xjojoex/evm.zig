@@ -321,25 +321,28 @@ pub const MockHost = struct {
         return evmz.uint256.fromBytes32(&digest);
     }
 
-    fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
+    fn selfDestruct(ptr: *anyopaque, address: AddressWord, beneficiary: AddressWord) !bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         const a = @This();
 
-        const should_refund = !self.removed_account.contains(address);
-        const destrucing_balance = try a.getBalance(self, .fromAddress(address));
-        const recipient_balance = try a.getBalance(self, .fromAddress(beneficiary));
+        const from = address.address();
+        const to = beneficiary.address();
 
-        try self.local_account.put(address, .{
+        const should_refund = !self.removed_account.contains(from);
+        const destrucing_balance = try a.getBalance(self, address);
+        const recipient_balance = try a.getBalance(self, beneficiary);
+
+        try self.local_account.put(from, .{
             .balance = 0,
         });
 
-        try self.local_account.put(beneficiary, .{
+        try self.local_account.put(to, .{
             .balance = destrucing_balance + recipient_balance,
         });
 
-        _ = self.local_account.remove(address);
-        _ = try self.removed_account.put(address, true);
+        _ = self.local_account.remove(from);
+        _ = try self.removed_account.put(from, true);
 
         return should_refund;
     }
@@ -583,6 +586,20 @@ pub fn expectLatestForkBytecodeStackTop(comptime items: anytype, expected: u256)
 
 test "mock host persists storage writes" {
     try expectBytecodeStackTopByRevision(.{ .PUSH1, 0x2a, .PUSH1, 0x00, .SSTORE, .PUSH1, 0x00, .SLOAD }, .osaka, 0x2a);
+}
+
+test "mock host self-destruct removes the destructed account, not the beneficiary" {
+    var mock_host = MockHost.init(std.testing.allocator, null);
+    defer mock_host.deinit();
+    var host = mock_host.host();
+    const source: AddressWord = .fromAddress(addr(0x1));
+    const beneficiary: AddressWord = .fromAddress(addr(0x2));
+    var code = [_]u8{0x00};
+    try mock_host.code.put(beneficiary.address(), &code);
+
+    try std.testing.expect(try host.selfDestruct(source, beneficiary));
+    try std.testing.expect(!try host.selfDestruct(source, beneficiary));
+    try std.testing.expectEqualSlices(u8, &code, try host.getCode(beneficiary));
 }
 
 test "ORIGIN and GASPRICE read the borrowed transaction context" {

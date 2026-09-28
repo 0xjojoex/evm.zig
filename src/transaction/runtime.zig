@@ -28,13 +28,13 @@ pub fn begin(executor: anytype, mode: Mode) !void {
     std.debug.assert(executor.attempt == null);
     std.debug.assert(executor.execution_context == null);
     std.debug.assert(!executor.state.hasOpenCheckpoint());
-    std.debug.assert(!executor.state.scopeActive());
+    std.debug.assert(!executor.state.sessionActive());
 
     if (mode.captureContext()) |capture| std.debug.assert(capture.isActive());
     const state_attempt_id = if (mode.observesState())
-        executor.state.beginObservedTransaction()
+        executor.state.beginObservedAttempt()
     else
-        executor.state.beginTransaction();
+        executor.state.beginAttempt();
     std.debug.assert(executor.next_transaction_generation != std.math.maxInt(u64));
     executor.next_transaction_generation += 1;
     executor.attempt = .{
@@ -99,11 +99,12 @@ pub fn beginExecution(
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
     std.debug.assert(!executor.state.hasOpenCheckpoint());
-    std.debug.assert(!executor.state.scopeActive());
+    std.debug.assert(!executor.state.sessionActive());
 
     executor.execution_context = request.context;
+    executor.execution_phase = .idle;
     executor.scope_root = null;
-    executor.state.beginScope();
+    executor.state.openSession();
     errdefer closeExecutionScope(executor);
 
     try initializeMessageScope(executor, request.message, scope_init, .none);
@@ -116,11 +117,12 @@ pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) 
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
     std.debug.assert(!executor.state.hasOpenCheckpoint());
-    std.debug.assert(!executor.state.scopeActive());
+    std.debug.assert(!executor.state.sessionActive());
 
     executor.execution_context = context;
+    executor.execution_phase = .idle;
     executor.scope_root = null;
-    executor.state.beginScope();
+    executor.state.openSession();
 }
 
 /// Execute one independently rollback-armed EVM root inside an open custom
@@ -133,10 +135,11 @@ pub fn runRoot(
     scope_init: execution.ExecutionScopeInit,
 ) @TypeOf(executor.executeTransactionRequestPhased(request)) {
     requireActive(executor);
+    std.debug.assert(executor.execution_context != null);
+    std.debug.assert(executor.execution_phase == .idle);
     const runtime_state = &executor.attempt.?.owner.transaction;
     runtime_state.payload_started = true;
-    std.debug.assert(executor.execution_context != null);
-    std.debug.assert(executor.state.scopeActive());
+    std.debug.assert(executor.state.sessionActive());
     std.debug.assert(executor.execution_context.?.sameRootSession(request.context));
 
     executor.state.clearTransientStorage();
@@ -161,6 +164,8 @@ pub fn runPayload(
     request: execution.ExecutionRequest,
 ) @TypeOf(executor.executeTransactionRequestPhased(request)) {
     requireActive(executor);
+    std.debug.assert(executor.execution_context != null);
+    std.debug.assert(executor.execution_phase == .idle);
     const runtime_state = &executor.attempt.?.owner.transaction;
     std.debug.assert(!runtime_state.payload_started);
     runtime_state.payload_started = true;
@@ -184,9 +189,10 @@ pub fn runPrelude(
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
     std.debug.assert(!executor.state.hasOpenCheckpoint());
-    std.debug.assert(!executor.state.scopeActive());
+    std.debug.assert(!executor.state.sessionActive());
 
     executor.execution_context = request.context;
+    executor.execution_phase = .idle;
     executor.scope_root = switch (request.message) {
         .call => |call| .{
             .sender = call.sender,
@@ -197,7 +203,7 @@ pub fn runPrelude(
             .recipient = null,
         },
     };
-    executor.state.beginScope();
+    executor.state.openSession();
     errdefer closeExecutionScope(executor);
 
     var checkpoint = executor.checkpoint();
@@ -206,19 +212,24 @@ pub fn runPrelude(
     if (executionRolledBack(result.outcome.status)) {
         checkpoint.restore();
     } else {
-        try executor.finalizeTransactionState();
+        try executor.finalizeExecution();
         checkpoint.commit();
     }
     closeExecutionScope(executor);
     return result;
 }
 
+/// Seal the attempt. Lifecycle rows left by dispatch must be finalized or rolled
+/// back first; State asserts that at seal.
 pub fn finish(executor: anytype) u64 {
     requireActive(executor);
+    if (executor.execution_context != null) {
+        std.debug.assert(executor.execution_phase != .running);
+    }
     const state_attempt_id = executor.attempt.?.id;
     const generation = executor.attempt.?.owner.transaction.generation;
     closeExecutionScope(executor);
-    executor.state.seal(state_attempt_id);
+    executor.state.sealAttempt(state_attempt_id);
     executor.attempt.?.owner.transaction.phase = .pending;
     return generation;
 }
@@ -227,7 +238,7 @@ pub fn discard(executor: anytype) void {
     requireActive(executor);
     const state_attempt_id = executor.attempt.?.id;
     closeExecutionScope(executor);
-    executor.state.discard(state_attempt_id);
+    executor.state.discardAttempt(state_attempt_id);
     executor.clearLastOutput();
     executor.attempt = null;
 }
@@ -241,8 +252,8 @@ fn executionRolledBack(status: anytype) bool {
 
 fn closeExecutionScope(executor: anytype) void {
     if (executor.execution_context == null) return;
-    std.debug.assert(executor.state.scopeActive());
-    executor.state.closeScope();
+    std.debug.assert(executor.state.sessionActive());
+    executor.state.closeSession();
     executor.execution_context = null;
     executor.scope_root = null;
 }

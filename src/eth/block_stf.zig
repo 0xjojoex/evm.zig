@@ -1696,12 +1696,12 @@ test "external candidate owns its root delta through failure commit and output" 
         defer run.deinit();
         run.executor = Engine.Executor.init(failing.allocator(), .{});
         const execution_state = &run.executor.?.state;
-        const attempt = execution_state.beginTransaction();
-        execution_state.beginScope();
+        const attempt = execution_state.beginAttempt();
+        execution_state.openSession();
         try execution_state.setBalance(.fromAddress(address.addr(1)), 7);
-        execution_state.closeScope();
-        execution_state.seal(attempt);
-        execution_state.retain(attempt);
+        execution_state.closeSession();
+        execution_state.sealAttempt(attempt);
+        execution_state.retainAttempt(attempt);
 
         const root_result = commit.stateRoot(failing.allocator(), &run.state_backend, execution_state.acceptedView(), null, &run.delta);
         if (mode == .root_failure) {

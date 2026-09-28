@@ -50,8 +50,8 @@ var std_clear_broad: []StdStorageMap = &.{};
 var clear_storage_keys: []const StorageKey = &.{};
 var hit_load_state: ?*OpenState = null;
 var admit_load_state: ?*OpenState = null;
-var hit_load_attempt: ?evmz.state.Checkpoint.AttemptId = null;
-var admit_load_attempt: ?evmz.state.Checkpoint.AttemptId = null;
+var hit_load_attempt: ?evmz.state.Generation(.transaction) = null;
+var admit_load_attempt: ?evmz.state.Generation(.transaction) = null;
 
 test "micro/state/key-hash" {
     var addresses: [state_map_ops_per_run]Address = undefined;
@@ -202,8 +202,14 @@ test "micro/state/open-state/storage-load" {
     hit_load_state = &hit;
     admit_load_state = &admit;
     defer {
-        if (hit_load_attempt) |attempt| hit.discard(attempt);
-        if (admit_load_attempt) |attempt| admit.discard(attempt);
+        if (hit_load_attempt) |attempt| {
+            hit.closeSession();
+            hit.discardAttempt(attempt);
+        }
+        if (admit_load_attempt) |attempt| {
+            admit.closeSession();
+            admit.discardAttempt(attempt);
+        }
         hit_load_state = null;
         admit_load_state = null;
         hit_load_attempt = null;
@@ -508,21 +514,27 @@ fn seedStorage(state: *OpenState, contract: Address, slots: []const u256) !void 
 
 fn prepareHitStorageLoads() void {
     const state = hit_load_state.?;
-    if (hit_load_attempt) |attempt| state.discard(attempt);
+    if (hit_load_attempt) |attempt| {
+        state.closeSession();
+        state.discardAttempt(attempt);
+    }
     hit_load_attempt = openLoadAttempt(state);
 }
 
 /// Rows admitted by the previous run are dropped so every load admits again.
 fn prepareAdmitStorageLoads() void {
     const state = admit_load_state.?;
-    if (admit_load_attempt) |attempt| state.discard(attempt);
+    if (admit_load_attempt) |attempt| {
+        state.closeSession();
+        state.discardAttempt(attempt);
+    }
     state.discardAccepted();
     admit_load_attempt = openLoadAttempt(state);
 }
 
-fn openLoadAttempt(state: *OpenState) evmz.state.Checkpoint.AttemptId {
-    const attempt = state.beginTransaction();
-    state.beginScope();
+fn openLoadAttempt(state: *OpenState) evmz.state.Generation(.transaction) {
+    const attempt = state.beginAttempt();
+    state.openSession();
     state.reserveAccessHint(.{
         .accounts = 1,
         .storage_keys = state_map_ops_per_run,

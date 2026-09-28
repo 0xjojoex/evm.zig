@@ -280,7 +280,7 @@ pub const CountingHost = struct {
         };
     }
 
-    noinline fn selfDestruct(ptr: *anyopaque, address: Address, beneficiary: Address) !bool {
+    noinline fn selfDestruct(ptr: *anyopaque, address: AddressWord, beneficiary: AddressWord) !bool {
         const self: *CountingHost = @ptrCast(@alignCast(ptr));
         _ = address;
         _ = beneficiary;

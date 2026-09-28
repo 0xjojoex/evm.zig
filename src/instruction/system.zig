@@ -7,14 +7,6 @@ const std = @import("std");
 
 const CallFrame = Interpreter.CallFrame;
 
-fn wordToGas(word: u256) i64 {
-    return std.math.lossyCast(i64, word);
-}
-
-fn nextDepth(depth: u16) u16 {
-    return if (depth == std.math.maxInt(u16)) depth else depth + 1;
-}
-
 pub fn Handlers(comptime spec: Spec) type {
     return struct {
         const Self = @This();
@@ -54,8 +46,8 @@ pub fn Handlers(comptime spec: Spec) type {
 
             const data = frame.memory.readBytes(in_offset_usize, in_size_usize);
 
-            var msg = Host.Message{
-                .depth = nextDepth(frame.msg.depth),
+            var msg: Host.Message = .{
+                .depth = frame.msg.depth + 1,
                 .kind = Host.CallKind.fromOpcode(op),
                 .recipient = if (op == Opcode.CALL or op == Opcode.STATICCALL) canonical_address else frame.msg.recipient,
                 .is_static = frame.msg.is_static or op == Opcode.STATICCALL,
@@ -63,7 +55,7 @@ pub fn Handlers(comptime spec: Spec) type {
                 .sender = if (op == Opcode.DELEGATECALL) frame.msg.sender else frame.msg.recipient,
                 .value = if (op == Opcode.DELEGATECALL) frame.msg.value else value,
                 .input_data = data,
-                .gas = wordToGas(gas),
+                .gas = std.math.lossyCast(i64, gas),
                 .gas_reservoir = frame.gas_reservoir,
             };
 
@@ -206,7 +198,7 @@ pub fn Handlers(comptime spec: Spec) type {
             }
 
             const target_word: evmz.AddressWord = .fromAddress(target);
-            try frame.host.observeAccountAccess(target_word, nextDepth(frame.msg.depth));
+            try frame.host.observeAccountAccess(target_word, frame.msg.depth + 1);
             const target_alive = if (try frame.host.getNonce(target_word) != 0)
                 true
             else if (try frame.host.getBalance(target_word) != 0)
@@ -232,8 +224,8 @@ pub fn Handlers(comptime spec: Spec) type {
             comptime is_create2: bool,
             precheck_failure: ?evmz.execution.TerminalCause,
         ) void {
-            var msg = Host.Message{
-                .depth = nextDepth(frame.msg.depth),
+            var msg: Host.Message = .{
+                .depth = frame.msg.depth + 1,
                 .kind = if (is_create2) .create2 else .create,
                 .input_data = init_code,
                 .gas = frame.gas_left,
@@ -270,29 +262,28 @@ pub fn Handlers(comptime spec: Spec) type {
                 return;
             }
 
-            const address_word = frame.pop() orelse return;
+            const beneficiary: evmz.AddressWord = .fromU256(frame.pop() orelse return);
+            const source: evmz.AddressWord = .fromAddress(frame.msg.recipient);
 
-            const address_word_key: evmz.AddressWord = .fromU256(address_word);
-            const address = address_word_key.address();
+            const balance = try frame.host.getBalance(source);
+            const same_address = source.eql(beneficiary);
 
-            const balance = try frame.host.getBalance(.fromAddress(frame.msg.recipient));
-            const same_address = evmz.Address.eql(frame.msg.recipient, address);
             const transfers_balance = balance > 0 and !same_address;
             if (spec.self_destruct.cold_account_access_gas) |cold_account_access_cost| {
-                if (try frame.host.accessAccount(address_word_key) == .cold) {
+                if (try frame.host.accessAccount(beneficiary) == .cold) {
                     if (!frame.trackGas(cold_account_access_cost)) return;
                 }
             }
-            try frame.traceAccountAccess(address_word_key);
+            try frame.traceAccountAccess(beneficiary);
 
             const new_account_gas = spec.self_destruct.newAccountGas(.{
                 .same_address = same_address,
                 .transfers_balance = transfers_balance,
-                .account_exists = try frame.host.accountExists(address_word_key),
+                .account_exists = try frame.host.accountExists(beneficiary),
             });
             if (!frame.trackGas(new_account_gas.regular)) return;
             if (!frame.trackStateGas(new_account_gas.state)) return;
-            const should_refund = try frame.host.selfDestruct(frame.msg.recipient, address);
+            const should_refund = try frame.host.selfDestruct(source, beneficiary);
 
             if (should_refund) {
                 frame.gas_refund += spec.self_destruct.refund_gas;

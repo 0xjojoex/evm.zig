@@ -219,16 +219,16 @@ test "witness reader derives the root of tracked changes through a sorted commit
     var state = OpenState.init(std.testing.allocator, .init(std.testing.allocator, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.lifetime.transaction);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
-    const attempt = state.beginTransaction();
-    state.beginScope();
+    const attempt = state.beginAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(address.addr(1)), 1);
     _ = try state.setStorage(.fromAddress(address.addr(1)), 2, 3);
-    state.closeScope();
-    state.seal(attempt);
-    state.retain(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
+    state.retainAttempt(attempt);
 
     var witness = try initFromNodes(std.testing.allocator, trie.empty_root_hash, &.{}, &.{});
     defer witness.deinit();

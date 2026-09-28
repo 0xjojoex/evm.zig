@@ -1,9 +1,9 @@
-//! Transaction and scope lifecycle over a `World` that owns execution rows.
+//! Attempt and session lifecycle over a `World` that owns execution rows.
 //!
 //! `WorldState(World)` owns rollback, observations, and accepted branch tracking.
 //! `World` supplies row, key resolution, parent reads, and optional trie
 //! ordering.
-//! Rows retain their id across attempts and hold a value from admission
+//! Rows keep stable IDs across attempts; admission initializes their values.
 //!
 //! `findAccount`/`findStorage` query existing rows and may update lookup memos.
 //! `resolveAccount`/`resolveStorage` may admit rows.
@@ -14,10 +14,13 @@
 //! store holds introduced code. Otherwise parent code is supplied to the store
 //! at initialization.
 //!
-//! An attempt permits writes before its execution scope opens. Those writes
-//! survive scope rollback and are undone by discarding the attempt. Reads outside
-//! an open, unsealed attempt do not record observations. Every attempt tracks
-//! observations; `beginObservedTransaction` also enables their sealed view.
+//! An attempt is the mutable span from `beginAttempt` to `retainAttempt` or
+//! `discardAttempt`; `transaction` names the lifetime its row stamps carry,
+//! which outlives retention. An attempt permits writes before a session opens.
+//! Those writes survive session checkpoints and are undone by discarding the
+//! attempt. Reads outside an open, unsealed attempt do not record observations.
+//! Every attempt tracks observations; `beginObservedAttempt` also enables their
+//! sealed view.
 
 const std = @import("std");
 
@@ -68,6 +71,7 @@ pub const ResolutionPolicy = enum {
 pub const AccountFlags = packed struct {
     block_changed: bool = false,
     storage_dirty: bool = false,
+    /// Commitment must clear prior storage, for creation or finalization.
     storage_wiped: bool = false,
     touched: bool = false,
     created: bool = false,
@@ -180,8 +184,8 @@ pub const AccountRow = struct {
 /// when that incarnation differs from the owning account's.
 pub const StorageRow = struct {
     current: u256,
-    /// EIP-2200 original for the execution root in `execution_original_root`.
-    /// Captured on first use in that execution root; preserved across nested rollback.
+    /// Ordinary storage original for `execution_original_root`, preserved across
+    /// nested rollback. Created accounts derive zero without replacing this cache.
     execution_original: u256 = 0,
     flags: StorageFlags = .{},
     /// Scope that already holds this row's undo record. Restored by undo.
@@ -393,12 +397,13 @@ pub fn WorldState(comptime World: type) type {
         /// The caller must bound total ticks between resets below u32 exhaustion.
         clock: u32 = 0,
         /// The active value of each lifetime, a row stamp matches when equal.
-        /// Both clear at attempt end. Stale row stamps are never cleared: a moved
+        /// Scope and root clear at attempt end; transaction remains issued but inactive.
+        /// Stale row stamps are never cleared: a moved
         /// lifetime invalidates them lazily.
         lifetime: struct {
             /// Issued at attempt begin and retained after, also require `transaction_active`.
             transaction: Generation(.transaction) = .none,
-            /// Issued at begin, `beginScope`, `closeScope`, and every checkpoint,
+            /// Issued at begin, `openSession`, `closeSession`, and every checkpoint,
             /// restored to the parent on commit and revert.
             scope: Generation(.scope) = .none,
             /// Moves with `scope` except at checkpoints, so execution originals survive nested rollback.
@@ -412,6 +417,7 @@ pub fn WorldState(comptime World: type) type {
         /// `transaction_active and !sealed`, kept as one byte because every
         /// read consults it.
         attempt_open: bool = false,
+        /// Open scopes: 0 outside a session, 1 at the session root, more per nested checkpoint.
         scope_depth: u32 = 0,
         transaction_active: bool = false,
         /// Set by `revertToCheckpoint`; only then can block or transaction ID lists
@@ -419,7 +425,7 @@ pub fn WorldState(comptime World: type) type {
         /// compaction passes.
         transaction_scope_reverted: bool = false,
         /// Accepted rows occupy each block list's prefix; the attempt appends a
-        /// rollbackable suffix. Captured at begin, restored by `discard`.
+        /// rollbackable suffix. Captured at begin, restored by `discardAttempt`.
         accepted_len: struct {
             block_changed_accounts: u32 = 0,
             block_storage_wipes: u32 = 0,
@@ -677,7 +683,7 @@ pub fn WorldState(comptime World: type) type {
             /// Commit projection over the same sealed rows (`state.checkCommitView`).
             /// Only a world that knows its trie order and authenticated its
             /// parents up front can hand one out; the open lane sorts a changes
-            /// view at seal instead.
+            /// view at sealing instead.
             pub fn commit(self: AcceptedView) CommitView {
                 comptime std.debug.assert(options.authenticated_parents);
                 return .{ .state = self.state };
@@ -997,7 +1003,7 @@ pub fn WorldState(comptime World: type) type {
         /// away at comptime so the caller's code shape does not change.
         pub fn reserveAccessHint(self: *State, hint: AccessHint) !void {
             if (comptime !options.grows_on_touch) return;
-            self.assertAttempt();
+            std.debug.assert(self.transaction_active);
             try self.world.reserveRows(hint);
         }
 
@@ -1007,22 +1013,22 @@ pub fn WorldState(comptime World: type) type {
             try self.world.reserveRows(hint);
         }
 
-        /// Start a mutable attempt on the accepted branch, with no execution scope.
+        /// Start a mutable attempt on the accepted branch, with no session.
         /// Asserts no attempt is active and the journal is empty. The returned
         /// generation identifies this attempt on this State; finish it with
-        /// `retain` or `discard`. Copies must not be reused after a clock reset.
+        /// `retainAttempt` or `discardAttempt`. Copies must not be reused after a clock reset.
         /// Observations are tracked internally but not exposed through the pending view.
-        pub fn beginTransaction(self: *State) Generation(.transaction) {
-            return self.beginTransactionMode(false);
+        pub fn beginAttempt(self: *State) Generation(.transaction) {
+            return self.beginAttemptMode(false);
         }
 
-        /// Start an attempt as in `beginTransaction`, enabling observation access
+        /// Start an attempt as in `beginAttempt`, enabling observation access
         /// through the pending view after sealing.
-        pub fn beginObservedTransaction(self: *State) Generation(.transaction) {
-            return self.beginTransactionMode(true);
+        pub fn beginObservedAttempt(self: *State) Generation(.transaction) {
+            return self.beginAttemptMode(true);
         }
 
-        fn beginTransactionMode(self: *State, comptime observe: bool) Generation(.transaction) {
+        fn beginAttemptMode(self: *State, comptime observe: bool) Generation(.transaction) {
             std.debug.assert(!self.transaction_active);
             std.debug.assert(self.journal.isEmpty());
             self.lifetime.transaction = self.tick(.transaction);
@@ -1032,7 +1038,7 @@ pub fn WorldState(comptime World: type) type {
             self.attempt_open = true;
             // Pre-scope writes journal against this scope; a fresh row's zero
             // stamp never matches it, so the first write is always undone by
-            // `discard` and never by a scope checkpoint. The root is issued
+            // `discardAttempt` and never by a scope checkpoint. The root is issued
             // too, so original capture is one compare on every path.
             self.openRoot();
             self.accepted_len = .{
@@ -1053,21 +1059,22 @@ pub fn WorldState(comptime World: type) type {
             return self.lifetime.transaction;
         }
 
-        /// Open an execution root and establish a fresh execution-original lifetime.
-        /// Asserts a mutable attempt with no open scope. Earlier attempt writes
-        /// remain outside this root's checkpoints.
-        pub fn beginScope(self: *State) void {
+        /// Open a session with a fresh execution-original baseline.
+        /// Asserts a mutable attempt with no open session. Earlier attempt writes
+        /// remain outside this session's checkpoints; roots within it share the baseline.
+        pub fn openSession(self: *State) void {
             self.assertMutable();
             std.debug.assert(self.scope_depth == 0);
             self.openRoot();
             self.scope_depth = 1;
         }
 
-        /// Close the execution root without reverting writes or ending the attempt.
-        /// Asserts the root is active with no nested checkpoints. Subsequent writes
-        /// use a fresh journaling scope and execution-original lifetime.
-        pub fn closeScope(self: *State) void {
-            self.assertRootScope();
+        /// Close the session without reverting writes, finalizing lifecycle effects,
+        /// or ending the attempt. Asserts an active session with no nested checkpoints.
+        /// Subsequent writes use a fresh journaling scope and execution-original lifetime.
+        pub fn closeSession(self: *State) void {
+            self.assertSession();
+            std.debug.assert(self.scope_depth == 1);
             self.openRoot();
             self.scope_depth = 0;
         }
@@ -1077,25 +1084,25 @@ pub fn WorldState(comptime World: type) type {
         /// The clear may occur inside an outer checkpoint and is not journaled: rollback
         /// must not resurrect transient values whose root lifetime has ended.
         pub fn clearTransientStorage(self: *State) void {
-            self.assertTransaction();
+            self.assertSession();
             self.transient_storage.clearRetainingCapacity();
         }
 
-        pub fn scopeActive(self: *const State) bool {
+        pub fn sessionActive(self: *const State) bool {
             return self.scope_depth != 0;
         }
 
-        /// True while a nested checkpoint is open inside the scope root.
+        /// True while a checkpoint is open inside the session.
         pub fn hasOpenCheckpoint(self: *const State) bool {
             return self.scope_depth > 1;
         }
 
-        /// Open a nested rollback scope. Asserts an active attempt and scope.
+        /// Open a nested rollback scope. Asserts an active session.
         /// Commit or revert the returned checkpoint in LIFO order on this State,
         /// within the same attempt. Block dirty lists use undo-restored row flags
-        /// and retain-time compaction rather than saved lengths.
+        /// and retention-time compaction rather than saved lengths.
         pub fn checkpoint(self: *State) Checkpoint {
-            self.assertTransaction();
+            self.assertSession();
             std.debug.assert(self.scope_depth != std.math.maxInt(u32));
             const parent = self.lifetime.scope;
             const scope = self.tick(.scope);
@@ -1122,7 +1129,7 @@ pub fn WorldState(comptime World: type) type {
         /// Undo and close the active checkpoint, restoring its parent scope.
         /// Asserts that this checkpoint is current. Recorded reads survive;
         /// values, effects, and introduced warmth unwind through the journal.
-        /// Block dirty lists retain stale entries until retain-time compaction.
+        /// Block dirty lists retain stale entries until retention-time compaction.
         pub fn revertToCheckpoint(self: *State, checkpoint_state: Checkpoint) void {
             self.assertCheckpoint(checkpoint_state);
             self.transaction_scope_reverted = true;
@@ -1136,11 +1143,17 @@ pub fn WorldState(comptime World: type) type {
 
         /// Freeze the current attempt for pending-view access without accepting it.
         /// Asserts a matching attempt generation, an unsealed attempt, and no open scope.
-        /// The sealed attempt must still be retained or discarded.
-        pub fn seal(self: *State, attempt: Generation(.transaction)) void {
+        /// The sealed attempt must still be retained or discarded. Asserts every
+        /// lifecycle row was settled by `finalizeLifecycle` or rolled back: a
+        /// retained `created` flag would misprice the next transaction's SSTOREs.
+        pub fn sealAttempt(self: *State, attempt: Generation(.transaction)) void {
             self.assertCurrent(attempt);
             std.debug.assert(!self.sealed);
-            std.debug.assert(!self.scopeActive());
+            std.debug.assert(!self.sessionActive());
+            if (std.debug.runtime_safety) for (self.lifecycle_accounts.items) |id| {
+                const flags = self.world.accountRow(id).flags;
+                std.debug.assert(!flags.created and !flags.selfdestructed);
+            };
             self.compactTransactionStorageChanges();
             if (self.transaction_scope_reverted) self.compactTransactionStorageWipes();
             self.sealed = true;
@@ -1150,10 +1163,10 @@ pub fn WorldState(comptime World: type) type {
         /// Accept the current attempt's values, retain its logs, and end it.
         /// Release transaction observations and undo records.
         /// Asserts a matching attempt generation, a sealed attempt, and no open scope.
-        pub fn retain(self: *State, attempt: Generation(.transaction)) void {
+        pub fn retainAttempt(self: *State, attempt: Generation(.transaction)) void {
             self.assertCurrent(attempt);
             std.debug.assert(self.sealed);
-            std.debug.assert(!self.scopeActive());
+            std.debug.assert(!self.sessionActive());
             std.mem.swap(LogBuffer, &self.logs, &self.retained_logs);
             if (self.transaction_scope_reverted) self.compactAcceptedAccountChanges();
             if (self.transaction_scope_reverted) self.compactAcceptedStorageWipes();
@@ -1165,9 +1178,9 @@ pub fn WorldState(comptime World: type) type {
         /// Undo the entire attempt, including writes before its execution root.
         /// Release its logs and observations. Asserts a matching attempt generation
         /// and no open scope; sealing is not required.
-        pub fn discard(self: *State, attempt: Generation(.transaction)) void {
+        pub fn discardAttempt(self: *State, attempt: Generation(.transaction)) void {
             self.assertCurrent(attempt);
-            std.debug.assert(!self.scopeActive());
+            std.debug.assert(!self.sessionActive());
             self.revertJournalTo(0);
             self.block_changed_accounts.items.len = self.accepted_len.block_changed_accounts;
             self.block_storage_wipes.items.len = self.accepted_len.block_storage_wipes;
@@ -1210,7 +1223,7 @@ pub fn WorldState(comptime World: type) type {
             std.debug.assert(snapshot.owner == self);
             std.debug.assert(snapshot.world_epoch == self.world_epoch);
             std.debug.assert(!snapshot.resolved);
-            if (self.transaction_active) self.discard(self.lifetime.transaction);
+            if (self.transaction_active) self.discardAttempt(self.lifetime.transaction);
             self.world.restoreSnapshot(&snapshot.rows);
             self.block_changed_accounts.clearRetainingCapacity();
             self.block_changed_accounts.appendSliceAssumeCapacity(snapshot.block_changed_accounts);
@@ -1239,13 +1252,15 @@ pub fn WorldState(comptime World: type) type {
             return if (self.transaction_active) self.logs.view() else self.retained_logs.view();
         }
 
-        /// Return a materialized row without creating an execution observation.
-        pub fn getAccount(self: *State, address: AccountKey) ?Account {
+        /// Return cached account state without loading or recording an observation.
+        /// Null means either no cached row or an absent account; use `getAccount` to resolve it.
+        pub fn cachedAccount(self: *State, address: AccountKey) ?Account {
             const id = self.world.findAccount(address) orelse return null;
             return self.world.accountRow(id).current;
         }
 
-        pub fn getAccountOrLoad(self: *State, address: AccountKey) !?Account {
+        /// Resolve account state and record a value read while an attempt is open.
+        pub fn getAccount(self: *State, address: AccountKey) !?Account {
             return self.readAccount(address, .{ .accessed = true, .value_read = true });
         }
 
@@ -1411,7 +1426,11 @@ pub fn WorldState(comptime World: type) type {
         }
 
         pub fn warmAccount(self: *State, address: AccountKey) !void {
-            _ = try self.warmAccountAddress(address, .optional_warm_only);
+            const id = (try self.world.resolveAccount(address, .optional_warm_only)) orelse {
+                if (comptime options.grows_on_touch) _ = try self.deferAccountWarm(address);
+                return;
+            };
+            _ = try self.warmAccountId(id);
         }
 
         pub fn isAccountWarm(self: *State, address: AccountKey) bool {
@@ -1419,25 +1438,8 @@ pub fn WorldState(comptime World: type) type {
             return self.accountWarm(id);
         }
 
-        pub fn warmAccountAddress(self: *State, address: AccountKey, policy: ResolutionPolicy) !?bool {
-            const id = (try self.world.resolveAccount(address, policy)) orelse {
-                if (comptime options.grows_on_touch) return try self.deferAccountWarm(address);
-                return null;
-            };
-            return try self.warmAccountId(id);
-        }
-
-        pub fn warmStorageSlot(self: *State, account: AccountId, key: u256, policy: ResolutionPolicy) !?bool {
-            const id = (try self.world.resolveStorage(account, key, policy)) orelse {
-                if (comptime options.grows_on_touch)
-                    return try self.deferStorageWarm(.fromAddress(self.world.accountAddress(account)), key);
-                return null;
-            };
-            return try self.warmStorageId(id);
-        }
-
-        pub fn warmAccountId(self: *State, id: AccountId) !bool {
-            self.assertTransaction();
+        fn warmAccountId(self: *State, id: AccountId) !bool {
+            self.assertSession();
             const row = self.world.accountRow(id);
             if (row.warm_transaction == self.lifetime.transaction) return false;
             const was_warm = self.deferredAccountWarm(.fromAddress(self.world.accountAddress(id)));
@@ -1447,8 +1449,8 @@ pub fn WorldState(comptime World: type) type {
             return !was_warm;
         }
 
-        pub fn warmStorageId(self: *State, id: StorageId) !bool {
-            self.assertTransaction();
+        fn warmStorageId(self: *State, id: StorageId) !bool {
+            self.assertSession();
             const row = self.world.storageRow(id);
             if (row.warm_transaction == self.lifetime.transaction) return false;
             const was_warm = self.deferredStorageWarm(
@@ -1461,12 +1463,12 @@ pub fn WorldState(comptime World: type) type {
             return !was_warm;
         }
 
-        pub fn accountWarm(self: *const State, id: AccountId) bool {
+        fn accountWarm(self: *const State, id: AccountId) bool {
             return self.world.accountRow(id).warm_transaction == self.lifetime.transaction or
                 self.deferredAccountWarm(.fromAddress(self.world.accountAddress(id)));
         }
 
-        pub fn storageWarm(self: *const State, id: StorageId) bool {
+        fn storageWarm(self: *const State, id: StorageId) bool {
             return self.world.storageRow(id).warm_transaction == self.lifetime.transaction or
                 self.deferredStorageWarm(
                     .fromAddress(self.world.accountAddress(self.world.storageAccount(id))),
@@ -1512,15 +1514,6 @@ pub fn WorldState(comptime World: type) type {
             };
         }
 
-        pub fn originalStorage(self: *State, address: AccountKey, key: u256) !u256 {
-            const resolved = (try self.resolveStorageKey(address, key, .required_observed)).?;
-            try self.observeAccount(resolved.account, .{ .accessed = true });
-            try self.observeStorage(resolved, .{ .accessed = true, .value_read = true });
-            const row = self.world.storageRow(resolved.storage);
-            self.captureExecutionOriginal(row, self.resolvedValue(resolved));
-            return row.execution_original;
-        }
-
         pub fn warmStorage(self: *State, address: AccountKey, key: u256) !void {
             _ = try self.warmStorageAddress(address, key);
         }
@@ -1536,7 +1529,12 @@ pub fn WorldState(comptime World: type) type {
                 if (comptime options.grows_on_touch) return try self.deferStorageWarm(address, key);
                 return null;
             };
-            return self.warmStorageSlot(account, key, .optional_warm_only);
+            const id = (try self.world.resolveStorage(account, key, .optional_warm_only)) orelse {
+                if (comptime options.grows_on_touch)
+                    return try self.deferStorageWarm(.fromAddress(self.world.accountAddress(account)), key);
+                return null;
+            };
+            return try self.warmStorageId(id);
         }
 
         fn deferredAccountWarm(self: *const State, address: AccountKey) bool {
@@ -1550,7 +1548,7 @@ pub fn WorldState(comptime World: type) type {
         }
 
         fn deferAccountWarm(self: *State, address: AccountKey) !bool {
-            self.assertTransaction();
+            self.assertSession();
             if (self.deferredAccountWarm(address)) return false;
             try self.journal.ensureWarm(self.allocator);
             const entry = try self.deferred_warmth.accounts.getOrPut(address);
@@ -1560,7 +1558,7 @@ pub fn WorldState(comptime World: type) type {
         }
 
         fn deferStorageWarm(self: *State, address: AccountKey, key: u256) !bool {
-            self.assertTransaction();
+            self.assertSession();
             if (self.deferredStorageWarm(address, key)) return false;
             try self.journal.ensureWarm(self.allocator);
             const entry = try self.deferred_warmth.storage.getOrPut(.init(address, key));
@@ -1570,12 +1568,12 @@ pub fn WorldState(comptime World: type) type {
         }
 
         pub fn getTransientStorage(self: *State, address: AccountKey, key: u256) u256 {
-            self.assertTransaction();
+            self.assertSession();
             return self.transient_storage.get(.init(address, key)) orelse 0;
         }
 
         pub fn setTransientStorage(self: *State, address: AccountKey, key: u256, value: u256) !void {
-            self.assertTransaction();
+            self.assertSession();
             const storage_key = TransientKey.init(address, key);
             const previous_entry = self.transient_storage.get(storage_key);
             const previous = previous_entry orelse 0;
@@ -1591,7 +1589,7 @@ pub fn WorldState(comptime World: type) type {
         }
 
         pub fn emitLog(self: *State, event_log: Host.Log) !void {
-            self.assertTransaction();
+            self.assertSession();
             try self.logs.append(self.allocator, event_log);
         }
 
@@ -1600,26 +1598,62 @@ pub fn WorldState(comptime World: type) type {
             logs.clearRetainingCapacity();
         }
 
-        pub fn markCreatedContract(self: *State, address: AccountKey) !void {
+        /// Initialize an admitted CREATE destination before initcode: preserve
+        /// balance, set nonce, clear code/storage, and mark it created.
+        /// Caller checks and restores that checkpoint on initialization or execution failure.
+        pub fn initializeContract(self: *State, address: AccountKey, initial_nonce: u64) !void {
+            self.assertSession();
+            std.debug.assert(self.hasOpenCheckpoint());
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
-            if (self.world.accountRow(id).flags.created) return;
-            try self.markCreatedId(id);
-        }
-
-        pub fn markSelfdestructed(self: *State, address: AccountKey) !void {
-            const id = (try self.world.resolveAccount(address, .required_observed)).?;
-            if (self.world.accountRow(id).flags.selfdestructed) return;
-            try self.markSelfdestructedId(id);
-        }
-
-        pub fn markCreatedId(self: *State, id: AccountId) !void {
-            try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
+            var account = self.world.accountRow(id).current orelse Account{};
+            account.nonce = initial_nonce;
+            account.code_hash = crypto.keccak256_empty;
+            try self.writeAccount(id, account);
+            try self.wipeStorage(id);
             const row = try self.prepareLifecycleMutation(id);
             row.flags.created = true;
             self.observed_accounts.items[row.observation.index].effect.created_contract = true;
         }
 
-        pub fn markSelfdestructedId(self: *State, id: AccountId) !void {
+        pub const SelfDestructResult = struct {
+            transferred_value: u256,
+            previously_marked: bool,
+        };
+
+        /// Apply immediate SELFDESTRUCT effects under Executor's selected policy.
+        /// Asserts an active session and an enclosing checkpoint, which owns cleanup
+        /// after partial failure. Storage/account removal belongs to finalization.
+        /// Executor owns gas, capture, and any transfer log for the returned amount.
+        pub fn applySelfDestruct(
+            self: *State,
+            source: AccountKey,
+            beneficiary: AccountKey,
+            policy: execution.SelfDestructPolicy,
+            touch_zero_beneficiary: bool,
+        ) !SelfDestructResult {
+            self.assertSession();
+            std.debug.assert(self.hasOpenCheckpoint());
+            const balance = try self.getBalance(source);
+            const previously_marked = self.wasSelfdestructed(source);
+            const same_address = source.eql(beneficiary);
+            const transferred_value = if (same_address) 0 else balance;
+            if (balance > 0) {
+                if (!same_address) try self.addBalance(beneficiary, balance);
+                if (policy.clear_balance) try self.setBalance(source, 0);
+            } else if (!same_address and touch_zero_beneficiary) {
+                try self.touchAccount(beneficiary);
+            }
+            if (policy.reset_nonce) try self.setNonce(source, 0);
+            if (policy.mark_selfdestructed) try self.markSelfdestructed(source);
+            return .{
+                .transferred_value = transferred_value,
+                .previously_marked = previously_marked,
+            };
+        }
+
+        fn markSelfdestructed(self: *State, address: AccountKey) !void {
+            const id = (try self.world.resolveAccount(address, .required_observed)).?;
+            if (self.world.accountRow(id).flags.selfdestructed) return;
             try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
             const row = try self.prepareLifecycleMutation(id);
             row.flags.selfdestructed = true;
@@ -1631,16 +1665,17 @@ pub fn WorldState(comptime World: type) type {
             return self.transaction_active and self.world.accountRow(id).flags.created;
         }
 
-        pub fn wasSelfdestructed(self: *State, address: AccountKey) bool {
+        fn wasSelfdestructed(self: *State, address: AccountKey) bool {
             const id = self.world.findAccount(address) orelse return false;
             return self.transaction_active and self.world.accountRow(id).flags.selfdestructed;
         }
 
         /// Settle every lifecycle-listed row. The pass runs under its own
         /// checkpoint so that an allocation failure part-way leaves the
-        /// enclosing scope exactly as it was.
-        pub fn finalize(self: *State, rules: FinalizationRules) Allocator.Error!void {
-            self.assertTransaction();
+        /// enclosing scope exactly as it was. Executor owns the separate rule
+        /// that successful finalization ends dispatch permission in its session.
+        pub fn finalizeLifecycle(self: *State, rules: FinalizationRules) Allocator.Error!void {
+            self.assertSession();
             if (self.lifecycle_accounts.items.len == 0) return;
             const checkpoint_state = self.checkpoint();
             errdefer self.revertToCheckpoint(checkpoint_state);
@@ -1657,7 +1692,11 @@ pub fn WorldState(comptime World: type) type {
                     rules.created_account
                 else
                     rules.existing_account;
-                if (policy.clear_storage) try self.wipeStorage(id);
+                if (policy.clear_storage) {
+                    try self.wipeStorage(id);
+                    const row = self.world.accountRow(id);
+                    self.observed_accounts.items[row.observation.index].effect.storage_wiped = true;
+                }
                 if (policy.reset_account) {
                     var account = self.world.accountRow(id).current orelse Account{};
                     account.nonce = 0;
@@ -1721,7 +1760,9 @@ pub fn WorldState(comptime World: type) type {
         }
 
         /// Hide all parent and prior-block storage without fabricating slot accesses.
-        pub fn wipeStorage(self: *State, id: AccountId) Allocator.Error!void {
+        /// Creation and finalization share the wipe; only finalization suppresses
+        /// the account's point writes in transaction observations.
+        fn wipeStorage(self: *State, id: AccountId) Allocator.Error!void {
             try self.observeAccount(id, .{ .accessed = true, .semantic_access = true });
             const original = self.world.accountRow(id);
             const first_block_wipe = !original.flags.storage_wiped;
@@ -1736,10 +1777,9 @@ pub fn WorldState(comptime World: type) type {
             row.flags.storage_wiped = true;
             row.storage_incarnation = row.storage_incarnation.next();
             row.wiped_transaction = self.lifetime.transaction;
-            self.observed_accounts.items[row.observation.index].effect.storage_wiped = true;
         }
 
-        pub fn writeAccount(self: *State, id: AccountId, value: ?Account) !void {
+        fn writeAccount(self: *State, id: AccountId, value: ?Account) !void {
             self.assertMutable();
             try self.observeAccount(id, .{
                 .accessed = true,
@@ -1755,15 +1795,6 @@ pub fn WorldState(comptime World: type) type {
             }
             row.current = value;
             recordAccountEffect(&self.observed_accounts.items[row.observation.index], previous, value);
-        }
-
-        pub fn writeStorage(self: *State, id: StorageId, value: u256) !void {
-            self.assertMutable();
-            const resolved: ResolvedStorage = .{ .account = self.world.storageAccount(id), .storage = id };
-            try self.observeAccount(resolved.account, .{ .accessed = true });
-            try self.observeStorage(resolved, .{ .accessed = true, .value_read = true });
-            self.captureExecutionOriginal(self.world.storageRow(id), self.resolvedValue(resolved));
-            try self.writeResolvedStorage(resolved, value);
         }
 
         /// Journal, list, and write the slot. Asserts the slot was observed
@@ -1802,7 +1833,7 @@ pub fn WorldState(comptime World: type) type {
 
         /// Merge `observation` into the row's observation, creating it on first touch
         /// in this transaction. Every attempt observes; there is no opt-out.
-        pub fn observeAccount(self: *State, id: AccountId, observation: AccountObservation) !void {
+        fn observeAccount(self: *State, id: AccountId, observation: AccountObservation) !void {
             self.assertMutable();
             const row = self.world.accountRow(id);
             if (row.observation.transaction == self.lifetime.transaction) {
@@ -1832,8 +1863,8 @@ pub fn WorldState(comptime World: type) type {
         }
 
         /// Merge `observation` into the slot's observation, creating it on first
-        /// touch in this transaction. The first touch also fixes the EIP-2200
-        /// transaction original, so every read and write observes first.
+        /// touch in this transaction. The observation original belongs to the
+        /// accepted boundary; SSTORE's execution original is tracked separately.
         fn observeStorage(self: *State, resolved: ResolvedStorage, observation: StorageObservation) !void {
             self.assertMutable();
             const row = self.world.storageRow(resolved.storage);
@@ -1851,33 +1882,27 @@ pub fn WorldState(comptime World: type) type {
             observation: StorageObservation,
         ) Allocator.Error!void {
             try reserve(&self.observed_storage, self.allocator, 1);
-            const account = self.world.accountRow(resolved.account);
-            const current = effectiveValue(account, row);
+            const original = self.acceptedStorageValue(resolved.storage);
             row.observation = .{
                 .transaction = self.lifetime.transaction,
                 .index = @intCast(self.observed_storage.items.len),
             };
             self.observed_storage.appendAssumeCapacity(.{
                 .storage = resolved.storage,
-                // A wipe earlier in this transaction hides the value the
-                // transaction started from; the row still holds it.
-                .original = if (account.wiped_transaction == self.lifetime.transaction)
-                    row.current
-                else
-                    current,
+                .original = original,
                 .observation = observation,
             });
         }
 
-        inline fn assertTransaction(self: *const State) void {
-            self.assertAttempt();
+        inline fn assertSession(self: *const State) void {
+            std.debug.assert(self.transaction_active);
             std.debug.assert(self.scope_depth != 0);
         }
 
-        /// An open, unsealed attempt: what a write needs. A scope is only
-        /// needed by what a scope owns (checkpoints, warmth, logs, transient).
+        /// A mutable attempt permits writes before and after a session.
+        /// Checkpoints, warmth, logs, and transient storage also require a session.
         inline fn assertMutable(self: *const State) void {
-            self.assertAttempt();
+            std.debug.assert(self.transaction_active);
             std.debug.assert(!self.sealed);
             std.debug.assert(self.attempt_open);
         }
@@ -1887,28 +1912,19 @@ pub fn WorldState(comptime World: type) type {
             return self.attempt_open;
         }
 
-        inline fn assertAttempt(self: *const State) void {
-            std.debug.assert(self.transaction_active);
-        }
-
-        inline fn assertRootScope(self: *const State) void {
-            self.assertTransaction();
-            std.debug.assert(self.scope_depth == 1);
-        }
-
         inline fn assertSealed(self: *const State) void {
             std.debug.assert(self.transaction_active);
             std.debug.assert(self.sealed);
-            std.debug.assert(!self.scopeActive());
+            std.debug.assert(!self.sessionActive());
         }
 
         inline fn assertCurrent(self: *const State, attempt: Generation(.transaction)) void {
-            self.assertAttempt();
+            std.debug.assert(self.transaction_active);
             std.debug.assert(self.lifetime.transaction == attempt);
         }
 
         inline fn assertCheckpoint(self: *const State, checkpoint_state: Checkpoint) void {
-            self.assertTransaction();
+            self.assertSession();
             std.debug.assert(self.scope_depth >= 1);
             std.debug.assert(checkpoint_state.scope == self.lifetime.scope);
             std.debug.assert(checkpoint_state.journal_len <= self.journal.entries.items.len);
@@ -2078,23 +2094,28 @@ pub fn WorldState(comptime World: type) type {
 
         fn setResolvedStorage(self: *State, resolved: ResolvedStorage, value: u256) !execution.StorageStatus {
             try self.observeStorage(resolved, .{ .accessed = true, .value_read = true });
-            const row = self.world.storageRow(resolved.storage);
             const current = self.resolvedValue(resolved);
-            self.captureExecutionOriginal(row, current);
+            const original = self.executionOriginal(resolved, current);
             if (current == value) return .assigned;
-            const status = storageStatus(row.execution_original, current, value);
+            const status = storageStatus(original, current, value);
             try self.writeResolvedStorage(resolved, value);
             return status;
         }
 
-        fn captureExecutionOriginal(self: *State, row: *StorageRow, current: u256) void {
-            if (row.execution_original_root == self.lifetime.root) return;
-            std.debug.assert(self.lifetime.root != .none);
-            row.execution_original = current;
-            row.execution_original_root = self.lifetime.root;
+        fn executionOriginal(self: *State, resolved: ResolvedStorage, current: u256) u256 {
+            // Creation starts from empty storage. Leave the ordinary cache intact:
+            // reverting creation restores its marker and the earlier baseline.
+            if (self.world.accountRow(resolved.account).flags.created) return 0;
+            const row = self.world.storageRow(resolved.storage);
+            if (row.execution_original_root != self.lifetime.root) {
+                std.debug.assert(self.lifetime.root != .none);
+                row.execution_original = current;
+                row.execution_original_root = self.lifetime.root;
+            }
+            return row.execution_original;
         }
 
-        pub fn effectiveStorage(self: *const State, id: StorageId) u256 {
+        fn effectiveStorage(self: *const State, id: StorageId) u256 {
             return self.resolvedValue(.{ .account = self.world.storageAccount(id), .storage = id });
         }
 
@@ -2254,7 +2275,7 @@ pub fn WorldState(comptime World: type) type {
         }
 
         /// Stale-entry compaction for the block account change list: scope
-        /// reverts leave flag-false entries behind instead of truncating, so retain
+        /// reverts leave flag-false entries behind instead of truncating, so retention
         /// filters and deduplicates them with the same consume-then-restore passes.
         fn compactAcceptedAccountChanges(self: *State) void {
             var changed_write: usize = 0;

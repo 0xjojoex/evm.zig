@@ -324,7 +324,7 @@ test "parent prepared view survives child admission" {
 
     try executor.beginTransaction(execution_context, sender, contract);
     const first = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    executor.retainStateTransition();
+    try executor.commitTransaction();
 
     try std.testing.expectEqual(Interpreter.Status.success, first.status());
     try std.testing.expectEqual(@as(usize, 2), pool.count());
@@ -333,7 +333,7 @@ test "parent prepared view survives child admission" {
 
     try executor.beginTransaction(execution_context, sender, contract);
     const second = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    executor.retainStateTransition();
+    try executor.commitTransaction();
 
     try std.testing.expectEqual(Interpreter.Status.success, second.status());
     try std.testing.expectEqual(@as(usize, 2), pool.count());
@@ -359,7 +359,7 @@ test "CREATE initcode preparation remains execution-local" {
         .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
     }, .legacy(100_000));
     const result = (try executor.executeMessage(request.message, request.gas));
-    executor.retainStateTransition();
+    try executor.commitTransaction();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 0), pool.count());
@@ -419,7 +419,7 @@ test "trace replay runs after prepared code leaves the live frame" {
         contract,
     );
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
-    executor.retainStateTransition();
+    try executor.commitTransaction();
 
     const span = (try capture.finish()).?;
     capture_open = false;
@@ -1260,8 +1260,8 @@ test "top-level call transaction executes precompile recipient" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 982), result.gas_left);
     try std.testing.expectEqualSlices(u8, &input, result.output_data);
-    try std.testing.expectEqual(@as(u256, 999_993), executor.getAccount(sender).?.balance);
-    try std.testing.expectEqual(@as(u256, 7), executor.getAccount(precompile).?.balance);
+    try std.testing.expectEqual(@as(u256, 999_993), executor.cachedAccount(sender).?.balance);
+    try std.testing.expectEqual(@as(u256, 7), executor.cachedAccount(precompile).?.balance);
 }
 
 test "legacy precompile calls materialize touched empty account until Spurious Dragon" {
@@ -1312,7 +1312,7 @@ fn expectLegacyPrecompileCall(
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(gas_left, result.gas_left);
-    try std.testing.expectEqual(materialized, executor.getAccount(precompile) != null);
+    try std.testing.expectEqual(materialized, executor.cachedAccount(precompile) != null);
 }
 
 test "prepared call transaction calls to empty account succeed" {
@@ -1561,7 +1561,7 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
     });
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(contract).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), executor.cachedAccount(contract).?.nonce);
     try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(create2_address)));
 }
 
@@ -1675,6 +1675,7 @@ test "captured span is inspectable before executed transaction resolution" {
     defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
     const result = try executor.executeTransactionRequest(request_value);
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try executor.finalizeExecution();
     const executed = Osaka.Executor.Executed(void){
         .executor = &executor,
         .generation = transaction_runtime.finish(&executor),
@@ -1899,7 +1900,7 @@ test "transaction nonce advancement survives payload rollback" {
         .output_value = {},
     };
     executed.retain();
-    try std.testing.expectEqual(@as(u64, 8), (try executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 8), (try executor.getAccount(sender)).?.nonce);
 }
 
 test "transaction nonce advancement remains recorded for the runtime" {
@@ -1968,14 +1969,14 @@ test "transaction nonce advancement selects the root create entry" {
     try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status());
     try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
 
-    try executor.finalizeTransactionState();
+    try executor.finalizeExecution();
     const executed = Cancun.Executor.Executed(void){
         .executor = &executor,
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
     executed.retain();
-    try std.testing.expectEqual(@as(u64, 8), (try executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 8), (try executor.getAccount(sender)).?.nonce);
 }
 
 test "transaction nonce advancement leaves max-nonce acceptance to policy" {
@@ -2010,14 +2011,14 @@ test "transaction nonce advancement leaves max-nonce acceptance to policy" {
     try std.testing.expectEqual(Interpreter.Status.success, outcome.result.status());
     try std.testing.expectEqual(max_nonce, (try executor.transactionAccountSummary(sender)).?.nonce);
 
-    try executor.finalizeTransactionState();
+    try executor.finalizeExecution();
     const executed = Cancun.Executor.Executed(void){
         .executor = &executor,
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
     executed.retain();
-    try std.testing.expectEqual(max_nonce, (try executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(max_nonce, (try executor.getAccount(sender)).?.nonce);
 }
 
 test "transaction payload resolves only its inner checkpoint" {
@@ -2050,9 +2051,6 @@ test "transaction payload resolves only its inner checkpoint" {
         defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
         try executor.state.addBalance(.fromAddress(sender), 7);
         try transaction_runtime.beginExecution(&executor, request, .{});
-
-        var preparation_checkpoint = executor.checkpoint();
-        defer preparation_checkpoint.deinit();
         try executor.state.addBalance(.fromAddress(sender), 5);
 
         const outcome = try transaction_runtime.runPayload(&executor, request);
@@ -2060,8 +2058,6 @@ test "transaction payload resolves only its inner checkpoint" {
         try std.testing.expectEqual(Interpreter.Status.revert, outcome.result.status());
         try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(contract, 0));
         try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
-
-        preparation_checkpoint.commit();
         const executed = Cancun.Executor.Executed(void){
             .executor = &executor,
             .generation = transaction_runtime.finish(&executor),
@@ -2091,7 +2087,7 @@ test "transaction payload resolves only its inner checkpoint" {
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
         try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
 
-        try executor.finalizeTransactionState();
+        try executor.finalizeExecution();
         const executed = Cancun.Executor.Executed(void){
             .executor = &executor,
             .generation = transaction_runtime.finish(&executor),
@@ -2122,7 +2118,7 @@ test "executor executes top-level create transaction" {
     const result = (try executor.executeMessage(request.message, request.gas));
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), executor.cachedAccount(sender).?.nonce);
     try std.testing.expectEqualSlices(u8, &.{0x00}, try executor.getCode(create_address));
 }
 
@@ -2246,6 +2242,8 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 7, .code = &code });
 
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .{
         .regular_left = 90_000,
         .reservoir = evmz.eth.eip8037.new_account_state_gas,
@@ -2254,6 +2252,58 @@ test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
     try expectTransferLog(executor.logView().get(0), contract, beneficiary, 7);
+}
+
+test "SELFDESTRUCT transfer log allocation failure discards state effects before retry" {
+    const LogPolicy = struct {
+        var fail_next_log: ?*std.testing.FailingAllocator = null;
+
+        fn transfer(input: execution_values.ValueTransferInput) ?execution_values.ValueTransferLog {
+            if (fail_next_log) |allocator| {
+                allocator.fail_index = allocator.alloc_index;
+                fail_next_log = null;
+            }
+            return .{ .address = input.from, .topic = 1 };
+        }
+    };
+    const Latest = evmz.t.CustomVm(.latest, .{ .valueTransferLog = LogPolicy.transfer }).?;
+    const sender = evmz.addr(0xaaaa);
+    const contract = evmz.addr(0xbbbb);
+    const beneficiary = evmz.addr(0xcccc);
+    const code = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, .SELFDESTRUCT });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(failing.allocator(), .{});
+    defer executor.deinit();
+    try putFundedSender(&executor, sender);
+    try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 7, .code = &code });
+    try evmz.t.seedExecutorAccount(&executor, beneficiary, .{ .balance = 1 });
+
+    LogPolicy.fail_next_log = &failing;
+    defer LogPolicy.fail_next_log = null;
+    try std.testing.expectError(error.OutOfMemory, runStandalone(
+        &executor,
+        testExecutionContext(sender, 100_000),
+        .{ .call = .{ .sender = sender, .recipient = contract } },
+        .legacy(100_000),
+    ));
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expect(LogPolicy.fail_next_log == null);
+    try std.testing.expect(executor.execution_context == null);
+    try std.testing.expect(!executor.state.transaction_active);
+    try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(contract));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getBalance(beneficiary));
+    try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
+
+    const result = try runStandalone(
+        &executor,
+        testExecutionContext(sender, 100_000),
+        .{ .call = .{ .sender = sender, .recipient = contract } },
+        .legacy(100_000),
+    );
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(@as(u256, 0), try executor.getBalance(contract));
+    try std.testing.expectEqual(@as(u256, 8), try executor.getBalance(beneficiary));
+    try std.testing.expectEqual(@as(usize, 1), executor.logView().len());
 }
 
 fn initCodeReturningRuntimeSize(size: u32) [6]u8 {
@@ -2473,7 +2523,7 @@ test "exact spec drives created account initial nonce" {
         .init_code = &init_code,
     } }, .legacy(100_000)));
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
-    try std.testing.expectEqual(@as(u64, 7), executor.getAccount(evmz.address.create(sender, 0)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 7), executor.cachedAccount(evmz.address.create(sender, 0)).?.nonce);
 }
 
 test "exact spec drives precompile warm access" {
@@ -2594,9 +2644,9 @@ test "exact spec drives selfdestruct host policy" {
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 7), result.gas_refund);
-    try std.testing.expectEqual(@as(u256, 7), executor.getAccount(contract).?.balance);
-    try std.testing.expectEqual(@as(u256, 7), executor.getAccount(beneficiary).?.balance);
-    try std.testing.expect(!executor.state.wasSelfdestructed(.fromAddress(contract)));
+    try std.testing.expectEqual(@as(u256, 7), executor.cachedAccount(contract).?.balance);
+    try std.testing.expectEqual(@as(u256, 7), executor.cachedAccount(beneficiary).?.balance);
+    try std.testing.expect(!executor.state.world.accountRow(executor.state.world.findAccount(.fromAddress(contract)).?).flags.selfdestructed);
 }
 
 test "create warms created address from Berlin" {
@@ -2673,7 +2723,7 @@ test "create address collision preserves nonce and warmth outside payload rollba
     const result = (try executor.executeMessage(request.message, request.gas));
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), executor.cachedAccount(sender).?.nonce);
     try std.testing.expect(executor.state.isAccountWarm(.fromAddress(create_address)));
 }
 
@@ -2764,7 +2814,7 @@ test "call-like message at max depth still executes in recipient storage" {
 
         try std.testing.expectEqual(Interpreter.Status.success, result.status());
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(caller, slot));
-        executor.retainStateTransition();
+        try executor.commitTransaction();
     }
 }
 
@@ -2805,7 +2855,7 @@ test "value call at max depth returns stipend without child execution" {
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 93_179), result.gas_left);
-    try std.testing.expectEqual(@as(u256, 0), executor.getAccount(contract).?.balance);
+    try std.testing.expectEqual(@as(u256, 0), executor.cachedAccount(contract).?.balance);
 }
 
 test "Amsterdam value call at max depth refills new-account state gas" {
@@ -2880,7 +2930,7 @@ test "Amsterdam create at max depth refills new-account state gas" {
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, evmz.eth.eip8037.new_account_state_gas), result.gas_reservoir);
     try std.testing.expectEqual(@as(i64, 0), result.state_gas_spent);
-    try std.testing.expectEqual(@as(u64, 0), executor.getAccount(contract).?.nonce);
+    try std.testing.expectEqual(@as(u64, 0), executor.cachedAccount(contract).?.nonce);
 }
 
 test "exceptional child call rolls back storage via checkpoint" {
@@ -2932,8 +2982,8 @@ test "contract creation rejects EF-prefixed runtime code from London" {
 
     try std.testing.expectEqual(Interpreter.Status.invalid, result.status());
     try std.testing.expectEqual(@as(i64, 0), result.gas_left);
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(sender).?.nonce);
-    try std.testing.expect(executor.getAccount(create_address) == null);
+    try std.testing.expectEqual(@as(u64, 1), executor.cachedAccount(sender).?.nonce);
+    try std.testing.expect(executor.cachedAccount(create_address) == null);
     try std.testing.expect(executor.state.isAccountWarm(.fromAddress(create_address)));
 }
 
@@ -2950,6 +3000,8 @@ test "selfdestruct charges new-account cost for nonzero balance" {
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .balance = 1, .code = &.{ 0x5f, 0xff } });
 
     try executor.beginTransaction(execution_context, sender, contract);
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -2978,6 +3030,8 @@ fn expectEmptySelfDestructGas(comptime ExactVm: type, expected_gas_left: i64) !v
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     try executor.beginTransaction(execution_context, sender, contract);
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -3004,6 +3058,8 @@ fn expectSelfDestructRefund(comptime ExactVm: type, expected_refund: i64) !void 
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
     try executor.beginTransaction(execution_context, sender, contract);
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -3016,14 +3072,20 @@ test "active precompiles are warm but not existing state accounts" {
     var executor = Berlin.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
+    try executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
     var host_iface = executor.host();
     try std.testing.expect(!try host_iface.accountExists(.fromAddress(precompile_address)));
     try std.testing.expectEqual(execution_values.AccessStatus.warm, try host_iface.accessAccount(.fromAddress(precompile_address)));
     try std.testing.expectEqual(@as(u256, 0), try host_iface.getCodeHash(.fromAddress(precompile_address)));
 
+    executor.discardStateTransition();
+
     // Alive, so the address is a real state account: an EIP-161-empty one is
     // dead and would still report zero.
     try evmz.t.seedExecutorAccount(&executor, precompile_address, .{ .balance = 1 });
+    try executor.beginStateTransition(testExecutionContext(precompile_address, 100_000));
+    defer executor.discardStateTransition();
+    host_iface = executor.host();
     try std.testing.expectEqual(uint256.fromBytes32(&evmz.crypto.keccak256_empty), try host_iface.getCodeHash(.fromAddress(precompile_address)));
 }
 
@@ -3110,6 +3172,8 @@ fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {
     eip7702.writeDelegationCode(&code, precompile_address);
     try evmz.t.seedExecutorAccount(&executor, authority, .{ .code = &code });
 
+    try executor.beginStateTransition(testExecutionContext(authority, 100_000));
+    defer executor.discardStateTransition();
     var host_iface = executor.host();
     try std.testing.expectEqual(execution_values.AccessStatus.warm, (try host_iface.accessDelegatedAccount(.fromAddress(authority))).?);
 }
@@ -3164,6 +3228,7 @@ test "sealed observations expose storage state without a trace tape" {
     try observed.beginTransaction(execution_context, sender, contract);
     defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
+    try executor.finalizeExecution();
     try observed.retainStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
@@ -3230,7 +3295,8 @@ const StepOrderRecorder = struct {
 
 fn executeHostCall(executor: anytype, msg: Host.Message) !Host.Result {
     var host_iface = executor.host();
-    return host_iface.call(msg);
+    const result = try host_iface.call(msg);
+    return result;
 }
 
 test "EIP-161 empty accounts do not exist from Spurious Dragon on" {
@@ -3297,12 +3363,165 @@ test "pre-Spurious-Dragon retains empty accounts as real state" {
     try std.testing.expect(executor.state.world.retains_empty_accounts);
     try evmz.t.seedExecutorAccount(&executor, seeded_empty, .{});
 
-    const attempt = executor.state.beginTransaction();
-    executor.state.beginScope();
+    const attempt = executor.state.beginAttempt();
+    executor.state.openSession();
     defer {
-        executor.state.closeScope();
-        executor.state.seal(attempt);
-        executor.state.discard(attempt);
+        executor.state.closeSession();
+        executor.state.sealAttempt(attempt);
+        executor.state.discardAttempt(attempt);
     }
     try std.testing.expect(try executor.state.accountExists(.fromAddress(seeded_empty)));
+}
+
+test "execution finalization permits settlement and outer rollback without reopening the session" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const sender = evmz.addr(0xaaaa);
+    const target = evmz.addr(0xbbbb);
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    // A resource batch spans idle periods and must not count as active execution.
+    executor.beginSystemCallBatch();
+    defer executor.endSystemCallBatch();
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, target);
+    defer executor.discardStateTransition();
+    _ = try executor.executeCallTransaction(sender, target, &.{}, .legacy(100_000), 0);
+    _ = try executor.executeCallTransaction(sender, target, &.{}, .legacy(100_000), 0);
+    try executor.addBalance(target, 3);
+    var outer = executor.checkpoint();
+    try executor.finalizeExecution();
+    try executor.addBalance(target, 5);
+    try std.testing.expectEqual(@as(u256, 8), try executor.getBalance(target));
+    outer.restore();
+    try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(target));
+    try std.testing.expectEqual(.closed, executor.execution_phase);
+    try executor.finalizeExecution();
+    executor.retainStateTransition();
+
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, target);
+    _ = try executor.executeCallTransaction(sender, target, &.{}, .legacy(100_000), 0);
+    try executor.commitTransaction();
+    try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(target));
+}
+
+test "execution finalization failure preserves the session and lifecycle changes" {
+    const Latest = evmz.t.Vm(.latest).?;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(failing.allocator(), .{});
+    defer executor.deinit();
+    const target = evmz.addr(0xbbbb);
+    try executor.beginStateTransition(testExecutionContext(target, 100_000));
+    defer executor.discardStateTransition();
+    var creation = executor.checkpoint();
+    try executor.state.initializeContract(.fromAddress(target), Latest.spec.create.initial_nonce);
+    creation.commit();
+    _ = try executor.state.setStorage(.fromAddress(target), 7, 11);
+    {
+        const destruction = executor.state.checkpoint();
+        errdefer executor.state.revertToCheckpoint(destruction);
+        _ = try executor.state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
+            .clear_balance = false,
+            .reset_nonce = false,
+            .mark_selfdestructed = true,
+        }, false);
+        executor.state.commitCheckpoint(destruction);
+    }
+    // Force the next finalization checkpoint to allocate an account undo.
+    executor.state.journal.accounts.shrinkAndFree(executor.allocator, executor.state.journal.accounts.items.len);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, executor.finalizeExecution());
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(.idle, executor.execution_phase);
+    try std.testing.expect(executor.state.world.accountRow(executor.state.world.findAccount(.fromAddress(target)).?).flags.selfdestructed);
+    try std.testing.expectEqual(@as(u256, 11), try executor.getStorage(target, 7));
+    try executor.finalizeExecution();
+    try std.testing.expectEqual(.closed, executor.execution_phase);
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(target, 7));
+}
+
+test "execution finalization phase covers native dispatch and restores after errors" {
+    const Native = struct {
+        pub fn active(address: Address) bool {
+            return Address.eql(address, evmz.addr(0x1234));
+        }
+    };
+    const Latest = evmz.t.CustomVm(.latest, .{ .reentrant_native_contract = Native }).?;
+    const Runtime = struct {
+        fn execute(_: *anyopaque, call: execution_values.ReentrantNativeContractCall) !evmz.precompile.Result {
+            const executor: *Latest.Executor = @ptrCast(@alignCast(call.host.ptr));
+            try std.testing.expectEqual(.running, executor.execution_phase);
+            _ = try call.host.call(.{
+                .depth = 1,
+                .kind = .call,
+                .gas = call.message.gas,
+                .sender = call.message.recipient,
+                .recipient = evmz.addr(0xbbbb),
+                .code_address = evmz.addr(0xbbbb),
+                .input_data = &.{},
+                .value = 0,
+            });
+            try std.testing.expectEqual(.running, executor.execution_phase);
+            return error.NativeProbeFailed;
+        }
+    };
+    var marker: u8 = 0;
+    var executor = Latest.Executor.init(std.testing.allocator, .{
+        .reentrant_native_contract_runtime = .{ .ptr = &marker, .vtable = &.{ .execute = Runtime.execute } },
+    });
+    defer executor.deinit();
+    const sender = evmz.addr(0xaaaa);
+    const target = evmz.addr(0x1234);
+    try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, target);
+    defer executor.discardStateTransition();
+    var dispatch_checkpoint = executor.checkpoint();
+    defer dispatch_checkpoint.deinit();
+    try std.testing.expectError(error.NativeProbeFailed, executor.executeCallTransaction(sender, target, &.{}, .legacy(100_000), 0));
+    dispatch_checkpoint.restore();
+    try std.testing.expectEqual(.idle, executor.execution_phase);
+    try executor.finalizeExecution();
+}
+
+test "execution finalization phase covers direct prepared frames" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const Probe = struct {
+        executor: ?*Latest.Executor = null,
+        called: bool = false,
+
+        fn getBlockHash(ptr: *anyopaque, _: u64) !?u256 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            try std.testing.expectEqual(.running, self.executor.?.execution_phase);
+            try std.testing.expectEqual(@as(u32, 0), self.executor.?.frame_store.len());
+            self.called = true;
+            return 7;
+        }
+    };
+    var probe = Probe{};
+    var executor = Latest.Executor.init(std.testing.allocator, .{
+        .block_hash_source = .{ .ptr = &probe, .vtable = &.{ .getBlockHash = Probe.getBlockHash } },
+    });
+    defer executor.deinit();
+    probe.executor = &executor;
+    const sender = evmz.addr(0xaaaa);
+    const target = evmz.addr(0xbbbb);
+    var context = testExecutionContext(sender, 100_000);
+    context.block.number = 2;
+    try executor.beginTransaction(context, sender, target);
+    defer executor.discardStateTransition();
+    var bytecode = try executor.prepareBytecode(&.{ 0x60, 1, 0x40, 0x50, 0x00 });
+    defer bytecode.deinit(std.testing.allocator);
+    executor.beginPreparedCodeExecution();
+    defer executor.endPreparedCodeExecution();
+    const result = try executor.executePreparedCallMessageDirect(.{
+        .depth = 0,
+        .kind = .call,
+        .gas = 100_000,
+        .sender = sender,
+        .recipient = target,
+        .code_address = target,
+        .input_data = &.{},
+        .value = 0,
+    }, bytecode.view());
+    try std.testing.expectEqual(Interpreter.Status.success, result.status());
+    try std.testing.expect(probe.called);
+    try std.testing.expectEqual(.idle, executor.execution_phase);
+    try executor.finalizeExecution();
 }

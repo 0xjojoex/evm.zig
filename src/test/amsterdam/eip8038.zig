@@ -53,11 +53,13 @@ test "Amsterdam SELFDESTRUCT to alive beneficiary charges no account write" {
     try evmz.t.seedExecutorAccount(&executor, beneficiary, .{ .balance = 1 });
 
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, contract);
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(20_000), 0);
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 11_997), result.gas_left);
-    try std.testing.expectEqual(@as(u256, 2), executor.getAccount(beneficiary).?.balance);
+    try std.testing.expectEqual(@as(u256, 2), executor.cachedAccount(beneficiary).?.balance);
 }
 
 test "Amsterdam top-level create to alive target skips new-account state gas" {
@@ -107,7 +109,7 @@ test "Amsterdam created contract selfdestruct removes empty account at commit" {
     }));
     defer executed.discardIfCurrent();
     try std.testing.expectEqual(evmz.TxStatus.success, executed.result().status);
-    try std.testing.expect(executor.getAccount(create_address) == null);
+    try std.testing.expect(executor.cachedAccount(create_address) == null);
     try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(create_address)).len);
 }
 

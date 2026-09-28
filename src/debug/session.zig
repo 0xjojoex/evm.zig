@@ -67,6 +67,7 @@ pub fn SessionType(comptime Vm: type) type {
         call_runtime: Executor.CallRuntime,
         open: bool,
         intervened: bool,
+        previous_phase: Executor.ExecutionPhase,
 
         const Session = @This();
 
@@ -76,17 +77,19 @@ pub fn SessionType(comptime Vm: type) type {
         /// until `deinit`; live frames borrow its host interface.
         ///
         /// `bytecode` remains borrowed from the caller. The caller also owns
-        /// the surrounding transaction attempt and resolves it after this
-        /// session finishes or aborts.
+        /// the surrounding transaction attempt and resolves it after this session
+        /// finishes or aborts; committed execution requires finalization before retention.
         pub fn init(self: *Session, executor: *Executor, msg: Host.Message, bytecode: evmz.Bytecode.View) !void {
             // Establish a deinit-safe closed value here before any fallible steps
             self.* = .{
                 .call_runtime = Executor.CallRuntime.init(executor),
                 .open = false,
                 .intervened = false,
+                .previous_phase = undefined,
             };
             if (executor.currentCaptureContext() != null) return error.CaptureActive;
 
+            self.previous_phase = executor.beginExecutionDispatch();
             executor.beginPreparedCodeExecution();
             self.open = true;
             // Unwind to a closed session: `deinit` must not close the
@@ -94,6 +97,7 @@ pub fn SessionType(comptime Vm: type) type {
             errdefer {
                 self.call_runtime.deinit();
                 executor.endPreparedCodeExecution();
+                executor.execution_phase = self.previous_phase;
                 self.open = false;
             }
 
@@ -252,6 +256,7 @@ pub fn SessionType(comptime Vm: type) type {
             std.debug.assert(self.open);
             self.call_runtime.deinit();
             self.call_runtime.executor.endPreparedCodeExecution();
+            self.call_runtime.executor.execution_phase = self.previous_phase;
             self.open = false;
         }
     };

@@ -203,6 +203,8 @@ pub const AccountEffect = packed struct {
     account_deleted: bool = false,
     created_contract: bool = false,
     selfdestruct: bool = false,
+    /// Finalization cleared storage; projectors suppress its surviving point writes.
+    /// Creation's storage reset does not set this effect.
     storage_wiped: bool = false,
     _padding: u1 = 0,
 

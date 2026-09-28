@@ -516,9 +516,11 @@ pub fn ContextType(
                 return executor_errors.normalize(err);
         }
 
-        /// Apply the exact specification's end-of-transaction state rules.
-        pub fn finalizeState(self: *Self) ContextError!void {
-            return self.activeExecutor().finalizeTransactionState() catch |err|
+        /// Apply the exact specification's lifecycle effects and close dispatch.
+        /// Required before completion when execution survives rollback; if a
+        /// checkpoint rolls the pass back, finalize again.
+        pub fn finalizeExecution(self: *Self) ContextError!void {
+            return self.activeExecutor().finalizeExecution() catch |err|
                 return executor_errors.normalize(err);
         }
 
@@ -553,7 +555,7 @@ pub fn ContextType(
 
         fn preparationAccountSummary(ptr: *anyopaque, account_address: Address) !?tx.PreparationAccount {
             const runtime: *RuntimeState = @ptrCast(@alignCast(ptr));
-            return runtime.executor.getAccountOrLoad(account_address) catch |err|
+            return runtime.executor.getAccount(account_address) catch |err|
                 return executor_errors.normalize(err);
         }
 
