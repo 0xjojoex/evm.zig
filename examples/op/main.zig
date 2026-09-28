@@ -309,7 +309,7 @@ fn DepositTransition(comptime op_spec: OpSpec) type {
 
             try context.runPrelude();
             // The message scope opens even when the payload is skipped: nonce
-            // advancement and finalizeState live inside it.
+            // advancement and finalizeExecution live inside it.
             try context.beginExecution(prepared.request, .{});
             try context.advanceTransactionNonce(prepared.request.message);
 
@@ -317,10 +317,10 @@ fn DepositTransition(comptime op_spec: OpSpec) type {
             var gas_result: evmz.transaction.ExecutionGasResult = .empty;
             var output: []const u8 = &.{};
             if (prepared.runnable == null) {
-                try context.finalizeState();
+                try context.finalizeExecution();
             } else {
                 const result = (try context.runPayload(prepared.request)).result;
-                try context.finalizeState();
+                try context.finalizeExecution();
                 status = result.status();
                 gas_result = .{
                     .gas_left = result.gas_left,
@@ -848,7 +848,7 @@ test "successful deposit preserves mint and advances nonce" {
     try std.testing.expectEqual(evmz.TxStatus.success, result.status);
     try std.testing.expectEqual(@as(u64, 0), result.deposit_nonce);
     try std.testing.expect(!result.failed_deposit);
-    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccount(sender)).?.nonce);
     try std.testing.expectEqual(@as(u256, 7), try vm.executor.getBalance(sender));
     try std.testing.expectEqual(@as(u256, 3), try vm.executor.getBalance(recipient));
 }
@@ -878,7 +878,7 @@ test "reverted deposit keeps mint and nonce but rolls back EVM writes" {
     try std.testing.expectEqual(evmz.TxStatus.revert, result.status);
     try std.testing.expect(!result.failed_deposit);
     try std.testing.expect(result.gas.used < 100_000);
-    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccount(sender)).?.nonce);
     try std.testing.expectEqual(@as(u256, 10), try vm.executor.getBalance(sender));
     try std.testing.expectEqual(@as(u256, 0), try vm.executor.getBalance(recipient));
 }
@@ -905,7 +905,7 @@ test "insufficient-value deposit becomes an included failure after mint" {
     try std.testing.expectEqual(evmz.TxStatus.invalid, result.status);
     try std.testing.expect(result.failed_deposit);
     try std.testing.expectEqual(@as(u64, 100_000), result.gas.used);
-    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccount(sender)).?.nonce);
     try std.testing.expectEqual(@as(u256, 2), try vm.executor.getBalance(sender));
     try std.testing.expectEqual(@as(u256, 0), try vm.executor.getBalance(recipient));
 }
@@ -930,7 +930,7 @@ test "intrinsic-gas failure is included after mint with one nonce increment" {
     try std.testing.expectEqual(evmz.TxStatus.invalid, result.status);
     try std.testing.expect(result.failed_deposit);
     try std.testing.expectEqual(@as(u64, 20_000), result.gas.used);
-    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccount(sender)).?.nonce);
     try std.testing.expectEqual(@as(u256, 5), try vm.executor.getBalance(sender));
 }
 
@@ -959,7 +959,7 @@ test "halted deposit is included as failed with the full limit consumed" {
     try std.testing.expect(result.failed_deposit);
     try std.testing.expectEqual(@as(u64, 50_000), result.gas.used);
     try std.testing.expectEqual(@as(u256, 777), try vm.executor.getBalance(sender));
-    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccount(sender)).?.nonce);
 }
 
 test "create deposit derives address from the pre-execution deposit nonce" {
@@ -985,7 +985,7 @@ test "create deposit derives address from the pre-execution deposit nonce" {
     try std.testing.expectEqual(evmz.TxStatus.success, result.status);
     try std.testing.expectEqual(address.create(sender, 0), result.created_address.?);
     try std.testing.expectEqual(@as(u64, 0), result.deposit_nonce);
-    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccount(sender)).?.nonce);
 }
 
 test "legacy system deposit is included as failed, never rejected" {
@@ -1008,7 +1008,7 @@ test "legacy system deposit is included as failed, never rejected" {
     try std.testing.expect(result.failed_deposit);
     try std.testing.expectEqual(@as(u64, 100_000), result.gas.used);
     try std.testing.expectEqual(@as(u256, 5), try vm.executor.getBalance(sender));
-    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try vm.executor.getAccount(sender)).?.nonce);
 }
 
 test "typed block prelude propagates its non-empty error and rolls back" {
@@ -1076,7 +1076,7 @@ test "Ethereum rejection remains tagged through the OP transaction program" {
     });
 
     try std.testing.expectEqual(@FieldType(Canyon.Rejection, "ethereum").nonce_too_high, result.rejected.ethereum);
-    try std.testing.expectEqual(@as(u64, 0), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 0), (try vm.executor.getAccount(sender)).?.nonce);
 }
 
 test "OP block execution normalizes and folds Ethereum and deposit transactions" {
@@ -1165,7 +1165,7 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     };
     try std.testing.expectEqual(@FieldType(Ecotone.Rejection, "ethereum").type_3_tx_pre_fork, rejected.ethereum);
     try std.testing.expectEqual(@as(u64, 2), block.progress());
-    try std.testing.expectEqual(@as(u64, 2), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 2), (try vm.executor.getAccount(sender)).?.nonce);
     try std.testing.expectEqual(@as(u64, 2), block.finish());
 }
 
@@ -1389,7 +1389,7 @@ test "Ethereum variant requires a real signed envelope" {
             .completed => return error.UnexpectedExecution,
         }
     }
-    try std.testing.expectEqual(@as(u64, 0), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 0), (try vm.executor.getAccount(sender)).?.nonce);
 }
 
 test "Ethereum transaction unable to cover the rollup fee is rejected" {
@@ -1424,7 +1424,7 @@ test "Ethereum transaction unable to cover the rollup fee is rejected" {
         .completed => return error.UnexpectedExecution,
     }
     try std.testing.expectEqual(@as(u256, 50), try vm.executor.getBalance(sender));
-    try std.testing.expectEqual(@as(u64, 0), (try vm.executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 0), (try vm.executor.getAccount(sender)).?.nonce);
 }
 
 test "Isthmus charges the operator fee on the limit and refunds on gas used" {
@@ -1539,9 +1539,9 @@ test "unresolved Ethereum transaction keeps exclusive state ownership" {
     try std.testing.expect(vm.executor.hasCurrentTransaction());
     _ = execution.result();
     _ = execution.changes();
-    try std.testing.expectEqual(@as(u256, 90), (try vm.executor.getAccountOrLoad(sender)).?.balance);
-    try std.testing.expectEqual(@as(u256, 10), (try vm.executor.getAccountOrLoad(ethereum_recipient)).?.balance);
-    try std.testing.expect((try vm.executor.getAccountOrLoad(deposit_recipient)) == null);
+    try std.testing.expectEqual(@as(u256, 90), (try vm.executor.getAccount(sender)).?.balance);
+    try std.testing.expectEqual(@as(u256, 10), (try vm.executor.getAccount(ethereum_recipient)).?.balance);
+    try std.testing.expect((try vm.executor.getAccount(deposit_recipient)) == null);
 }
 
 test "one OP transaction program alternates Ethereum and deposit variants on one overlay" {
@@ -1617,9 +1617,9 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
     });
     try std.testing.expectEqual(evmz.TxStatus.success, ethereum_2.executed.retainResult().ethereum.execution.status);
 
-    const sender_account = (try vm.executor.getAccountOrLoad(sender)).?;
+    const sender_account = (try vm.executor.getAccount(sender)).?;
     try std.testing.expectEqual(@as(u64, 4), sender_account.nonce);
     try std.testing.expectEqual(@as(u256, 95), sender_account.balance);
-    try std.testing.expectEqual(@as(u256, 14), (try vm.executor.getAccountOrLoad(ethereum_recipient)).?.balance);
-    try std.testing.expectEqual(@as(u256, 3), (try vm.executor.getAccountOrLoad(deposit_recipient)).?.balance);
+    try std.testing.expectEqual(@as(u256, 14), (try vm.executor.getAccount(ethereum_recipient)).?.balance);
+    try std.testing.expectEqual(@as(u256, 3), (try vm.executor.getAccount(deposit_recipient)).?.balance);
 }

@@ -79,13 +79,6 @@ const ScopeRoot = struct {
             .create => |create| .{ .sender = create.sender, .recipient = null },
         };
     }
-
-    fn eql(a: ScopeRoot, b: ScopeRoot) bool {
-        if (!Address.eql(a.sender, b.sender)) return false;
-        if ((a.recipient == null) != (b.recipient == null)) return false;
-        if (a.recipient) |recipient| return Address.eql(recipient, b.recipient.?);
-        return true;
-    }
 };
 
 /// An open world may start empty or load through a reader. Other worlds must
@@ -151,27 +144,17 @@ pub fn ExecutorType(
     return struct {
         const Executor = @This();
 
+        pub const ExecutionPhase = enum { idle, running, closed };
+
         const BoundInterpreter = Interpreter.Interpreter(spec);
 
         const callbacks = HostCallbacks(spec, World, options_value);
 
         pub const State = evmz.state.WorldState(World);
 
-        /// Both worlds key rows by `AddressWord`, the form the interpreter
-        /// already holds; `Address` enters only from transaction fields.
-        pub const StateAddress = AddressWord;
-
         pub const BranchSnapshot = State.BranchSnapshot;
 
         pub const Init = ExecutorInitType(World);
-
-        pub inline fn stateAddress(value: Address) StateAddress {
-            return .fromAddress(value);
-        }
-
-        pub inline fn executionAddress(value: AddressWord) StateAddress {
-            return value;
-        }
 
         allocator: std.mem.Allocator,
         state: State,
@@ -179,6 +162,9 @@ pub fn ExecutorType(
         call_scratch_slots: std.ArrayList(*call_scratch_storage.Slot),
         prepared_code_scratch: call_scratch_storage.Slot,
         execution_context: ?ExecutionContext = null,
+        /// Dispatch control flow for the current session, never checkpointed.
+        /// New sessions reset it; restoring state cannot reopen finalized dispatch.
+        execution_phase: ExecutionPhase = .idle,
         scope_root: ?ScopeRoot = null,
         attempt: ?Attempt = null,
         next_transaction_generation: u64 = 0,
@@ -236,7 +222,7 @@ pub fn ExecutorType(
         /// attempts, `transaction/runtime.zig` resolves `transaction` ones
         /// through an `Executed` handle.
         const Attempt = struct {
-            id: Checkpoint.AttemptId,
+            id: evmz.state.Generation(.transaction),
             mode: InstrumentationMode,
             owner: Owner,
 
@@ -293,12 +279,13 @@ pub fn ExecutorType(
             std.debug.assert(self.attempt == null);
             assertExecutionMode(mode);
             const state_attempt_id = if (mode.observesState())
-                self.state.beginObservedTransaction()
+                self.state.beginObservedAttempt()
             else
-                self.state.beginTransaction();
-            self.state.beginScope();
+                self.state.beginAttempt();
+            self.state.openSession();
             self.attempt = .{ .id = state_attempt_id, .mode = mode, .owner = .manual };
             self.execution_context = context;
+            self.execution_phase = .idle;
             self.scope_root = null;
         }
 
@@ -307,11 +294,22 @@ pub fn ExecutorType(
             sender: Address,
             recipient: ?Address,
         ) !void {
-            try self.state.warmAccount(stateAddress(sender));
+            try self.state.warmAccount(.fromAddress(sender));
             if (recipient) |address| {
-                try self.state.warmAccount(stateAddress(address));
+                try self.state.warmAccount(.fromAddress(address));
             }
             self.scope_root = .{ .sender = sender, .recipient = recipient };
+        }
+
+        /// Enter dispatch. Shared with stepped debugging. Dispatch may nest; the
+        /// caller must restore the returned phase on every exit. Asserts the
+        /// session was not finalized.
+        pub fn beginExecutionDispatch(self: *Executor) ExecutionPhase {
+            self.requireTransactionScope();
+            std.debug.assert(self.execution_phase != .closed);
+            const previous = self.execution_phase;
+            self.execution_phase = .running;
+            return previous;
         }
 
         fn requireTransactionScope(self: *const Executor) void {
@@ -326,14 +324,15 @@ pub fn ExecutorType(
         fn validateScopeRoot(self: *const Executor, root: ScopeRoot) void {
             self.requireTransactionScope();
             std.debug.assert(self.scope_root != null);
-            std.debug.assert(ScopeRoot.eql(self.scope_root.?, root));
+            std.debug.assert(std.meta.eql(self.scope_root.?, root));
         }
 
         /// Open a manual call transaction scope.
         ///
         /// This low-level API does not finalize or resolve the transition. A
-        /// successful caller must use `commitTransaction` or
-        /// `retainStateTransition`; failure cleanup must use
+        /// caller must open `checkpoint()` before dispatch and resolve it before
+        /// closing the scope. Retained execution requires `commitTransaction` or
+        /// `finalizeExecution` followed by `retainStateTransition`; failure cleanup uses
         /// `discardStateTransition`.
         /// The scope warms the sender and recipient. Family-required additions,
         /// such as Ethereum's coinbase rule, belong in `beginMessageScope` init.
@@ -408,7 +407,7 @@ pub fn ExecutorType(
 
         pub fn transactionAccountSummary(self: *Executor, account_address: Address) !?AccountState {
             transaction_runtime.requireActive(self);
-            return self.getAccountOrLoad(account_address);
+            return self.getAccount(account_address);
         }
 
         /// Report whether an unresolved transaction currently owns the Executor.
@@ -436,15 +435,19 @@ pub fn ExecutorType(
             };
         }
 
-        /// Apply protocol finalization without resolving the current transition.
-        ///
-        /// This is an advanced building block for callers that must inspect or
-        /// extend finalized state before retaining it.
-        pub fn finalizeTransactionState(self: *Executor) !void {
-            try self.state.finalize(.{
+        /// Apply lifecycle rules and end dispatch permission in this session.
+        /// Asserts dispatch is not running. Settlement and enclosing checkpoint
+        /// resolution remain legal; rollback does not reopen dispatch. If rollback
+        /// undoes this pass, finalize again before sealing: State asserts settled
+        /// lifecycle rows at seal. Allocation failure restores State.
+        pub fn finalizeExecution(self: *Executor) !void {
+            self.requireTransactionScope();
+            std.debug.assert(self.execution_phase != .running);
+            try self.state.finalizeLifecycle(.{
                 .existing_account = spec.self_destruct.finalization(false),
                 .created_account = spec.self_destruct.finalization(true),
             });
+            self.execution_phase = .closed;
         }
 
         /// Run protocol finalization, retain the transition, and close its scope.
@@ -455,16 +458,16 @@ pub fn ExecutorType(
         fn commitTransactionWithObserver(self: *Executor, observer: anytype) !void {
             std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
-            try self.finalizeTransactionState();
+            try self.finalizeExecution();
             try self.resolveManualTransaction(observer);
         }
 
         /// Retain the current manual state transition exactly as it stands.
         ///
-        /// This seals and retains mutations but does not run protocol
-        /// finalization. Prefer `commitTransaction` unless the caller
-        /// deliberately owns finalization. Failure cleanup must use
-        /// `discardStateTransition`.
+        /// Lifecycle rows left by dispatch must be finalized or rolled back first;
+        /// State asserts that at seal. State-only transitions need no finalization.
+        /// Use `commitTransaction` to finalize and retain in one step, or
+        /// `discardStateTransition` for failure cleanup.
         pub fn retainStateTransition(self: *Executor) void {
             self.retainStateTransitionWithObserver({}) catch unreachable;
         }
@@ -488,25 +491,26 @@ pub fn ExecutorType(
                 std.debug.assert(self.attempt == null);
                 return;
             }
-            std.debug.assert(self.state.scopeActive());
+            std.debug.assert(self.state.sessionActive());
             const state_attempt_id = (self.attempt orelse unreachable).id;
-            self.state.closeScope();
-            self.state.discard(state_attempt_id);
+            self.state.closeSession();
+            self.state.discardAttempt(state_attempt_id);
             self.closeManualTransactionLifetime();
         }
 
         fn resolveManualTransaction(self: *Executor, observer: anytype) !void {
-            std.debug.assert(self.state.scopeActive());
+            std.debug.assert(self.state.sessionActive());
+            std.debug.assert(self.execution_phase != .running);
             const state_attempt_id = (self.attempt orelse unreachable).id;
-            self.state.closeScope();
-            self.state.seal(state_attempt_id);
+            self.state.closeSession();
+            self.state.sealAttempt(state_attempt_id);
             if (comptime @TypeOf(observer) != void)
                 observer.observe(self.currentObservation()) catch |err| {
-                    self.state.discard(state_attempt_id);
+                    self.state.discardAttempt(state_attempt_id);
                     self.closeManualTransactionLifetime();
                     return err;
                 };
-            self.state.retain(state_attempt_id);
+            self.state.retainAttempt(state_attempt_id);
             self.closeManualTransactionLifetime();
         }
 
@@ -521,7 +525,7 @@ pub fn ExecutorType(
         fn closeTransactionLifetime(self: *Executor) void {
             std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(self.hasCurrentTransaction());
-            std.debug.assert(!self.state.scopeActive());
+            std.debug.assert(!self.state.sessionActive());
             self.execution_context = null;
             self.scope_root = null;
         }
@@ -529,7 +533,7 @@ pub fn ExecutorType(
         fn discardCurrentTransaction(self: *Executor) void {
             std.debug.assert(self.hasCurrentTransaction());
             defer self.finishCurrentTransaction(true);
-            self.state.discard(self.attempt.?.id);
+            self.state.discardAttempt(self.attempt.?.id);
         }
 
         fn finishCurrentTransaction(self: *Executor, clear_output: bool) void {
@@ -598,7 +602,7 @@ pub fn ExecutorType(
                 /// The value and all copies become stale after this call.
                 pub fn retain(self: Execution) void {
                     _ = self.state();
-                    self.executor.state.retain(self.executor.attempt.?.id);
+                    self.executor.state.retainAttempt(self.executor.attempt.?.id);
                     self.executor.finishCurrentTransaction(false);
                 }
 
@@ -636,13 +640,14 @@ pub fn ExecutorType(
         }
 
         /// Caller-owned journal checkpoint. Opened only inside an active
-        /// transaction scope; it never finalizes or closes that scope, so the
-        /// owning runtime can span prelude writes and payload execution.
+        /// transaction scope while dispatch is idle; it never finalizes or closes
+        /// that scope, so the owning runtime can span prelude writes and payload execution.
         pub const ExecutionCheckpoint = CheckpointGuard(State);
 
-        /// Open one journal-backed checkpoint inside the active execution scope.
+        /// Open one journal-backed checkpoint inside the active session.
         pub fn checkpoint(self: *Executor) ExecutionCheckpoint {
             self.requireTransactionScope();
+            std.debug.assert(self.execution_phase != .running);
             return .begin(&self.state);
         }
 
@@ -778,7 +783,7 @@ pub fn ExecutorType(
         // State access. Thin passthroughs that only convert `Address` to the row key.
 
         pub fn traceAccountAccess(self: *Executor, account_address: Address) !void {
-            try self.state.observeAccountAccess(stateAddress(account_address));
+            try self.state.observeAccountAccess(.fromAddress(account_address));
         }
 
         /// Capacity advice for the current transaction attempt. Whether there
@@ -795,66 +800,66 @@ pub fn ExecutorType(
         /// Mark an account warm in the current transaction scope.
         pub fn warmAccount(self: *Executor, address: Address) !void {
             self.requireTransactionScope();
-            try self.state.warmAccount(stateAddress(address));
+            try self.state.warmAccount(.fromAddress(address));
         }
 
         /// Mark a storage slot warm in the current transaction scope.
         pub fn warmStorage(self: *Executor, address: Address, key: u256) !void {
             self.requireTransactionScope();
-            try self.state.warmStorage(stateAddress(address), key);
+            try self.state.warmStorage(.fromAddress(address), key);
         }
 
         /// Return account metadata already present in tracked state.
-        pub fn getAccount(self: *Executor, address: Address) ?AccountState {
-            return self.state.getAccount(stateAddress(address));
+        pub fn cachedAccount(self: *Executor, address: Address) ?AccountState {
+            return self.state.cachedAccount(.fromAddress(address));
         }
 
         /// Return account metadata, loading it from the state reader if needed.
-        pub fn getAccountOrLoad(self: *Executor, address: Address) !?AccountState {
-            return self.state.getAccountOrLoad(stateAddress(address));
+        pub fn getAccount(self: *Executor, address: Address) !?AccountState {
+            return self.state.getAccount(.fromAddress(address));
         }
 
         /// Read storage through tracked state and its canonical reader.
         pub fn getStorage(self: *Executor, address: Address, key: u256) !u256 {
-            return self.state.getStorage(stateAddress(address), key);
+            return self.state.getStorage(.fromAddress(address), key);
         }
 
         /// Read an account balance through tracked state and its canonical reader.
         pub fn getBalance(self: *Executor, address: Address) !u256 {
-            return self.state.getBalance(stateAddress(address));
+            return self.state.getBalance(.fromAddress(address));
         }
 
         /// Add balance as a direct family/STF state transition.
         pub fn addBalance(self: *Executor, address: Address, value: u256) !void {
-            try self.state.addBalance(stateAddress(address), value);
+            try self.state.addBalance(.fromAddress(address), value);
         }
 
         pub fn subtractBalance(self: *Executor, address: Address, value: u256) !bool {
-            return self.state.subtractBalance(stateAddress(address), value);
+            return self.state.subtractBalance(.fromAddress(address), value);
         }
 
         pub fn setNonce(self: *Executor, address: Address, nonce: u64) !void {
-            try self.state.setNonce(stateAddress(address), nonce);
+            try self.state.setNonce(.fromAddress(address), nonce);
         }
 
         pub fn touchAccount(self: *Executor, address: Address) !void {
-            try self.state.touchAccount(stateAddress(address));
+            try self.state.touchAccount(.fromAddress(address));
         }
 
         /// Record one semantic account access without changing warmth or
         /// loading account metadata.
         pub fn observeAccountAccess(self: *Executor, address_value: Address) !void {
             self.requireTransactionScope();
-            try self.state.observeAccountAccess(stateAddress(address_value));
+            try self.state.observeAccountAccess(.fromAddress(address_value));
         }
 
         /// Set account code as a direct family/STF state transition.
         pub fn setCode(self: *Executor, address: Address, code: []const u8) !void {
-            try self.state.setCode(stateAddress(address), code);
+            try self.state.setCode(.fromAddress(address), code);
         }
 
         pub fn clearCode(self: *Executor, address: Address) !void {
-            try self.state.clearCode(stateAddress(address));
+            try self.state.clearCode(.fromAddress(address));
         }
 
         pub fn logView(self: *const Executor) LogBuffer.View {
@@ -887,8 +892,8 @@ pub fn ExecutorType(
         /// Transfer value between accounts, returning false on insufficient balance.
         pub fn transferValue(self: *Executor, sender: Address, recipient: Address, value: u256) !bool {
             if (value == 0) return true;
-            if (!try self.state.subtractBalance(stateAddress(sender), value)) return false;
-            try self.state.addBalance(stateAddress(recipient), value);
+            if (!try self.state.subtractBalance(.fromAddress(sender), value)) return false;
+            try self.state.addBalance(.fromAddress(recipient), value);
             try self.emitTransferLog(.{
                 .from = sender,
                 .to = recipient,
@@ -917,11 +922,13 @@ pub fn ExecutorType(
 
         /// Increment an account nonce, saturating at `maxInt(u64)`.
         fn incrementNonce(self: *Executor, address: Address) !void {
-            const account = try self.getAccountOrLoad(address) orelse AccountState{};
-            try self.state.setNonce(stateAddress(address), account.nonce +| 1);
+            const account = try self.getAccount(address) orelse AccountState{};
+            try self.state.setNonce(.fromAddress(address), account.nonce +| 1);
         }
 
-        /// Return this executor's `Host` adapter for interpreter frames.
+        /// Borrow a Host for the current execution session. Callbacks assert an
+        /// open, unfinalized session. Do not retain the adapter across sessions;
+        /// its pointer carries no session identity. Settlement uses Executor methods.
         pub fn host(self: *Executor) Host {
             return callbacks.host(self);
         }
@@ -938,7 +945,7 @@ pub fn ExecutorType(
         /// cache. Address-based callers materialize through tracked state for witness
         /// validation and code-read tracing; CALL paths can reuse that traced view.
         pub fn resolveExecutionCode(self: *Executor, address: Address) !Bytecode.View {
-            return self.resolveExecutionCodeView(try self.state.getCodeView(stateAddress(address)));
+            return self.resolveExecutionCodeView(try self.state.getCodeView(.fromAddress(address)));
         }
 
         pub fn resolveExecutionCodeView(self: *Executor, code: evmz.state.CodeView) !Bytecode.View {
@@ -957,7 +964,7 @@ pub fn ExecutorType(
         }
 
         fn resolveCode(self: *Executor, address: Address) !ResolvedCode {
-            const original = try self.state.getCodeView(stateAddress(address));
+            const original = try self.state.getCodeView(.fromAddress(address));
             if (eip7702.delegationTarget(original.bytes)) |target| {
                 return .{
                     .address = target,
@@ -973,18 +980,18 @@ pub fn ExecutorType(
         }
 
         pub fn resolvedCodeView(self: *Executor, resolved: ResolvedCode) !evmz.state.CodeView {
-            if (resolved.delegated) return self.state.getCodeView(stateAddress(resolved.address));
+            if (resolved.delegated) return self.state.getCodeView(.fromAddress(resolved.address));
             return resolved.original_view;
         }
 
         /// Read account code through tracked state and its canonical reader.
         pub fn getCode(self: *Executor, address: Address) ![]const u8 {
-            return self.state.getCode(stateAddress(address));
+            return self.state.getCode(.fromAddress(address));
         }
 
         /// Test code presence from authenticated account metadata.
         pub fn accountHasCode(self: *Executor, address: Address) !bool {
-            return self.state.accountHasCode(stateAddress(address));
+            return self.state.accountHasCode(.fromAddress(address));
         }
 
         /// Prepare code according to the executor preprocessing configuration.
@@ -993,7 +1000,7 @@ pub fn ExecutorType(
         }
 
         fn hasBalance(self: *Executor, address: Address, value: u256) !bool {
-            const account = try self.state.getAccountOrLoad(stateAddress(address)) orelse return value == 0;
+            const account = try self.state.getAccount(.fromAddress(address)) orelse return value == 0;
             return account.balance >= value;
         }
 
@@ -1003,7 +1010,7 @@ pub fn ExecutorType(
         }
 
         // Capture wrappers. The mapping itself lives in `executor/trace_capture.zig`;
-        // these only supply the borrowed context and the executing frame depth.
+        // these supply the borrowed context, frame depth, and required state values.
 
         pub fn beginRootCapture(self: *Executor, message: evmz.Message, gas: ExecutionGas) !?evmz.trace.CallToken {
             return trace_capture.beginRoot(self.currentCaptureContext(), message, gas);
@@ -1017,13 +1024,19 @@ pub fn ExecutorType(
             try trace_capture.finishCall(self.currentCaptureContext(), token, result);
         }
 
-        pub fn beginSelfDestructCapture(self: *Executor, address: Address, beneficiary: Address, balance: u256) !?evmz.trace.CallToken {
+        pub fn beginSelfDestructCapture(
+            self: *Executor,
+            address: AddressWord,
+            beneficiary: AddressWord,
+        ) !?evmz.trace.CallToken {
+            const context = self.currentCaptureContext() orelse return null;
+            if (!context.capturesCalls()) return null;
             return trace_capture.beginSelfDestruct(
-                self.currentCaptureContext(),
+                context,
                 self.trace_depth,
-                address,
-                beneficiary,
-                balance,
+                address.address(),
+                beneficiary.address(),
+                try self.state.getBalance(address),
             );
         }
 
@@ -1564,7 +1577,7 @@ pub fn ExecutorType(
 
         fn touchEmptyCallRecipient(self: *Executor, msg: *const Host.Message) !void {
             if (msg.kind != .call or !spec.call.touches_empty_recipient) return;
-            try self.state.touchAccount(stateAddress(msg.recipient));
+            try self.state.touchAccount(.fromAddress(msg.recipient));
         }
 
         fn executeCreateMessage(self: *Executor, msg: Host.Message) !Host.Result {
@@ -1612,7 +1625,7 @@ pub fn ExecutorType(
             const next_nonce = std.math.add(u64, caller_nonce, 1) catch
                 return .{ .immediate = self.createFailureWithCause(msg.gas, msg.gas_reservoir, .invalid, .nonce_overflow) };
             try self.warmCreatedAddressIfNeeded(msg.recipient);
-            try self.state.setNonce(stateAddress(msg.sender), next_nonce);
+            try self.state.setNonce(.fromAddress(msg.sender), next_nonce);
             return self.beginPreparedCreate(msg);
         }
 
@@ -1626,7 +1639,7 @@ pub fn ExecutorType(
         }
 
         fn prepareCreateCaller(self: *Executor, msg: *const Host.Message) !CreateCallerPreparation {
-            const caller = try self.getAccountOrLoad(msg.sender) orelse evmz.state.Account{};
+            const caller = try self.getAccount(msg.sender) orelse evmz.state.Account{};
             if (caller.balance < msg.value) {
                 return .{ .rejected = self.createFailureWithCause(msg.gas, msg.gas_reservoir, .invalid, .insufficient_balance) };
             }
@@ -1654,16 +1667,14 @@ pub fn ExecutorType(
                 ) };
             }
 
-            _ = try self.state.subtractBalance(stateAddress(msg.sender), msg.value);
-            try self.state.addBalance(stateAddress(create_address), msg.value);
+            _ = try self.state.subtractBalance(.fromAddress(msg.sender), msg.value);
+            try self.state.addBalance(.fromAddress(create_address), msg.value);
             try self.emitTransferLog(.{
                 .from = msg.sender,
                 .to = create_address,
                 .amount = msg.value,
             });
-            try self.state.setNonce(stateAddress(create_address), spec.create.initial_nonce);
-            try self.state.clearCode(stateAddress(create_address));
-            try self.state.markCreatedContract(stateAddress(create_address));
+            try self.state.initializeContract(.fromAddress(create_address), spec.create.initial_nonce);
 
             create_checkpoint.disarm();
             return .{ .child = .{
@@ -1727,7 +1738,7 @@ pub fn ExecutorType(
                 return self.createFailureFromResult(deposit_result, deposit_result.outcome.status, .code_store_out_of_gas);
             }
 
-            try self.state.setCode(stateAddress(child.address), output);
+            try self.state.setCode(.fromAddress(child.address), output);
             create_checkpoint.commit();
 
             return Host.Result.fromExecution(deposit_result, false);
@@ -1768,15 +1779,18 @@ pub fn ExecutorType(
 
         fn createCollision(self: *Executor, address: Address) !bool {
             if (nativeContractActive(address)) return true;
-            if (try self.state.getAccountOrLoad(stateAddress(address))) |account| {
+            if (try self.state.getAccount(.fromAddress(address))) |account| {
                 if (account.nonce != 0) return true;
             }
-            return self.state.accountHasCode(stateAddress(address));
+            return self.state.accountHasCode(.fromAddress(address));
         }
 
         /// Host.call resolver for direct `Interpreter.execute()` users. Top-level call
         /// and create transactions enter `CallRuntime` through their executor entrypoints.
         pub fn resolveHostCall(self: *Executor, msg: Host.Message) !Host.Result {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             // Write protection is enforced through `is_static` alone; a
             // static call kind that fails to inherit it is a constructor bug.
             std.debug.assert(msg.kind != .staticcall or msg.is_static);
@@ -1818,7 +1832,7 @@ pub fn ExecutorType(
         // Top-frame state gas. Charged before dispatch, reconciled into the result after.
 
         fn topLevelDelegatedAccountAccess(self: *Executor, target: Address) !?evmz.execution.DelegatedAccountAccess {
-            const state_target = stateAddress(target);
+            const state_target: AddressWord = .fromAddress(target);
             const already_warm = self.state.isAccountWarm(state_target);
             const access = spec.call.topLevelDelegatedAccountAccess(.{
                 .target_is_native_contract = nativeContractActive(target),
@@ -1841,7 +1855,7 @@ pub fn ExecutorType(
             const creates_account = if (value == 0 or same_address)
                 false
             else
-                !try self.state.accountExists(stateAddress(recipient));
+                !try self.state.accountExists(.fromAddress(recipient));
             const charge_i64 = spec.call.topFrameValueTransferStateGas(.{
                 .value = value,
                 .same_address = same_address,
@@ -1857,7 +1871,7 @@ pub fn ExecutorType(
         ) !top_frame_gas.Charge {
             // The integrated rule compares the pre-transaction account to the
             // empty account value. Storage does not make an account alive.
-            const target_alive = if (try self.state.getAccountOrLoad(stateAddress(options.recipient))) |account|
+            const target_alive = if (try self.state.getAccount(.fromAddress(options.recipient))) |account|
                 account.nonce != 0 or
                     account.balance != 0 or
                     !std.mem.eql(u8, &account.code_hash, &evmz.crypto.keccak256_empty)
@@ -1877,6 +1891,9 @@ pub fn ExecutorType(
         /// This does not open or close a transaction scope. Use `executeStandalone` for the
         /// fully-managed raw-message lifecycle.
         pub fn executeMessage(self: *Executor, message: Message, gas: ExecutionGas) !Result {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             self.validateScopeRoot(.fromMessage(message));
             const call_capture = try self.beginRootCapture(message, gas);
             const result = try switch (message) {
@@ -1929,7 +1946,7 @@ pub fn ExecutorType(
                 pre_execution.restore();
                 try self.retainStateTransitionWithObserver(observer);
             } else {
-                try self.finalizeTransactionState();
+                try self.finalizeExecution();
                 pre_execution.commit();
                 try self.retainStateTransitionWithObserver(observer);
             }
@@ -1952,6 +1969,9 @@ pub fn ExecutorType(
             self: *Executor,
             request: ExecutionRequest,
         ) !TransactionExecutionOutcome {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             self.validateScopeContext(request.context);
             self.validateScopeRoot(.fromMessage(request.message));
             return self.executeTransactionRequestTrustedPhased(request);
@@ -2018,6 +2038,9 @@ pub fn ExecutorType(
             gas: ExecutionGas,
             value: u256,
         ) !TransactionExecutionOutcome {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -2115,6 +2138,9 @@ pub fn ExecutorType(
         }
 
         pub fn executePreparedCallTransaction(self: *Executor, options: PreparedCallTransaction) !ExecutionResult {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -2156,6 +2182,9 @@ pub fn ExecutorType(
             message: Host.Message,
             bytecode: Bytecode.View,
         ) !Host.Result {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             var runtime = CallRuntime.init(self);
             defer runtime.deinit();
             try runtime.prepare();
@@ -2170,6 +2199,9 @@ pub fn ExecutorType(
             message: Host.Message,
             bytecode: Bytecode.View,
         ) !Host.Result {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             std.debug.assert(self.currentCaptureContext() == null);
             std.debug.assert(self.prepared_code_execution != null);
             var host_iface = self.host();
@@ -2200,6 +2232,9 @@ pub fn ExecutorType(
             options: Create,
             gas: ExecutionGas,
         ) !TransactionExecutionOutcome {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -2236,6 +2271,9 @@ pub fn ExecutorType(
         }
 
         pub fn executeCreate(self: *Executor, options: Create, gas: ExecutionGas) !Result {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -2509,12 +2547,12 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
 
     var executor = Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
-    const attempt = executor.state.beginTransaction();
-    executor.state.beginScope();
+    const attempt = executor.state.beginAttempt();
+    executor.state.openSession();
     defer {
-        executor.state.closeScope();
-        executor.state.seal(attempt);
-        executor.state.discard(attempt);
+        executor.state.closeSession();
+        executor.state.sealAttempt(attempt);
+        executor.state.discardAttempt(attempt);
     }
 
     {
@@ -2626,6 +2664,8 @@ test "nested runtime error restores its transferred checkpoint once" {
         recipient,
     );
     defer executor.discardStateTransition();
+    var root_checkpoint = executor.checkpoint();
+    defer root_checkpoint.deinit();
 
     try std.testing.expectError(error.ForcedRuntimeFailure, executor.resolveHostCall(.{
         .depth = 1,
@@ -2676,6 +2716,8 @@ test "nested call runtime owns its segment and keeps capture indices global" {
         evmz.addr(0x2222),
     );
     defer executor.discardStateTransition();
+    var root_checkpoint = executor.checkpoint();
+    defer root_checkpoint.deinit();
 
     executor.beginPreparedCodeExecution();
     defer executor.endPreparedCodeExecution();

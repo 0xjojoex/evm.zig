@@ -310,7 +310,7 @@ pub fn ImplType(
             gas.foldInto(&result);
             preparation_checkpoint.commit();
             if (!executionRolledBack(result.outcome.status)) {
-                try context.finalizeState();
+                try context.finalizeExecution();
             }
             return result;
         }
@@ -327,7 +327,7 @@ pub fn ImplType(
             ));
             const result = outcome.result;
             if (!executionRolledBack(result.outcome.status)) {
-                try context.finalizeState();
+                try context.finalizeExecution();
             }
             return result;
         }

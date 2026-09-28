@@ -1,8 +1,8 @@
-//! Immutable parent-state truth for one block, authenticated against the
+//! Immutable parent-state records for one block, authenticated against the
 //! catalog and indexed by dense claim id.
 //!
 //! The catalog remains owned by `WitnessStateReader`. This object owns only
-//! one account fact per BAL account and one storage fact per BAL slot. Claim
+//! one account record per BAL account and one storage record per BAL slot. Claim
 //! identity and trie ordering remain in the borrowed `ClaimPlan`.
 
 const std = @import("std");
@@ -15,36 +15,36 @@ const mpt = @import("mpt");
 const rlp = @import("rlp");
 
 const Allocator = std.mem.Allocator;
-const ParentFacts = @This();
+const ParentState = @This();
 pub const AccountParent = union(enum) {
     absent: mpt.FixedAbsence,
     present: trie.Account,
 };
 
 /// Dense index is `ClaimPlan.AccountId`; identity is intentionally not copied.
-pub const AccountFact = struct {
+pub const AccountRecord = struct {
     parent: AccountParent,
 };
 
 /// Dense index is `ClaimPlan.StorageId`; identity is intentionally not copied.
-pub const StorageFact = struct {
+pub const StorageRecord = struct {
     value: u256,
 };
 
 pub const Error = std.mem.Allocator.Error || trie.ProofLookupError;
 
-accounts: []AccountFact = &.{},
-storage: []StorageFact = &.{},
+accounts: []AccountRecord = &.{},
+storage: []StorageRecord = &.{},
 
-/// Copy fixture/integration facts into the owned block-lifetime representation.
+/// Copy fixture/integration records into the owned block-lifetime representation.
 pub fn initCopy(
     allocator: Allocator,
-    account_facts: []const AccountFact,
-    storage_facts: []const StorageFact,
-) Allocator.Error!ParentFacts {
-    const accounts = try allocator.dupe(AccountFact, account_facts);
+    account_records: []const AccountRecord,
+    storage_records: []const StorageRecord,
+) Allocator.Error!ParentState {
+    const accounts = try allocator.dupe(AccountRecord, account_records);
     errdefer allocator.free(accounts);
-    const storage = try allocator.dupe(StorageFact, storage_facts);
+    const storage = try allocator.dupe(StorageRecord, storage_records);
     return .{ .accounts = accounts, .storage = storage };
 }
 
@@ -52,10 +52,10 @@ pub fn authenticate(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
     catalog: *const trie.WitnessCatalog,
-) Error!ParentFacts {
-    const accounts = try allocator.alloc(AccountFact, plan.accountCount());
+) Error!ParentState {
+    const accounts = try allocator.alloc(AccountRecord, plan.accountCount());
     errdefer allocator.free(accounts);
-    const storage = try allocator.alloc(StorageFact, plan.storageCount());
+    const storage = try allocator.alloc(StorageRecord, plan.storageCount());
     errdefer allocator.free(storage);
 
     // Account and storage lookups are serial, so they reuse the same typed
@@ -78,17 +78,17 @@ pub fn authenticate(
         &workspace,
     );
     for (plan.account_trie_order, account_results) |id, result| {
-        const fact = &accounts[@intFromEnum(id)];
+        const record = &accounts[@intFromEnum(id)];
         switch (result) {
             .present => |encoded| {
-                fact.* = .{ .parent = .{ .present = undefined } };
-                const account = switch (fact.parent) {
+                record.* = .{ .parent = .{ .present = undefined } };
+                const account = switch (record.parent) {
                     .present => |*value| value,
                     .absent => unreachable,
                 };
                 try trie.decodeAccountValueInto(encoded, account);
             },
-            .absent => |absence| fact.* = .{ .parent = .{ .absent = absence } },
+            .absent => |absence| record.* = .{ .parent = .{ .absent = absence } },
         }
     }
 
@@ -118,10 +118,10 @@ pub fn authenticate(
             &workspace,
         );
         for (order, storage_results[begin..end]) |storage_id, result| {
-            const fact = &storage[@intFromEnum(storage_id)];
+            const record = &storage[@intFromEnum(storage_id)];
             switch (result) {
                 .absent => {},
-                .present => |encoded| fact.value = try trie.decodeStorageValue(encoded),
+                .present => |encoded| record.value = try trie.decodeStorageValue(encoded),
             }
         }
     }
@@ -132,18 +132,18 @@ pub fn authenticate(
     };
 }
 
-pub fn deinit(self: *ParentFacts, allocator: Allocator) void {
+pub fn deinit(self: *ParentState, allocator: Allocator) void {
     allocator.free(self.storage);
     allocator.free(self.accounts);
     self.* = undefined;
 }
 
-pub fn allocationBytes(self: ParentFacts) usize {
-    return self.accounts.len * @sizeOf(AccountFact) +
-        self.storage.len * @sizeOf(StorageFact);
+pub fn allocationBytes(self: ParentState) usize {
+    return self.accounts.len * @sizeOf(AccountRecord) +
+        self.storage.len * @sizeOf(StorageRecord);
 }
 
-test "catalog records bind typed account and storage facts without another topology" {
+test "catalog records bind typed account and storage records without another topology" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -175,7 +175,7 @@ test "catalog records bind typed account and storage facts without another topol
     try std.testing.expectEqual(@as(usize, 1), records.storage.len);
     try std.testing.expectEqual(@as(u256, 42), records.storage[0].value);
     try std.testing.expectEqual(
-        @sizeOf(AccountFact) + @sizeOf(StorageFact),
+        @sizeOf(AccountRecord) + @sizeOf(StorageRecord),
         records.allocationBytes(),
     );
 }
@@ -195,7 +195,7 @@ test "catalog records inherit absence without resolving storage" {
     try std.testing.expectEqual(@as(u256, 0), records.storage[0].value);
 }
 
-test "authentication workspace is transient and facts reclaim in LIFO order" {
+test "authentication workspace is transient and parent state reclaims in LIFO order" {
     const claims = [_]bal.AccountChanges{.{ .address = address.addr(2), .storage_reads = &.{7} }};
     var plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     defer plan.deinit(std.testing.allocator);

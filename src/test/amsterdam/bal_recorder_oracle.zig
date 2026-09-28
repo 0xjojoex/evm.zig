@@ -1211,8 +1211,8 @@ test "tracked observations match recorder after inner rollback" {
     var state = State.init(allocator, .init(allocator, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;
@@ -1225,8 +1225,8 @@ test "tracked observations match recorder after inner rollback" {
     defer oracle.deinit();
     oracle.setBlockAccessIndex(1);
 
-    const attempt = state.beginObservedTransaction();
-    state.beginScope();
+    const attempt = state.beginObservedAttempt();
+    state.openSession();
     try state.observeAccountAccess(.fromAddress(accessed));
     try oracle.recordAccountAccess(accessed);
 
@@ -1283,7 +1283,7 @@ test "tracked observations match recorder after inner rollback" {
         .previous = 13,
         .value = 15,
     });
-    try state.markCreatedContract(.fromAddress(reverted));
+    try state.initializeContract(.fromAddress(reverted), 0);
     try oracle.recordLifecycle(.created_contract, reverted);
     state.revertToCheckpoint(checkpoint);
     try oracle.checkpoint(.{
@@ -1293,8 +1293,8 @@ test "tracked observations match recorder after inner rollback" {
         .logs_len = 0,
     });
 
-    state.closeScope();
-    state.seal(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
 
     var delta = try materialize(state.pendingView().observations(), allocator);
     defer delta.deinit(allocator);
@@ -1321,8 +1321,8 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     var state = State.init(allocator, .init(allocator, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
     var seeded = MemoryAccount.init(allocator);
     seeded.account.balance = 10;
@@ -1335,8 +1335,8 @@ test "selfdestruct finalization projects post-transaction BAL state" {
     defer oracle.deinit();
     oracle.setBlockAccessIndex(1);
 
-    const attempt = state.beginObservedTransaction();
-    state.beginScope();
+    const attempt = state.beginObservedAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(target), 12);
     try oracle.recordBalanceWrite(.{
         .address = target,
@@ -1351,15 +1351,24 @@ test "selfdestruct finalization projects post-transaction BAL state" {
         .key = 7,
         .value = 11,
     });
-    try state.markSelfdestructed(.fromAddress(target));
+    {
+        const destruction = state.checkpoint();
+        errdefer state.revertToCheckpoint(destruction);
+        _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
+            .clear_balance = false,
+            .reset_nonce = false,
+            .mark_selfdestructed = true,
+        }, false);
+        state.commitCheckpoint(destruction);
+    }
     try oracle.recordLifecycle(.selfdestruct, target);
-    try state.finalize(.{ .existing_account = .{
+    try state.finalizeLifecycle(.{ .existing_account = .{
         .delete_account = true,
         .clear_storage = true,
     } });
     try oracle.recordLifecycle(.account_deleted, target);
-    state.closeScope();
-    state.seal(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
 
     var delta = try materialize(state.pendingView().observations(), allocator);
     defer delta.deinit(allocator);

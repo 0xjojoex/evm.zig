@@ -773,19 +773,19 @@ const GasTracePrinter = struct {
         _ = ptr;
         var account_index: u32 = 0;
         while (account_index < observations.accounts.len()) : (account_index += 1) {
-            const fact = observations.accounts.at(account_index);
-            if (fact.observation.semantic_access) {
+            const record = observations.accounts.at(account_index);
+            if (record.observation.semantic_access) {
                 std.debug.print("    trace account index={} addr={x}\n", .{
                     block_access_index,
-                    fact.address,
+                    record.address,
                 });
             }
-            if (fact.effect.balance_written) printBalance(block_access_index, fact);
-            if (fact.effect.nonce_written) printNonce(block_access_index, fact);
-            if (fact.effect.code_written) {
+            if (record.effect.balance_written) printBalance(block_access_index, record);
+            if (record.effect.nonce_written) printNonce(block_access_index, record);
+            if (record.effect.code_written) {
                 std.debug.print("    trace code index={} addr={x}\n", .{
                     block_access_index,
-                    fact.address,
+                    record.address,
                 });
             }
         }
@@ -795,22 +795,21 @@ const GasTracePrinter = struct {
             const metadata = observations.storage.metadataAt(storage_index);
             if (!metadata.observation.value_read and !metadata.effect.written) {
                 std.debug.print(
-                    "    trace storage index={} addr={x} key={x} value=unloaded written=false\n",
+                    "    trace storage index={} addr={x} key={x} value_read=false written=false\n",
                     .{ block_access_index, metadata.address, metadata.key },
                 );
                 continue;
             }
-            const fact = observations.storage.at(storage_index) orelse
-                return error.IncompleteStorageObservation;
+            const record = observations.storage.at(storage_index);
             std.debug.print(
                 "    trace storage index={} addr={x} key={x} previous={x} value={x} written={}\n",
                 .{
                     block_access_index,
-                    fact.address,
-                    fact.key,
-                    fact.original,
-                    fact.current,
-                    fact.effect.written,
+                    record.address,
+                    record.key,
+                    record.original,
+                    record.current,
+                    record.effect.written,
                 },
             );
         }
@@ -818,25 +817,25 @@ const GasTracePrinter = struct {
 
     fn printBalance(
         block_access_index: evmz.eth.bal.BlockAccessIndex,
-        fact: evmz.state.AccountObservationFact,
+        record: evmz.state.AccountObservationRecord,
     ) void {
-        const original = fact.original orelse evmz.state.Account{};
-        const current = fact.current orelse evmz.state.Account{};
+        const original = record.original orelse evmz.state.Account{};
+        const current = record.current orelse evmz.state.Account{};
         std.debug.print(
             "    trace balance index={} addr={x} previous={x} value={x}\n",
-            .{ block_access_index, fact.address, original.balance, current.balance },
+            .{ block_access_index, record.address, original.balance, current.balance },
         );
     }
 
     fn printNonce(
         block_access_index: evmz.eth.bal.BlockAccessIndex,
-        fact: evmz.state.AccountObservationFact,
+        record: evmz.state.AccountObservationRecord,
     ) void {
-        const original = fact.original orelse evmz.state.Account{};
-        const current = fact.current orelse evmz.state.Account{};
+        const original = record.original orelse evmz.state.Account{};
+        const current = record.current orelse evmz.state.Account{};
         std.debug.print(
             "    trace nonce index={} addr={x} previous={} value={}\n",
-            .{ block_access_index, fact.address, original.nonce, current.nonce },
+            .{ block_access_index, record.address, original.nonce, current.nonce },
         );
     }
 

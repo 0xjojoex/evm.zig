@@ -83,10 +83,10 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
             const view = observation.observations();
             var index: u32 = 0;
             while (index < view.accounts.len()) : (index += 1) {
-                const fact = view.accounts.at(index);
-                if (!evmz.Address.eql(fact.address, self.address)) continue;
-                try std.testing.expect(fact.observation.code_read);
-                const loaded_account = fact.current orelse return error.ExpectedLoadedAccount;
+                const record = view.accounts.at(index);
+                if (!evmz.Address.eql(record.address, self.address)) continue;
+                try std.testing.expect(record.observation.code_read);
+                const loaded_account = record.current orelse return error.ExpectedLoadedAccount;
                 try std.testing.expectEqualSlices(u8, &self.code_hash, &loaded_account.code_hash);
                 return;
             }
@@ -441,7 +441,7 @@ test "Executed retainResult retains state and returns the validated output" {
     copied.discardIfCurrent();
     try std.testing.expect(!executor.hasCurrentTransaction());
     try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(recipient));
-    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccountOrLoad(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccount(sender)).?.nonce);
 }
 
 test "transaction STF forwards BLOCKHASH to the Executor source" {
@@ -863,4 +863,209 @@ test "exact spec owns total transaction gas limit as a value" {
         .rejected => return error.UnexpectedRejection,
     };
     executed.discard();
+}
+
+fn creationStorageTransaction(
+    comptime revision: evmz.eth.Revision,
+    initial: u256,
+    init_code: []const u8,
+) !struct { status: TxStatus, gas_used: u64, slot: u256, deployed_word: u256 } {
+    const Vm = evmz.t.Vm(revision).?;
+    const sender = addr(0xaaaa);
+    const target = address.create(sender, 0);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+    try evmz.t.seedStoreAccount(&memory, target, .{ .balance = 1 });
+    try (try memory.getOrCreateAccount(target)).storage.put(7, initial);
+    var executor = Vm.Executor.init(std.testing.allocator, .{ .state = .{ .reader = memory.reader() } });
+    defer executor.deinit();
+    const result = try expectExecuted(try transact(Vm, &executor, .{
+        .env = .{ .gas_limit = 1_000_000 },
+        .tx = .{ .sender = sender, .gas_limit = 500_000, .gas_price = 1, .input = init_code },
+    }));
+    // Creation rollback does not undo transaction nonce advancement or gas settlement.
+    try std.testing.expectEqual(@as(u64, 1), (try executor.getAccount(sender)).?.nonce);
+    try std.testing.expectEqual(@as(u256, 10_000_000 - result.gas.used), try executor.getBalance(sender));
+    try std.testing.expectEqual(@as(u256, 1), try executor.getBalance(target));
+    const code = try executor.getCode(target);
+    return .{
+        .status = result.status,
+        .gas_used = result.gas.used,
+        .slot = try executor.getStorage(target, 7),
+        .deployed_word = if (code.len == 32) std.mem.readInt(u256, code[0..32], .big) else 0,
+    };
+}
+
+test "transaction CREATE resets eligible storage before initcode and SSTORE gas classification" {
+    // All enabled forks share reset-before-initcode, including forks predating EIP-2200.
+    inline for (evmz.t.enabled_revisions) |revision| {
+        const read = try creationStorageTransaction(revision, 10, &.{
+            0x60, 7, 0x54, 0x60, 0, 0x52, 0x60, 32, 0x60, 0, 0xf3,
+        });
+        try std.testing.expectEqual(TxStatus.success, read.status);
+        try std.testing.expectEqual(@as(u256, 0), read.deployed_word);
+        try std.testing.expectEqual(@as(u256, 0), read.slot);
+        const writes = &.{ 0x60, 7, 0x60, 7, 0x55, 0x60, 0, 0x60, 7, 0x55, 0x00 };
+        const existing = try creationStorageTransaction(revision, 10, writes);
+        const fresh = try creationStorageTransaction(revision, 0, writes);
+        try std.testing.expectEqual(TxStatus.success, existing.status);
+        try std.testing.expectEqual(TxStatus.success, fresh.status);
+        try std.testing.expectEqual(fresh.gas_used, existing.gas_used);
+        try std.testing.expectEqual(@as(u256, 0), existing.slot);
+    }
+}
+
+test "transaction CREATE revert restores destination storage while settling the transaction" {
+    const reverted = try creationStorageTransaction(.latest, 10, &.{
+        0x60, 7, 0x60, 7, 0x55, 0x60, 0, 0x60, 0, 0xfd,
+    });
+    try std.testing.expectEqual(TxStatus.revert, reverted.status);
+    try std.testing.expectEqual(@as(u256, 10), reverted.slot);
+}
+
+test "nested CREATE2 resets storage and enclosing REVERT restores the destination" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const sender = addr(0xaaaa);
+    const factory = addr(0xbbbb);
+    const init_code = evmz.t.bytecode(.{
+        .PUSH1, 7,  .SLOAD, .PUSH0,  .MSTORE,
+        .PUSH1, 7,  .PUSH1, 7,       .SSTORE,
+        .PUSH1, 32, .PUSH0, .RETURN,
+    });
+    const target = address.create2(factory, 0, &init_code);
+    for ([_]bool{ false, true }) |revert_parent| {
+        var factory_code = evmz.t.bytecode(.{
+            .CALLDATASIZE, .PUSH0,        .PUSH0,  .CALLDATACOPY,
+            .PUSH0,        .CALLDATASIZE, .PUSH0,  .PUSH0,
+            .CREATE2,      .PUSH0,        .MSTORE, .PUSH1,
+            32,            .PUSH0,        .RETURN,
+        });
+        if (revert_parent) factory_code[factory_code.len - 1] = @intFromEnum(evmz.Opcode.REVERT);
+        var memory = MemoryStore.init(std.testing.allocator);
+        defer memory.deinit();
+        try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+        try evmz.t.seedStoreAccount(&memory, factory, .{ .nonce = 1, .code = &factory_code });
+        try evmz.t.seedStoreAccount(&memory, target, .{ .balance = 1 });
+        try (try memory.getOrCreateAccount(target)).storage.put(7, 10);
+        var executor = Latest.Executor.init(std.testing.allocator, .{ .state = .{ .reader = memory.reader() } });
+        defer executor.deinit();
+        const result = try expectExecuted(try transact(Latest, &executor, .{
+            .env = .{ .gas_limit = 1_000_000 },
+            .tx = .{ .sender = sender, .to = factory, .gas_limit = 500_000, .input = &init_code },
+        }));
+        try std.testing.expectEqual(if (revert_parent) TxStatus.revert else TxStatus.success, result.status);
+        try std.testing.expectEqual(@as(usize, 32), result.output.len);
+        try std.testing.expectEqual(target.toU256(), std.mem.readInt(u256, result.output[0..32], .big));
+        try std.testing.expectEqual(@as(u256, if (revert_parent) 10 else 7), try executor.getStorage(target, 7));
+        const deployed = try executor.getCode(target);
+        if (revert_parent) {
+            try std.testing.expectEqual(@as(usize, 0), deployed.len);
+            try std.testing.expectEqual(@as(u64, 0), executor.cachedAccount(target).?.nonce);
+        } else {
+            try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), deployed);
+        }
+    }
+}
+
+// These are VM transaction tests: fork policy, rollback, and finalization all
+// participate. State tests that select effect flags only test reversible mechanics.
+fn selfDestructTransition(comptime revision: evmz.eth.Revision, deletes_existing: bool) !void {
+    const Vm = evmz.t.Vm(revision) orelse return error.SkipZigTest;
+    const sender = addr(0xaaaa);
+    const parent = addr(0xbbbb);
+    const target = addr(0xcccc);
+    const beneficiary = addr(0xdddd);
+    for ([_]bool{ false, true }) |same_beneficiary| {
+        for ([_]bool{ false, true }) |revert_parent| {
+            const code: []const u8 = if (same_beneficiary)
+                &evmz.t.bytecode(.{ .ADDRESS, .SELFDESTRUCT })
+            else
+                &evmz.t.bytecode(.{ .PUSH2, 0xdd, 0xdd, .SELFDESTRUCT });
+            var parent_code = evmz.t.bytecode(.{
+                .PUSH0,  .PUSH0, .PUSH0, .PUSH0, .PUSH0,  .PUSH2, 0xcc,         0xcc,
+                .GAS,    .CALL,  .POP,
+                // Deletion is deferred: code remains visible after the child halts.
+                  .PUSH2, 0xcc,    0xcc,   .EXTCODESIZE, .PUSH0,
+                .MSTORE, .PUSH1, 32,     .PUSH0, .RETURN,
+            });
+            if (revert_parent) parent_code[parent_code.len - 1] = evmz.Opcode.REVERT.toByte();
+            var memory = MemoryStore.init(std.testing.allocator);
+            defer memory.deinit();
+            try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });
+            try evmz.t.seedStoreAccount(&memory, parent, .{ .nonce = 1, .code = &parent_code });
+            try evmz.t.seedStoreAccount(&memory, target, .{ .nonce = 1, .balance = 7, .code = code });
+            try evmz.t.seedStoreAccount(&memory, beneficiary, .{ .balance = 1 });
+            try (try memory.getOrCreateAccount(target)).storage.put(7, 10);
+            var executor = Vm.Executor.init(std.testing.allocator, .{ .state = .{ .reader = memory.reader() } });
+            defer executor.deinit();
+            const result = try expectExecuted(try transact(Vm, &executor, .{
+                .env = .{ .gas_limit = 1_000_000 },
+                .tx = .{ .sender = sender, .to = parent, .gas_limit = 500_000 },
+            }));
+            try std.testing.expectEqual(if (revert_parent) TxStatus.revert else TxStatus.success, result.status);
+            try std.testing.expectEqual(@as(usize, 32), result.output.len);
+            try std.testing.expectEqual(@as(u256, code.len), std.mem.readInt(u256, result.output[0..32], .big));
+            const deleted = deletes_existing and !revert_parent;
+            if (deleted) {
+                try std.testing.expect((try executor.getAccount(target)) == null);
+            } else {
+                try std.testing.expectEqualSlices(u8, code, try executor.getCode(target));
+                try std.testing.expectEqual(@as(u64, 1), (try executor.getAccount(target)).?.nonce);
+            }
+            try std.testing.expectEqual(@as(u256, if (deleted) 0 else 10), try executor.getStorage(target, 7));
+            const keeps_balance = revert_parent or (same_beneficiary and !deletes_existing);
+            try std.testing.expectEqual(@as(u256, if (keeps_balance) 7 else 0), try executor.getBalance(target));
+            try std.testing.expectEqual(@as(u256, if (revert_parent or same_beneficiary) 1 else 8), try executor.getBalance(beneficiary));
+            try std.testing.expectEqual(@as(u64, 1), (try executor.getAccount(sender)).?.nonce);
+            try std.testing.expect(executor.execution_context == null);
+        }
+    }
+}
+
+test "Shanghai transaction SELFDESTRUCT deletes only at finalization and parent revert restores it" {
+    try selfDestructTransition(.shanghai, true);
+}
+
+test "Cancun transaction SELFDESTRUCT preserves existing storage and self-beneficiary balance" {
+    try selfDestructTransition(.cancun, false);
+}
+
+test "latest transaction SELFDESTRUCT preserves existing storage and self-beneficiary balance" {
+    try selfDestructTransition(.latest, false);
+}
+
+fn createdSelfDestructTransition(comptime revision: evmz.eth.Revision, preserves_balance: bool) !void {
+    const Vm = evmz.t.Vm(revision) orelse return error.SkipZigTest;
+    const sender = addr(0xaaaa);
+    const target = address.create(sender, 0);
+    var executor = Vm.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 10_000_000 });
+    // A prefunded address still counts as created in this transaction (EIP-6780).
+    try evmz.t.seedExecutorAccount(&executor, target, .{ .balance = 7 });
+    const init_code = evmz.t.bytecode(.{
+        .PUSH1, 11, .PUSH1, 7, .SSTORE, .ADDRESS, .SELFDESTRUCT,
+    });
+    const result = try expectExecuted(try transact(Vm, &executor, .{
+        .env = .{ .gas_limit = 1_000_000 },
+        .tx = .{ .sender = sender, .gas_limit = 500_000, .input = &init_code },
+    }));
+    try std.testing.expectEqual(TxStatus.success, result.status);
+    if (preserves_balance) {
+        try std.testing.expectEqual(@as(u64, 0), (try executor.getAccount(target)).?.nonce);
+        try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(target)).len);
+    } else {
+        try std.testing.expect((try executor.getAccount(target)) == null);
+    }
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, if (preserves_balance) 7 else 0), try executor.getBalance(target));
+}
+
+test "Cancun transaction creation followed by SELFDESTRUCT deletes the new account" {
+    try createdSelfDestructTransition(.cancun, false);
+}
+
+test "latest transaction creation followed by SELFDESTRUCT resets storage and preserves balance" {
+    try createdSelfDestructTransition(.latest, true);
 }

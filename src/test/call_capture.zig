@@ -193,6 +193,8 @@ test "call capture retains immediate depth-limit cause" {
         child,
     );
     defer executor.discardStateTransition();
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
     var host = executor.host();
     const result = (try host.call(.{
         .depth = evmz.Host.max_call_depth + 1,
@@ -241,6 +243,8 @@ test "call capture retains opcode-local CALL depth attempt" {
         root,
     );
     defer executor.discardStateTransition();
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
     var host = executor.host();
     const result = (try host.call(.{
         .depth = evmz.Host.max_call_depth,
@@ -343,6 +347,8 @@ test "call capture retains opcode-local CREATE precheck attempts" {
             root,
         );
         defer executor.discardStateTransition();
+        var checkpoint = executor.checkpoint();
+        defer checkpoint.deinit();
         var host = executor.host();
         const result = (try host.call(.{
             .depth = case.depth,
@@ -363,7 +369,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
         try std.testing.expectEqual(case.status, span.rows[1].status);
         try std.testing.expectEqual(@as(i64, 0), span.rows[1].gas_used);
         try std.testing.expectEqual(case.target, span.rows[1].to);
-        try std.testing.expectEqual(case.nonce, executor.getAccount(root).?.nonce);
+        try std.testing.expectEqual(case.nonce, executor.cachedAccount(root).?.nonce);
         try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(case.target)));
     }
 }
@@ -409,8 +415,8 @@ test "call capture distinguishes CREATE collision from rollback" {
     try std.testing.expect(!span.rows[1].checkpointReverted());
     try std.testing.expectEqual(@as(?evmz.Address, null), span.rows[1].createdAddress());
     try std.testing.expectEqual(target, span.rows[1].to);
-    try std.testing.expectEqual(@as(u64, root_nonce + 1), executor.getAccount(root).?.nonce);
-    try std.testing.expectEqual(@as(u64, 1), executor.getAccount(target).?.nonce);
+    try std.testing.expectEqual(@as(u64, root_nonce + 1), executor.cachedAccount(root).?.nonce);
+    try std.testing.expectEqual(@as(u64, 1), executor.cachedAccount(target).?.nonce);
 }
 
 test "call capture retains invalid deployed code and local rollback" {
@@ -450,7 +456,7 @@ test "call capture retains invalid deployed code and local rollback" {
     try std.testing.expect(span.rows[1].checkpointReverted());
     try std.testing.expectEqual(@as(?evmz.Address, null), span.rows[1].createdAddress());
     try std.testing.expectEqual(target, span.rows[1].to);
-    try std.testing.expect(executor.getAccount(target) == null);
+    try std.testing.expect(executor.cachedAccount(target) == null);
 }
 
 test "call capture retains Frontier committed code-store out-of-gas" {

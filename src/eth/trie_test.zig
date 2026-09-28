@@ -25,7 +25,7 @@ const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || mpt.Error;
 const Pair = mpt.Entry;
 const Account = trie.Account;
-const AccountFacts = trie.AccountFacts;
+const AccountCache = trie.AccountCache;
 const Update = trie.Update;
 const empty_root_hash = trie.empty_root_hash;
 const root = trie.root;
@@ -399,15 +399,15 @@ test "MPT update root inserts into empty trie" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
-test "authenticated account facts preserve cached absence" {
-    var facts = AccountFacts.init(std.testing.allocator);
-    defer facts.deinit();
+test "authenticated account cache preserves cached absence" {
+    var cache = AccountCache.init(std.testing.allocator);
+    defer cache.deinit();
 
-    try facts.put(address.addr(1), null);
-    const cached = facts.get(address.addr(1));
+    try cache.put(address.addr(1), null);
+    const cached = cache.get(address.addr(1));
     try std.testing.expect(cached != null);
     try std.testing.expect(cached.? == null);
-    try std.testing.expect(facts.get(address.addr(2)) == null);
+    try std.testing.expect(cache.get(address.addr(2)) == null);
 }
 
 test "MPT proof lookup resolves a root leaf" {
@@ -795,17 +795,17 @@ test "MPT state root is the same through a detached delta" {
     var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
-    const attempt = state.beginTransaction();
-    state.beginScope();
+    const attempt = state.beginAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(address.addr(0x1000)), 20);
     _ = try state.setStorage(.fromAddress(address.addr(0x1000)), 1, 7);
     try state.setBalance(.fromAddress(address.addr(0x2000)), 5);
-    state.closeScope();
-    state.seal(attempt);
-    state.retain(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
+    state.retainAttempt(attempt);
     const live = state.acceptedView().changes();
 
     var delta = try StateDelta.init(scratch, live);
@@ -825,16 +825,16 @@ test "MPT state root consumes tracked changes" {
     var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
-    const attempt = state.beginTransaction();
-    state.beginScope();
+    const attempt = state.beginAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(target), 20);
     _ = try state.setStorage(.fromAddress(target), 1, 7);
-    state.closeScope();
-    state.seal(attempt);
-    state.retain(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
+    state.retainAttempt(attempt);
     const changes = state.acceptedView().changes();
 
     const direct = try rootAfterChanges(scratch, empty_root_hash, &.{}, changes);
@@ -849,17 +849,26 @@ test "MPT state root consumes tracked changes" {
     const expected = try root(scratch, &.{.{ .key = &account_key, .value = account_value }});
     try std.testing.expectEqualSlices(u8, &expected, &direct);
 
-    const wiped = state.beginTransaction();
-    state.beginScope();
+    const wiped = state.beginAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(target), 0);
-    try state.markSelfdestructed(.fromAddress(target));
-    try state.finalize(.{ .existing_account = .{
+    {
+        const destruction = state.checkpoint();
+        errdefer state.revertToCheckpoint(destruction);
+        _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
+            .clear_balance = false,
+            .reset_nonce = false,
+            .mark_selfdestructed = true,
+        }, false);
+        state.commitCheckpoint(destruction);
+    }
+    try state.finalizeLifecycle(.{ .existing_account = .{
         .reset_account = true,
         .clear_storage = true,
     } });
-    state.closeScope();
-    state.seal(wiped);
-    state.retain(wiped);
+    state.closeSession();
+    state.sealAttempt(wiped);
+    state.retainAttempt(wiped);
     const wiped_changes = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 1), wiped_changes.storage_wipes.len());
     try std.testing.expectEqual(@as(u32, 0), wiped_changes.storage_writes.len());
@@ -883,19 +892,19 @@ test "MPT state root groups interleaved tracked storage writes by address" {
     var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
-    const attempt = state.beginTransaction();
-    state.beginScope();
+    const attempt = state.beginAttempt();
+    state.openSession();
     try state.setBalance(.fromAddress(first), 10);
     _ = try state.setStorage(.fromAddress(first), 1, 11);
     try state.setBalance(.fromAddress(second), 20);
     _ = try state.setStorage(.fromAddress(second), 2, 22);
     _ = try state.setStorage(.fromAddress(first), 3, 33);
-    state.closeScope();
-    state.seal(attempt);
-    state.retain(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
+    state.retainAttempt(attempt);
     const changes = state.acceptedView().changes();
     try std.testing.expectEqual(first, changes.storage_writes.at(0).address);
     try std.testing.expectEqual(second, changes.storage_writes.at(1).address);
@@ -950,19 +959,19 @@ test "MPT state root loads the parent account from the catalog" {
     var state = OpenState.init(scratch, .init(scratch, null));
     defer state.deinit();
     defer if (state.transaction_active) {
-        if (state.scopeActive()) state.closeScope();
-        state.discard(state.active_attempt_id.?);
+        if (state.sessionActive()) state.closeSession();
+        state.discardAttempt(state.lifetime.transaction);
     };
     var seeded = MemoryAccount.init(scratch);
     seeded.account.nonce = previous.nonce;
     seeded.account.balance = previous.balance;
     try state.seedAccount(target, seeded);
-    const attempt = state.beginTransaction();
-    state.beginScope();
+    const attempt = state.beginAttempt();
+    state.openSession();
     _ = try state.setStorage(.fromAddress(target), 1, 7);
-    state.closeScope();
-    state.seal(attempt);
-    state.retain(attempt);
+    state.closeSession();
+    state.sealAttempt(attempt);
+    state.retainAttempt(attempt);
     const changes = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 0), changes.accounts.len());
 

@@ -210,7 +210,7 @@ pub const VTable = struct {
     accessDelegatedAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!?AccessStatus,
     observeAccountAccess: ?*const fn (ptr: *anyopaque, address: AddressWord, depth: u16) anyerror!void = null,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
-    selfDestruct: *const fn (ptr: *anyopaque, address: Address, beneficiary: Address) anyerror!bool,
+    selfDestruct: *const fn (ptr: *anyopaque, address: AddressWord, beneficiary: AddressWord) anyerror!bool,
     getTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!u256,
     setTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256, value: u256) anyerror!void,
 
@@ -276,7 +276,7 @@ pub fn storeStorage(self: *Self, address: AddressWord, key: u256, value: u256) !
 pub fn emitLog(self: *Self, event_log: Log) !void {
     return self.vtable.emitLog(self.ptr, event_log);
 }
-pub fn selfDestruct(self: *Self, address: Address, beneficiary: Address) !bool {
+pub fn selfDestruct(self: *Self, address: AddressWord, beneficiary: AddressWord) !bool {
     return self.vtable.selfDestruct(self.ptr, address, beneficiary);
 }
 pub fn call(self: *Self, msg: Message) !Result {

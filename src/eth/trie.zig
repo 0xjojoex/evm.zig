@@ -197,7 +197,7 @@ const max_rlp_account: Account = .{
 pub const StorageValueBuffer = [fixedRlpEncodedLen(u256, std.math.maxInt(u256))]u8;
 pub const AccountValueBuffer = [fixedRlpEncodedLen(Account, max_rlp_account)]u8;
 
-pub const AccountFacts = @import("../state/sparse_hash_map.zig").WithContext(address.Address, ?Account, address.Address.HashContext);
+pub const AccountCache = @import("../state/sparse_hash_map.zig").WithContext(address.Address, ?Account, address.Address.HashContext);
 
 pub const Update = mpt.Update;
 

@@ -2,7 +2,7 @@
 //! declares.
 //!
 //! The world for the BAL lane and the guest. Rows are dense arrays indexed by
-//! claim id and exist from admission, seeded from parent facts authenticated
+//! claim id and exist from admission, seeded from parent state authenticated
 //! against the witness. Anything undeclared is invalid: an observed resolution
 //! of an unlisted key is `error.Undeclared*`, a warm-only one resolves to
 //! nothing. Trie order and trie keys are the plan's, so the state hands out a
@@ -23,7 +23,7 @@ const state_types = @import("../../state.zig");
 const Account = @import("../../state/Account.zig");
 const artifacts = @import("claim_artifacts.zig");
 const claim_plan = @import("ClaimPlan.zig");
-const ParentFacts = @import("ParentFacts.zig");
+const ParentState = @import("ParentState.zig");
 
 const Allocator = std.mem.Allocator;
 const Address = address.Address;
@@ -59,14 +59,14 @@ pub const options: world_state.Options = .{
     // Every row exists from admission, sized by the claim plan. There is nothing
     // to reserve or reuse.
     .grows_on_touch = false,
-    // Parent facts were authenticated against the witness at admission.
+    // Parent state was authenticated against the witness at admission.
     .authenticated_parents = true,
     // Parent code is the witness's, handed to the state's code store at init.
     .caches_parent_code = false,
 };
 
 plan: claim_plan.ClaimPlan,
-facts: ParentFacts,
+parent_state: ParentState,
 accounts: []AccountRow,
 storage: []StorageRow,
 /// Hot-translation memo: `memo_account_entries` remembered address->id entries and one
@@ -91,27 +91,27 @@ translation_storage: struct {
     valid: bool = false,
 } = .{},
 
-/// Take ownership of `plan` and `facts`; both are released on failure.
+/// Take ownership of `plan` and `parent_state`; both are released on failure.
 pub fn init(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    facts: ParentFacts,
+    parent_state: ParentState,
 ) Allocator.Error!ClosedWorld {
     var owned_plan = plan;
-    var owned_facts = facts;
+    var owned_parent_state = parent_state;
     errdefer owned_plan.deinit(allocator);
-    errdefer owned_facts.deinit(allocator);
-    std.debug.assert(owned_plan.accountCount() == owned_facts.accounts.len);
-    std.debug.assert(owned_plan.storageCount() == owned_facts.storage.len);
+    errdefer owned_parent_state.deinit(allocator);
+    std.debug.assert(owned_plan.accountCount() == owned_parent_state.accounts.len);
+    std.debug.assert(owned_plan.storageCount() == owned_parent_state.storage.len);
 
-    const accounts = try allocator.alloc(AccountRow, owned_facts.accounts.len);
+    const accounts = try allocator.alloc(AccountRow, owned_parent_state.accounts.len);
     errdefer allocator.free(accounts);
-    const storage = try allocator.alloc(StorageRow, owned_facts.storage.len);
+    const storage = try allocator.alloc(StorageRow, owned_parent_state.storage.len);
     errdefer allocator.free(storage);
 
     var world: ClosedWorld = .{
         .plan = owned_plan,
-        .facts = owned_facts,
+        .parent_state = owned_parent_state,
         .accounts = accounts,
         .storage = storage,
     };
@@ -126,10 +126,10 @@ pub fn init(
 pub noinline fn initState(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    facts: ParentFacts,
+    parent_state: ParentState,
     codes: []const []const u8,
 ) artifacts.CodeStore.InitError!State {
-    var world = try init(allocator, plan, facts);
+    var world = try init(allocator, plan, parent_state);
     errdefer world.deinit(allocator);
     const code = try artifacts.CodeStore.init(allocator, codes);
     return State.initWithCodeStore(allocator, world, code);
@@ -139,10 +139,10 @@ pub noinline fn initState(
 pub noinline fn initStateHashed(
     allocator: Allocator,
     plan: claim_plan.ClaimPlan,
-    facts: ParentFacts,
+    parent_state: ParentState,
     codes: []const artifacts.ParentCode,
 ) artifacts.CodeStore.InitError!State {
-    var world = try init(allocator, plan, facts);
+    var world = try init(allocator, plan, parent_state);
     errdefer world.deinit(allocator);
     const code = try artifacts.CodeStore.initHashed(allocator, codes);
     return State.initWithCodeStore(allocator, world, code);
@@ -151,7 +151,7 @@ pub noinline fn initStateHashed(
 pub fn deinit(self: *ClosedWorld, allocator: Allocator) void {
     allocator.free(self.accounts);
     allocator.free(self.storage);
-    self.facts.deinit(allocator);
+    self.parent_state.deinit(allocator);
     self.plan.deinit(allocator);
     self.* = undefined;
 }
@@ -255,14 +255,14 @@ pub fn loadCode(_: *ClosedWorld, _: CodeHash) error{InvalidWitness}!CodeView {
     return error.InvalidWitness;
 }
 
-/// Every row goes back to the value its parent fact admits; code binds on
+/// Every row goes back to the value its parent record admits; code binds on
 /// first fetch through the state's store.
 pub fn resetRows(self: *ClosedWorld) void {
-    for (self.facts.accounts, self.accounts) |fact, *row| {
-        row.* = .admitted(accountExecutionValue(fact));
+    for (self.parent_state.accounts, self.accounts) |record, *row| {
+        row.* = .admitted(accountExecutionValue(record));
     }
-    for (self.facts.storage, self.storage) |fact, *row| {
-        row.* = .{ .current = fact.value };
+    for (self.parent_state.storage, self.storage) |record, *row| {
+        row.* = .{ .current = record.value };
     }
 }
 
@@ -270,7 +270,7 @@ pub fn allocationBytes(self: *const ClosedWorld) usize {
     return self.accounts.len * @sizeOf(AccountRow) +
         self.storage.len * @sizeOf(StorageRow) +
         self.plan.allocationBytes() +
-        self.facts.allocationBytes();
+        self.parent_state.allocationBytes();
 }
 
 pub fn accountTrieOrder(self: *const ClosedWorld) []const AccountId {
@@ -289,14 +289,14 @@ pub fn storageTrieKey(self: *const ClosedWorld, id: StorageId) [32]u8 {
     return self.plan.storageTrieKey(id);
 }
 
-pub fn accountFact(self: *const ClosedWorld, id: AccountId) *const ParentFacts.AccountFact {
-    return &self.facts.accounts[@intFromEnum(id)];
+pub fn parentAccount(self: *const ClosedWorld, id: AccountId) *const ParentState.AccountRecord {
+    return &self.parent_state.accounts[@intFromEnum(id)];
 }
 
-/// The value execution sees for a parent fact. Dropping `storage_root` is the
+/// The value execution sees for a parent account record. Dropping `storage_root` is the
 /// point: liveness here is EIP-161, which ignores storage.
-fn accountExecutionValue(fact: ParentFacts.AccountFact) ?Account {
-    const parent = switch (fact.parent) {
+fn accountExecutionValue(record: ParentState.AccountRecord) ?Account {
+    const parent = switch (record.parent) {
         .absent => return null,
         .present => |parent| parent,
     };
