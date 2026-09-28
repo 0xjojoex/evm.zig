@@ -186,6 +186,31 @@ pub fn build(b: *std.Build) void {
     // parent build may ask for `module("evmz")` during the configure pass that
     // discovers a missing lazy dependency; Zig then fetches and configures the
     // graph again before making any steps.
+    const fixtures_mod = b.addModule("fixtures", .{
+        .root_source_file = b.path("tools/fixtures.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
+    });
+    const statetest_mod = b.addModule("statetest", .{
+        .root_source_file = b.path("tools/statetest/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = native_evmz_mod },
+            .{ .name = "fixtures", .module = fixtures_mod },
+        },
+    });
+    const blocktest_mod = b.addModule("blocktest", .{
+        .root_source_file = b.path("tools/blocktest/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "evmz", .module = native_evmz_mod },
+            .{ .name = "fixtures", .module = fixtures_mod },
+        },
+    });
+
     const use_xkcp = native_keccak == .xkcp;
     const xkcp_dep = if (use_xkcp) b.lazyDependency("xkcp", .{}) else null;
     if (use_xkcp and xkcp_dep == null) return;
@@ -239,21 +264,6 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
     });
 
-    const fixtures_mod = b.addModule("fixtures", .{
-        .root_source_file = b.path("tools/fixtures.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
-    });
-    const statetest_mod = b.addModule("statetest", .{
-        .root_source_file = b.path("tools/statetest/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "evmz", .module = native_evmz_mod },
-            .{ .name = "fixtures", .module = fixtures_mod },
-        },
-    });
     const statetest_cli_mod = b.createModule(.{
         .root_source_file = b.path("tools/statetest/main.zig"),
         .target = target,
@@ -268,15 +278,6 @@ pub fn build(b: *std.Build) void {
     const run_statetest_tests = b.addRunArtifact(statetest_tests);
     b.step("statetest-test", "Test state-test tooling").dependOn(&run_statetest_tests.step);
 
-    const blocktest_mod = b.addModule("blocktest", .{
-        .root_source_file = b.path("tools/blocktest/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "evmz", .module = native_evmz_mod },
-            .{ .name = "fixtures", .module = fixtures_mod },
-        },
-    });
     const blocktest_cli_mod = b.createModule(.{
         .root_source_file = b.path("tools/blocktest/main.zig"),
         .target = target,
