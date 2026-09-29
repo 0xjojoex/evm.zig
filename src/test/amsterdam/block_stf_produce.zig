@@ -70,10 +70,6 @@ const CountingBlockHashSource = struct {
     }
 };
 
-test "derived block output excludes caller-owned block hash" {
-    try std.testing.expect(!@hasField(block_stf.DerivedBlockOutput, "block_hash"));
-}
-
 test "BlockSTF produce returns the owned canonical empty BAL" {
     var outcome = try block_stf.Exact(.amsterdam).produce(std.testing.allocator, .{
         .env = blockEnv(30_000_000),

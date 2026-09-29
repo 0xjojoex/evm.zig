@@ -252,8 +252,8 @@ test "closed world executor matches open world checkpoint discard" {
 }
 
 test "executor prepareBytecode eagerly analyzes jumpdests" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    const Latest = evmz.t.Vm(.latest).?;
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     const code = evmz.t.bytecode(.{ .PUSH1, .JUMPDEST, .JUMPDEST });
@@ -340,13 +340,13 @@ test "parent prepared view survives child admission" {
 }
 
 test "CREATE initcode preparation remains execution-local" {
-    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
 
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
-    var executor = Osaka.Executor.init(std.testing.allocator, .{
+    var executor = Latest.Executor.init(std.testing.allocator, .{
         .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
@@ -432,7 +432,7 @@ test "trace replay runs after prepared code leaves the live frame" {
 }
 
 test "executor uses caller-owned prepared artifacts through the supplied backend" {
-    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const contract = evmz.addr(0xc0de);
     const code = evmz.t.bytecode(.{.STOP});
     const code_hash = evmz.crypto.keccak256(&code);
@@ -440,7 +440,7 @@ test "executor uses caller-owned prepared artifacts through the supplied backend
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
     const prepared = try pool.getOrPrepare(code_hash, &code);
-    var executor = Osaka.Executor.init(std.testing.allocator, .{
+    var executor = Latest.Executor.init(std.testing.allocator, .{
         .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
@@ -450,21 +450,21 @@ test "executor uses caller-owned prepared artifacts through the supplied backend
 
     executor.beginPreparedCodeExecution();
     defer executor.endPreparedCodeExecution();
-    const resolved = try Osaka.Executor.resolveExecutionCode(&executor, contract);
+    const resolved = try Latest.Executor.resolveExecutionCode(&executor, contract);
 
     try std.testing.expectEqual(prepared.bytes.ptr, resolved.bytes.ptr);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
 test "prepared execution follows current code hash without owning public code reads" {
-    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const contract = evmz.addr(0xc0de);
     const original_code = evmz.t.bytecode(.{ .PUSH0, .STOP });
     const replacement_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .STOP });
 
     var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
     defer pool.deinit();
-    var executor = Osaka.Executor.init(std.testing.allocator, .{
+    var executor = Latest.Executor.init(std.testing.allocator, .{
         .prepared_code_backend = pool.backend(),
     });
     defer executor.deinit();
@@ -476,14 +476,14 @@ test "prepared execution follows current code hash without owning public code re
     executor.beginPreparedCodeExecution();
     var prepared_execution_open = true;
     errdefer if (prepared_execution_open) executor.endPreparedCodeExecution();
-    const original_execution = try Osaka.Executor.resolveExecutionCode(&executor, contract);
+    const original_execution = try Latest.Executor.resolveExecutionCode(&executor, contract);
     const original_prepared = original_execution;
     const public_original = try executor.getCode(contract);
     try std.testing.expect(original_prepared.bytes.ptr != public_original.ptr);
     try std.testing.expectEqualSlices(u8, &original_code, public_original);
 
     try executor.state.setCode(.fromAddress(contract), &replacement_code);
-    const replacement_execution = try Osaka.Executor.resolveExecutionCode(&executor, contract);
+    const replacement_execution = try Latest.Executor.resolveExecutionCode(&executor, contract);
     try std.testing.expect(replacement_execution.bytes.ptr != original_prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &replacement_code, replacement_execution.bytes);
     const public_replacement = try executor.getCode(contract);
@@ -498,7 +498,7 @@ test "prepared execution follows current code hash without owning public code re
 }
 
 test "prepared caches cannot satisfy code omitted from the active witness" {
-    const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const TestTrie = struct {
         fn leafNode(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
             const path = try allocator.alloc(u8, key.len + 1);
@@ -539,7 +539,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
 
         var pool = evmz.prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
         defer pool.deinit();
-        var executor = Osaka.Executor.init(std.testing.allocator, .{
+        var executor = Latest.Executor.init(std.testing.allocator, .{
             .state = .{ .reader = witness.reader() },
             .prepared_code_backend = pool.backend(),
         });
@@ -548,7 +548,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         _ = try pool.getOrPrepare(code_hash, &code);
         try std.testing.expectError(
             error.InvalidWitness,
-            Osaka.Executor.resolveExecutionCode(&executor, target),
+            Latest.Executor.resolveExecutionCode(&executor, target),
         );
     }
 
@@ -570,7 +570,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         );
         defer witness.deinit();
 
-        var executor = Osaka.Executor.init(std.testing.allocator, .{
+        var executor = Latest.Executor.init(std.testing.allocator, .{
             .state = .{ .reader = witness.reader() },
             .prepared_code_backend = system_prepared_code.backend(),
         });
@@ -684,7 +684,7 @@ test "exact spec drives top-level delegated account access" {
 }
 
 test "top-level delegated target is a semantic account access" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0x1111);
     const authority = evmz.addr(0x2222);
     const target = evmz.addr(0x3333);
@@ -706,7 +706,7 @@ test "top-level delegated target is a semantic account access" {
     };
 
     var observer = Observer{ .target = target };
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
@@ -731,7 +731,7 @@ test "top-level delegated target is a semantic account access" {
 }
 
 test "delegated target is observed before insufficient call balance" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0x1111);
     const parent = evmz.addr(0x2222);
     const authority = evmz.addr(0x3333);
@@ -754,7 +754,7 @@ test "delegated target is observed before insufficient call balance" {
     };
 
     var observer = Observer{ .target = target };
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
@@ -783,14 +783,14 @@ test "delegated target is observed before insufficient call balance" {
 }
 
 test "top-level call code resolution reuses one traced view" {
-    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
     var observations = CodeObservation{
         .required = recipient,
         .expected_code_reads = 1,
     };
-    var executor = Prague.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try putFundedSender(&executor, sender);
 
@@ -1198,11 +1198,11 @@ test "recursive call bomb unwinds with iterative call runtime" {
 }
 
 test "iterative call runtime preserves precompile output" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const execution_context = testExecutionContext(sender, 100_000);
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
@@ -1357,7 +1357,7 @@ test "prepared call transaction calls to empty account succeed" {
 }
 
 test "iterative CALLCODE writes target code in caller storage" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
@@ -1373,7 +1373,7 @@ test "iterative CALLCODE writes target code in caller storage" {
         .STOP,
     });
 
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
@@ -1444,7 +1444,7 @@ test "iterative DELEGATECALL preserves parent call value" {
 }
 
 test "iterative STATICCALL failure resumes parent with zero result" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const target = evmz.addr(0xbeef);
@@ -1461,7 +1461,7 @@ test "iterative STATICCALL failure resumes parent with zero result" {
         .STOP,
     });
 
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
@@ -1532,7 +1532,7 @@ test "prepared call transaction create opcodes deploy code" {
 }
 
 test "CREATE2 insufficient balance does not bump creator nonce" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0x0343505c9f9bda06ff73c96183434ffd23442073);
     const contract = evmz.addr(0xbba624a7e00e22fd18816e2e0e1f4f396ce3409c);
     const execution_context = testExecutionContext(sender, 100_000);
@@ -1541,7 +1541,7 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
         .PUSH0, .PUSH0, .PUSH0, .GAS, .CREATE2, .STOP,
     });
 
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -1566,7 +1566,7 @@ test "CREATE2 insufficient balance does not bump creator nonce" {
 }
 
 test "captured runtime records nested call and create frames without generic stepping" {
-    const Cancun = evmz.t.CaptureVm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.CaptureVm(.latest).?;
     const sender = evmz.addr(0x371c4d94cf9ed2e0cde964a748609b7c46ec3811);
     const contract = evmz.addr(0xd83874a1c62a78b10ae86b27b59b21c4d34f6d30);
     const child = evmz.addr(0x1234);
@@ -1583,7 +1583,7 @@ test "captured runtime records nested call and create frames without generic ste
     defer tape.deinit();
     var capture = CaptureContext.init(std.testing.allocator, .{ .tape = &tape });
     defer capture.deinit();
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000_000_000_000_000 });
 
@@ -1729,7 +1729,7 @@ test "active transaction owns rollback before pending state" {
 }
 
 test "active transaction finishes into pending state" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.ExecutionRequest{
@@ -1743,14 +1743,14 @@ test "active transaction finishes into pending state" {
         } },
         .gas = .legacy(100_000),
     };
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try transaction_runtime.begin(&executor, .normal);
     errdefer transaction_runtime.discard(&executor);
     try transaction_runtime.beginExecution(&executor, request, .{});
     try executor.state.addBalance(.fromAddress(sender), 7);
-    const executed = Cancun.Executor.Executed(void){
+    const executed = Latest.Executor.Executed(void){
         .executor = &executor,
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
@@ -1862,7 +1862,7 @@ test "multi-root transaction preserves committed roots and isolates failed roots
 }
 
 test "transaction nonce advancement survives payload rollback" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const request = execution_values.ExecutionRequest{
@@ -1876,7 +1876,7 @@ test "transaction nonce advancement survives payload rollback" {
         } },
         .gas = .legacy(100_000),
     };
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = 7 });
@@ -1893,7 +1893,7 @@ test "transaction nonce advancement survives payload rollback" {
     try std.testing.expectEqual(Interpreter.Status.revert, outcome.result.status());
     try std.testing.expectEqual(@as(u64, 8), (try executor.transactionAccountSummary(sender)).?.nonce);
 
-    const executed = Cancun.Executor.Executed(void){
+    const executed = Latest.Executor.Executed(void){
         .executor = &executor,
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
@@ -1903,7 +1903,7 @@ test "transaction nonce advancement survives payload rollback" {
 }
 
 test "transaction nonce advancement remains recorded for the runtime" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const request = execution_values.ExecutionRequest{
@@ -1917,7 +1917,7 @@ test "transaction nonce advancement remains recorded for the runtime" {
         } },
         .gas = .legacy(100_000),
     };
-    var executor = Cancun.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .nonce = 7 });
@@ -2103,10 +2103,10 @@ test "transaction payload resolves only its inner checkpoint" {
 }
 
 test "executor executes top-level create transaction" {
-    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -2139,10 +2139,10 @@ fn expectTransferLog(event_log: Host.Log, from: Address, to: Address, amount: u2
 }
 
 test "Amsterdam value transaction emits transfer log" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -2175,7 +2175,7 @@ test "Osaka value transaction does not emit transfer log" {
 }
 
 test "Amsterdam nested CALL transfer log rolls back on revert" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const recipient = evmz.addr(0xcccc);
@@ -2184,7 +2184,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
         .PUSH0, .PUSH0, .REVERT,
     });
 
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -2205,7 +2205,7 @@ test "Amsterdam nested CALL transfer log rolls back on revert" {
 }
 
 test "Amsterdam CREATE endowment emits transfer log" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const create_address = evmz.address.create(contract, 0);
@@ -2213,7 +2213,7 @@ test "Amsterdam CREATE endowment emits transfer log" {
         .PUSH1, 0x00, .PUSH1, 0x00, .PUSH1, 0x07, .CREATE, .POP, .STOP,
     });
 
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -2232,13 +2232,13 @@ test "Amsterdam CREATE endowment emits transfer log" {
 }
 
 test "Amsterdam SELFDESTRUCT transfer emits transfer log" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const beneficiary = evmz.addr(0xcccc);
     const code = evmz.t.bytecode(.{ .PUSH2, 0xcc, 0xcc, .SELFDESTRUCT });
 
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
@@ -2273,13 +2273,13 @@ fn putFundedSender(executor: anytype, sender: Address) !void {
 
 test "Amsterdam raises create runtime code size limit" {
     if (comptime !evmz.t.forkEnabled(.osaka)) return error.SkipZigTest;
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const Osaka = evmz.t.Vm(.osaka) orelse return error.SkipZigTest;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 20_000_000);
     const default_max_code_size = evmz.eth.osaka.create.code_size_limit.?;
     const oversized_osaka = initCodeReturningRuntimeSize(default_max_code_size + 1);
-    const oversized_amsterdam = initCodeReturningRuntimeSize(evmz.eth.amsterdam.create.code_size_limit.? + 1);
+    const oversized_amsterdam = initCodeReturningRuntimeSize(evmz.eth.latest.create.code_size_limit.? + 1);
 
     var osaka = Osaka.Executor.init(std.testing.allocator, .{});
     defer osaka.deinit();
@@ -2295,11 +2295,11 @@ test "Amsterdam raises create runtime code size limit" {
     try std.testing.expectEqual(evmz.execution.FrameHalt.success, osaka_result.frame_halt.?);
     try std.testing.expect(osaka_result.checkpoint_reverted);
 
-    var amsterdam = Amsterdam.Executor.init(std.testing.allocator, .{});
-    defer amsterdam.deinit();
-    try putFundedSender(&amsterdam, sender);
+    var latest = Latest.Executor.init(std.testing.allocator, .{});
+    defer latest.deinit();
+    try putFundedSender(&latest, sender);
 
-    const amsterdam_result = (try runStandalone(&amsterdam, execution_context, .{ .create = .{
+    const latest_result = (try runStandalone(&latest, execution_context, .{ .create = .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
         .init_code = &oversized_osaka,
@@ -2307,10 +2307,10 @@ test "Amsterdam raises create runtime code size limit" {
         .regular_left = 20_000_000,
         .reservoir = evmz.eth.eip8037.new_account_state_gas + (default_max_code_size + 1) * evmz.eth.eip8037.cost_per_state_byte,
     }));
-    try std.testing.expectEqual(Interpreter.Status.success, amsterdam_result.status());
-    try std.testing.expectEqual(@as(usize, default_max_code_size + 1), (try amsterdam.getCode(evmz.address.create(sender, 0))).len);
+    try std.testing.expectEqual(Interpreter.Status.success, latest_result.status());
+    try std.testing.expectEqual(@as(usize, default_max_code_size + 1), (try latest.getCode(evmz.address.create(sender, 0))).len);
 
-    var amsterdam_over = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var amsterdam_over = Latest.Executor.init(std.testing.allocator, .{});
     defer amsterdam_over.deinit();
     try putFundedSender(&amsterdam_over, sender);
 
@@ -2622,11 +2622,11 @@ test "create warms created address from Berlin" {
 }
 
 test "callcode with insufficient balance leaves caller storage unchanged" {
-    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const caller = evmz.addr(0xaaaa);
     const target = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(caller, 100_000);
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 0 });
@@ -2652,10 +2652,10 @@ test "callcode with insufficient balance leaves caller storage unchanged" {
 }
 
 test "create address collision preserves nonce and warmth outside payload rollback" {
-    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const execution_context = testExecutionContext(sender, 100_000);
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1 });
@@ -2809,12 +2809,12 @@ test "value call at max depth returns stipend without child execution" {
 }
 
 test "Amsterdam value call at max depth refills new-account state gas" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const recipient = evmz.addr(0xcccc);
     const execution_context = testExecutionContext(caller, 300_000);
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 1_000_000 });
@@ -2852,11 +2852,11 @@ test "Amsterdam value call at max depth refills new-account state gas" {
 }
 
 test "Amsterdam create at max depth refills new-account state gas" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const caller = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const execution_context = testExecutionContext(caller, 300_000);
-    var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try evmz.t.seedExecutorAccount(&executor, caller, .{ .balance = 1_000_000 });
@@ -3011,9 +3011,9 @@ fn expectSelfDestructRefund(comptime ExactVm: type, expected_refund: i64) !void 
 }
 
 test "active precompiles are warm but not existing state accounts" {
-    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const precompile_address = evmz.addr(2);
-    var executor = Berlin.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     var host_iface = executor.host();
@@ -3028,7 +3028,7 @@ test "active precompiles are warm but not existing state accounts" {
 }
 
 test "EXTCODESIZE and CALL canonicalize and share warmth for high-bit address words" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0xbbbb);
     const target = evmz.addr(0x1234);
@@ -3039,7 +3039,7 @@ test "EXTCODESIZE and CALL canonicalize and share warmth for high-bit address wo
 
     inline for (.{ false, true }, 0..) |prewarm, index| {
         const root_code = highBitAddressCallCode(prewarm, address_bytes);
-        var executor = Amsterdam.Executor.init(std.testing.allocator, .{});
+        var executor = Latest.Executor.init(std.testing.allocator, .{});
         defer executor.deinit();
         try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
         try evmz.t.seedExecutorAccount(&executor, root, .{ .code = &root_code });
@@ -3094,10 +3094,10 @@ fn highBitAddressCallCode(comptime prewarm: bool, address_bytes: [32]u8) [if (pr
 }
 
 test "delegated precompile targets are warm" {
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = evmz.t.Vm(.latest).?;
     const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     try expectDelegatedPrecompileWarm(Prague);
-    try expectDelegatedPrecompileWarm(Amsterdam);
+    try expectDelegatedPrecompileWarm(Latest);
 }
 
 fn expectDelegatedPrecompileWarm(comptime ExactVm: type) !void {

@@ -165,7 +165,8 @@ test "Amsterdam prepare skips sender code read for canonical empty code hash" {
 }
 
 test "prepare accepts delegation-shaped sender code only after EIP-7702 activates" {
-    if (comptime !(evmz.t.forkEnabled(.cancun) and evmz.t.forkEnabled(.prague))) return error.SkipZigTest;
+    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Prague = evmz.t.Vm(.prague) orelse return error.SkipZigTest;
     var delegation_code: [evmz.eth.eip7702.delegation_code_len]u8 = undefined;
     evmz.eip7702.writeDelegationCode(&delegation_code, evmz.addr(0xdddd));
 
@@ -185,12 +186,12 @@ test "prepare accepts delegation-shaped sender code only after EIP-7702 activate
         .gas_price = 1,
     };
 
-    const cancun = try prepareFor(evmz.Vm(evmz.eth.cancun), &probe, value, .{});
+    const cancun = try prepareFor(Cancun, &probe, value, .{});
     try std.testing.expectEqual(ValidationError.sender_not_eoa, try rejected(cancun));
     try probe.expectReads(&.{ .account_summary, .code });
 
     probe.resetReads();
-    const prague = try prepareFor(evmz.Vm(evmz.eth.prague), &probe, value, .{});
+    const prague = try prepareFor(Prague, &probe, value, .{});
     switch (prague) {
         .executable => {},
         .rejected => return error.UnexpectedRejection,
