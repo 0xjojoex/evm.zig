@@ -27,7 +27,7 @@ const Backend = @import("../backend.zig").Backend;
 
 const Log = vm.Log;
 const AssumeDecodedBlockInput = block_stf.AssumeDecodedBlockInput;
-const DenseAmsterdam = block_stf.Bind(.amsterdam, vm.BalVm(eth_spec.amsterdam));
+const DenseLatest = block_stf.Bind(.latest, vm.BalVm(eth_spec.latest));
 const FinalizeBlockContext = block_stf.FinalizeBlockContext;
 const ObservationTarget = block_stf.ObservationTarget;
 const empty_requests_hash = block_stf.empty_requests_hash;
@@ -381,7 +381,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
 }
 
 test "BlockSTF reports root mismatches and invalid witness" {
-    const StfFrontier = t.BlockStf(.frontier) orelse return error.SkipZigTest;
+    const StfLatest = t.BlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -397,7 +397,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
         .encoded = "tx0",
     }};
 
-    const mismatch = try StfFrontier.applyAssumeDecoded(scratch, .{
+    const mismatch = try StfLatest.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
@@ -417,7 +417,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
     });
     const coded_node = try testLeafNode(scratch, &account_key, coded_value);
     const coded_nodes = [_][]const u8{coded_node};
-    const invalid = try StfFrontier.applyAssumeDecoded(scratch, .{
+    const invalid = try StfLatest.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 21_000 },
         .state_backend = try Backend.fromWitness(scratch, crypto.keccak256(coded_node), &coded_nodes, &.{}),
         .transactions = &tx_input,
@@ -432,7 +432,7 @@ test "BlockSTF reports root mismatches and invalid witness" {
 }
 
 test "BlockSTF receipt ownership survives a later trace-consumer error" {
-    const StfAmsterdam = t.CaptureBlockStf(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = t.CaptureBlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -459,7 +459,7 @@ test "BlockSTF receipt ownership survives a later trace-consumer error" {
 
     try std.testing.expectError(
         error.TestTraceConsumerFailure,
-        StfAmsterdam.applyAssumeDecoded(std.testing.allocator, .{
+        Latest.applyAssumeDecoded(std.testing.allocator, .{
             .env = .{ .gas_limit = 21_000 },
             .state_backend = try Backend.fromWitness(
                 std.testing.allocator,
@@ -482,7 +482,7 @@ test "BlockSTF receipt ownership survives a later trace-consumer error" {
 }
 
 test "BlockSTF validates withdrawals root" {
-    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = t.BlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -512,7 +512,7 @@ test "BlockSTF validates withdrawals root" {
     };
     const expected_state_root = try trie.root(scratch, &expected_state_pairs);
 
-    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const result = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -527,7 +527,7 @@ test "BlockSTF validates withdrawals root" {
     try std.testing.expectEqual(Status.valid, result.status);
     try std.testing.expectEqualSlices(u8, &expected_withdrawals_root, &result.withdrawals_root);
 
-    const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const mismatch = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -542,7 +542,7 @@ test "BlockSTF validates withdrawals root" {
 }
 
 test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL index" {
-    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = t.BlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -569,7 +569,7 @@ test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL 
         .{ .address = recipient_b },
     });
 
-    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const result = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -650,8 +650,8 @@ test "BlockSTF applies Cancun block-start system contract" {
 }
 
 test "BlockSTF rejects missing or inconsistent parent context" {
-    const StfCancun = t.BlockStf(.cancun) orelse return error.SkipZigTest;
-    const missing = try StfCancun.applyAssumeDecoded(std.testing.allocator, .{
+    const Latest = t.BlockStf(.latest).?;
+    const missing = try Latest.applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2 },
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -660,7 +660,7 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     try std.testing.expectEqual(Status.parent_header_mismatch, missing.status);
 
     const parent_hash = [_]u8{0x11} ** 32;
-    const inconsistent = try StfCancun.applyAssumeDecoded(std.testing.allocator, .{
+    const inconsistent = try Latest.applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2, .gas_limit = 30_000_000 },
         .block_header = .{
             .number = 1,
@@ -684,12 +684,12 @@ test "BlockSTF rejects missing or inconsistent parent context" {
 }
 
 test "BlockSTF rejects a nonempty requests hash claim against an empty block" {
-    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = t.BlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const result = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -701,7 +701,7 @@ test "BlockSTF rejects a nonempty requests hash claim against an empty block" {
     const claimed_request = try eip7685.requestBytes(scratch, eip6110.request_type, &.{0xbb});
     const claimed_requests = [_][]const u8{claimed_request};
     const claimed_requests_hash = try requestsHash(scratch, &claimed_requests);
-    const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const mismatch = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
@@ -719,7 +719,7 @@ test "Amsterdam finalize calls include builder request predeploys" {
         .block_gas = 0,
         .state_gas = 0,
     };
-    const calls = eth_spec.amsterdam.block.finalizeBlock(context);
+    const calls = eth_spec.latest.block.finalizeBlock(context);
 
     try std.testing.expectEqual(@as(usize, 4), calls.len);
     try std.testing.expectEqual(eth_system.withdrawal_request_predeploy_address, calls.items[0].call.recipient);
@@ -740,7 +740,7 @@ test "Amsterdam finalize calls include builder request predeploys" {
 }
 
 test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reachable" {
-    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = t.BlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -770,26 +770,26 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
         },
     };
 
-    const mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, input);
+    const mismatch = try Latest.applyAssumeDecoded(scratch, input);
     try std.testing.expectEqual(Status.block_hash_mismatch, mismatch.status);
     try std.testing.expect(!std.mem.eql(u8, &zero_hash, &mismatch.block_hash));
 
     var valid_input = input;
     valid_input.header_hash_claim.?.block_hash = mismatch.block_hash;
-    const valid = try StfAmsterdam.applyAssumeDecoded(scratch, valid_input);
+    const valid = try Latest.applyAssumeDecoded(scratch, valid_input);
     try std.testing.expectEqual(Status.valid, valid.status);
     try std.testing.expectEqualSlices(u8, &mismatch.block_hash, &valid.block_hash);
 }
 
 test "BlockSTF compares derived block access list artifact and hash claims" {
-    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = t.BlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
 
     const empty_bal: []const eth_bal.AccountChanges = &.{};
     const empty_claim = try eth_bal.encodeAlloc(scratch, empty_bal);
-    const valid = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const valid = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -801,7 +801,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
 
     const phantom_accounts = [_]eth_bal.AccountChanges{.{ .address = address.addr(0xbeef) }};
     const phantom_claim = try eth_bal.encodeAlloc(scratch, &phantom_accounts);
-    const artifact_mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const artifact_mismatch = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = phantom_claim,
@@ -809,7 +809,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_mismatch, artifact_mismatch.status);
 
-    const hash_mismatch = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const hash_mismatch = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = empty_claim,
@@ -818,7 +818,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.block_access_list_hash_mismatch, hash_mismatch.status);
 
-    const malformed_claim = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const malformed_claim = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .block_access_list = &.{0xff},
@@ -826,7 +826,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
     });
     try std.testing.expectEqual(Status.malformed_block_access_list, malformed_claim.status);
 
-    const oversized_claim = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const oversized_claim = try Latest.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 1 },
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -839,7 +839,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
         .tx = .{ .sender = .zero, .gas_limit = 2 },
         .encoded = "tx0",
     }};
-    const excessive_gas = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const excessive_gas = try Latest.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 1 },
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &excessive_gas_transactions,
@@ -863,7 +863,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         .amount = 0,
     };
     const withdrawals = [_]Withdrawal{withdrawal};
-    const missing_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+    const missing_account = try DenseLatest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(
             scratch,
             trie.empty_root_hash,
@@ -906,7 +906,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         },
         .encoded = "tx0",
     }};
-    const missing_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+    const missing_storage = try DenseLatest.applyAssumeDecoded(scratch, .{
         .env = .{ .gas_limit = 100_000 },
         .state_backend = try Backend.fromWitness(
             scratch,
@@ -927,7 +927,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
     const spurious_account_claim = try eth_bal.encodeAlloc(scratch, &.{.{
         .address = address.addr(0x3000),
     }});
-    const spurious_account = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+    const spurious_account = try DenseLatest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(
             scratch,
             trie.empty_root_hash,
@@ -945,7 +945,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
         .address = address.addr(0x4000),
         .storage_reads = &spurious_slot,
     }});
-    const spurious_storage = try DenseAmsterdam.applyAssumeDecoded(scratch, .{
+    const spurious_storage = try DenseLatest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(
             scratch,
             trie.empty_root_hash,
@@ -960,7 +960,7 @@ test "dense BlockSTF classifies missing and spurious BAL coverage as mismatch" {
 }
 
 test "BlockSTF records zero withdrawals as block access list accesses" {
-    const StfAmsterdam = t.BlockStf(.amsterdam) orelse return error.SkipZigTest;
+    const Latest = t.BlockStf(.latest).?;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -976,7 +976,7 @@ test "BlockSTF records zero withdrawals as block access list accesses" {
     const claimed_accounts = [_]eth_bal.AccountChanges{.{ .address = withdrawal.address }};
     const claimed_bal = try eth_bal.encodeAlloc(scratch, &claimed_accounts);
 
-    const result = try StfAmsterdam.applyAssumeDecoded(scratch, .{
+    const result = try Latest.applyAssumeDecoded(scratch, .{
         .state_backend = try Backend.fromWitness(scratch, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
         .withdrawals = &withdrawals,
@@ -1038,7 +1038,7 @@ test "BlockSTF validates blob gas header fields" {
         .parent_blob_gas_used = 786_432,
         .parent_base_fee_per_gas = 1_000_000,
     };
-    const blob_schedule = vm.Vm(eth_spec.prague).spec.transaction.blob_schedule.?;
+    const blob_schedule = eth_spec.prague.transaction.blob_schedule.?;
     const expected_excess_blob_gas = blob_schedule.calcExcessBlobGasForSchedule(parent_blob_gas).?;
     const custom_blob_params = transaction.BlobParams{
         .target = 10,

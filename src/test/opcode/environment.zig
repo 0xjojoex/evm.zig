@@ -72,7 +72,6 @@ test "EXTCODESIZE account access gas comes from the exact spec" {
 }
 
 test "EXTCODECOPY writes directly and zero pads missing code bytes" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
     var target_code = [_]u8{ 0xaa, 0xbb, 0xcc };
@@ -95,8 +94,8 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
         0x3c, // EXTCODECOPY
     };
 
-    const Cancun = evmz.Vm(evmz.eth.cancun);
-    var frame = try Cancun.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    const Latest = evmz.t.Vm(.latest).?;
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &mock_host.execution_context,
         .msg = &msg,

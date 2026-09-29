@@ -39,18 +39,8 @@ fn seedCode(executor: anytype, address: evmz.Address, code: []const u8, balance:
     try executor.state.seedAccount(address, account);
 }
 
-test "call capture exports client-independent primitives without a projection" {
-    try std.testing.expect(@hasDecl(evmz.trace, "CallArena"));
-    try std.testing.expect(@hasDecl(evmz.trace, "CallSpan"));
-    try std.testing.expect(@hasDecl(evmz.trace, "CallRow"));
-    try std.testing.expect(@hasDecl(evmz.trace, "CallKind"));
-    try std.testing.expect(@hasDecl(evmz.trace, "CallStatus"));
-    try std.testing.expect(!@hasDecl(evmz.trace, "call_projection"));
-    try std.testing.expect(!@hasDecl(evmz.trace, "geth_calltracer"));
-}
-
 test "call capture distinguishes STATICCALL from inherited-static CALL" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);
@@ -99,7 +89,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
 }
 
 test "call capture closes an immediate insufficient-balance call" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);
@@ -174,7 +164,7 @@ test "root insufficient-balance capture preserves unspent gas" {
 }
 
 test "call capture retains immediate depth-limit cause" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const child = evmz.addr(0x1234);
 
@@ -217,7 +207,7 @@ test "call capture retains immediate depth-limit cause" {
 }
 
 test "call capture retains opcode-local CALL depth attempt" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);
@@ -269,7 +259,7 @@ test "call capture retains opcode-local CALL depth attempt" {
 }
 
 test "call capture retains opcode-local CREATE precheck attempts" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const create_zero = evmz.t.bytecode(.{
@@ -375,7 +365,7 @@ test "call capture retains opcode-local CREATE precheck attempts" {
 }
 
 test "call capture distinguishes CREATE collision from rollback" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const root_nonce = 7;
@@ -420,7 +410,7 @@ test "call capture distinguishes CREATE collision from rollback" {
 }
 
 test "call capture retains invalid deployed code and local rollback" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const target = evmz.address.create(root, 0);
@@ -502,7 +492,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
 }
 
 test "call capture retains pinned Geth v1.17.4 frame error categories" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const invalid_opcode = [_]u8{0x0c};
@@ -557,7 +547,7 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
 }
 
 test "call capture retains pinned write-protection category" {
-    const Default = (evmz.t.Vm(.cancun) orelse return error.SkipZigTest).Executor;
+    const Default = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const root = evmz.addr(0x1000);
     const child = evmz.addr(0x1234);

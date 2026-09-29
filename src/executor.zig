@@ -2495,8 +2495,8 @@ pub fn ExecutorType(
 }
 
 test "CREATE final stabilization reuses already-stable output" {
-    const Berlin = evmz.t.Vm(.berlin) orelse return error.SkipZigTest;
-    const Executor = Berlin.Executor;
+    const Latest = evmz.t.Vm(.latest).?;
+    const Executor = Latest.Executor;
 
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var executor = Executor.init(failing_allocator.allocator(), .{});
@@ -2541,8 +2541,8 @@ test "EIP-684 creation collision checks nonce and code" {
 }
 
 test "interior checkpoint guard restores unresolved state and preserves commits" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
-    const Executor = Cancun.Executor;
+    const Latest = evmz.t.Vm(.latest).?;
+    const Executor = Latest.Executor;
     const address = evmz.addr(0x1234);
 
     var executor = Executor.init(std.testing.allocator, .{});
@@ -2572,8 +2572,8 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
 }
 
 test "call runtime abort skips resolved top and restores enclosing checkpoint" {
-    const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
-    const Executor = Cancun.Executor;
+    const Latest = evmz.t.Vm(.latest).?;
+    const Executor = Latest.Executor;
     const sender = evmz.addr(0x1111);
     const root_address = evmz.addr(0x2222);
     const parent_write = evmz.addr(0x3333);
@@ -2632,7 +2632,6 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
 }
 
 test "nested runtime error restores its transferred checkpoint once" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const fail_byte: u8 = 0xb0;
     const Fail = struct {
         pub inline fn execute(comptime _: evmz.spec.Spec, _: *Interpreter.CallFrame) anyerror!void {
@@ -2640,14 +2639,14 @@ test "nested runtime error restores its transferred checkpoint once" {
         }
     };
     const custom_instructions = comptime instructions: {
-        var instructions = evmz.eth.cancun.instruction;
+        var instructions = evmz.eth.latest.instruction;
         instructions.install(.SQUARE, fail_byte, .{
             .static_gas = 0,
             .stack_in = 0,
         }, .{ .custom = Fail });
         break :instructions instructions;
     };
-    const Exact = evmz.t.CustomVm(.cancun, .{ .instruction = custom_instructions }) orelse return error.SkipZigTest;
+    const Exact = evmz.t.CustomVm(.latest, .{ .instruction = custom_instructions }).?;
     const Executor = Exact.Executor;
     const sender = evmz.addr(0x1111);
     const recipient = evmz.addr(0x2222);
@@ -2693,7 +2692,7 @@ fn expectNoCreationCollision(comptime revision: evmz.eth.Revision, target: Addre
 }
 
 test "nested call runtime owns its segment and keeps capture indices global" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const child_address = evmz.addr(0x3333);
 
@@ -2745,7 +2744,7 @@ test "nested call runtime owns its segment and keeps capture indices global" {
     const child_result = (try executor.resolveHostCall(.{
         .depth = 1,
         .kind = .call,
-        .gas = 100_000,
+        .gas = 1_000_000,
         .recipient = child_address,
         .sender = root_message.recipient,
         .input_data = &.{},

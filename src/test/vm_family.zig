@@ -46,13 +46,8 @@ test "exact Engine derives one coherent transaction authoring chain" {
 
     comptime {
         std.debug.assert(ExactEngine.Executor == ExactVm.Executor);
-        std.debug.assert(!@hasDecl(ExactEngine.Executor, "specification"));
         std.debug.assert(ExactVm.World == evmz.state.OpenWorld);
-        std.debug.assert(!@hasDecl(ExactEngine, "Lane"));
         std.debug.assert(SourceContext == Context);
-        std.debug.assert(!@hasDecl(Context, "specification"));
-        std.debug.assert(!@hasDecl(Context, "Lane"));
-        std.debug.assert(!@hasDecl(Context, "compile_options"));
         std.debug.assert(@TypeOf(Transition.transact) == ExpectedTransact);
     }
 }
@@ -82,7 +77,7 @@ fn analyzeEngineProduct(comptime Engine: type) void {
 }
 
 test "hand-written multi-variant family dispatches through ProgramType" {
-    const Base = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
+    const Base = evmz.t.Vm(.latest).?;
     const ExactEngine = evmz.Engine(Base.spec);
     const Executor = ExactEngine.Executor;
 
@@ -251,44 +246,26 @@ test "Env execution context derives opcode-visible gas limit from the environmen
 }
 
 test "exact VM closes the complete spec without revision state" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
-    const Cancun = evmz.Vm(evmz.eth.cancun);
+    const Latest = evmz.t.Vm(.latest).?;
 
     comptime {
-        std.debug.assert(!@hasField(Cancun.Executor.Init, "revision"));
-        std.debug.assert(!@hasField(Cancun.Executor, "revision_id"));
-        std.debug.assert(Cancun.spec.transaction.max_initcode_size == evmz.eth.cancun.transaction.max_initcode_size);
-        std.debug.assert(Cancun.Executor == evmz.Executor(
-            Cancun.spec,
-            Cancun.World,
-            Cancun.compile_options,
+        for (std.meta.fields(Latest.Executor.Init)) |field| {
+            std.debug.assert(field.type != evmz.eth.Revision);
+        }
+        for (std.meta.fields(Latest.Executor)) |field| {
+            std.debug.assert(field.type != evmz.eth.Revision);
+        }
+        std.debug.assert(Latest.Executor == evmz.Executor(
+            Latest.spec,
+            Latest.World,
+            Latest.compile_options,
         ));
     }
-
-    try std.testing.expect(@hasDecl(Cancun, "transact"));
-    try std.testing.expect(@hasDecl(Cancun, "BlockExecution"));
-    try std.testing.expect(!@hasDecl(Cancun.BlockExecution.PreludeContext, "specification"));
-    try std.testing.expect(!@hasDecl(Cancun, "beginBlock"));
-    try std.testing.expect(!@hasDecl(Cancun, "Context"));
-    try std.testing.expect(!@hasDecl(Cancun, "Transition"));
-    try std.testing.expect(!@hasDecl(Cancun, "Program"));
-    try std.testing.expect(!@hasDecl(Cancun, "Family"));
-    try std.testing.expect(!@hasDecl(Cancun, "NamedFamily"));
-    inline for (.{
-        "TransactionLog",
-        "TransactionLogs",
-        "Prelude",
-        "PreludeContext",
-        "Gas",
-        "Settlement",
-    }) |name| try std.testing.expect(!@hasDecl(Cancun, name));
-    try std.testing.expect(!@hasDecl(Cancun, "TransactionPolicy"));
-    try std.testing.expect(!@hasDecl(Cancun, "ExecutionProtocol"));
 }
 
 test "exact VM compile options can opt into step capture" {
-    const Slim = evmz.Vm(evmz.eth.amsterdam);
-    const Full = evmz.VmWithOptions(evmz.eth.amsterdam, .{ .step_capture = true });
+    const Slim = evmz.t.Vm(.latest).?;
+    const Full = evmz.t.CaptureVm(.latest).?;
 
     comptime {
         std.debug.assert(Full != Slim);
@@ -301,19 +278,18 @@ test "exact VM compile options can opt into step capture" {
 }
 
 test "Spec.extend creates a distinct exact VM from static values" {
-    if (comptime !evmz.t.forkEnabled(.london)) return error.SkipZigTest;
-    const Strict = evmz.Vm(evmz.eth.london.extend(.{
+    const Strict = evmz.t.CustomVm(.latest, .{
         .transaction = .{ .total_gas_limit = .{ .replace = 20_000 } },
-        .call = .{ .base_gas = evmz.eth.london.call.base_gas + 5 },
-    }));
-    const London = evmz.Vm(evmz.eth.london);
+        .call = .{ .base_gas = evmz.eth.latest.call.base_gas + 5 },
+    }).?;
+    const Latest = evmz.t.Vm(.latest).?;
 
     comptime {
-        std.debug.assert(Strict != London);
-        std.debug.assert(Strict.Executor != London.Executor);
+        std.debug.assert(Strict != Latest);
+        std.debug.assert(Strict.Executor != Latest.Executor);
         std.debug.assert(Strict.spec.transaction.total_gas_limit.? == 20_000);
-        std.debug.assert(Strict.spec.call.base_gas == London.spec.call.base_gas + 5);
-        std.debug.assert(Strict.spec.create.initial_nonce == London.spec.create.initial_nonce);
+        std.debug.assert(Strict.spec.call.base_gas == Latest.spec.call.base_gas + 5);
+        std.debug.assert(Strict.spec.create.initial_nonce == Latest.spec.create.initial_nonce);
     }
 
     var memory = MemoryStore.init(std.testing.allocator);

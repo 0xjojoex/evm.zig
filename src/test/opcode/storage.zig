@@ -134,8 +134,8 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
-    var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    const Latest = evmz.t.Vm(.latest).?;
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &mock_host.execution_context,
         .msg = &msg,
@@ -167,8 +167,8 @@ test "prepared cold Amsterdam SSTORE at stipend stops before storage access" {
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, code);
     defer bytecode.deinit(std.testing.allocator);
 
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
-    var frame = try Amsterdam.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    const Latest = evmz.t.Vm(.latest).?;
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &mock_host.execution_context,
         .msg = &msg,

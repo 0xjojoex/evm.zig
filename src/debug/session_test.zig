@@ -124,7 +124,7 @@ fn stepOut(controlled: anytype, current: session.Pause) !session.Pause {
 }
 
 test "debug session matches uninterrupted execution" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
@@ -219,7 +219,7 @@ test "debug session matches uninterrupted execution" {
 }
 
 test "debug session stops at the next instruction and jump target" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
@@ -273,7 +273,7 @@ test "debug session stops at the next instruction and jump target" {
 }
 
 test "debug session matches call, create, precompile, and terminal outcomes" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const empty = [_]u8{};
     const create = evmz.t.bytecode(.{
         .PUSH0, .PUSH0,  .PUSH0, .CREATE,
@@ -315,10 +315,9 @@ test "debug session matches call, create, precompile, and terminal outcomes" {
 }
 
 test "debug stepping respects finalized specialized builtin admission" {
-    if (comptime !evmz.t.forkEnabled(.amsterdam)) return error.SkipZigTest;
     const instructions = comptime instructions: {
         @setEvalBranchQuota(100_000);
-        var exact = evmz.eth.amsterdam.instruction;
+        var exact = evmz.eth.latest.instruction;
         for (.{
             .{ evmz.Opcode.STOP, 1 },
             .{ evmz.Opcode.PUSH1, 1 },
@@ -333,7 +332,7 @@ test "debug stepping respects finalized specialized builtin admission" {
         }
         break :instructions exact;
     };
-    const Exact = evmz.t.CustomVm(.amsterdam, .{ .instruction = instructions }) orelse return error.SkipZigTest;
+    const Exact = evmz.t.CustomVm(.latest, .{ .instruction = instructions }).?;
 
     inline for (.{
         evmz.Opcode.STOP,
@@ -354,7 +353,7 @@ test "debug stepping respects finalized specialized builtin admission" {
 }
 
 test "debug session dispatches a child and resumes its parent" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
@@ -629,7 +628,7 @@ test "debug session can substitute a create before continuing" {
 }
 
 test "debug session aborts at child and action boundaries" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
@@ -732,7 +731,6 @@ test "debug session aborts at child and action boundaries" {
 }
 
 test "debug session resolves and executes a custom instruction" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
     const square_byte: u8 = 0xb0;
     const Square = struct {
         pub inline fn execute(comptime _: evmz.spec.Spec, frame: *Interpreter.CallFrame) anyerror!void {
@@ -741,14 +739,14 @@ test "debug session resolves and executes a custom instruction" {
         }
     };
     const custom_instructions = comptime instructions: {
-        var instructions = evmz.eth.cancun.instruction;
+        var instructions = evmz.eth.latest.instruction;
         instructions.install(.SQUARE, square_byte, .{
             .static_gas = 5,
             .stack_in = 1,
         }, .{ .custom = Square });
         break :instructions instructions;
     };
-    const Exact = evmz.t.CustomVm(.cancun, .{ .instruction = custom_instructions }) orelse return error.SkipZigTest;
+    const Exact = evmz.t.CustomVm(.latest, .{ .instruction = custom_instructions }).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
@@ -848,7 +846,7 @@ test "debug session resolves and executes a custom instruction" {
 }
 
 test "debug session rejects an active capture context" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
@@ -887,7 +885,7 @@ test "debug session rejects an active capture context" {
 }
 
 test "debug session inspection rebinds to the active frame" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);
@@ -995,7 +993,7 @@ const ArmedFailingAllocator = struct {
 };
 
 test "failed debug session init leaves no prepared-code execution scope" {
-    const Exact = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
+    const Exact = evmz.t.Vm(.latest).?;
     const Executor = Exact.Executor;
     const Session = session.SessionType(Exact);
     const sender = evmz.addr(0x1111);

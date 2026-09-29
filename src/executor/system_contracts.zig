@@ -465,8 +465,8 @@ test "finalize system calls reject VM failure" {
 
 test "Amsterdam before-block system calls reserve state gas" {
     const ethereum = evmz.eth;
-    const Amsterdam = evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest;
-    const calls = Amsterdam.spec.block.beforeBlock(.{
+    const Latest = evmz.t.Vm(.latest).?;
+    const calls = Latest.spec.block.beforeBlock(.{
         .number = 1,
         .timestamp = 12,
         .parent_hash = [_]u8{0xaa} ** 32,

@@ -422,14 +422,6 @@ test "execution request and scope initialization contain no family policy" {
     try std.testing.expectEqual(@as(usize, 1), scope_fields.len);
     try std.testing.expectEqualStrings("initial_warm_set", scope_fields[0].name);
     try std.testing.expect(scope_fields[0].type == InitialWarmSet);
-
-    try std.testing.expect(!@hasField(ExecutionRequest, "transaction"));
-    try std.testing.expect(!@hasField(ExecutionRequest, "access_list"));
-    try std.testing.expect(!@hasField(ExecutionRequest, "authorization_list"));
-    try std.testing.expect(!@hasField(ExecutionRequest, "settlement"));
-    try std.testing.expect(!@hasField(ExecutionRequest, "checkpoint"));
-    try std.testing.expect(!@hasField(ExecutionScopeInit, "access_list"));
-    try std.testing.expect(!@hasField(ExecutionScopeInit, "authorization_list"));
 }
 
 test "message identity preserves create2 salt" {

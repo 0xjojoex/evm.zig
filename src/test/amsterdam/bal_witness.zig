@@ -28,11 +28,11 @@ const RecordingPreparer = struct {
     storage_slot_count: usize = 0,
     first_account: ?evmz.Address = null,
 
-    fn service(self: *RecordingPreparer) evmz.ExecutionResourcePreparer {
+    fn service(self: *RecordingPreparer) evmz.execution_resources.Preparer {
         return .{ .ptr = self, .vtable = &.{ .prepare = prepare } };
     }
 
-    fn prepare(ptr: *anyopaque, plan: evmz.ExecutionResourcePlan) !void {
+    fn prepare(ptr: *anyopaque, plan: evmz.execution_resources.Plan) !void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.called = true;
         self.account_count = plan.state.accounts.len;

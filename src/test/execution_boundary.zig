@@ -4,16 +4,6 @@ const evmz = @import("../evm.zig");
 const trace = evmz.trace;
 const transaction_runtime = @import("../transaction/runtime.zig");
 
-test "execution resource plan and preparer have nominal root aliases" {
-    try std.testing.expectEqual(evmz.execution_resources.Plan, evmz.ExecutionResourcePlan);
-    try std.testing.expectEqual(evmz.execution_resources.Preparer, evmz.ExecutionResourcePreparer);
-}
-
-test "execution resource interfaces omit legacy prefetch and verify hooks" {
-    try std.testing.expect(!@hasDecl(evmz.StateReader, "prefetch"));
-    try std.testing.expect(!@hasDecl(evmz.ExecutionResourcePreparer, "verify"));
-}
-
 test "Executor observation boundary hides pending state views" {
     const Executor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
     const Executed = Executor.Executed(void);
@@ -24,9 +14,9 @@ test "Executor observation boundary hides pending state views" {
 }
 
 test "discarding a manual state transition rolls back its mutations" {
-    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
+    const LatestExecutor = (evmz.t.Vm(.latest).?).Executor;
     const account = evmz.addr(0xaaaa);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{});
+    var executor = LatestExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try executor.beginStateTransition(evmz.t.defaultExecutionContext(account, 100_000));
@@ -40,12 +30,12 @@ test "discarding a manual state transition rolls back its mutations" {
 }
 
 test "execution checkpoints stay inside one stable transaction scope" {
-    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
+    const LatestExecutor = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const other = evmz.addr(0xcccc);
     const reverted = evmz.addr(0xdddd);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{});
+    var executor = LatestExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     const execution_context = evmz.t.defaultExecutionContext(sender, 100_000);
@@ -72,7 +62,7 @@ test "execution checkpoints stay inside one stable transaction scope" {
 }
 
 test "beginMessageScope derives root identity context and raw warmth" {
-    const ShanghaiExecutor = (evmz.t.Vm(.shanghai) orelse return error.SkipZigTest).Executor;
+    const LatestExecutor = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const recipient = evmz.addr(0xbbbb);
     const coinbase = evmz.addr(0xcccc);
@@ -102,7 +92,7 @@ test "beginMessageScope derives root identity context and raw warmth" {
             .blob_hashes = &blob_hashes,
         },
     };
-    var executor = ShanghaiExecutor.init(std.testing.allocator, .{});
+    var executor = LatestExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     defer executor.discardStateTransition();
 
@@ -171,7 +161,7 @@ test "execution checkpoint preserves family pre-scope writes" {
 }
 
 test "checkpoint commit retains state and restore rolls back without closing scope" {
-    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
+    const LatestExecutor = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const additional = evmz.addr(0xcccc);
@@ -179,7 +169,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         contract: evmz.Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), observation: BerlinExecutor.Observation) !void {
+        pub fn observe(self: *@This(), observation: LatestExecutor.Observation) !void {
             const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
@@ -194,7 +184,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
         }
     };
     var observations = Observer{ .contract = contract };
-    var executor = BerlinExecutor.init(std.testing.allocator, .{});
+    var executor = LatestExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     const observed = executor.observe(&observations);
     try observed.beginTransaction(
@@ -232,10 +222,10 @@ test "checkpoint commit retains state and restore rolls back without closing sco
 }
 
 test "checkpoint nests LIFO and deinit restores an open token" {
-    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
+    const LatestExecutor = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{});
+    var executor = LatestExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(evmz.t.defaultExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
@@ -257,10 +247,10 @@ test "checkpoint nests LIFO and deinit restores an open token" {
 }
 
 test "successive checkpoints receive distinct scope generations" {
-    const BerlinExecutor = (evmz.t.Vm(.berlin) orelse return error.SkipZigTest).Executor;
+    const LatestExecutor = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
-    var executor = BerlinExecutor.init(std.testing.allocator, .{});
+    var executor = LatestExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     try executor.beginTransaction(evmz.t.defaultExecutionContext(sender, 100_000), sender, contract);
     defer executor.discardStateTransition();
@@ -282,14 +272,14 @@ test "successive checkpoints receive distinct scope generations" {
 }
 
 test "checkpoint revert preserves reads without retaining storage effects" {
-    const AmsterdamExecutor = (evmz.t.Vm(.amsterdam) orelse return error.SkipZigTest).Executor;
+    const LatestExecutor = (evmz.t.Vm(.latest).?).Executor;
     const sender = evmz.addr(0xaaaa);
     const contract = evmz.addr(0xbbbb);
     const Observer = struct {
         contract: evmz.Address,
         found: bool = false,
 
-        pub fn observe(self: *@This(), observation: AmsterdamExecutor.Observation) !void {
+        pub fn observe(self: *@This(), observation: LatestExecutor.Observation) !void {
             const storage = observation.observations().storage;
             var index: u32 = 0;
             while (index < storage.len()) : (index += 1) {
@@ -304,7 +294,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
         }
     };
     var observations = Observer{ .contract = contract };
-    var executor = AmsterdamExecutor.init(std.testing.allocator, .{});
+    var executor = LatestExecutor.init(std.testing.allocator, .{});
     defer executor.deinit();
     const observed = executor.observe(&observations);
     try observed.beginTransaction(
