@@ -49,6 +49,27 @@ Changed
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the
   precompiles, so no consumer loses a C-free configuration.
+- Native results require an explicit `gas_reservoir` and carry signed state-gas
+  accounting. `NativeContractResult.init` and shared charge/child-settlement
+  operations preserve retained gas, child refunds and state-gas credits.
+  Native Host effects enforce static context and direct-child depth; caught static
+  violations remain terminal. Failure normalization unwinds state gas and clears
+  discarded output, including retained child output.
+- `NativeContractCall.rules` borrows the executor's `StorageSpec` and `CallSpec`,
+  so native effects that mimic EVM operations are priced from the compiled spec,
+  including `Spec.extend` overrides, and one runtime can serve several specs.
+- `Host.changeBalance` supports journaled credit/debit and an optional atomic
+  issuance log. Custom Host implementations must supply the new callback.
+  Standalone system-call entry rejects effective native targets with
+  `NativeSystemCallUnsupported`; delegated bytecode still executes normally.
+- Host-capable native contracts are named for the tier, not for one of its
+  capabilities: `Spec.reentrant_native_contract` is `Spec.native_contract`;
+  `execution.ReentrantNativeContract{Runtime,Call,Result}` are
+  `execution.NativeContract{Runtime,Call,Result}`; `NoReentrantNativeContracts`
+  is `NoNativeContracts`; the executor option `reentrant_native_contract_runtime`
+  is `native_contract_runtime` and its missing-runtime error is
+  `MissingNativeContractRuntime`. Callback into the EVM remains a permitted
+  capability of the tier, not a requirement. See `doc/native-contracts.md`.
 
 Removed
 

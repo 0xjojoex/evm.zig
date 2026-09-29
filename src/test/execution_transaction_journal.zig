@@ -100,7 +100,7 @@ const NativeContract = struct {
 };
 
 const JournalVm = evmz.VmWithOptions(
-    evmz.eth.latest.extend(.{ .reentrant_native_contract = NativeContract }),
+    evmz.eth.latest.extend(.{ .native_contract = NativeContract }),
     .{ .transaction_journal = TestJournal },
 );
 
@@ -123,15 +123,16 @@ const NativeRuntime = struct {
     journal: *TestJournal,
     reentry_target: evmz.Address,
 
-    fn service(self: *NativeRuntime) execution.ReentrantNativeContractRuntime {
+    fn service(self: *NativeRuntime) execution.NativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
     fn execute(
         ptr: *anyopaque,
-        call: execution.ReentrantNativeContractCall,
-    ) !execution.ReentrantNativeContractResult {
+        call: execution.NativeContractCall,
+    ) !execution.NativeContractResult {
         const self: *NativeRuntime = @ptrCast(@alignCast(ptr));
+        var ledger = execution.NativeContractResult.init(call.message);
         const command = if (call.message.input_data.len == 0) @as(u8, 1) else call.message.input_data[0];
         const value: u64 = switch (command) {
             0xff => 0xff,
@@ -155,18 +156,14 @@ const NativeRuntime = struct {
                 .code_address = self.reentry_target,
             });
             if (nested.status() != .revert) return error.ExpectedNestedRevert;
+            if (!ledger.settleChild(call.message.gas, 0, nested)) return ledger;
         }
 
-        if (command == 0xff) return .{
-            .status = .revert,
-            .output_data = try call.allocator.dupe(u8, &.{0xde}),
-            .gas_left = call.message.gas,
-        };
-        return .{
-            .status = .success,
-            .output_data = &.{},
-            .gas_left = call.message.gas,
-        };
+        if (command == 0xff) {
+            ledger.status = .revert;
+            ledger.output_data = try call.allocator.dupe(u8, &.{0xde});
+        }
+        return ledger;
     }
 };
 
@@ -179,7 +176,7 @@ test "transaction journal follows native call and parent frame rollback" {
         .reentry_target = reverting_child,
     };
     var executor = JournalVm.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = native.service(),
+        .native_contract_runtime = native.service(),
         .transaction_journal = &journal,
     });
     defer executor.deinit();
@@ -225,7 +222,7 @@ test "EVM caller observes native revert data and continues after paired rollback
         .reentry_target = caller,
     };
     var executor = JournalVm.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = native.service(),
+        .native_contract_runtime = native.service(),
         .transaction_journal = &journal,
     });
     defer executor.deinit();

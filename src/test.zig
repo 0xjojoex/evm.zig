@@ -8,7 +8,9 @@ test {
     _ = @import("./test/execution_boundary.zig");
     _ = @import("./test/call_capture.zig");
     _ = @import("./test/executor_custom_handler_reentry.zig");
-    _ = @import("./test/execution_reentrant_native_contract.zig");
+    _ = @import("./test/execution_native_contract.zig");
+    _ = @import("./test/native_subcall.zig");
+    _ = @import("./test/native_hardening.zig");
     _ = @import("./test/execution_transaction_journal.zig");
     _ = @import("./test/mpt_package_test.zig");
     _ = @import("./eth/trie_test.zig");

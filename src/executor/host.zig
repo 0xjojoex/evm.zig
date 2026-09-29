@@ -20,6 +20,7 @@ pub fn Callbacks(
                 .call = call,
                 .accountExists = accountExists,
                 .getBalance = getBalance,
+                .changeBalance = changeBalance,
                 .getNonce = getNonce,
                 .getCode = getCode,
                 .getCodeHash = getCodeHash,
@@ -48,12 +49,29 @@ pub fn Callbacks(
 
         fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
             const self = fromHost(ptr);
+            if (comptime spec.native_contract == execution.NoNativeContracts)
+                return self.resolveHostCall(msg);
+            const context = self.native_context;
+            if (context) |native| {
+                std.debug.assert(msg.depth == native.depth + 1);
+                const forbidden = native.is_static and (!msg.is_static or switch (msg.kind) {
+                    .create, .create2 => true,
+                    .call => msg.value != 0,
+                    .staticcall, .delegatecall, .callcode => false,
+                });
+                if (native.violated_static or forbidden) {
+                    native.violated_static = true;
+                    return error.StaticModeViolation;
+                }
+            }
+            self.native_context = null;
+            defer self.native_context = context;
             return self.resolveHostCall(msg);
         }
 
         fn accessAccount(ptr: *anyopaque, address: AddressWord) !execution.AccessStatus {
             const self = fromHost(ptr);
-            if (nativeContractActive(address)) return .warm;
+            if (nativeTargetActive(address)) return .warm;
             if (self.state.isAccountWarm(address)) return .warm;
             try self.state.warmAccount(address);
             return .cold;
@@ -65,7 +83,7 @@ pub fn Callbacks(
                 try self.state.getCode(address),
             ) orelse return null;
             const state_target: AddressWord = .fromAddress(target);
-            if (nativeContractActive(state_target)) return .warm;
+            if (nativeTargetActive(state_target)) return .warm;
             if (self.state.isAccountWarm(state_target)) return .warm;
             try self.state.warmAccount(state_target);
             return .cold;
@@ -73,6 +91,7 @@ pub fn Callbacks(
 
         fn selfDestruct(ptr: *anyopaque, address: AddressWord, beneficiary: AddressWord) !bool {
             const self = fromHost(ptr);
+            try self.guardNativeMutation();
             const call_capture = try self.beginSelfDestructCapture(address, beneficiary);
             const policy = spec.self_destruct.policy(.{
                 .same_address = address.eql(beneficiary),
@@ -95,12 +114,12 @@ pub fn Callbacks(
             return !effect.previously_marked;
         }
 
-        inline fn nativeContractActive(address: AddressWord) bool {
+        inline fn nativeTargetActive(address: AddressWord) bool {
             if (spec.precompile.activeWord(address)) return true;
-            // Reentrant sets keep the Address-domain `active` contract; the
+            // Native-contract sets keep the Address-domain `active` contract; the
             // default empty set must not force canonical unpacking here.
-            if (spec.reentrant_native_contract == execution.NoReentrantNativeContracts) return false;
-            return spec.reentrant_native_contract.active(address.address());
+            if (spec.native_contract == execution.NoNativeContracts) return false;
+            return spec.native_contract.active(address.address());
         }
 
         fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {
@@ -119,6 +138,24 @@ pub fn Callbacks(
             return self.state.getBalance(address);
         }
 
+        fn changeBalance(ptr: *anyopaque, change: Host.BalanceChange) !Host.BalanceChangeStatus {
+            const self = fromHost(ptr);
+            try self.guardNativeMutation();
+            // Effect-local scope: native entries call this while dispatch runs.
+            var scope = Executor.ExecutionCheckpoint.begin(self);
+            defer scope.deinit();
+            const address = change.address;
+            const balance = try self.state.getBalance(address);
+            const updated = switch (change.kind) {
+                .credit => std.math.add(u256, balance, change.amount) catch return .overflow,
+                .debit => std.math.sub(u256, balance, change.amount) catch return .insufficient_balance,
+            };
+            if (change.amount != 0) try self.state.setBalance(address, updated);
+            if (change.event_log) |event_log| try self.state.emitLog(event_log);
+            scope.commit();
+            return .applied;
+        }
+
         fn getNonce(ptr: *anyopaque, address: AddressWord) !u64 {
             const self = fromHost(ptr);
             return self.state.getNonce(address);
@@ -131,6 +168,7 @@ pub fn Callbacks(
 
         fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !execution.StorageStatus {
             const self = fromHost(ptr);
+            try self.guardNativeMutation();
             return self.state.setStorage(address, key, value);
         }
 
@@ -141,6 +179,7 @@ pub fn Callbacks(
 
         fn storeStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStoreResult {
             const self = fromHost(ptr);
+            try self.guardNativeMutation();
             return self.state.storeStorage(address, key, value);
         }
 
@@ -156,6 +195,7 @@ pub fn Callbacks(
 
         fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {
             const self = fromHost(ptr);
+            try self.guardNativeMutation();
             try self.state.emitLog(event_log);
         }
 
@@ -178,6 +218,7 @@ pub fn Callbacks(
 
         fn setTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !void {
             const self = fromHost(ptr);
+            try self.guardNativeMutation();
             try self.state.setTransientStorage(address, key, value);
         }
     };

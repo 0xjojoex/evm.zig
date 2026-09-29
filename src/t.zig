@@ -307,6 +307,20 @@ pub const MockHost = struct {
         return 0;
     }
 
+    fn changeBalance(ptr: *anyopaque, change: Host.BalanceChange) !Host.BalanceChangeStatus {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const address = change.address.address();
+        var account = self.local_account.get(address) orelse Account{ .balance = 0 };
+        account.balance = switch (change.kind) {
+            .credit => std.math.add(u256, account.balance, change.amount) catch return .overflow,
+            .debit => std.math.sub(u256, account.balance, change.amount) catch return .insufficient_balance,
+        };
+        try self.local_account.ensureUnusedCapacity(1);
+        if (change.event_log) |event_log| try emitLog(ptr, event_log);
+        if (change.amount != 0) self.local_account.putAssumeCapacity(address, account);
+        return .applied;
+    }
+
     fn getNonce(ptr: *anyopaque, address_word: AddressWord) !u64 {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const address = address_word.address();
@@ -418,6 +432,7 @@ pub const MockHost = struct {
             .call = call,
             .accountExists = accountExists,
             .getBalance = getBalance,
+            .changeBalance = changeBalance,
             .getNonce = getNonce,
             .getCode = getCode,
             .getCodeHash = getCodeHash,

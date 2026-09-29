@@ -8,14 +8,14 @@ const StatefulRuntime = struct {
     status: execution.Status = .success,
     service_error: ?anyerror = null,
 
-    fn service(self: *StatefulRuntime) execution.ReentrantNativeContractRuntime {
+    fn service(self: *StatefulRuntime) execution.NativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
     fn execute(
         ptr: *anyopaque,
-        call: execution.ReentrantNativeContractCall,
-    ) !execution.ReentrantNativeContractResult {
+        call: execution.NativeContractCall,
+    ) !execution.NativeContractResult {
         const self: *StatefulRuntime = @ptrCast(@alignCast(ptr));
         if (self.service_error) |err| return err;
         _ = try call.host.setStorage(.fromAddress(call.message.recipient), 7, self.tx_kind);
@@ -25,6 +25,7 @@ const StatefulRuntime = struct {
             .status = self.status,
             .output_data = output,
             .gas_left = call.message.gas - 9,
+            .gas_reservoir = call.message.gas_reservoir,
         };
     }
 };
@@ -33,19 +34,21 @@ const ReentrantRuntime = struct {
     child: evmz.Address,
     called: bool = false,
 
-    fn service(self: *ReentrantRuntime) execution.ReentrantNativeContractRuntime {
+    fn service(self: *ReentrantRuntime) execution.NativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
     fn execute(
         ptr: *anyopaque,
-        call: execution.ReentrantNativeContractCall,
-    ) !execution.ReentrantNativeContractResult {
+        call: execution.NativeContractCall,
+    ) !execution.NativeContractResult {
         const self: *ReentrantRuntime = @ptrCast(@alignCast(ptr));
+        var ledger = execution.NativeContractResult.init(call.message);
         const result = (try call.host.call(.{
             .depth = call.message.depth + 1,
             .kind = .call,
             .gas = call.message.gas,
+            .gas_reservoir = ledger.gas_reservoir,
             .recipient = self.child,
             .sender = call.message.recipient,
             .input_data = &.{},
@@ -54,28 +57,26 @@ const ReentrantRuntime = struct {
             .code_address = self.child,
         }));
         self.called = true;
-        return .{
-            .status = result.status(),
-            // Keep this empty: this test isolates stack-arena rebinding from
-            // the separate native-output lifetime.
-            .output_data = &.{},
-            .gas_left = result.gas_left,
-        };
+        if (!ledger.settleChild(call.message.gas, 0, result)) return ledger;
+        ledger.status = result.status();
+        return ledger;
     }
 };
 
 const ReentrantOutputRuntime = struct {
-    fn service(self: *ReentrantOutputRuntime) execution.ReentrantNativeContractRuntime {
+    fn service(self: *ReentrantOutputRuntime) execution.NativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
     fn execute(
         ptr: *anyopaque,
-        call: execution.ReentrantNativeContractCall,
-    ) !execution.ReentrantNativeContractResult {
+        call: execution.NativeContractCall,
+    ) !execution.NativeContractResult {
         const self: *ReentrantOutputRuntime = @ptrCast(@alignCast(ptr));
         _ = self;
+        var ledger = execution.NativeContractResult.init(call.message);
         const output = try call.allocator.alloc(u8, 1);
+        ledger.output_data = output;
         const outer = call.message.input_data.len == 0;
         output[0] = if (outer) 0xaa else 0xbb;
 
@@ -92,13 +93,10 @@ const ReentrantOutputRuntime = struct {
                 .code_address = call.message.code_address,
             }));
             try std.testing.expectEqualSlices(u8, &.{0xbb}, nested.output_data);
+            if (!ledger.settleChild(call.message.gas, 0, nested)) return ledger;
         }
 
-        return .{
-            .status = .success,
-            .output_data = output,
-            .gas_left = call.message.gas,
-        };
+        return ledger;
     }
 };
 
@@ -110,28 +108,24 @@ const StatefulNativeContract = struct {
     }
 };
 
-const StatefulVm = evmz.Vm(evmz.eth.cancun.extend(.{
-    .reentrant_native_contract = StatefulNativeContract,
-}));
+const Latest = evmz.t.CustomVm(.latest, .{ .native_contract = StatefulNativeContract }).?;
 
-test "active reentrant native contract requires an embedding runtime" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
+test "active native contract requires an embedding runtime" {
     const sender = evmz.addr(0xaaaa);
-    var executor = StatefulVm.Executor.init(std.testing.allocator, .{});
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try std.testing.expectError(
-        error.MissingReentrantNativeContractRuntime,
+        error.MissingNativeContractRuntime,
         executor.executeStandalone(request(sender, StatefulNativeContract.target, &.{}), .{}),
     );
 }
 
-test "reentrant native contract can use host state and keeps EVM rollback semantics" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
+test "native contract can use host state and keeps EVM rollback semantics" {
     const sender = evmz.addr(0xaaaa);
     var runtime = StatefulRuntime{ .tx_kind = 0x7e };
-    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = runtime.service(),
+    var executor = Latest.Executor.init(std.testing.allocator, .{
+        .native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 
@@ -139,7 +133,7 @@ test "reentrant native contract can use host state and keeps EVM rollback semant
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
     ));
-    try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, success.status());
+    try std.testing.expectEqual(Latest.Interpreter.Status.success, success.status());
     try std.testing.expectEqualSlices(u8, &.{0x7e}, success.output_data);
     try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulNativeContract.target, 7));
     try std.testing.expectEqual(@as(usize, 0), executor.frame_store.maxRowCount());
@@ -150,7 +144,7 @@ test "reentrant native contract can use host state and keeps EVM rollback semant
         request(sender, StatefulNativeContract.target, &.{}),
         .{},
     ));
-    try std.testing.expectEqual(StatefulVm.Interpreter.Status.revert, failure.status());
+    try std.testing.expectEqual(Latest.Interpreter.Status.revert, failure.status());
     try std.testing.expectEqualSlices(u8, &.{0x99}, failure.output_data);
     try std.testing.expectEqual(@as(u256, 0x7e), try executor.getStorage(StatefulNativeContract.target, 7));
 
@@ -162,12 +156,11 @@ test "reentrant native contract can use host state and keeps EVM rollback semant
     );
 }
 
-test "executor construction selects the supplied reentrant native contract runtime" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
+test "executor construction selects the supplied native contract runtime" {
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
-    var first_executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = first_runtime.service(),
+    var first_executor = Latest.Executor.init(std.testing.allocator, .{
+        .native_contract_runtime = first_runtime.service(),
     });
     defer first_executor.deinit();
 
@@ -178,8 +171,8 @@ test "executor construction selects the supplied reentrant native contract runti
     try std.testing.expectEqualSlices(u8, &.{0x11}, first.output_data);
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
-    var second_executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = second_runtime.service(),
+    var second_executor = Latest.Executor.init(std.testing.allocator, .{
+        .native_contract_runtime = second_runtime.service(),
     });
     defer second_executor.deinit();
 
@@ -190,12 +183,11 @@ test "executor construction selects the supplied reentrant native contract runti
     try std.testing.expectEqualSlices(u8, &.{0x22}, second.output_data);
 }
 
-test "reentrant native contract output survives synchronous host reentry" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
+test "native contract output survives synchronous host reentry" {
     const sender = evmz.addr(0xaaaa);
     var runtime = ReentrantOutputRuntime{};
-    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = runtime.service(),
+    var executor = Latest.Executor.init(std.testing.allocator, .{
+        .native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 
@@ -207,8 +199,7 @@ test "reentrant native contract output survives synchronous host reentry" {
     try std.testing.expectEqualSlices(u8, &.{0xaa}, result.output_data);
 }
 
-test "reentrant native contract preserves parent stack across arena growth" {
-    if (comptime !evmz.t.forkEnabled(.cancun)) return error.SkipZigTest;
+test "native contract preserves parent stack across arena growth" {
     const sender = evmz.addr(0xaaaa);
     const parent = evmz.addr(0xbbbb);
     const child = evmz.addr(0x5678);
@@ -240,8 +231,8 @@ test "reentrant native contract preserves parent stack across arena growth" {
     });
 
     var runtime = ReentrantRuntime{ .child = child };
-    var executor = StatefulVm.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = runtime.service(),
+    var executor = Latest.Executor.init(std.testing.allocator, .{
+        .native_contract_runtime = runtime.service(),
     });
     defer executor.deinit();
 
@@ -255,7 +246,7 @@ test "reentrant native contract preserves parent stack across arena growth" {
     const result = (try executor.executeStandalone(request(sender, parent, &.{}), .{}));
 
     try std.testing.expect(runtime.called);
-    try std.testing.expectEqual(StatefulVm.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(Latest.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(parent, 0));
     try std.testing.expectEqual(@as(u256, 0x77), try executor.getStorage(child, 9));
     try std.testing.expect(executor.frame_store.maxStackBase() >= 600);
@@ -274,6 +265,9 @@ fn request(sender: evmz.Address, recipient: evmz.Address, input: []const u8) evm
             .recipient = recipient,
             .input = input,
         } },
-        .gas = .legacy(100_000),
+        .gas = .{
+            .regular_left = 100_000,
+            .reservoir = @intCast(4 * Latest.spec.storage.sstoreStateGas(.added).charge),
+        },
     };
 }

@@ -93,7 +93,7 @@ fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) ty
                 /// synchronization, and capacity policy are outside executor bounds.
                 prepared_code_backend: ?prepared_code.Backend = null,
                 block_hash_source: ?BlockHashSource = null,
-                reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+                native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
             };
         }
         return struct {
@@ -101,7 +101,7 @@ fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) ty
             transaction_journal: *Journal,
             prepared_code_backend: ?prepared_code.Backend = null,
             block_hash_source: ?BlockHashSource = null,
-            reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+            native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
         };
     }
     if (World == evmz.state.OpenWorld) {
@@ -111,14 +111,14 @@ fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) ty
             /// synchronization, and capacity policy are outside executor bounds.
             prepared_code_backend: ?prepared_code.Backend = null,
             block_hash_source: ?BlockHashSource = null,
-            reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+            native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
         };
     }
     return struct {
         state: evmz.state.WorldState(World),
         prepared_code_backend: ?prepared_code.Backend = null,
         block_hash_source: ?BlockHashSource = null,
-        reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+        native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
     };
 }
 
@@ -203,13 +203,22 @@ pub fn ExecutorType(
         active_block_execution_generation: ?u64 = null,
         next_block_execution_generation: u64 = 0,
         block_hash_source: ?BlockHashSource = null,
-        reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+        native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
         transaction_journal: TransactionJournal,
+        /// Borrowed from the synchronous native activation. Suspended during a
+        /// Host child call so bytecode uses its own frame's guards.
+        native_context: ?*NativeContext = null,
         prepared_code_backend: ?prepared_code.Backend,
         prepared_code_execution: ?prepared_code.Execution = null,
         prepared_code_execution_depth: usize = 0,
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
+
+        const NativeContext = struct {
+            depth: u16,
+            is_static: bool,
+            violated_static: bool = false,
+        };
 
         /// Construct and take exclusive ownership of the execution state.
         pub fn init(allocator: std.mem.Allocator, options: Init) Executor {
@@ -223,7 +232,7 @@ pub fn ExecutorType(
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = .init(allocator),
                 .block_hash_source = options.block_hash_source,
-                .reentrant_native_contract_runtime = options.reentrant_native_contract_runtime,
+                .native_contract_runtime = options.native_contract_runtime,
                 .transaction_journal = if (transaction_journal_enabled)
                     options.transaction_journal
                 else {},
@@ -995,6 +1004,17 @@ pub fn ExecutorType(
             return callbacks.host(self);
         }
 
+        /// Reject native effects before mutation. A caught error cannot clear
+        /// the invocation's terminal violation. Empty native sets compile out.
+        pub fn guardNativeMutation(self: *Executor) !void {
+            if (comptime spec.native_contract == evmz.execution.NoNativeContracts) return;
+            const context = self.native_context orelse return;
+            if (context.is_static or context.violated_static) {
+                context.violated_static = true;
+                return error.StaticModeViolation;
+            }
+        }
+
         // Code resolution: canonical bytes -> EIP-7702 delegation -> prepared-code cache.
 
         pub const ResolvedCode = struct {
@@ -1066,9 +1086,9 @@ pub fn ExecutorType(
             return account.balance >= value;
         }
 
-        inline fn nativeContractActive(address: Address) bool {
+        inline fn nativeTargetActive(address: Address) bool {
             return spec.precompile.active(address) or
-                spec.reentrant_native_contract.active(address);
+                spec.native_contract.active(address);
         }
 
         // Capture wrappers. The mapping itself lives in `executor/trace_capture.zig`;
@@ -1538,7 +1558,7 @@ pub fn ExecutorType(
                 }
             }
 
-            if (!resolved.delegated and nativeContractActive(msg.code_address)) {
+            if (!resolved.delegated and nativeTargetActive(msg.code_address)) {
                 if (try self.runNativeCall(msg)) |result_value| {
                     var result = result_value;
                     if (result.status() == .success) {
@@ -1579,8 +1599,8 @@ pub fn ExecutorType(
             defer scratch.deinit();
 
             const precompile = spec.precompile.resolve(msg.code_address);
-            const reentrant = spec.reentrant_native_contract.active(msg.code_address);
-            std.debug.assert(precompile == null or !reentrant);
+            const native = spec.native_contract.active(msg.code_address);
+            std.debug.assert(precompile == null or !native);
             if (precompile) |entry| {
                 const result = spec.precompile.execute(entry, .{
                     .allocator = scratch.allocator,
@@ -1619,21 +1639,44 @@ pub fn ExecutorType(
                     .gas_reservoir = msg.gas_reservoir,
                 };
             }
-            if (reentrant) {
-                const runtime = self.reentrant_native_contract_runtime orelse
-                    return error.MissingReentrantNativeContractRuntime;
+            if (native) {
+                const runtime = self.native_contract_runtime orelse
+                    return error.MissingNativeContractRuntime;
+                var context = NativeContext{ .depth = msg.depth, .is_static = msg.is_static };
+                const previous_context = self.native_context;
+                self.native_context = &context;
+                defer self.native_context = previous_context;
                 var host_iface = self.host();
-                const result = try runtime.execute(.{
+                const result = runtime.execute(.{
                     .allocator = scratch.allocator,
                     .host = &host_iface,
                     .message = msg,
-                });
+                    .rules = .{ .storage = &spec.storage, .call = &spec.call },
+                }) catch |err| {
+                    if (err != error.StaticModeViolation or !context.violated_static) return err;
+                    self.clearLastOutput();
+                    return .{
+                        .outcome = .{ .status = .invalid, .cause = .write_protection },
+                        .output_data = &.{},
+                        .gas_left = 0,
+                        .gas_refund = 0,
+                        .gas_reservoir = msg.gas_reservoir,
+                    };
+                };
                 defer if (result.output_data.len != 0) scratch.allocator.free(result.output_data);
-                const output = try self.retainNativeOutput(result.output_data);
-                return .{
+                // No upper bound: a value stipend returns more regular gas than
+                // the callback was given, exactly as in bytecode CALL.
+                std.debug.assert(result.gas_left >= 0);
+                std.debug.assert(result.gas_reservoir >= 0);
+                std.debug.assert(result.state_gas_from_gas_left >= 0);
+                const status = if (context.violated_static) .invalid else result.status;
+                const output = try self.retainNativeOutput(
+                    if (status == .success or status == .revert) result.output_data else &.{},
+                );
+                var settled = Host.Result{
                     .outcome = .{
-                        .status = result.status,
-                        .cause = switch (result.status) {
+                        .status = status,
+                        .cause = if (context.violated_static) .write_protection else switch (status) {
                             .revert => .revert,
                             .success => .none,
                             .out_of_gas => .out_of_gas,
@@ -1641,19 +1684,26 @@ pub fn ExecutorType(
                         },
                     },
                     .output_data = output,
-                    .gas_left = switch (result.status) {
+                    .gas_left = switch (status) {
                         .success, .revert => result.gas_left,
                         .invalid, .out_of_gas => 0,
                     },
-                    .gas_refund = 0,
-                    .gas_reservoir = msg.gas_reservoir,
+                    .gas_refund = if (status == .success) result.gas_refund else 0,
+                    .gas_reservoir = result.gas_reservoir,
+                    .state_gas_spent = result.state_gas_spent,
+                    .state_gas_from_gas_left = result.state_gas_from_gas_left,
                 };
+                evmz.execution.finalizeStateGas(&settled);
+                return settled;
             }
             return null;
         }
 
         fn retainNativeOutput(self: *Executor, output_data: []u8) ![]u8 {
-            if (output_data.len == 0) return &.{};
+            if (output_data.len == 0) {
+                self.clearLastOutput();
+                return &.{};
+            }
             return self.setLastOutput(output_data);
         }
 
@@ -1860,7 +1910,7 @@ pub fn ExecutorType(
         }
 
         fn createCollision(self: *Executor, address: Address) !bool {
-            if (nativeContractActive(address)) return true;
+            if (nativeTargetActive(address)) return true;
             if (try self.state.getAccount(.fromAddress(address))) |account| {
                 if (account.nonce != 0) return true;
             }
@@ -1874,8 +1924,14 @@ pub fn ExecutorType(
             defer self.execution_phase = previous_phase;
 
             // Write protection is enforced through `is_static` alone; a
-            // static call kind that fails to inherit it is a constructor bug.
+            // static call kind that fails to inherit it, or a static message
+            // that creates or transfers value, is a constructor bug.
             std.debug.assert(msg.kind != .staticcall or msg.is_static);
+            std.debug.assert(!msg.is_static or switch (msg.kind) {
+                .create, .create2 => false,
+                .call => msg.value == 0,
+                .staticcall, .delegatecall, .callcode => true,
+            });
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -1917,7 +1973,7 @@ pub fn ExecutorType(
             const state_target: AddressWord = .fromAddress(target);
             const already_warm = self.state.isAccountWarm(state_target);
             const access = spec.call.topLevelDelegatedAccountAccess(.{
-                .target_is_native_contract = nativeContractActive(target),
+                .target_is_native_contract = nativeTargetActive(target),
                 .already_warm = already_warm,
             }) orelse return null;
             if (access.status == .cold and !already_warm) {
@@ -2143,7 +2199,7 @@ pub fn ExecutorType(
             }
 
             const resolved = try self.resolveCode(recipient);
-            if (!resolved.delegated and nativeContractActive(recipient)) {
+            if (!resolved.delegated and nativeTargetActive(recipient)) {
                 var result = try self.runNativeCallTransaction(sender, recipient, input, execution_gas, value);
                 top_frame_gas.finish(&result, top_frame_state_gas);
                 return .{ .stage = .payload, .result = result };
@@ -2418,6 +2474,8 @@ pub fn ExecutorType(
             defer execution_checkpoint.deinit();
 
             const resolved = try self.resolveCode(recipient);
+            if (!resolved.delegated and nativeTargetActive(recipient))
+                return error.NativeSystemCallUnsupported;
             const resolved_view = try self.resolvedCodeView(resolved);
             const bytecode = try self.resolveExecutionCodeView(resolved_view);
             try self.traceAccountAccess(recipient);

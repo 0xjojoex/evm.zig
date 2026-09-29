@@ -3444,9 +3444,9 @@ test "execution finalization phase covers native dispatch and restores after err
             return Address.eql(address, evmz.addr(0x1234));
         }
     };
-    const Latest = evmz.t.CustomVm(.latest, .{ .reentrant_native_contract = Native }).?;
+    const Latest = evmz.t.CustomVm(.latest, .{ .native_contract = Native }).?;
     const Runtime = struct {
-        fn execute(_: *anyopaque, call: execution_values.ReentrantNativeContractCall) !execution_values.ReentrantNativeContractResult {
+        fn execute(_: *anyopaque, call: execution_values.NativeContractCall) !execution_values.NativeContractResult {
             const executor: *Latest.Executor = @ptrCast(@alignCast(call.host.ptr));
             try std.testing.expectEqual(.running, executor.execution_phase);
             _ = try call.host.call(.{
@@ -3465,7 +3465,7 @@ test "execution finalization phase covers native dispatch and restores after err
     };
     var marker: u8 = 0;
     var executor = Latest.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = .{ .ptr = &marker, .vtable = &.{ .execute = Runtime.execute } },
+        .native_contract_runtime = .{ .ptr = &marker, .vtable = &.{ .execute = Runtime.execute } },
     });
     defer executor.deinit();
     const sender = evmz.addr(0xaaaa);

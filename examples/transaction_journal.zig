@@ -3,7 +3,7 @@
 //! This example uses a counter to show the ownership boundary:
 //!
 //! - `CounterProgram` owns its transaction carrier and execution semantics.
-//! - `CounterRuntime` implements a reentrant native contract.
+//! - `CounterRuntime` implements a native contract.
 //! - `CounterJournal` follows EVM transaction and CALL/CREATE rollback.
 //! - `CounterBlock` owns accepted EVM and sidecar snapshots together.
 
@@ -111,16 +111,16 @@ pub const CounterContract = struct {
 pub const CounterRuntime = struct {
     journal: *CounterJournal,
 
-    pub fn service(self: *CounterRuntime) evmz.execution.ReentrantNativeContractRuntime {
+    pub fn service(self: *CounterRuntime) evmz.execution.NativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
     fn execute(
         ptr: *anyopaque,
-        call: evmz.execution.ReentrantNativeContractCall,
-    ) !evmz.execution.ReentrantNativeContractResult {
+        call: evmz.execution.NativeContractCall,
+    ) !evmz.execution.NativeContractResult {
         const self: *CounterRuntime = @ptrCast(@alignCast(ptr));
-        if (call.message.input_data.len != 2) return revert(call.message.gas);
+        if (call.message.input_data.len != 2) return revert(call.message);
 
         const increment = call.message.input_data[0];
         const force_revert = call.message.input_data[1] != 0;
@@ -135,20 +135,22 @@ pub const CounterRuntime = struct {
             .status = if (force_revert) .revert else .success,
             .output_data = &.{},
             .gas_left = call.message.gas,
+            .gas_reservoir = call.message.gas_reservoir,
         };
     }
 
-    fn revert(gas_left: i64) evmz.execution.ReentrantNativeContractResult {
+    fn revert(message: *const evmz.Host.Message) evmz.execution.NativeContractResult {
         return .{
             .status = .revert,
             .output_data = &.{},
-            .gas_left = gas_left,
+            .gas_left = message.gas,
+            .gas_reservoir = message.gas_reservoir,
         };
     }
 };
 
 pub const counter_spec = evmz.eth.latest.extend(.{
-    .reentrant_native_contract = CounterContract,
+    .native_contract = CounterContract,
 });
 
 /// The journal implementation is part of the generated Executor type.
@@ -209,7 +211,7 @@ pub const CounterBlock = struct {
     pub const CheckpointError = CounterError;
 
     pub const Checkpoint = struct {
-        evm: Executor.BranchCheckpoint,
+        evm: Executor.BranchSnapshot,
         sidecar: CounterJournal.BranchCheckpoint,
 
         pub fn deinit(self: *Checkpoint) void {
@@ -289,7 +291,7 @@ pub const CounterBlock = struct {
         journal: *const CounterJournal,
     ) CheckpointError!Checkpoint {
         return .{
-            .evm = executor.branchCheckpoint() catch |err|
+            .evm = executor.branchSnapshot() catch |err|
                 return evmz.executor.errors.normalize(err),
             .sidecar = journal.branchCheckpoint(),
         };
@@ -329,7 +331,7 @@ pub fn run(allocator: std.mem.Allocator) DemoError!DemoResult {
     var counter_runtime: CounterRuntime = .{ .journal = &journal };
     var executor = CounterEngine.Executor.init(allocator, .{
         .transaction_journal = &journal,
-        .reentrant_native_contract_runtime = counter_runtime.service(),
+        .native_contract_runtime = counter_runtime.service(),
     });
     defer executor.deinit();
 
