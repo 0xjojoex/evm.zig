@@ -3446,21 +3446,17 @@ test "execution finalization phase covers native dispatch and restores after err
     };
     const Latest = evmz.t.CustomVm(.latest, .{ .native_contract = Native }).?;
     const Runtime = struct {
-        fn execute(_: *anyopaque, call: execution_values.NativeContractCall) !execution_values.NativeContractResult {
+        fn execute(_: *anyopaque, call: execution_values.NativeContractCall) !execution_values.NativeContractStep {
             const executor: *Latest.Executor = @ptrCast(@alignCast(call.host.ptr));
             try std.testing.expectEqual(.running, executor.execution_phase);
-            _ = try call.host.call(.{
-                .depth = 1,
+            if (call.child != null) return error.NativeProbeFailed;
+            return .{ .call = .{
                 .kind = .call,
-                .gas = call.message.gas,
-                .sender = call.message.recipient,
                 .recipient = evmz.addr(0xbbbb),
                 .code_address = evmz.addr(0xbbbb),
-                .input_data = &.{},
-                .value = 0,
-            });
-            try std.testing.expectEqual(.running, executor.execution_phase);
-            return error.NativeProbeFailed;
+                .sender = call.message.recipient,
+                .gas = call.ledger.gas_left,
+            } };
         }
     };
     var marker: u8 = 0;

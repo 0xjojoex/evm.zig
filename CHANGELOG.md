@@ -42,6 +42,11 @@ Added
   raw-x ECDH over libsecp256k1 behind a seeded, allocator-backed `Context`,
   so a node built on evmz shares one curve implementation with the EVM
   instead of linking its own. Native profile only.
+- `CompileOptions.transaction_journal`: an embedding-owned journal whose
+  checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
+  with it. See `examples/transaction_journal.zig`.
+- `Host.changeBalance`: journaled credit or debit with an optional issuance log,
+  applied atomically. Custom Host implementations must supply it.
 
 Changed
 
@@ -49,27 +54,22 @@ Changed
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the
   precompiles, so no consumer loses a C-free configuration.
-- Native results require an explicit `gas_reservoir` and carry signed state-gas
-  accounting. `NativeContractResult.init` and shared charge/child-settlement
-  operations preserve retained gas, child refunds and state-gas credits.
-  Native Host effects enforce static context and direct-child depth; caught static
-  violations remain terminal. Failure normalization unwinds state gas and clears
-  discarded output, including retained child output.
-- `NativeContractCall.rules` borrows the executor's `StorageSpec` and `CallSpec`,
-  so native effects that mimic EVM operations are priced from the compiled spec,
-  including `Spec.extend` overrides, and one runtime can serve several specs.
-- `Host.changeBalance` supports journaled credit/debit and an optional atomic
-  issuance log. Custom Host implementations must supply the new callback.
-  Standalone system-call entry rejects effective native targets with
-  `NativeSystemCallUnsupported`; delegated bytecode still executes normally.
-- Host-capable native contracts are named for the tier, not for one of its
-  capabilities: `Spec.reentrant_native_contract` is `Spec.native_contract`;
-  `execution.ReentrantNativeContract{Runtime,Call,Result}` are
-  `execution.NativeContract{Runtime,Call,Result}`; `NoReentrantNativeContracts`
-  is `NoNativeContracts`; the executor option `reentrant_native_contract_runtime`
-  is `native_contract_runtime` and its missing-runtime error is
-  `MissingNativeContractRuntime`. Callback into the EVM remains a permitted
-  capability of the tier, not a requirement. See `doc/native-contracts.md`.
+- Native contracts are renamed for the tier: `Spec.reentrant_native_contract` is
+  `Spec.native_contract`, `ReentrantNativeContract{Runtime,Call}` are
+  `NativeContract{Runtime,Call}`, `NoReentrantNativeContracts` is
+  `NoNativeContracts`, the executor option is `native_contract_runtime` and its
+  error is `MissingNativeContractRuntime`.
+- Native contracts no longer call `Host.call`. `NativeContractRuntime.execute`
+  returns a `NativeContractStep`: `.done`, or `.call` with one CALL-family child.
+  The executor runs and settles the child, then enters the native again, so native
+  recursion no longer uses the Zig stack. `Host.call` inside an entry fails with
+  `NativeHostCallUnsupported`. `ReentrantNativeContractResult` is gone; gas lives
+  in the executor-owned `NativeContractLedger`. See `doc/native-contracts.md`.
+- Native effects respect static context, and a failed activation unwinds state gas
+  and drops refunds like a failed bytecode frame. `NativeContractCall.rules`
+  exposes the executor's own `StorageSpec` and `CallSpec`, so native pricing
+  follows `Spec.extend` overrides.
+- System-call entry rejects native targets with `NativeSystemCallUnsupported`.
 
 Removed
 

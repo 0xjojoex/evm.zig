@@ -106,7 +106,7 @@ pub const CounterContract = struct {
     }
 };
 
-/// Native code mutates the counter and may call back into the EVM. This example
+/// Native code mutates the counter and may request EVM child calls. This example
 /// mirrors the counter into EVM storage so rollback is visible in both domains.
 pub const CounterRuntime = struct {
     journal: *CounterJournal,
@@ -115,12 +115,9 @@ pub const CounterRuntime = struct {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(
-        ptr: *anyopaque,
-        call: evmz.execution.NativeContractCall,
-    ) !evmz.execution.NativeContractResult {
+    fn execute(ptr: *anyopaque, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
         const self: *CounterRuntime = @ptrCast(@alignCast(ptr));
-        if (call.message.input_data.len != 2) return revert(call.message);
+        if (call.message.input_data.len != 2) return .{ .done = .{ .status = .revert } };
 
         const increment = call.message.input_data[0];
         const force_revert = call.message.input_data[1] != 0;
@@ -130,22 +127,7 @@ pub const CounterRuntime = struct {
             0,
             self.journal.value,
         );
-
-        return .{
-            .status = if (force_revert) .revert else .success,
-            .output_data = &.{},
-            .gas_left = call.message.gas,
-            .gas_reservoir = call.message.gas_reservoir,
-        };
-    }
-
-    fn revert(message: *const evmz.Host.Message) evmz.execution.NativeContractResult {
-        return .{
-            .status = .revert,
-            .output_data = &.{},
-            .gas_left = message.gas,
-            .gas_reservoir = message.gas_reservoir,
-        };
+        return .{ .done = .{ .status = if (force_revert) .revert else .success } };
     }
 };
 

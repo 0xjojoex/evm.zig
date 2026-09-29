@@ -49,23 +49,10 @@ pub fn Callbacks(
 
         fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
             const self = fromHost(ptr);
-            if (comptime spec.native_contract == execution.NoNativeContracts)
-                return self.resolveHostCall(msg);
-            const context = self.native_context;
-            if (context) |native| {
-                std.debug.assert(msg.depth == native.depth + 1);
-                const forbidden = native.is_static and (!msg.is_static or switch (msg.kind) {
-                    .create, .create2 => true,
-                    .call => msg.value != 0,
-                    .staticcall, .delegatecall, .callcode => false,
-                });
-                if (native.violated_static or forbidden) {
-                    native.violated_static = true;
-                    return error.StaticModeViolation;
-                }
+            // A native entry requests children through its returned step.
+            if (comptime spec.native_contract != execution.NoNativeContracts) {
+                if (self.native_guard != null) return error.NativeHostCallUnsupported;
             }
-            self.native_context = null;
-            defer self.native_context = context;
             return self.resolveHostCall(msg);
         }
 

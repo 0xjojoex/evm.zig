@@ -127,13 +127,13 @@ const NativeRuntime = struct {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(
-        ptr: *anyopaque,
-        call: execution.NativeContractCall,
-    ) !execution.NativeContractResult {
+    fn execute(ptr: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
         const self: *NativeRuntime = @ptrCast(@alignCast(ptr));
-        var ledger = execution.NativeContractResult.init(call.message);
         const command = if (call.message.input_data.len == 0) @as(u8, 1) else call.message.input_data[0];
+        if (call.child) |nested| {
+            if (nested.status() != .revert) return error.ExpectedNestedRevert;
+            return .{ .done = .{} };
+        }
         const value: u64 = switch (command) {
             0xff => 0xff,
             0x30 => 0x30,
@@ -142,28 +142,18 @@ const NativeRuntime = struct {
         self.journal.write(value);
         _ = try call.host.setStorage(.fromAddress(call.message.recipient), 1, value);
 
-        if (command == 0x30) {
-            const nested = try call.host.call(.{
-                .depth = call.message.depth + 1,
-                .kind = .call,
-                .gas = call.message.gas,
-                .gas_reservoir = call.message.gas_reservoir,
-                .recipient = self.reentry_target,
-                .sender = call.message.recipient,
-                .input_data = &.{},
-                .value = 0,
-                .is_static = call.message.is_static,
-                .code_address = self.reentry_target,
-            });
-            if (nested.status() != .revert) return error.ExpectedNestedRevert;
-            if (!ledger.settleChild(call.message.gas, 0, nested)) return ledger;
-        }
-
-        if (command == 0xff) {
-            ledger.status = .revert;
-            ledger.output_data = try call.allocator.dupe(u8, &.{0xde});
-        }
-        return ledger;
+        if (command == 0x30) return .{ .call = .{
+            .kind = .call,
+            .recipient = self.reentry_target,
+            .code_address = self.reentry_target,
+            .sender = call.message.recipient,
+            .gas = call.ledger.gas_left,
+        } };
+        if (command == 0xff) return .{ .done = .{
+            .status = .revert,
+            .output_data = try call.allocator.dupe(u8, &.{0xde}),
+        } };
+        return .{ .done = .{} };
     }
 };
 

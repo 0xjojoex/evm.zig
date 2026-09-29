@@ -14,9 +14,11 @@ const native_contract = @import("./execution/native_contract.zig");
 
 pub const ExecutionGas = @import("./execution/gas.zig").ExecutionGas;
 pub const NativeContractCall = native_contract.Call;
-pub const NativeContractResult = native_contract.Result;
+pub const NativeContractChildRequest = native_contract.ChildRequest;
+pub const NativeContractLedger = native_contract.Ledger;
 pub const NativeContractRules = native_contract.Rules;
 pub const NativeContractRuntime = native_contract.Runtime;
+pub const NativeContractStep = native_contract.Step;
 pub const NoNativeContracts = native_contract.None;
 pub const resources = @import("./execution/resources.zig");
 

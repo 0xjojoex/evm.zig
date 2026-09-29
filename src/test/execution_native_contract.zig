@@ -12,24 +12,18 @@ const StatefulRuntime = struct {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(
-        ptr: *anyopaque,
-        call: execution.NativeContractCall,
-    ) !execution.NativeContractResult {
+    fn execute(ptr: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
         const self: *StatefulRuntime = @ptrCast(@alignCast(ptr));
         if (self.service_error) |err| return err;
         _ = try call.host.setStorage(.fromAddress(call.message.recipient), 7, self.tx_kind);
+        _ = call.ledger.trackGas(9);
         const output = try call.allocator.alloc(u8, 1);
         output[0] = self.tx_kind;
-        return .{
-            .status = self.status,
-            .output_data = output,
-            .gas_left = call.message.gas - 9,
-            .gas_reservoir = call.message.gas_reservoir,
-        };
+        return .{ .done = .{ .status = self.status, .output_data = output } };
     }
 };
 
+/// Calls `child` with all remaining gas and reports the child's status.
 const ReentrantRuntime = struct {
     child: evmz.Address,
     called: bool = false,
@@ -38,65 +32,40 @@ const ReentrantRuntime = struct {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(
-        ptr: *anyopaque,
-        call: execution.NativeContractCall,
-    ) !execution.NativeContractResult {
+    fn execute(ptr: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
         const self: *ReentrantRuntime = @ptrCast(@alignCast(ptr));
-        var ledger = execution.NativeContractResult.init(call.message);
-        const result = (try call.host.call(.{
-            .depth = call.message.depth + 1,
+        if (call.child) |child| {
+            self.called = true;
+            return .{ .done = .{ .status = child.status() } };
+        }
+        return .{ .call = .{
             .kind = .call,
-            .gas = call.message.gas,
-            .gas_reservoir = ledger.gas_reservoir,
             .recipient = self.child,
-            .sender = call.message.recipient,
-            .input_data = &.{},
-            .value = 0,
-            .is_static = call.message.is_static,
             .code_address = self.child,
-        }));
-        self.called = true;
-        if (!ledger.settleChild(call.message.gas, 0, result)) return ledger;
-        ledger.status = result.status();
-        return ledger;
+            .sender = call.message.recipient,
+            .gas = call.ledger.gas_left,
+        } };
     }
 };
 
+/// The outer activation calls itself; each returns one marker byte.
 const ReentrantOutputRuntime = struct {
     fn service(self: *ReentrantOutputRuntime) execution.NativeContractRuntime {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(
-        ptr: *anyopaque,
-        call: execution.NativeContractCall,
-    ) !execution.NativeContractResult {
-        const self: *ReentrantOutputRuntime = @ptrCast(@alignCast(ptr));
-        _ = self;
-        var ledger = execution.NativeContractResult.init(call.message);
-        const output = try call.allocator.alloc(u8, 1);
-        ledger.output_data = output;
+    fn execute(_: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
         const outer = call.message.input_data.len == 0;
-        output[0] = if (outer) 0xaa else 0xbb;
-
-        if (outer) {
-            const nested = (try call.host.call(.{
-                .depth = call.message.depth + 1,
-                .kind = .call,
-                .gas = call.message.gas,
-                .gas_reservoir = call.message.gas_reservoir,
-                .recipient = call.message.recipient,
-                .sender = call.message.recipient,
-                .input_data = &.{0x01},
-                .value = 0,
-                .code_address = call.message.code_address,
-            }));
-            try std.testing.expectEqualSlices(u8, &.{0xbb}, nested.output_data);
-            if (!ledger.settleChild(call.message.gas, 0, nested)) return ledger;
-        }
-
-        return ledger;
+        if (outer and call.child == null) return .{ .call = .{
+            .kind = .call,
+            .recipient = call.message.recipient,
+            .code_address = call.message.code_address,
+            .sender = call.message.recipient,
+            .input_data = &.{0x01},
+            .gas = call.ledger.gas_left,
+        } };
+        if (call.child) |nested| try std.testing.expectEqualSlices(u8, &.{0xbb}, nested.output_data);
+        return .{ .done = .{ .output_data = try call.allocator.dupe(u8, &.{if (outer) 0xaa else 0xbb}) } };
     }
 };
 
@@ -183,7 +152,7 @@ test "executor construction selects the supplied native contract runtime" {
     try std.testing.expectEqualSlices(u8, &.{0x22}, second.output_data);
 }
 
-test "native contract output survives synchronous host reentry" {
+test "native contract output survives self reentry" {
     const sender = evmz.addr(0xaaaa);
     var runtime = ReentrantOutputRuntime{};
     var executor = Latest.Executor.init(std.testing.allocator, .{

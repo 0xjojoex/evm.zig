@@ -27,48 +27,41 @@ const Runtime = struct {
         return .{ .ptr = self, .vtable = &.{ .execute = execute } };
     }
 
-    fn execute(ptr: *anyopaque, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractResult {
+    fn execute(ptr: *anyopaque, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
         const self: *Runtime = @ptrCast(@alignCast(ptr));
-        var ledger = evmz.execution.NativeContractResult.init(call.message);
-        const child = if (call.message.depth < self.native_depth) Native.address else self.child;
-        const result = try call.host.call(.{
-            .depth = call.message.depth + 1,
-            .kind = .call,
-            .gas = call.message.gas,
-            .gas_reservoir = call.message.gas_reservoir,
-            .recipient = child,
-            .sender = call.message.sender,
-            .input_data = call.message.input_data,
-            .value = 0,
-            .is_static = call.message.is_static,
-            .code_address = child,
-        });
+        const result = call.child orelse {
+            const child = if (call.message.depth < self.native_depth) Native.address else self.child;
+            return .{ .call = .{
+                .kind = .call,
+                .recipient = child,
+                .code_address = child,
+                .sender = call.message.sender,
+                .input_data = call.message.input_data,
+                .gas = call.ledger.gas_left,
+            } };
+        };
+        // Resumed after the sibling: the first child's copy is the output.
+        if (call.continuation) |saved| {
+            const output: *[]u8 = @ptrCast(@alignCast(saved));
+            return .{ .done = .{ .status = self.completion_status, .output_data = output.* } };
+        }
         self.child_status = result.status();
         self.child_refund = result.gas_refund;
-        // Host output is borrowed until the next Host call. Copy before a sibling call.
-        const output = try call.allocator.alloc(u8, result.output_data.len + 1);
-        output[0] = @intFromBool(result.isSuccess());
-        @memcpy(output[1..], result.output_data);
-        ledger.output_data = output;
-        if (!ledger.settleChild(call.message.gas, 0, result)) return ledger;
-        if (self.sibling) {
-            const forwarded = ledger.gas_left;
-            const sibling = try call.host.call(.{
-                .depth = call.message.depth + 1,
-                .kind = .call,
-                .gas = forwarded,
-                .gas_reservoir = ledger.gas_reservoir,
-                .is_static = call.message.is_static,
-                .recipient = evmz.addr(4),
-                .sender = call.message.recipient,
-                .input_data = &.{0xff},
-                .value = 0,
-                .code_address = evmz.addr(4),
-            });
-            if (!ledger.settleChild(forwarded, 0, sibling)) return ledger;
-        }
-        ledger.status = self.completion_status;
-        return ledger;
+        // Prefix the child status; the sibling resumes with this in its continuation.
+        const output = try call.allocator.create([]u8);
+        output.* = try call.allocator.alloc(u8, result.output_data.len + 1);
+        output.*[0] = @intFromBool(result.isSuccess());
+        @memcpy(output.*[1..], result.output_data);
+        if (self.sibling) return .{ .call = .{
+            .kind = .call,
+            .recipient = evmz.addr(4),
+            .code_address = evmz.addr(4),
+            .sender = call.message.recipient,
+            .input_data = &.{0xff},
+            .gas = call.ledger.gas_left,
+            .continuation = @ptrCast(output),
+        } };
+        return .{ .done = .{ .status = self.completion_status, .output_data = output.* } };
     }
 };
 
@@ -214,7 +207,9 @@ test "native subcall wraps immediate empty code and exceptional halt outcomes" {
         try testing.expectEqual(.success, result.status());
         try testing.expectEqualSlices(u8, &.{@intFromBool(!halt)}, result.output_data);
         try testing.expectEqual(@as(i64, 0), result.gas_refund);
-        if (halt) try testing.expectEqual(@as(i64, 0), result.gas_left);
+        // The halted child consumes its forwarded gas; EIP-150 retains the rest.
+        const forwarded = Latest.spec.call.childGas(.{ .requested = 100_000, .available = 100_000 });
+        if (halt) try testing.expectEqual(100_000 - forwarded.gas, result.gas_left);
     }
 }
 
