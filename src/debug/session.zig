@@ -121,7 +121,9 @@ pub fn SessionType(comptime Vm: type) type {
         /// uses.
         pub fn pause(self: *Session) !Pause {
             std.debug.assert(self.open);
-            while (self.call_runtime.frames.len() > self.call_runtime.frame_base) {
+            while (true) {
+                // Native entries have no opcode boundary; run them through.
+                if (try self.call_runtime.runNatives()) |stable| return self.finish(stable);
                 const index = self.call_runtime.frames.len() - 1;
                 const frame = self.call_runtime.frames.frame(index);
                 switch (frame.state) {
@@ -144,22 +146,18 @@ pub fn SessionType(comptime Vm: type) type {
                 }
 
                 const host_result = try self.call_runtime.finishFrame(index, frame.result());
-                if (self.call_runtime.frames.len() == self.call_runtime.frame_base + 1) {
-                    const stable = try Executor.stabilizeFinalResult(self.call_runtime.executor, host_result);
-                    const completion: Completion = if (self.intervened)
-                        .{ .intervened = stable }
-                    else
-                        .{ .canonical = stable };
-                    self.call_runtime.popResolvedFrame();
-                    self.close();
-                    return .{ .finished = completion };
-                }
-
-                const parent_index = self.call_runtime.frames.len() - 2;
-                try self.call_runtime.resumeSuspended(parent_index, host_result);
-                self.call_runtime.popResolvedFrame();
+                const row: Executor.CallRuntime.Row = .{ .frame = index };
+                if (try self.call_runtime.returnToParent(row, host_result)) |stable| return self.finish(stable);
             }
-            unreachable;
+        }
+
+        fn finish(self: *Session, stable: Host.Result) Pause {
+            const completion: Completion = if (self.intervened)
+                .{ .intervened = stable }
+            else
+                .{ .canonical = stable };
+            self.close();
+            return .{ .finished = completion };
         }
 
         /// Borrow the active frame's stack until the next resume.
@@ -227,7 +225,7 @@ pub fn SessionType(comptime Vm: type) type {
             const index = self.call_runtime.frames.len() - 1;
             const frame = self.call_runtime.frames.frame(index);
             const action = frame.suspendedAction() orelse unreachable;
-            try self.call_runtime.dispatchSuspension(index, action);
+            try self.call_runtime.dispatchSuspension(.{ .frame = index }, action);
             return self.pause();
         }
 
@@ -240,7 +238,7 @@ pub fn SessionType(comptime Vm: type) type {
             std.debug.assert(self.open);
             const index = self.call_runtime.frames.len() - 1;
             std.debug.assert(self.call_runtime.frames.frame(index).isSuspended());
-            try self.call_runtime.resumeSuspended(index, result);
+            try self.call_runtime.resumeSuspended(.{ .frame = index }, result);
             self.intervened = true;
             return self.pause();
         }

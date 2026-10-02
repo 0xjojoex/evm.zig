@@ -151,6 +151,8 @@ precompile, transaction, or block bindings can also be replaced. See
 [`examples/custom_fork/`](https://github.com/0xjojoex/evm.zig/tree/main/examples/custom_fork)
 and
 [`examples/op/`](https://github.com/0xjojoex/evm.zig/blob/main/examples/op).
+For the difference between precompiles, native contracts, predeploys, and
+system calls, see [`doc/native-contracts.md`](doc/native-contracts.md).
 
 ## Stateless validation and zkVM guests
 

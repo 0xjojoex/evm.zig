@@ -8,13 +8,108 @@ const Host = evmz.Host;
 const execution = evmz.execution;
 
 pub fn Callbacks(
-    comptime spec: evmz.Spec,
+    comptime specification: evmz.Spec,
     comptime World: type,
     comptime options_value: evmz.executor.CompileOptions,
 ) type {
-    const Executor = evmz.executor.ExecutorType(spec, World, options_value);
+    const Executor = evmz.executor.ExecutorType(specification, World, options_value);
 
     return struct {
+        const Self = @This();
+        const spec = specification;
+
+        /// Executor handle for one native entry: the journaled paths `Host` uses,
+        /// with mutation rejected in a static entry and no call, since children
+        /// are requested through the returned step. Entry-scoped; never retain it.
+        pub const NativeContext = struct {
+            /// The executor's own spec. Price EVM-like effects from it, so they
+            /// never disagree with the executor, including `Spec.extend` overrides.
+            pub const spec = specification;
+
+            /// Not a capability: effects that bypass these methods skip the guard.
+            executor: *Executor,
+            guard: *Guard,
+
+            pub const Guard = struct {
+                is_static: bool,
+                violated_static: bool = false,
+            };
+
+            /// A caught error cannot clear the entry's terminal violation.
+            fn mutate(self: NativeContext) !void {
+                if (!self.guard.is_static and !self.guard.violated_static) return;
+                self.guard.violated_static = true;
+                return error.StaticModeViolation;
+            }
+
+            pub fn accountExists(self: NativeContext, address: Address) !bool {
+                return Self.accountExists(self.executor, .fromAddress(address));
+            }
+            pub fn getBalance(self: NativeContext, address: Address) !u256 {
+                return Self.getBalance(self.executor, .fromAddress(address));
+            }
+            /// Issuance: no transfer log. `error.BalanceOverflow` changes nothing.
+            pub fn addBalance(self: NativeContext, address: Address, value: u256) !void {
+                try self.mutate();
+                try self.executor.addBalance(address, value);
+            }
+            /// Burn. False, with nothing changed, when the balance is short.
+            pub fn subtractBalance(self: NativeContext, address: Address, value: u256) !bool {
+                try self.mutate();
+                return self.executor.subtractBalance(address, value);
+            }
+            pub fn getNonce(self: NativeContext, address: Address) !u64 {
+                return Self.getNonce(self.executor, .fromAddress(address));
+            }
+            pub fn getCode(self: NativeContext, address: Address) ![]const u8 {
+                return Self.getCode(self.executor, .fromAddress(address));
+            }
+            pub fn getCodeHash(self: NativeContext, address: Address) !u256 {
+                return Self.getCodeHash(self.executor, .fromAddress(address));
+            }
+            pub fn getStorage(self: NativeContext, address: Address, key: u256) !u256 {
+                return Self.hostGetStorage(self.executor, .fromAddress(address), key);
+            }
+            pub fn setStorage(self: NativeContext, address: Address, key: u256, value: u256) !execution.StorageStatus {
+                try self.mutate();
+                return Self.setStorage(self.executor, .fromAddress(address), key, value);
+            }
+            pub fn loadStorage(self: NativeContext, address: Address, key: u256) !Host.StorageLoadResult {
+                return Self.loadStorage(self.executor, .fromAddress(address), key);
+            }
+            pub fn storeStorage(self: NativeContext, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+                try self.mutate();
+                return Self.storeStorage(self.executor, .fromAddress(address), key, value);
+            }
+            pub fn getTransientStorage(self: NativeContext, address: Address, key: u256) !u256 {
+                return Self.getTransientStorage(self.executor, .fromAddress(address), key);
+            }
+            pub fn setTransientStorage(self: NativeContext, address: Address, key: u256, value: u256) !void {
+                try self.mutate();
+                return Self.setTransientStorage(self.executor, .fromAddress(address), key, value);
+            }
+            pub fn emitLog(self: NativeContext, event_log: Host.Log) !void {
+                try self.mutate();
+                return Self.emitLog(self.executor, event_log);
+            }
+            pub fn selfDestruct(self: NativeContext, address: Address, beneficiary: Address) !bool {
+                try self.mutate();
+                return Self.selfDestruct(self.executor, .fromAddress(address), .fromAddress(beneficiary));
+            }
+            pub fn getBlockHash(self: NativeContext, number: u256) !u256 {
+                return Self.getBlockHash(self.executor, number);
+            }
+            pub fn accessAccount(self: NativeContext, address: Address) !execution.AccessStatus {
+                return Self.accessAccount(self.executor, .fromAddress(address));
+            }
+            pub fn accessDelegatedAccount(self: NativeContext, address: Address) !?execution.AccessStatus {
+                return Self.accessDelegatedAccount(self.executor, .fromAddress(address));
+            }
+            pub fn accessStorage(self: NativeContext, address: Address, key: u256) !execution.AccessStatus {
+                return Self.accessStorage(self.executor, .fromAddress(address), key);
+            }
+        };
+
         pub fn host(self: *Executor) Host {
             return Host{ .ptr = self, .vtable = &.{
                 .call = call,
@@ -53,7 +148,7 @@ pub fn Callbacks(
 
         fn accessAccount(ptr: *anyopaque, address: AddressWord) !execution.AccessStatus {
             const self = fromHost(ptr);
-            if (nativeContractActive(address)) return .warm;
+            if (nativeTargetActive(address)) return .warm;
             if (self.state.isAccountWarm(address)) return .warm;
             try self.state.warmAccount(address);
             return .cold;
@@ -65,7 +160,7 @@ pub fn Callbacks(
                 try self.state.getCode(address),
             ) orelse return null;
             const state_target: AddressWord = .fromAddress(target);
-            if (nativeContractActive(state_target)) return .warm;
+            if (nativeTargetActive(state_target)) return .warm;
             if (self.state.isAccountWarm(state_target)) return .warm;
             try self.state.warmAccount(state_target);
             return .cold;
@@ -95,12 +190,12 @@ pub fn Callbacks(
             return !effect.previously_marked;
         }
 
-        inline fn nativeContractActive(address: AddressWord) bool {
+        inline fn nativeTargetActive(address: AddressWord) bool {
             if (spec.precompile.activeWord(address)) return true;
-            // Reentrant sets keep the Address-domain `active` contract; the
+            // Native-contract sets keep the Address-domain `active` contract; the
             // default empty set must not force canonical unpacking here.
-            if (spec.reentrant_native_contract == execution.NoReentrantNativeContracts) return false;
-            return spec.reentrant_native_contract.active(address.address());
+            if (spec.native_contract == execution.NoNativeContracts) return false;
+            return spec.native_contract.active(address.address());
         }
 
         fn accountExists(ptr: *anyopaque, address: AddressWord) !bool {

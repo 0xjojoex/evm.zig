@@ -686,7 +686,7 @@ pub const frontier: Spec = .{
     .valueTransferLog = semantics.noValueTransferLog,
     .instruction = eth_instruction.frontier,
     .precompile = .{ .config = eth_precompile.frontier_config },
-    .reentrant_native_contract = execution.NoReentrantNativeContracts,
+    .native_contract = execution.NoNativeContracts,
 };
 
 pub const frontier_thawing = frontier;

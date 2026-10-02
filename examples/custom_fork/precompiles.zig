@@ -40,7 +40,6 @@ const ReverseContract = struct {
                 .status = .out_of_gas,
                 .output_data = &.{},
                 .gas_left = 0,
-                .output_owned = false,
             };
         }
         const output = try call.allocator.dupe(u8, call.input_data);
