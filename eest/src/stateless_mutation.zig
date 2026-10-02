@@ -15,7 +15,6 @@ pub const Mutation = enum {
     altered_header,
     altered_header_history,
     altered_pre_state_root,
-    altered_public_key,
     altered_transaction_body,
     state_root_claim,
     receipts_root_claim,
@@ -52,9 +51,8 @@ const cases = [_]Case{
     .{ .mutation = .altered_header, .expected = .invalid_witness },
     .{ .mutation = .altered_header_history, .expected = .invalid_witness },
     .{ .mutation = .altered_pre_state_root, .expected = .invalid_witness },
-    .{ .mutation = .altered_public_key, .expected = .invalid_witness },
-    // Public-key authentication binds the body before any root claim is compared.
-    .{ .mutation = .altered_transaction_body, .expected = .invalid_witness },
+    // A changed signature changes the sender access committed by the BAL.
+    .{ .mutation = .altered_transaction_body, .expected = .block_access_list_mismatch },
     .{ .mutation = .state_root_claim, .expected = .state_root_mismatch },
     .{ .mutation = .receipts_root_claim, .expected = .receipts_root_mismatch },
     .{ .mutation = .logs_bloom_claim, .expected = .logs_bloom_mismatch },
@@ -258,12 +256,6 @@ fn mutate(
         .altered_pre_state_root => {
             if (input.witness.headers.len == 0) return false;
             if (!try alterHeaderStateRoot(allocator, input, input.witness.headers.len - 1, true)) return false;
-        },
-        .altered_public_key => {
-            if (input.public_keys.len == 0) return false;
-            const keys = try allocator.dupe([65]u8, input.public_keys);
-            keys[0][0] ^= 1;
-            input.public_keys = keys;
         },
         .missing_bal_account,
         .missing_bal_storage,

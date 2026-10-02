@@ -75,20 +75,13 @@ test "stateless wire v1 derives the normalized requests hash" {
     );
 }
 
-test "stateless wire v1 decodes and authenticates public-key inputs" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
+test "stateless wire v1 input has the v21.0.1 fixed section" {
+    const encoded = try smoke.smokeInputBytes(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
 
-    var input = try smoke.smokeInput(scratch);
-    const hints = [_][65]u8{[_]u8{0x5a} ** 65};
-    input.public_keys = &hints;
-    const encoded = try input.encodeSchemaPrefixed(scratch);
-    const decoded = try wire.StatelessInput.decodeSchemaPrefixed(scratch, encoded);
-    try std.testing.expectEqual(@as(usize, 1), decoded.public_keys.len);
-
-    const result = try wire.validateStatelessResultBytes(scratch, encoded);
-    try std.testing.expectEqual(block_stf.Status.invalid_witness, result.status);
+    // Two offsets and a chain ID; the witness is the final variable field.
+    try std.testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, encoded[2..6], .little));
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, encoded[10..18], .little));
 }
 
 test "stateless wire v1 reuses parity-authenticated transaction decoding" {
@@ -103,9 +96,7 @@ test "stateless wire v1 reuses parity-authenticated transaction decoding" {
 
     var input = try smoke.smokeInput(scratch);
     const transactions = [_][]const u8{&encoded};
-    const public_keys = [_][65]u8{recovered.public_key};
     input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.transactions = &transactions;
-    input.public_keys = &public_keys;
 
     var normalized = try wire.normalize(scratch, input);
     defer normalized.deinit(scratch);
@@ -116,9 +107,21 @@ test "stateless wire v1 reuses parity-authenticated transaction decoding" {
     var opposite_parity = encoded;
     try std.testing.expectEqual(@as(u8, 0x25), opposite_parity[43]);
     opposite_parity[43] = 0x26;
-    const opposite_key = (try transaction_signing.recoverSender(scratch, &opposite_parity)).public_key;
-    input.public_keys = &[_][65]u8{opposite_key};
-    try std.testing.expectError(error.InvalidPublicKey, wire.normalize(scratch, input));
+    const opposite_sender = (try transaction_signing.recoverSender(scratch, &opposite_parity)).sender;
+    try std.testing.expect(!recovered.sender.eql(opposite_sender));
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.transactions = &.{&opposite_parity};
+    var opposite = try wire.normalize(scratch, input);
+    defer opposite.deinit(scratch);
+    try std.testing.expectEqual(opposite_sender, opposite.input.block.transactions[0].tx.sender);
+
+    var invalid_signature = encoded;
+    try std.testing.expectEqual(@as(u8, 0xa0), invalid_signature[77]);
+    invalid_signature[78] = 0xff;
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.transactions = &.{&invalid_signature};
+    try std.testing.expectError(error.InvalidSignature, wire.normalize(scratch, input));
+    const invalid_bytes = try input.encodeSchemaPrefixed(scratch);
+    const result = try wire.validateStatelessResultBytes(scratch, invalid_bytes);
+    try std.testing.expectEqual(block_stf.Status.invalid_witness, result.status);
 }
 
 test "stateless wire v1 declares Amsterdam semantics at its type boundary" {
@@ -354,9 +357,8 @@ test "stateless wire v1 rejects noncanonical SSZ before allocation" {
         @memcpy(bytes[0..canonical.len], canonical);
         switch (mutation) {
             .top_level_gap => {
-                // Schema prefix, then request offset, witness offset, chain ID,
-                // and public-key offset: the exact upstream #3531 mutation.
-                for ([_]usize{ 2, 6, 18 }) |offset| {
+                // Schema prefix, then request offset, witness offset, and chain ID.
+                for ([_]usize{ 2, 6 }) |offset| {
                     const field = bytes[offset..][0..4];
                     std.mem.writeInt(u32, field, std.mem.readInt(u32, field, .little) + 1, .little);
                 }
@@ -364,14 +366,11 @@ test "stateless wire v1 rejects noncanonical SSZ before allocation" {
             },
             .nested_gap => {
                 const witness = wire.schema_id_size + std.mem.readInt(u32, bytes[6..10], .little);
-                const witness_end = wire.schema_id_size + std.mem.readInt(u32, bytes[18..22], .little);
-                @memmove(bytes[witness_end + 1 ..], canonical[witness_end..]);
-                bytes[witness_end] = 0xff;
+                bytes[canonical.len] = 0xff;
                 for ([_]usize{ 0, 4, 8 }) |offset| {
                     const field = bytes[witness + offset ..][0..4];
                     std.mem.writeInt(u32, field, std.mem.readInt(u32, field, .little) + 1, .little);
                 }
-                std.mem.writeInt(u32, bytes[18..22], @intCast(witness_end + 1 - wire.schema_id_size), .little);
             },
             .zero_state_offset, .zero_header_offset => {
                 const witness = wire.schema_id_size + std.mem.readInt(u32, bytes[6..10], .little);
@@ -404,7 +403,7 @@ test "stateless wire v1 validation failure preserves the input commitment" {
     }, result);
 }
 
-test "stateless wire v1 protocol fork values match tests-zkevm v0.8.0" {
+test "stateless wire v1 protocol fork values match tests-zkevm v21.0.1" {
     try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(0x0e));
     try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(0x15));
     try std.testing.expectError(error.UnsupportedFork, wire.ProtocolFork.fromInt(0));
