@@ -2254,8 +2254,14 @@ pub fn WorldState(comptime World: type) type {
         /// preserves unique membership and filters stale incarnations in one pass.
         fn compactAcceptedStorageChanges(self: *State) void {
             const deduplicate = self.transaction_scope_reverted;
-            var write: usize = 0;
-            for (self.dirty_storage.items) |id| {
+            // Undo restores flags, so reverts leave the accepted prefix intact;
+            // only this attempt's wipes can retire an accepted incarnation.
+            const start: usize = if (self.transaction_storage_wipes.items.len != 0)
+                0
+            else
+                self.accepted_len.dirty_storage;
+            var write: usize = start;
+            for (self.dirty_storage.items[start..]) |id| {
                 const row = self.world.storageRow(id);
                 if (!row.flags.block_dirty) continue;
                 if (deduplicate) row.flags.block_dirty = false;
@@ -2268,7 +2274,7 @@ pub fn WorldState(comptime World: type) type {
                 write += 1;
             }
             if (deduplicate) {
-                for (self.dirty_storage.items[0..write]) |id|
+                for (self.dirty_storage.items[start..write]) |id|
                     self.world.storageRow(id).flags.block_dirty = true;
             }
             self.dirty_storage.items.len = write;
@@ -2278,30 +2284,32 @@ pub fn WorldState(comptime World: type) type {
         /// reverts leave flag-false entries behind instead of truncating, so retention
         /// filters and deduplicates them with the same consume-then-restore passes.
         fn compactAcceptedAccountChanges(self: *State) void {
-            var changed_write: usize = 0;
-            for (self.block_changed_accounts.items) |id| {
+            const start = self.accepted_len.block_changed_accounts;
+            var changed_write: usize = start;
+            for (self.block_changed_accounts.items[start..]) |id| {
                 const row = self.world.accountRow(id);
                 if (!row.flags.block_changed) continue;
                 row.flags.block_changed = false;
                 self.block_changed_accounts.items[changed_write] = id;
                 changed_write += 1;
             }
-            for (self.block_changed_accounts.items[0..changed_write]) |id| {
+            for (self.block_changed_accounts.items[start..changed_write]) |id| {
                 self.world.accountRow(id).flags.block_changed = true;
             }
             self.block_changed_accounts.items.len = changed_write;
         }
 
         fn compactAcceptedStorageWipes(self: *State) void {
-            var write: usize = 0;
-            for (self.block_storage_wipes.items) |id| {
+            const start = self.accepted_len.block_storage_wipes;
+            var write: usize = start;
+            for (self.block_storage_wipes.items[start..]) |id| {
                 const row = self.world.accountRow(id);
                 if (!row.flags.storage_wiped) continue;
                 row.flags.storage_wiped = false;
                 self.block_storage_wipes.items[write] = id;
                 write += 1;
             }
-            for (self.block_storage_wipes.items[0..write]) |id|
+            for (self.block_storage_wipes.items[start..write]) |id|
                 self.world.accountRow(id).flags.storage_wiped = true;
             self.block_storage_wipes.items.len = write;
         }
