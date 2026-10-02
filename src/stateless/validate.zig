@@ -5,7 +5,6 @@ const std = @import("std");
 const address = @import("../address.zig");
 const Revision = @import("../eth/revision.zig").Revision;
 const Spec = @import("../spec.zig").Spec;
-const BlockPreparedCode = @import("../eth/BlockPreparedCode.zig");
 const Withdrawal = @import("../eth/Withdrawal.zig");
 const Vm = @import("../vm.zig");
 const bal = @import("../eth/bal/model.zig");
@@ -210,7 +209,6 @@ fn validateExact(
 ) Error!block_stf.Result {
     const revision = ExactBlockStf.fork;
     const block = &input.block;
-    var prepared_code_pool: BlockPreparedCode = .init(allocator);
     return ExactBlockStf.applyAssumeDecoded(allocator, .{
         .env = .{
             .chain_id = input.chain_id,
@@ -242,7 +240,6 @@ fn validateExact(
             input.witness.state,
             input.witness.codes,
         ),
-        .prepared_code_backend = prepared_code_pool.backend(),
         .transactions = block.transactions,
         .withdrawals = block.withdrawals,
         .parent_header = .{

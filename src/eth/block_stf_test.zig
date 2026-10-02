@@ -23,6 +23,7 @@ const transaction = @import("../transaction.zig");
 const trace = @import("../trace.zig");
 const uint256 = @import("../uint256.zig");
 const vm = @import("../vm.zig");
+const prepared_code = @import("../prepared_code.zig");
 const Backend = @import("../backend.zig").Backend;
 
 const Log = vm.Log;
@@ -1247,6 +1248,36 @@ test "BlockSTF rejects cumulative blob gas above the block params cap" {
     try std.testing.expectEqual(Status.blob_gas_limit_exceeded, result.status);
     try std.testing.expectEqual(@as(?usize, 1), result.tx_index);
     try std.testing.expectEqual(cancun_schedule.max * cancun_schedule.gas_per_blob, result.blob_gas_used);
+}
+
+test "BlockSTF prepares code through an injected backend once per block" {
+    const Latest = t.BlockStf(.latest).?;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const sender = address.addr(0x1000);
+    const target = address.addr(0x2000);
+    var store = state.MemoryStore.init(scratch);
+    (try store.getOrCreateAccount(sender)).account.balance = 1_000_000_000;
+    try (try store.getOrCreateAccount(target)).setCode(&.{ 0x60, 0x01, 0x5f, 0x55, 0x00 });
+
+    var pool = prepared_code.InMemoryPreparedPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const tx_input = [_]TransactionInput{
+        .{ .tx = .{ .sender = sender, .to = target, .gas_limit = 100_000 }, .encoded = "tx0" },
+        .{ .tx = .{ .sender = sender, .nonce = 1, .to = target, .gas_limit = 100_000 }, .encoded = "tx1" },
+    };
+    const result = try Latest.applyAssumeDecoded(scratch, .{
+        .env = .{ .gas_limit = 1_000_000 },
+        .state_backend = .fromMemoryStore(&store),
+        .prepared_code_backend = pool.backend(),
+        .transactions = &tx_input,
+        .root_checks = testRootChecks(@splat(0), @splat(0), @splat(0)),
+    });
+    try std.testing.expectEqual(@as(?transaction.validation.ValidationError, null), result.transaction_rejection);
+    try std.testing.expect(result.gas_used > 0);
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
 test "BlockSTF applies withdrawals to state balances" {
