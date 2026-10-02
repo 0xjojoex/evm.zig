@@ -1,6 +1,6 @@
 //! Amsterdam schema `0x1501` wire contract for the stateless zkEVM guest interface.
 //! Defines the SSZ-encoded `StatelessInput`/`StatelessValidationResult` types
-//! (per tests-zkevm v0.8.0) and the schema-prefixed validate entry points.
+//! (per tests-zkevm v21.0.1) and the schema-prefixed validate entry points.
 //! The two-byte schema id gates decoding; unknown ids are rejected.
 //!
 //! This module implements exactly one `fork || revision` pair, so its id is
@@ -19,7 +19,6 @@ const stateless_validate = @import("../validate.zig");
 const block_stf = @import("../../eth/block_stf.zig");
 const eth_spec = @import("../../eth/spec.zig");
 const transaction_raw = @import("../../transaction/raw.zig");
-const transaction_signing = @import("../../transaction/signing.zig");
 const uint256 = @import("../../uint256.zig");
 
 pub const revision: Revision = .amsterdam;
@@ -37,13 +36,12 @@ pub const schema_id: u16 = schema.id(schema_fork, schema_revision);
 pub const schema_id_size = schema.id_size;
 
 const max_extra_data_bytes = 32;
-const public_key_bytes = 65;
 const max_witness_headers = 256;
 const max_bytes_per_witness_node = 1 << 10;
 const max_bytes_per_code = 1 << 16;
 const max_bytes_per_header = 1 << 10;
 
-pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Error || error{
+pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Error || transaction_raw.Error || error{
     InvalidBool,
     InvalidListLength,
     OffsetsAreNotMonotonic,
@@ -55,7 +53,6 @@ pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Err
     MissingParentHeader,
     InvalidHeaderWitness,
     InvalidPayloadForFork,
-    InvalidPublicKey,
     ExtraDataTooLong,
 };
 
@@ -607,7 +604,6 @@ pub const StatelessInput = struct {
     new_payload_request: NewPayloadRequest,
     witness: ExecutionWitness,
     chain_id: u64,
-    public_keys: []const [public_key_bytes]u8 = &.{},
 
     pub fn encode(self: StatelessInput, allocator: std.mem.Allocator) Error![]u8 {
         const request = switch (self.new_payload_request) {
@@ -618,7 +614,6 @@ pub const StatelessInput = struct {
             .new_payload_request = request,
             .witness = self.witness,
             .chain_id = self.chain_id,
-            .public_keys = self.public_keys,
         });
     }
 
@@ -650,7 +645,6 @@ pub const StatelessInput = struct {
             .new_payload_request = new_payload_request,
             .witness = value.witness,
             .chain_id = value.chain_id,
-            .public_keys = value.public_keys,
         };
     }
 
@@ -660,14 +654,12 @@ pub const StatelessInput = struct {
             .new_payload_request = .{ .amsterdam = amsterdamRequestFromWire(value.new_payload_request) },
             .witness = value.witness,
             .chain_id = value.chain_id,
-            .public_keys = value.public_keys,
         };
     }
 
     pub fn deinit(self: *StatelessInput, allocator: std.mem.Allocator) void {
         self.new_payload_request.deinit(allocator);
         self.witness.deinit(allocator);
-        PublicKeysSsz.deinit(allocator, &self.public_keys);
     }
 };
 
@@ -704,7 +696,6 @@ const WithdrawalsSsz = ssz.ProgressiveList(Withdrawal);
 const TransactionsSsz = ssz.ProgressiveListOf(ssz.ProgressiveByteList);
 const VersionedHashesSsz = ssz.ProgressiveList([32]u8);
 const BlockAccessListSsz = ssz.ProgressiveByteList;
-const PublicKeysSsz = ssz.ProgressiveList([public_key_bytes]u8);
 
 const BorrowedTransactionsSsz = ssz.ProgressiveListOf(ssz.Borrowed(ssz.ProgressiveByteList));
 const BorrowedExecutionWitnessSsz = ssz.Container(ExecutionWitness, .{
@@ -854,11 +845,8 @@ const StatelessInputWire = struct {
     new_payload_request: NewPayloadRequestAmsterdamWire,
     witness: ExecutionWitness,
     chain_id: u64,
-    public_keys: []const [public_key_bytes]u8,
 
-    pub const Ssz = ssz.Container(@This(), .{
-        .public_keys = PublicKeysSsz,
-    });
+    pub const Ssz = ssz.Container(@This(), .{});
 };
 
 const BorrowedExecutionPayloadV4Ssz = ssz.ProgressiveContainer(ExecutionPayloadV4Wire, [_]bool{true} ** 19, .{
@@ -874,7 +862,6 @@ const BorrowedNewPayloadRequestAmsterdamSsz = ssz.Container(NewPayloadRequestAms
 const BorrowedStatelessInputSsz = ssz.Container(StatelessInputWire, .{
     .new_payload_request = BorrowedNewPayloadRequestAmsterdamSsz,
     .witness = BorrowedExecutionWitnessSsz,
-    .public_keys = PublicKeysSsz,
 });
 
 const StatelessValidationResultWire = struct {
@@ -1157,12 +1144,8 @@ fn validateStatelessUsing(
 }
 
 /// Converts the immutable v1 wire representation into runtime Ethereum facts.
-/// Supplied public keys are authenticated against each signed payload
-/// transaction before they are discarded from the normalized execution input.
-/// EIP-8025 requires rejecting a key that is not the signer's, including a
-/// well-formed opposite-parity point, so the hint cannot simply be ignored.
-/// Recovery also authenticates the sender used by the decoded transaction, so
-/// execution reuses that prepared value instead of recovering a second time.
+/// Transaction senders are recovered from their signed payloads and reused
+/// during execution.
 /// Owns every allocation introduced while normalizing one wire input. The
 /// semantic input borrows these buffers and the original decoded wire value.
 pub const NormalizedInput = struct {
@@ -1188,11 +1171,7 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!Norm
         defer freeOpaqueRequests(allocator, opaque_requests);
         break :hash try block_stf.requestsHash(allocator, opaque_requests);
     } else null;
-    var transactions = try normalizeTransactions(
-        allocator,
-        payload.transactions,
-        input.public_keys,
-    );
+    var transactions = try transaction_raw.decodeRawBatch(allocator, payload.transactions);
     errdefer transactions.deinit(allocator);
     return .{
         .chain_id = input.chain_id,
@@ -1233,38 +1212,6 @@ pub fn normalize(allocator: std.mem.Allocator, input: StatelessInput) Error!Norm
         .withdrawals = withdrawals,
     };
 }
-
-fn normalizeTransactions(
-    allocator: std.mem.Allocator,
-    transactions: []const []const u8,
-    public_keys: []const [public_key_bytes]u8,
-) Error!transaction_raw.DecodedBatch {
-    if (public_keys.len != transactions.len) return error.InvalidPublicKey;
-    return transaction_raw.decodeRawBatchWith(
-        allocator,
-        transactions,
-        PublicKeyResolver{ .expected = public_keys },
-    );
-}
-
-const PublicKeyResolver = struct {
-    expected: []const [public_key_bytes]u8,
-
-    pub fn resolve(
-        self: PublicKeyResolver,
-        allocator: std.mem.Allocator,
-        index: usize,
-        encoded: []const u8,
-    ) Error!address.Address {
-        const recovered = transaction_signing.recoverSender(allocator, encoded) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidPublicKey,
-        };
-        if (!std.mem.eql(u8, &recovered.public_key, &self.expected[index]))
-            return error.InvalidPublicKey;
-        return recovered.sender;
-    }
-};
 
 fn freeOpaqueRequests(allocator: std.mem.Allocator, requests: []const []const u8) void {
     var index = requests.len;
