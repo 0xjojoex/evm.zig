@@ -50,35 +50,36 @@ Full example: [`examples/custom_fork/precompiles.zig`](../examples/custom_fork/p
 
 ## Native contract
 
-Native code with the executor's `Host` and the full `Host.Message`. It can read
-and write journaled storage, emit logs, credit and debit balances, and request
-child calls into the EVM. Other stacks call this a stateful precompile.
+Native code with journaled state and the full `Host.Message`. It can read and
+write storage, emit logs, mint and burn balances, and request child calls into
+the EVM. Other stacks call this a stateful precompile.
 
-The spec activates addresses at compile time. The embedding binds behavior when it
-constructs the executor.
+The spec names one native type. Its `active` is the compile-time address set and
+its `execute` is the code. The embedding binds an instance when it constructs the
+executor, so the type's fields carry embedding state.
 
 ```zig
 const Native = struct {
+    const target = evmz.addr(0x5678);
+
+    calls: u64 = 0,
+
     pub fn active(candidate: evmz.Address) bool {
         return candidate.eql(evmz.addr(0x1800000000000000000000000000000000000003));
     }
-};
-const my_spec = evmz.eth.latest.extend(.{ .native_contract = Native });
-const Vm = evmz.Vm(my_spec);
-const target = evmz.addr(0x5678);
 
-const Runtime = struct {
-    fn service(self: *Runtime) evmz.execution.NativeContractRuntime {
-        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
-    }
-
-    fn execute(ptr: *anyopaque, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
-        _ = ptr;
+    pub fn execute(
+        self: *Native,
+        ctx: anytype,
+        call: evmz.execution.NativeContractCall,
+    ) !evmz.execution.NativeContractStep {
         // Second entry: the executor has run and settled the child requested below.
         if (call.child) |child| return .{ .done = .{
             .status = child.status(),
             .output_data = try call.allocator.dupe(u8, child.output_data),
         } };
+        self.calls += 1;
+        _ = try ctx.setStorage(call.message.recipient, 0, self.calls);
         if (!call.ledger.trackGas(100)) return .{ .done = .{} };
         return .{ .call = .{
             .kind = .call,
@@ -90,15 +91,33 @@ const Runtime = struct {
         } };
     }
 };
+const my_spec = evmz.eth.latest.extend(.{ .native_contract = Native });
+const Vm = evmz.Vm(my_spec);
 
-var runtime = Runtime{};
-var executor = Vm.Executor.init(allocator, .{ .native_contract_runtime = runtime.service() });
+var native: Native = .{};
+var executor = Vm.Executor.init(allocator, .{ .native_contract = &native });
 ```
 
-The executor borrows the runtime, so it must outlive the executor. An active
-address with no runtime fails with `MissingNativeContractRuntime`. For embedding
-state that rolls back with the EVM, see
+The executor borrows the instance, so it must outlive the executor. An active
+address with no instance fails with `MissingNativeContract`. To run different
+code under one spec, as tests do, make the native type a tagged union that
+dispatches `execute`. For embedding state that rolls back with the EVM, see
 [`examples/transaction_journal.zig`](../examples/transaction_journal.zig).
+
+### The context
+
+`ctx` is the executor's `NativeContext`, valid for one entry only:
+
+- Reads: accounts, code, balances, storage, transient storage, block hashes, and
+  access status for pricing.
+- Effects: storage, transient storage, logs, self-destruct, and `addBalance` and
+  `subtractBalance` for issuance. They take the same journaled paths bytecode
+  does, so they roll back with the native call.
+- `@TypeOf(ctx).spec`: the executor's own compiled spec.
+
+`ctx` has no call. Children are requested through the returned step. State the
+instance mutates directly is outside the EVM journal unless the embedding
+journals it, as the transaction-journal example does.
 
 ### Entries and child calls
 
@@ -113,8 +132,8 @@ Entries never nest, so native recursion does not grow the Zig stack. Allocate
 output and continuation state from `call.allocator`. It lives until the native
 call ends, and so does the copied child output in `call.child`.
 
-`Host.call` inside an entry fails with `NativeHostCallUnsupported`. CREATE cannot
-be requested. To deploy, call a factory contract, which then becomes the deployer.
+CREATE cannot be requested. To deploy, call a factory contract, which then
+becomes the deployer.
 
 ### Who owns what
 
@@ -125,18 +144,16 @@ the executor applies bytecode's failure rules. Revert keeps output. Invalid and
 out-of-gas drop output and remaining gas. Any failure drops refunds, unwinds state
 gas and rolls back state, including state written by children that succeeded.
 
-In a static call, storage, transient storage, log, self-destruct and balance
-effects fail with `error.StaticModeViolation`, and so does a CALL request with
-value. Catching the error does not help. The call still ends as `.invalid` with
-`write_protection`.
+In a static call, every `ctx` effect fails with `error.StaticModeViolation`, and
+so does a CALL request with value. Catching the error does not help. The call
+still ends as `.invalid` with `write_protection`.
 
 The adapter owns everything the chain decides:
 
 - Charge native work and CALL-like overhead such as account access and value
   transfer with `call.ledger.trackGas`, `trackStateGas` and `refillStateGas`. A
   false return is terminal, so return `.done` without further effects. Price
-  SSTORE- or CALL-like work from `call.rules`, the executor's own compiled spec,
-  never a builtin fork.
+  SSTORE- or CALL-like work from `@TypeOf(ctx).spec`, never a builtin fork.
 - Decide which senders a request may name. The executor does not restrict them.
 - Add chain gas rules the EVM lacks. Arc burns the retained 1/64 after a child
   halts; `_ = call.ledger.trackGas(call.ledger.gas_left)` on the next entry does
@@ -144,10 +161,10 @@ The adapter owns everything the chain decides:
 - Report chain-visible failures, such as bad input or an unauthorized caller, as
   `.done` with `.revert` or `.invalid`. A Zig error aborts the whole execution, so
   keep errors for infrastructure faults like allocation or database failures.
-
-`Host.changeBalance` credits or debits a balance with an optional log, for
-issuance. Balance and log apply together or not at all, and no transfer log is
-emitted.
+- Define issuance. `addBalance` fails with `error.BalanceOverflow` and
+  `subtractBalance` returns false when the balance is short, both changing
+  nothing. Neither emits a transfer log, so emit the chain's own issuance log
+  after the balance moves.
 
 ### Rules shared by both native kinds
 
@@ -199,6 +216,6 @@ calls that a native contract or a predeploy with its own access control.
 
 - Pure function of its input: precompile.
 - Needs state, logs, balances or a child call: native contract. Do not smuggle
-  state into a precompile through the runtime pointer.
+  state into a precompile through globals.
 - Protocol logic that fits in bytecode: predeploy, system-called if the protocol
   invokes it.

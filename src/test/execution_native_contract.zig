@@ -8,14 +8,9 @@ const StatefulRuntime = struct {
     status: execution.Status = .success,
     service_error: ?anyerror = null,
 
-    fn service(self: *StatefulRuntime) execution.NativeContractRuntime {
-        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
-    }
-
-    fn execute(ptr: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
-        const self: *StatefulRuntime = @ptrCast(@alignCast(ptr));
+    fn execute(self: *StatefulRuntime, ctx: anytype, call: execution.NativeContractCall) !execution.NativeContractStep {
         if (self.service_error) |err| return err;
-        _ = try call.host.setStorage(.fromAddress(call.message.recipient), 7, self.tx_kind);
+        _ = try ctx.setStorage(call.message.recipient, 7, self.tx_kind);
         _ = call.ledger.trackGas(9);
         const output = try call.allocator.alloc(u8, 1);
         output[0] = self.tx_kind;
@@ -28,12 +23,7 @@ const ReentrantRuntime = struct {
     child: evmz.Address,
     called: bool = false,
 
-    fn service(self: *ReentrantRuntime) execution.NativeContractRuntime {
-        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
-    }
-
-    fn execute(ptr: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
-        const self: *ReentrantRuntime = @ptrCast(@alignCast(ptr));
+    fn execute(self: *ReentrantRuntime, _: anytype, call: execution.NativeContractCall) !execution.NativeContractStep {
         if (call.child) |child| {
             self.called = true;
             return .{ .done = .{ .status = child.status() } };
@@ -50,11 +40,7 @@ const ReentrantRuntime = struct {
 
 /// The outer activation calls itself; each returns one marker byte.
 const ReentrantOutputRuntime = struct {
-    fn service(self: *ReentrantOutputRuntime) execution.NativeContractRuntime {
-        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
-    }
-
-    fn execute(_: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
+    fn execute(_: *ReentrantOutputRuntime, _: anytype, call: execution.NativeContractCall) !execution.NativeContractStep {
         const outer = call.message.input_data.len == 0;
         if (outer and call.child == null) return .{ .call = .{
             .kind = .call,
@@ -69,23 +55,34 @@ const ReentrantOutputRuntime = struct {
     }
 };
 
-const StatefulNativeContract = struct {
+/// Each test binds one runtime; they share one executor instantiation.
+const StatefulNativeContract = union(enum) {
+    stateful: *StatefulRuntime,
+    reentrant: *ReentrantRuntime,
+    reentrant_output: *ReentrantOutputRuntime,
+
     const target = evmz.addr(0x1234);
 
     pub fn active(address: evmz.Address) bool {
         return evmz.Address.eql(address, target);
     }
+
+    pub fn execute(self: *StatefulNativeContract, ctx: anytype, call: execution.NativeContractCall) !execution.NativeContractStep {
+        return switch (self.*) {
+            inline else => |runtime| runtime.execute(ctx, call),
+        };
+    }
 };
 
 const Latest = evmz.t.CustomVm(.latest, .{ .native_contract = StatefulNativeContract }).?;
 
-test "active native contract requires an embedding runtime" {
+test "active native contract requires an embedding instance" {
     const sender = evmz.addr(0xaaaa);
     var executor = Latest.Executor.init(std.testing.allocator, .{});
     defer executor.deinit();
 
     try std.testing.expectError(
-        error.MissingNativeContractRuntime,
+        error.MissingNativeContract,
         executor.executeStandalone(request(sender, StatefulNativeContract.target, &.{}), .{}),
     );
 }
@@ -93,8 +90,9 @@ test "active native contract requires an embedding runtime" {
 test "native contract can use host state and keeps EVM rollback semantics" {
     const sender = evmz.addr(0xaaaa);
     var runtime = StatefulRuntime{ .tx_kind = 0x7e };
+    var native: StatefulNativeContract = .{ .stateful = &runtime };
     var executor = Latest.Executor.init(std.testing.allocator, .{
-        .native_contract_runtime = runtime.service(),
+        .native_contract = &native,
     });
     defer executor.deinit();
 
@@ -125,11 +123,12 @@ test "native contract can use host state and keeps EVM rollback semantics" {
     );
 }
 
-test "executor construction selects the supplied native contract runtime" {
+test "executor construction selects the supplied native contract instance" {
     const sender = evmz.addr(0xaaaa);
     var first_runtime = StatefulRuntime{ .tx_kind = 0x11 };
+    var first_native: StatefulNativeContract = .{ .stateful = &first_runtime };
     var first_executor = Latest.Executor.init(std.testing.allocator, .{
-        .native_contract_runtime = first_runtime.service(),
+        .native_contract = &first_native,
     });
     defer first_executor.deinit();
 
@@ -140,8 +139,9 @@ test "executor construction selects the supplied native contract runtime" {
     try std.testing.expectEqualSlices(u8, &.{0x11}, first.output_data);
 
     var second_runtime = StatefulRuntime{ .tx_kind = 0x22 };
+    var second_native: StatefulNativeContract = .{ .stateful = &second_runtime };
     var second_executor = Latest.Executor.init(std.testing.allocator, .{
-        .native_contract_runtime = second_runtime.service(),
+        .native_contract = &second_native,
     });
     defer second_executor.deinit();
 
@@ -155,8 +155,9 @@ test "executor construction selects the supplied native contract runtime" {
 test "native contract output survives self reentry" {
     const sender = evmz.addr(0xaaaa);
     var runtime = ReentrantOutputRuntime{};
+    var native: StatefulNativeContract = .{ .reentrant_output = &runtime };
     var executor = Latest.Executor.init(std.testing.allocator, .{
-        .native_contract_runtime = runtime.service(),
+        .native_contract = &native,
     });
     defer executor.deinit();
 
@@ -200,8 +201,9 @@ test "native contract preserves parent stack across arena growth" {
     });
 
     var runtime = ReentrantRuntime{ .child = child };
+    var native: StatefulNativeContract = .{ .reentrant = &runtime };
     var executor = Latest.Executor.init(std.testing.allocator, .{
-        .native_contract_runtime = runtime.service(),
+        .native_contract = &native,
     });
     defer executor.deinit();
 

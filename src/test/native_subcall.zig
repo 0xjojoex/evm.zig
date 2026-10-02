@@ -3,19 +3,12 @@ const std = @import("std");
 const evmz = @import("../evm.zig");
 const testing = std.testing;
 
-const Native = struct {
-    const address = evmz.addr(0x1800000000000000000000000000000000000003);
-
-    pub fn active(candidate: evmz.Address) bool {
-        return evmz.Address.eql(candidate, address);
-    }
-};
-
-const Latest = evmz.t.CustomVm(.latest, .{ .native_contract = Native }).?;
 const sender = evmz.addr(0xaaaa);
 const target = evmz.addr(0xbbbb);
 
-const Runtime = struct {
+const Native = struct {
+    const address = evmz.addr(0x1800000000000000000000000000000000000003);
+
     child: evmz.Address = target,
     completion_status: evmz.execution.Status = .success,
     child_status: ?evmz.execution.Status = null,
@@ -23,12 +16,11 @@ const Runtime = struct {
     native_depth: u16 = 0,
     sibling: bool = false,
 
-    fn service(self: *Runtime) evmz.execution.NativeContractRuntime {
-        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
+    pub fn active(candidate: evmz.Address) bool {
+        return evmz.Address.eql(candidate, address);
     }
 
-    fn execute(ptr: *anyopaque, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
-        const self: *Runtime = @ptrCast(@alignCast(ptr));
+    pub fn execute(self: *Native, _: anytype, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
         const result = call.child orelse {
             const child = if (call.message.depth < self.native_depth) Native.address else self.child;
             return .{ .call = .{
@@ -65,6 +57,8 @@ const Runtime = struct {
     }
 };
 
+const Latest = evmz.t.CustomVm(.latest, .{ .native_contract = Native }).?;
+
 fn seed(executor: *Latest.Executor, address: evmz.Address, code: []const u8) !void {
     var account = evmz.state.MemoryAccount.init(testing.allocator);
     errdefer account.deinit();
@@ -86,8 +80,8 @@ fn run(executor: *Latest.Executor, recipient: evmz.Address, input: []const u8) !
 
 test "native subcall preserves sender and delegated account context" {
     const delegate = evmz.addr(0xcccc);
-    var runtime = Runtime{};
-    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+    var runtime = Native{};
+    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
     defer executor.deinit();
     const code = evmz.t.bytecode(.{
         .CALLER,  .PUSH0,  .MSTORE,
@@ -110,8 +104,8 @@ test "native subcall preserves sender and delegated account context" {
 }
 
 test "native subcall wraps child revert and rolls back storage and logs" {
-    var runtime = Runtime{};
-    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+    var runtime = Native{};
+    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
     defer executor.deinit();
     const code = evmz.t.bytecode(.{
         .PUSH1, 2,      .PUSH0,   .SSTORE,
@@ -130,8 +124,8 @@ test "native subcall wraps child revert and rolls back storage and logs" {
 
 test "native subcall completion failure rolls back a successful child" {
     inline for (.{ evmz.execution.Status.revert, evmz.execution.Status.out_of_gas }) |status| {
-        var runtime = Runtime{ .completion_status = status };
-        var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+        var runtime = Native{ .completion_status = status };
+        var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
         defer executor.deinit();
         const code = evmz.t.bytecode(.{
             .PUSH0, .PUSH0, .SSTORE,
@@ -151,16 +145,16 @@ test "native subcall completion failure rolls back a successful child" {
 }
 
 test "native subcall copies terminal precompile output before sibling reentry" {
-    var runtime = Runtime{ .child = evmz.addr(4), .sibling = true };
-    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+    var runtime = Native{ .child = evmz.addr(4), .sibling = true };
+    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
     defer executor.deinit();
     const result = try run(&executor, Native.address, &.{ 0xaa, 0xbb });
     try testing.expectEqualSlices(u8, &.{ 1, 0xaa, 0xbb }, result.output_data);
 }
 
 test "native subcall forwards successful child storage refunds" {
-    var runtime = Runtime{};
-    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+    var runtime = Native{};
+    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
     defer executor.deinit();
     const code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .SSTORE, .STOP });
     try seed(&executor, target, &code);
@@ -181,8 +175,8 @@ test "native subcall completion failure leaves its bytecode caller alive" {
     });
     const child_code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .SSTORE, .PUSH0, .PUSH0, .LOG0, .STOP });
     inline for (.{ evmz.execution.Status.revert, evmz.execution.Status.out_of_gas }) |status| {
-        var runtime = Runtime{ .completion_status = status };
-        var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+        var runtime = Native{ .completion_status = status };
+        var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
         defer executor.deinit();
         try seed(&executor, target, &child_code);
         try seed(&executor, parent, &parent_code);
@@ -199,8 +193,8 @@ test "native subcall completion failure leaves its bytecode caller alive" {
 
 test "native subcall wraps immediate empty code and exceptional halt outcomes" {
     inline for (.{ false, true }) |halt| {
-        var runtime = Runtime{};
-        var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+        var runtime = Native{};
+        var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
         defer executor.deinit();
         if (halt) try seed(&executor, target, &evmz.t.bytecode(.{.INVALID}));
         const result = try run(&executor, Native.address, &.{});
@@ -214,8 +208,8 @@ test "native subcall wraps immediate empty code and exceptional halt outcomes" {
 }
 
 test "native subcall output survives repeated native recursion" {
-    var runtime = Runtime{ .child = evmz.addr(4), .native_depth = 24 };
-    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+    var runtime = Native{ .child = evmz.addr(4), .native_depth = 24 };
+    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
     defer executor.deinit();
     const result = try run(&executor, Native.address, &.{ 0xaa, 0xbb });
     var expected: [27]u8 = @splat(1);
@@ -232,8 +226,8 @@ test "native subcall inherits static context in its bytecode child" {
     }) ++ Native.address.bytes ++ evmz.t.bytecode(.{
         .GAS, .STATICCALL, .POP, .PUSH1, 1, .PUSH0, .RETURN,
     });
-    var runtime = Runtime{};
-    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract_runtime = runtime.service() });
+    var runtime = Native{};
+    var executor = Latest.Executor.init(testing.allocator, .{ .native_contract = &runtime });
     defer executor.deinit();
     try seed(&executor, target, &evmz.t.bytecode(.{ .PUSH0, .PUSH0, .SSTORE, .STOP }));
     try seed(&executor, parent, &parent_code);

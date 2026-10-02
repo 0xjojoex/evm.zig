@@ -1053,7 +1053,7 @@ test "debug session runs native rows through and steps their bytecode children" 
             return candidate.eql(address);
         }
         // Forwards to `child` and returns its output.
-        fn execute(_: *anyopaque, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
+        pub fn execute(_: *@This(), _: anytype, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
             if (call.child) |result| return .{ .done = .{ .output_data = try call.allocator.dupe(u8, result.output_data) } };
             return .{ .call = .{
                 .kind = .call,
@@ -1085,10 +1085,9 @@ test "debug session runs native rows through and steps their bytecode children" 
         .code_address = recipient,
     };
     const context = evmz.t.defaultExecutionContext(sender, 200_000);
-    var probe: u8 = 0;
-    const runtime: evmz.execution.NativeContractRuntime = .{ .ptr = &probe, .vtable = &.{ .execute = Native.execute } };
+    var native: Native = .{};
 
-    var normal_executor = Executor.init(std.testing.allocator, .{ .native_contract_runtime = runtime });
+    var normal_executor = Executor.init(std.testing.allocator, .{ .native_contract = &native });
     defer normal_executor.deinit();
     try evmz.t.seedExecutorAccount(&normal_executor, evmz.addr(0xbbbb), .{ .code = &child_code });
     try normal_executor.beginTransaction(context, sender, recipient);
@@ -1099,7 +1098,7 @@ test "debug session runs native rows through and steps their bytecode children" 
     defer normal_code.deinit(std.testing.allocator);
     const normal = try Executor.executePreparedCallMessage(&normal_executor, message, normal_code.view());
 
-    var controlled_executor = Executor.init(std.testing.allocator, .{ .native_contract_runtime = runtime });
+    var controlled_executor = Executor.init(std.testing.allocator, .{ .native_contract = &native });
     defer controlled_executor.deinit();
     try evmz.t.seedExecutorAccount(&controlled_executor, evmz.addr(0xbbbb), .{ .code = &child_code });
     try controlled_executor.beginTransaction(context, sender, recipient);

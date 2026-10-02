@@ -85,7 +85,9 @@ const ScopeRoot = struct {
 
 /// An open world may start empty or load through a reader. Other worlds must
 /// arrive as an admitted state, whose ownership transfers to the executor.
-fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) type {
+/// `native_contract` binds the instance of the spec's native type; specs without
+/// native code ignore it.
+fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type, comptime NativeContract: type) type {
     if (TransactionJournal) |Journal| {
         if (World == evmz.state.OpenWorld) {
             return struct {
@@ -95,7 +97,7 @@ fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) ty
                 /// synchronization, and capacity policy are outside executor bounds.
                 prepared_code_backend: ?prepared_code.Backend = null,
                 block_hash_source: ?BlockHashSource = null,
-                native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
+                native_contract: ?*NativeContract = null,
             };
         }
         return struct {
@@ -103,7 +105,7 @@ fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) ty
             transaction_journal: *Journal,
             prepared_code_backend: ?prepared_code.Backend = null,
             block_hash_source: ?BlockHashSource = null,
-            native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
+            native_contract: ?*NativeContract = null,
         };
     }
     if (World == evmz.state.OpenWorld) {
@@ -113,14 +115,14 @@ fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type) ty
             /// synchronization, and capacity policy are outside executor bounds.
             prepared_code_backend: ?prepared_code.Backend = null,
             block_hash_source: ?BlockHashSource = null,
-            native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
+            native_contract: ?*NativeContract = null,
         };
     }
     return struct {
         state: evmz.state.WorldState(World),
         prepared_code_backend: ?prepared_code.Backend = null,
         block_hash_source: ?BlockHashSource = null,
-        native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
+        native_contract: ?*NativeContract = null,
     };
 }
 
@@ -179,6 +181,8 @@ pub fn ExecutorType(
         const has_native_contracts = spec.native_contract != evmz.execution.NoNativeContracts;
 
         const callbacks = HostCallbacks(spec, World, options_value);
+        /// What a native entry receives as `ctx`.
+        pub const NativeContext = callbacks.NativeContext;
 
         pub const State = evmz.state.WorldState(World);
 
@@ -190,7 +194,7 @@ pub fn ExecutorType(
         else
             void;
 
-        pub const Init = ExecutorInitType(World, options_value.transaction_journal);
+        pub const Init = ExecutorInitType(World, options_value.transaction_journal, spec.native_contract);
 
         allocator: std.mem.Allocator,
         state: State,
@@ -207,11 +211,8 @@ pub fn ExecutorType(
         active_block_execution_generation: ?u64 = null,
         next_block_execution_generation: u64 = 0,
         block_hash_source: ?BlockHashSource = null,
-        native_contract_runtime: ?evmz.execution.NativeContractRuntime = null,
         transaction_journal: TransactionJournal,
-        /// Guard of the running native entry. Entries never nest because
-        /// `Host.call` is unavailable inside one.
-        native_guard: ?*NativeGuard = null,
+        native_contract: if (has_native_contracts) ?*spec.native_contract else void,
         /// Native activations, interleaved with `frame_store` rows. Reserved to
         /// the depth limit on first use, so suspended actions never move.
         /// Zero-size without native contracts: its 24 bytes pushed hot fields
@@ -224,17 +225,12 @@ pub fn ExecutorType(
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
 
-        const NativeGuard = struct {
-            is_static: bool,
-            violated_static: bool = false,
-        };
-
         /// A native activation's row. It suspends on one child and resumes from
         /// its result the way `Interpreter.CallFrame` does.
         const NativeFrame = struct {
             message: Host.Message,
             ledger: native_contract.Ledger,
-            guard: NativeGuard,
+            guard: NativeContext.Guard,
             /// Null for a root activation; its caller owns the transaction scope.
             checkpoint: ?Checkpoint,
             call_capture: ?evmz.trace.CallToken,
@@ -315,7 +311,7 @@ pub fn ExecutorType(
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = .init(allocator),
                 .block_hash_source = options.block_hash_source,
-                .native_contract_runtime = options.native_contract_runtime,
+                .native_contract = if (has_native_contracts) options.native_contract else {},
                 .transaction_journal = if (transaction_journal_enabled)
                     options.transaction_journal
                 else {},
@@ -1089,17 +1085,6 @@ pub fn ExecutorType(
             return callbacks.host(self);
         }
 
-        /// Reject native effects before mutation. A caught error cannot clear
-        /// the invocation's terminal violation. Empty native sets compile out.
-        pub fn guardNativeMutation(self: *Executor) !void {
-            if (!has_native_contracts) return;
-            const guard = self.native_guard orelse return;
-            if (guard.is_static or guard.violated_static) {
-                guard.violated_static = true;
-                return error.StaticModeViolation;
-            }
-        }
-
         // Code resolution: canonical bytes -> EIP-7702 delegation -> prepared-code cache.
 
         pub const ResolvedCode = struct {
@@ -1496,7 +1481,7 @@ pub fn ExecutorType(
                 call_capture: ?evmz.trace.CallToken,
             ) !void {
                 const executor = self.executor;
-                if (executor.native_contract_runtime == null) return error.MissingNativeContractRuntime;
+                if (executor.native_contract == null) return error.MissingNativeContract;
                 try executor.native_frames.ensureTotalCapacityPrecise(executor.allocator, default_max_live_frames);
                 const allocator = try executor.beginCallScratch(msg.depth);
                 errdefer executor.endCallScratch(msg.depth);
@@ -1537,18 +1522,14 @@ pub fn ExecutorType(
 
             fn enterNative(self: *CallRuntime, native: *NativeFrame) !native_contract.Step {
                 const executor = self.executor;
-                std.debug.assert(executor.native_guard == null);
-                executor.native_guard = &native.guard;
-                defer executor.native_guard = null;
                 const previous_depth = executor.trace_depth;
                 executor.trace_depth = native.message.depth;
                 defer executor.trace_depth = previous_depth;
                 defer native.child = null;
-                return executor.native_contract_runtime.?.execute(.{
+                const context: NativeContext = .{ .executor = executor, .guard = &native.guard };
+                return spec.native_contract.execute(executor.native_contract.?, context, .{
                     .allocator = native.allocator,
-                    .host = &self.host_iface,
                     .message = &native.message,
-                    .rules = .{ .storage = &spec.storage, .call = &spec.call },
                     .ledger = &native.ledger,
                     .child = if (native.child) |*child| child else null,
                     .continuation = native.continuation,

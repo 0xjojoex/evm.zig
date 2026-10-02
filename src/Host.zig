@@ -191,19 +191,6 @@ pub const Log = struct {
     data: []const u8,
 };
 
-/// Privileged issuance effect. The adapter owns authorization, pricing and log
-/// semantics. This does not implement an ordinary transfer between accounts.
-pub const BalanceChange = struct {
-    address: AddressWord,
-    kind: enum { credit, debit },
-    amount: u256,
-    /// Optional chain-defined issuance log, committed atomically with the balance.
-    /// Zero amounts leave the account unchanged but still emit a supplied log.
-    event_log: ?Log = null,
-};
-
-pub const BalanceChangeStatus = enum { applied, overflow, insufficient_balance };
-
 const Self = @This();
 
 pub const VTable = struct {
@@ -211,7 +198,6 @@ pub const VTable = struct {
     getStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!u256,
     setStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256, value: u256) anyerror!StorageStatus,
     getBalance: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
-    changeBalance: *const fn (ptr: *anyopaque, change: BalanceChange) anyerror!BalanceChangeStatus,
     getNonce: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u64,
     getCodeHash: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!u256,
     /// Raw account code, including an EIP-7702 delegation designator; EXTCODE*
@@ -248,11 +234,6 @@ pub fn accountExists(self: *Self, address: AddressWord) !bool {
     return self.vtable.accountExists(self.ptr, address);
 }
 
-/// No partial balance or log survives a rejected effect or callback error.
-/// Static native invocations cannot use this capability, even for zero amounts.
-pub fn changeBalance(self: *Self, change: BalanceChange) !BalanceChangeStatus {
-    return self.vtable.changeBalance(self.ptr, change);
-}
 pub fn getBlockHash(self: *Self, number: u256) !u256 {
     return self.vtable.getBlockHash(self.ptr, number);
 }

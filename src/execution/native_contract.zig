@@ -1,41 +1,32 @@
-//! Explicit host-capable native-contract extension.
+//! Explicit state-capable native-contract extension.
 //!
 //! Ethereum precompiles are terminal call targets and never receive this
-//! capability. A specification opts addresses into this separate domain, and
-//! the embedding supplies a runtime whose lifetime exceeds the executor
-//! binding or its next reset.
+//! capability. A specification opts addresses into this separate domain by
+//! naming a native type `N`, which declares:
+//!
+//! - `pub fn active(Address) bool`, the compile-time address set;
+//! - `pub fn execute(self: *N, ctx: anytype, call: Call) !Step`, one entry.
+//!
+//! The embedding supplies the `*N` instance, so `N`'s fields carry its state.
+//! It must outlive the executor binding or its next reset. `ctx` is the
+//! executor's `NativeContext`: journaled state, logs and balances, entry-scoped.
 //!
 //! A native activation is a suspendable frame. Each entry returns a `Step`: done,
 //! or one child call that the executor runs, prices and settles into the ledger
 //! before entering the native again. The native never holds the EVM while a child
-//! runs, so `Host.call` is unavailable inside an entry.
+//! runs, so `ctx` has no call.
 
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
 const Host = @import("../Host.zig");
 const execution = @import("../execution.zig");
-const spec = @import("../spec.zig");
 const accounting = @import("accounting.zig");
 
-/// Default address set for specifications without host-capable native code.
+/// Default address set for specifications without native code.
 pub const None = struct {
     pub fn active(_: Address) bool {
         return false;
-    }
-};
-
-/// Runtime service supplied by an embedding that opts into native contracts.
-pub const Runtime = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        execute: *const fn (ptr: *anyopaque, call: Call) anyerror!Step,
-    };
-
-    pub fn execute(self: Runtime, call: Call) !Step {
-        return self.vtable.execute(self.ptr, call);
     }
 };
 
@@ -118,22 +109,11 @@ pub const ChildRequest = struct {
     };
 };
 
-/// The executor's own pricing rules, borrowed for the invocation. A callback
-/// that mimics an EVM effect prices it from here, so it can never disagree
-/// with the spec the executor was compiled from, including `Spec.extend`
-/// overrides. Chain-specific tariffs stay with the adapter.
-pub const Rules = struct {
-    storage: *const spec.StorageSpec,
-    call: *const spec.CallSpec,
-};
-
 /// One entry into a native activation.
 pub const Call = struct {
     /// Activation-scoped: valid until the activation ends.
     allocator: std.mem.Allocator,
-    host: *Host,
     message: *const Host.Message,
-    rules: Rules,
     ledger: *Ledger,
     /// Null on the first entry, then the settled result of the previous child.
     /// Its output lives in `allocator`, valid until the activation ends.

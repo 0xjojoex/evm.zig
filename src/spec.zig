@@ -367,8 +367,9 @@ pub const Spec = struct {
     /// Precompile set: catalog configuration plus an optional custom
     /// dispatch leaf.
     precompile: precompile.Spec,
-    /// Host-capable native-contract address set. This capability is separate
-    /// because Ethereum precompiles are terminal and cannot reenter the EVM.
+    /// Native-contract type: its compile-time address set and code, executed
+    /// on an embedding-bound instance (`execution/native_contract.zig`). Separate
+    /// from precompiles, which are terminal and cannot reenter the EVM.
     native_contract: type,
 
     pub const Patch = struct {

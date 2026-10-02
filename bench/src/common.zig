@@ -118,7 +118,6 @@ pub const CountingHost = struct {
         return .{ .ptr = self, .vtable = &.{
             .accountExists = accountExists,
             .getBalance = getBalance,
-            .changeBalance = changeBalance,
             .getNonce = getNonce,
             .getCode = getCode,
             .getCodeHash = getCodeHash,
@@ -150,11 +149,6 @@ pub const CountingHost = struct {
         _ = address;
         self.counters.balance += 1;
         return 0;
-    }
-
-    // This opcode benchmark has no issuance or balance-state model.
-    noinline fn changeBalance(_: *anyopaque, _: Host.BalanceChange) !Host.BalanceChangeStatus {
-        return error.UnsupportedBalanceChange;
     }
 
     noinline fn getNonce(ptr: *anyopaque, address: AddressWord) !u64 {

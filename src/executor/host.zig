@@ -8,19 +8,113 @@ const Host = evmz.Host;
 const execution = evmz.execution;
 
 pub fn Callbacks(
-    comptime spec: evmz.Spec,
+    comptime specification: evmz.Spec,
     comptime World: type,
     comptime options_value: evmz.executor.CompileOptions,
 ) type {
-    const Executor = evmz.executor.ExecutorType(spec, World, options_value);
+    const Executor = evmz.executor.ExecutorType(specification, World, options_value);
 
     return struct {
+        const Self = @This();
+        const spec = specification;
+
+        /// Executor handle for one native entry: the journaled paths `Host` uses,
+        /// with mutation rejected in a static entry and no call, since children
+        /// are requested through the returned step. Entry-scoped; never retain it.
+        pub const NativeContext = struct {
+            /// The executor's own spec. Price EVM-like effects from it, so they
+            /// never disagree with the executor, including `Spec.extend` overrides.
+            pub const spec = specification;
+
+            /// Not a capability: effects that bypass these methods skip the guard.
+            executor: *Executor,
+            guard: *Guard,
+
+            pub const Guard = struct {
+                is_static: bool,
+                violated_static: bool = false,
+            };
+
+            /// A caught error cannot clear the entry's terminal violation.
+            fn mutate(self: NativeContext) !void {
+                if (!self.guard.is_static and !self.guard.violated_static) return;
+                self.guard.violated_static = true;
+                return error.StaticModeViolation;
+            }
+
+            pub fn accountExists(self: NativeContext, address: Address) !bool {
+                return Self.accountExists(self.executor, .fromAddress(address));
+            }
+            pub fn getBalance(self: NativeContext, address: Address) !u256 {
+                return Self.getBalance(self.executor, .fromAddress(address));
+            }
+            /// Issuance: no transfer log. `error.BalanceOverflow` changes nothing.
+            pub fn addBalance(self: NativeContext, address: Address, value: u256) !void {
+                try self.mutate();
+                try self.executor.addBalance(address, value);
+            }
+            /// Burn. False, with nothing changed, when the balance is short.
+            pub fn subtractBalance(self: NativeContext, address: Address, value: u256) !bool {
+                try self.mutate();
+                return self.executor.subtractBalance(address, value);
+            }
+            pub fn getNonce(self: NativeContext, address: Address) !u64 {
+                return Self.getNonce(self.executor, .fromAddress(address));
+            }
+            pub fn getCode(self: NativeContext, address: Address) ![]const u8 {
+                return Self.getCode(self.executor, .fromAddress(address));
+            }
+            pub fn getCodeHash(self: NativeContext, address: Address) !u256 {
+                return Self.getCodeHash(self.executor, .fromAddress(address));
+            }
+            pub fn getStorage(self: NativeContext, address: Address, key: u256) !u256 {
+                return Self.hostGetStorage(self.executor, .fromAddress(address), key);
+            }
+            pub fn setStorage(self: NativeContext, address: Address, key: u256, value: u256) !execution.StorageStatus {
+                try self.mutate();
+                return Self.setStorage(self.executor, .fromAddress(address), key, value);
+            }
+            pub fn loadStorage(self: NativeContext, address: Address, key: u256) !Host.StorageLoadResult {
+                return Self.loadStorage(self.executor, .fromAddress(address), key);
+            }
+            pub fn storeStorage(self: NativeContext, address: Address, key: u256, value: u256) !Host.StorageStoreResult {
+                try self.mutate();
+                return Self.storeStorage(self.executor, .fromAddress(address), key, value);
+            }
+            pub fn getTransientStorage(self: NativeContext, address: Address, key: u256) !u256 {
+                return Self.getTransientStorage(self.executor, .fromAddress(address), key);
+            }
+            pub fn setTransientStorage(self: NativeContext, address: Address, key: u256, value: u256) !void {
+                try self.mutate();
+                return Self.setTransientStorage(self.executor, .fromAddress(address), key, value);
+            }
+            pub fn emitLog(self: NativeContext, event_log: Host.Log) !void {
+                try self.mutate();
+                return Self.emitLog(self.executor, event_log);
+            }
+            pub fn selfDestruct(self: NativeContext, address: Address, beneficiary: Address) !bool {
+                try self.mutate();
+                return Self.selfDestruct(self.executor, .fromAddress(address), .fromAddress(beneficiary));
+            }
+            pub fn getBlockHash(self: NativeContext, number: u256) !u256 {
+                return Self.getBlockHash(self.executor, number);
+            }
+            pub fn accessAccount(self: NativeContext, address: Address) !execution.AccessStatus {
+                return Self.accessAccount(self.executor, .fromAddress(address));
+            }
+            pub fn accessDelegatedAccount(self: NativeContext, address: Address) !?execution.AccessStatus {
+                return Self.accessDelegatedAccount(self.executor, .fromAddress(address));
+            }
+            pub fn accessStorage(self: NativeContext, address: Address, key: u256) !execution.AccessStatus {
+                return Self.accessStorage(self.executor, .fromAddress(address), key);
+            }
+        };
+
         pub fn host(self: *Executor) Host {
             return Host{ .ptr = self, .vtable = &.{
                 .call = call,
                 .accountExists = accountExists,
                 .getBalance = getBalance,
-                .changeBalance = changeBalance,
                 .getNonce = getNonce,
                 .getCode = getCode,
                 .getCodeHash = getCodeHash,
@@ -49,10 +143,6 @@ pub fn Callbacks(
 
         fn call(ptr: *anyopaque, msg: Host.Message) !Host.Result {
             const self = fromHost(ptr);
-            // A native entry requests children through its returned step.
-            if (comptime spec.native_contract != execution.NoNativeContracts) {
-                if (self.native_guard != null) return error.NativeHostCallUnsupported;
-            }
             return self.resolveHostCall(msg);
         }
 
@@ -78,7 +168,6 @@ pub fn Callbacks(
 
         fn selfDestruct(ptr: *anyopaque, address: AddressWord, beneficiary: AddressWord) !bool {
             const self = fromHost(ptr);
-            try self.guardNativeMutation();
             const call_capture = try self.beginSelfDestructCapture(address, beneficiary);
             const policy = spec.self_destruct.policy(.{
                 .same_address = address.eql(beneficiary),
@@ -125,24 +214,6 @@ pub fn Callbacks(
             return self.state.getBalance(address);
         }
 
-        fn changeBalance(ptr: *anyopaque, change: Host.BalanceChange) !Host.BalanceChangeStatus {
-            const self = fromHost(ptr);
-            try self.guardNativeMutation();
-            // Effect-local scope: native entries call this while dispatch runs.
-            var scope = Executor.ExecutionCheckpoint.begin(self);
-            defer scope.deinit();
-            const address = change.address;
-            const balance = try self.state.getBalance(address);
-            const updated = switch (change.kind) {
-                .credit => std.math.add(u256, balance, change.amount) catch return .overflow,
-                .debit => std.math.sub(u256, balance, change.amount) catch return .insufficient_balance,
-            };
-            if (change.amount != 0) try self.state.setBalance(address, updated);
-            if (change.event_log) |event_log| try self.state.emitLog(event_log);
-            scope.commit();
-            return .applied;
-        }
-
         fn getNonce(ptr: *anyopaque, address: AddressWord) !u64 {
             const self = fromHost(ptr);
             return self.state.getNonce(address);
@@ -155,7 +226,6 @@ pub fn Callbacks(
 
         fn setStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !execution.StorageStatus {
             const self = fromHost(ptr);
-            try self.guardNativeMutation();
             return self.state.setStorage(address, key, value);
         }
 
@@ -166,7 +236,6 @@ pub fn Callbacks(
 
         fn storeStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !Host.StorageStoreResult {
             const self = fromHost(ptr);
-            try self.guardNativeMutation();
             return self.state.storeStorage(address, key, value);
         }
 
@@ -182,7 +251,6 @@ pub fn Callbacks(
 
         fn emitLog(ptr: *anyopaque, event_log: Host.Log) !void {
             const self = fromHost(ptr);
-            try self.guardNativeMutation();
             try self.state.emitLog(event_log);
         }
 
@@ -205,7 +273,6 @@ pub fn Callbacks(
 
         fn setTransientStorage(ptr: *anyopaque, address: AddressWord, key: u256, value: u256) !void {
             const self = fromHost(ptr);
-            try self.guardNativeMutation();
             try self.state.setTransientStorage(address, key, value);
         }
     };

@@ -3,7 +3,7 @@
 //! This example uses a counter to show the ownership boundary:
 //!
 //! - `CounterProgram` owns its transaction carrier and execution semantics.
-//! - `CounterRuntime` implements a native contract.
+//! - `CounterContract` implements a native contract.
 //! - `CounterJournal` follows EVM transaction and CALL/CREATE rollback.
 //! - `CounterBlock` owns accepted EVM and sidecar snapshots together.
 
@@ -97,36 +97,24 @@ pub const CounterJournal = struct {
     }
 };
 
-/// Address reserved by this example for its native counter runtime.
+/// Native code at a reserved address mutates the counter. This example mirrors
+/// the counter into EVM storage so rollback is visible in both domains.
 pub const CounterContract = struct {
     pub const address = evmz.addr(0x1000);
+
+    journal: *CounterJournal,
 
     pub fn active(candidate: evmz.Address) bool {
         return candidate.eql(address);
     }
-};
 
-/// Native code mutates the counter and may request EVM child calls. This example
-/// mirrors the counter into EVM storage so rollback is visible in both domains.
-pub const CounterRuntime = struct {
-    journal: *CounterJournal,
-
-    pub fn service(self: *CounterRuntime) evmz.execution.NativeContractRuntime {
-        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
-    }
-
-    fn execute(ptr: *anyopaque, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
-        const self: *CounterRuntime = @ptrCast(@alignCast(ptr));
+    pub fn execute(self: *CounterContract, ctx: anytype, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
         if (call.message.input_data.len != 2) return .{ .done = .{ .status = .revert } };
 
         const increment = call.message.input_data[0];
         const force_revert = call.message.input_data[1] != 0;
         try self.journal.increase(increment);
-        _ = try call.host.setStorage(
-            .fromAddress(call.message.recipient),
-            0,
-            self.journal.value,
-        );
+        _ = try ctx.setStorage(call.message.recipient, 0, self.journal.value);
         return .{ .done = .{ .status = if (force_revert) .revert else .success } };
     }
 };
@@ -310,10 +298,10 @@ pub const DemoError = CounterError || CounterBlock.InitError || error{
 pub fn run(allocator: std.mem.Allocator) DemoError!DemoResult {
     const sender = evmz.addr(0xaaaa);
     var journal: CounterJournal = .{};
-    var counter_runtime: CounterRuntime = .{ .journal = &journal };
+    var counter: CounterContract = .{ .journal = &journal };
     var executor = CounterEngine.Executor.init(allocator, .{
         .transaction_journal = &journal,
-        .native_contract_runtime = counter_runtime.service(),
+        .native_contract = &counter,
     });
     defer executor.deinit();
 

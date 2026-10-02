@@ -8,10 +8,27 @@ const Call = evmz.execution.NativeContractCall;
 const ChildRequest = evmz.execution.NativeContractChildRequest;
 const Host = evmz.Host;
 
-const Native = struct {
+/// One native type for every probe, so they share one executor instantiation.
+const Native = union(enum) {
+    static: *StaticProbe,
+    value: *ValueProbe,
+    guard: *GuardProbe,
+    credit: *CreditProbe,
+    priced: *PricedProbe,
+    output: *OutputProbe,
+    balance: *BalanceProbe,
+    depth: *DepthProbe,
+    sstore: *SstoreLike,
+    stipend: *StipendProbe,
+
     const address = evmz.addr(0x1234);
     pub fn active(candidate: evmz.Address) bool {
         return candidate.eql(Native.address);
+    }
+    pub fn execute(self: *Native, ctx: anytype, call: Call) !Step {
+        return switch (self.*) {
+            inline else => |probe| probe.execute(ctx, call),
+        };
     }
 };
 const Latest = t.CustomVm(.latest, .{ .native_contract = Native }).?;
@@ -21,10 +38,6 @@ const context: evmz.execution.ExecutionContext = .{
     .chain = .{ .chain_id = 1 },
     .transaction = .{ .origin = sender },
 };
-
-fn service(ptr: anytype, comptime callback: anytype) evmz.execution.NativeContractRuntime {
-    return .{ .ptr = ptr, .vtable = &.{ .execute = callback } };
-}
 
 fn message(gas: i64, reservoir: i64) Host.Message {
     return .{
@@ -65,28 +78,24 @@ const StaticProbe = struct {
     caught: bool = false,
     entries: u8 = 0,
 
-    fn effect(self: *StaticProbe, call: Call) !void {
-        const address: evmz.AddressWord = .fromAddress(Native.address);
+    fn effect(self: *StaticProbe, ctx: anytype) !void {
+        const address = Native.address;
         switch (self.action) {
-            .storage => _ = try call.host.setStorage(address, 0, 1),
-            .fused_storage => _ = try call.host.storeStorage(address, 0, 1),
-            .transient => try call.host.setTransientStorage(address, 0, 1),
-            .log => try call.host.emitLog(.{ .address = Native.address, .topics = &.{1}, .data = &.{2} }),
-            .destruction => _ = try call.host.selfDestruct(address, .fromAddress(child_address)),
-            .credit, .debit => _ = try call.host.changeBalance(.{
-                .address = address,
-                .kind = if (self.action == .credit) .credit else .debit,
-                .amount = 0,
-            }),
+            .storage => _ = try ctx.setStorage(address, 0, 1),
+            .fused_storage => _ = try ctx.storeStorage(address, 0, 1),
+            .transient => try ctx.setTransientStorage(address, 0, 1),
+            .log => try ctx.emitLog(.{ .address = address, .topics = &.{1}, .data = &.{2} }),
+            .destruction => _ = try ctx.selfDestruct(address, child_address),
+            .credit => try ctx.addBalance(address, 0),
+            .debit => _ = try ctx.subtractBalance(address, 0),
             .value_call => {},
         }
     }
 
-    fn execute(ptr: *anyopaque, call: Call) !Step {
-        const self: *StaticProbe = @ptrCast(@alignCast(ptr));
+    fn execute(self: *StaticProbe, ctx: anytype, call: Call) !Step {
         self.entries += 1;
         if (!call.ledger.trackStateGas(8)) return .{ .done = .{} };
-        self.effect(call) catch |err| {
+        self.effect(ctx) catch |err| {
             if (err != error.StaticModeViolation) return err;
             self.caught = true;
         };
@@ -101,7 +110,8 @@ const StaticProbe = struct {
 test "native static violations remain terminal after callback catches them" {
     inline for (std.meta.tags(@FieldType(StaticProbe, "action"))) |action| {
         var probe = StaticProbe{ .action = action };
-        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, StaticProbe.execute) });
+        var native: Native = .{ .static = &probe };
+        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
         defer executor.deinit();
         try t.seedExecutorAccount(&executor, Native.address, .{ .balance = 10 });
         var msg = message(100, 5);
@@ -127,8 +137,7 @@ test "native static violations remain terminal after callback catches them" {
 
 const ValueProbe = struct {
     kind: ChildRequest.Kind,
-    fn execute(ptr: *anyopaque, call: Call) !Step {
-        const self: *ValueProbe = @ptrCast(@alignCast(ptr));
+    fn execute(self: *ValueProbe, _: anytype, call: Call) !Step {
         if (call.child) |child| return .{ .done = .{
             .status = child.status(),
             .output_data = try call.allocator.dupe(u8, child.output_data),
@@ -144,7 +153,8 @@ const ValueProbe = struct {
 test "native static CALLCODE and DELEGATECALL preserve nonzero CALLVALUE" {
     inline for (.{ ChildRequest.Kind.callcode, ChildRequest.Kind.delegatecall }) |kind| {
         var probe = ValueProbe{ .kind = kind };
-        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, ValueProbe.execute) });
+        var native: Native = .{ .value = &probe };
+        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
         defer executor.deinit();
         try t.seedExecutorAccount(&executor, Native.address, .{ .balance = 7 });
         try t.seedExecutorAccount(&executor, child_address, .{ .code = &t.bytecode(.{ .CALLVALUE, .PUSH0, .MSTORE, .PUSH1, 32, .PUSH0, .RETURN }) });
@@ -166,12 +176,11 @@ const relay_code = t.bytecode(.{ .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH2,
 const GuardProbe = struct {
     nested: bool = false,
     fail_child_service: bool = false,
-    fn execute(ptr: *anyopaque, call: Call) !Step {
-        const self: *GuardProbe = @ptrCast(@alignCast(ptr));
+    fn execute(self: *GuardProbe, ctx: anytype, call: Call) !Step {
         if (call.message.depth != 0) {
             self.nested = true;
             if (self.fail_child_service) return error.ChildServiceFailed;
-            _ = try call.host.setStorage(.fromAddress(Native.address), 1, 9);
+            _ = try ctx.setStorage(Native.address, 1, 9);
             return .{ .done = .{} };
         }
         if (call.child == null) {
@@ -179,7 +188,7 @@ const GuardProbe = struct {
             request.call.kind = .staticcall;
             return request;
         }
-        _ = try call.host.setStorage(.fromAddress(Native.address), 0, 1);
+        _ = try ctx.setStorage(Native.address, 0, 1);
         return .{ .done = .{} };
     }
 };
@@ -188,7 +197,8 @@ test "native guard is per entry across bytecode reentry; service errors abort" {
     for ([_]bool{ false, true }) |is_static| {
         for ([_]bool{ false, true }) |fail_child_service| {
             var probe = GuardProbe{ .fail_child_service = fail_child_service };
-            var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, GuardProbe.execute) });
+            var native: Native = .{ .guard = &probe };
+            var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
             defer executor.deinit();
             try t.seedExecutorAccount(&executor, child_address, .{ .code = &relay_code });
             var msg = message(100_000, 0);
@@ -202,43 +212,20 @@ test "native guard is per entry across bytecode reentry; service errors abort" {
             }
             try expect(probe.nested);
             try equal(@as(u256, 0), try executor.getStorage(Native.address, 1));
-            try expect(executor.native_guard == null);
             try equal(@as(usize, 0), executor.native_frames.items.len);
         }
     }
 }
 
-// Children are requested through `Step.call`; the entry cannot hold the EVM.
-const HostCaller = struct {
-    fn execute(_: *anyopaque, call: Call) !Step {
-        var child = message(1_000, 0);
-        child.depth = call.message.depth + 1;
-        child.recipient = child_address;
-        child.code_address = child_address;
-        _ = try call.host.call(child);
-        return .{ .done = .{} };
-    }
-};
-
-test "native entry cannot call through Host" {
-    var probe: u8 = 0;
-    var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, HostCaller.execute) });
-    defer executor.deinit();
-    try std.testing.expectError(error.NativeHostCallUnsupported, invoke(&executor, message(100_000, 0)));
-    try expect(executor.native_guard == null);
-    try equal(@as(usize, 0), executor.native_frames.items.len);
-}
-
 const CreditProbe = struct {
     credit: i64,
     completion: evmz.execution.Status = .success,
-    fn execute(ptr: *anyopaque, call: Call) !Step {
-        const self: *CreditProbe = @ptrCast(@alignCast(ptr));
+    fn execute(self: *CreditProbe, ctx: anytype, call: Call) !Step {
         if (call.child != null) return .{ .done = .{
             .status = self.completion,
             .output_data = try call.allocator.dupe(u8, &.{0xaa}),
         } };
-        _ = try call.host.setStorage(.fromAddress(Native.address), call.message.depth, 1);
+        _ = try ctx.setStorage(Native.address, call.message.depth, 1);
         if (call.message.depth != 0) {
             call.ledger.refillStateGas(self.credit);
             call.ledger.gas_refund = 11;
@@ -257,7 +244,8 @@ test "native bytecode native settlement repays spill and unwinds completion fail
     for ([_]i64{ 0, 7 }) |credit| {
         inline for (std.meta.tags(evmz.execution.Status)) |completion| {
             var probe = CreditProbe{ .credit = credit, .completion = completion };
-            var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, CreditProbe.execute) });
+            var native: Native = .{ .credit = &probe };
+            var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
             defer executor.deinit();
             try t.seedExecutorAccount(&executor, child_address, .{ .code = &relay_code });
             const result = try invoke(&executor, message(100_000, 0));
@@ -298,21 +286,20 @@ fn Tariff(comptime charge: i64) type {
     };
 }
 
-fn PricedRuntime(comptime spec: evmz.Spec) type {
-    return struct {
-        fn execute(_: *anyopaque, call: Call) !Step {
-            const ledger = call.ledger;
-            const status = try call.host.setStorage(.fromAddress(call.message.recipient), 0, 42);
-            const regular = spec.storage.sstoreGas(status);
-            const state = spec.storage.sstoreStateGas(status);
-            if (!ledger.trackGas(regular.cost)) return .{ .done = .{} };
-            ledger.gas_refund += regular.refund;
-            if (!ledger.trackStateGas(state.charge)) return .{ .done = .{} };
-            ledger.refillStateGas(state.refund);
-            return .{ .done = .{} };
-        }
-    };
-}
+const PricedProbe = struct {
+    fn execute(_: *PricedProbe, ctx: anytype, call: Call) !Step {
+        const ledger = call.ledger;
+        const storage = @TypeOf(ctx).spec.storage;
+        const status = try ctx.setStorage(call.message.recipient, 0, 42);
+        const regular = storage.sstoreGas(status);
+        const state = storage.sstoreStateGas(status);
+        if (!ledger.trackGas(regular.cost)) return .{ .done = .{} };
+        ledger.gas_refund += regular.refund;
+        if (!ledger.trackStateGas(state.charge)) return .{ .done = .{} };
+        ledger.refillStateGas(state.refund);
+        return .{ .done = .{} };
+    }
+};
 
 test "native pricing uses exact custom spec with empty and nonempty reservoir" {
     inline for (.{ @as(i64, 0), 8, 12 }) |charge| {
@@ -320,10 +307,10 @@ test "native pricing uses exact custom spec with empty and nonempty reservoir" {
             .native_contract = Native,
             .storage = .{ .sstoreGas = Tariff(charge).regular, .sstoreStateGas = Tariff(charge).state },
         }).?;
-        const Runtime = PricedRuntime(Vm.spec);
         for ([_]i64{ 0, 5, 20 }) |reservoir| {
-            var runtime = Runtime{};
-            var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&runtime, Runtime.execute) });
+            var runtime: PricedProbe = .{};
+            var native: Native = .{ .priced = &runtime };
+            var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract = &native });
             defer executor.deinit();
             const result = try invoke(&executor, message(100, reservoir));
             try equal(.success, result.status());
@@ -341,9 +328,9 @@ test "native state gas OOG preserves the incoming reservoir and rolls back write
         .native_contract = Native,
         .storage = .{ .sstoreGas = Tariff(12).regular, .sstoreStateGas = Tariff(12).state },
     }).?;
-    const Runtime = PricedRuntime(Vm.spec);
-    var runtime = Runtime{};
-    var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&runtime, Runtime.execute) });
+    var runtime: PricedProbe = .{};
+    var native: Native = .{ .priced = &runtime };
+    var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract = &native });
     defer executor.deinit();
     const result = try invoke(&executor, message(10, 5));
     try equal(.out_of_gas, result.status());
@@ -366,15 +353,14 @@ test "native targets are rejected before root system execution" {
 const OutputProbe = struct {
     completion: evmz.execution.Status,
     violation: bool = false,
-    fn execute(ptr: *anyopaque, call: Call) !Step {
-        const self: *OutputProbe = @ptrCast(@alignCast(ptr));
+    fn execute(self: *OutputProbe, ctx: anytype, call: Call) !Step {
         const child = call.child orelse {
             var request = childCall(call, evmz.addr(4));
             request.call.input_data = &.{ 0xaa, 0xbb };
             return request;
         };
         try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, child.output_data);
-        if (self.violation) _ = try call.host.setStorage(.fromAddress(Native.address), 0, 1);
+        if (self.violation) _ = try ctx.setStorage(Native.address, 0, 1);
         if (self.completion == .out_of_gas) {
             try expect(!call.ledger.trackGas(call.ledger.gas_left + 1));
             return .{ .done = .{} };
@@ -386,7 +372,8 @@ const OutputProbe = struct {
 test "native empty completion clears retained child output including faults" {
     inline for (std.meta.tags(evmz.execution.Status)) |completion| {
         var probe = OutputProbe{ .completion = completion };
-        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, OutputProbe.execute) });
+        var native: Native = .{ .output = &probe };
+        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
         defer executor.deinit();
         const result = try invoke(&executor, message(1000, 0));
         try equal(completion, result.status());
@@ -411,37 +398,35 @@ test "native address delegation still selects bytecode for system roots" {
     try equal(.success, result.status());
 }
 
+/// Arc-style issuance built from the context: mint or burn, then the chain's
+/// own log only when the balance moved.
 const BalanceProbe = struct {
-    change: Host.BalanceChange,
+    kind: enum { credit, debit },
+    amount: u256 = 3,
     completion: evmz.execution.Status = .success,
-    outcome: ?Host.BalanceChangeStatus = null,
-    log_error: bool = false,
+    applied: ?bool = null,
 
-    fn execute(ptr: *anyopaque, call: Call) !Step {
-        const self: *BalanceProbe = @ptrCast(@alignCast(ptr));
-        self.outcome = call.host.changeBalance(self.change) catch |err| blk: {
-            if (err != error.TooManyLogTopics) return err;
-            self.log_error = true;
-            break :blk null;
+    fn execute(self: *BalanceProbe, ctx: anytype, _: Call) !Step {
+        const applied = switch (self.kind) {
+            .credit => if (ctx.addBalance(Native.address, self.amount)) true else |err| switch (err) {
+                error.BalanceOverflow => false,
+                else => return err,
+            },
+            .debit => try ctx.subtractBalance(Native.address, self.amount),
         };
+        self.applied = applied;
+        if (applied) try ctx.emitLog(.{ .address = Native.address, .topics = &.{9}, .data = &.{1} });
         return .{ .done = .{ .status = self.completion } };
     }
 };
 
-test "native balance credit and debit journal issuance logs atomically" {
+test "native issuance journals balance and log with frame rollback" {
     inline for (.{ .credit, .debit }) |kind| {
         for ([_]bool{ false, true }) |native_revert| {
             for ([_]bool{ false, true }) |parent_revert| {
-                var probe = BalanceProbe{
-                    .change = .{
-                        .address = .fromAddress(Native.address),
-                        .kind = kind,
-                        .amount = 3,
-                        .event_log = .{ .address = Native.address, .topics = &.{9}, .data = &.{1} },
-                    },
-                    .completion = if (native_revert) .revert else .success,
-                };
-                var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, BalanceProbe.execute) });
+                var probe = BalanceProbe{ .kind = kind, .completion = if (native_revert) .revert else .success };
+                var native: Native = .{ .balance = &probe };
+                var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
                 defer executor.deinit();
                 try t.seedExecutorAccount(&executor, Native.address, .{ .balance = 10 });
                 const parent_code = relay_code[0 .. relay_code.len - 1].* ++ t.bytecode(.{ .PUSH0, .PUSH0, .REVERT });
@@ -450,7 +435,7 @@ test "native balance credit and debit journal issuance logs atomically" {
                 msg.recipient = child_address;
                 msg.code_address = child_address;
                 _ = try invoke(&executor, msg);
-                try equal(.applied, probe.outcome.?);
+                try expect(probe.applied.?);
                 const rolled_back = native_revert or parent_revert;
                 try equal(@as(u256, if (rolled_back) 10 else if (kind == .credit) 13 else 7), try executor.getBalance(Native.address));
                 try equal(@as(usize, if (rolled_back) 0 else 1), executor.logView().len());
@@ -459,40 +444,23 @@ test "native balance credit and debit journal issuance logs atomically" {
     }
 }
 
-test "native rejected balance effects leave no partial balance or log" {
-    const cases = [_]struct {
-        kind: @FieldType(Host.BalanceChange, "kind"),
-        balance: u256,
-        amount: u256,
-        status: ?Host.BalanceChangeStatus,
-        bad_log: bool = false,
-    }{
-        .{ .kind = .credit, .balance = std.math.maxInt(u256), .amount = 1, .status = .overflow },
-        .{ .kind = .debit, .balance = 2, .amount = 3, .status = .insufficient_balance },
-        .{ .kind = .credit, .balance = 2, .amount = 3, .status = null, .bad_log = true },
-        .{ .kind = .debit, .balance = 5, .amount = 3, .status = null, .bad_log = true },
-        .{ .kind = .credit, .balance = 2, .amount = 0, .status = .applied },
+test "native rejected issuance leaves the balance unchanged" {
+    const cases = [_]struct { probe: BalanceProbe, balance: u256 }{
+        .{ .probe = .{ .kind = .credit, .amount = 1 }, .balance = std.math.maxInt(u256) },
+        .{ .probe = .{ .kind = .debit, .amount = 3 }, .balance = 2 },
+        .{ .probe = .{ .kind = .credit, .amount = 0 }, .balance = 2 },
     };
     for (cases) |case| {
-        var probe = BalanceProbe{ .change = .{
-            .address = .fromAddress(Native.address),
-            .kind = case.kind,
-            .amount = case.amount,
-            .event_log = .{
-                .address = Native.address,
-                .topics = if (case.bad_log) &.{ 1, 2, 3, 4, 5 } else &.{1},
-                .data = &.{},
-            },
-        } };
-        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, BalanceProbe.execute) });
+        var probe = case.probe;
+        var native: Native = .{ .balance = &probe };
+        var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
         defer executor.deinit();
         try t.seedExecutorAccount(&executor, Native.address, .{ .balance = case.balance });
         const result = try invoke(&executor, message(1000, 0));
         try equal(.success, result.status());
-        try equal(case.status, probe.outcome);
-        try equal(case.bad_log, probe.log_error);
+        try equal(probe.amount == 0, probe.applied.?);
         try equal(case.balance, try executor.getBalance(Native.address));
-        try equal(@as(usize, if (case.status == .applied) 1 else 0), executor.logView().len());
+        try equal(@as(usize, @intFromBool(probe.applied.?)), executor.logView().len());
     }
 }
 
@@ -503,8 +471,7 @@ const DepthProbe = struct {
     stack_low: usize = std.math.maxInt(usize),
     stack_high: usize = 0,
 
-    fn execute(ptr: *anyopaque, call: Call) !Step {
-        const self: *DepthProbe = @ptrCast(@alignCast(ptr));
+    fn execute(self: *DepthProbe, ctx: anytype, call: Call) !Step {
         var marker: u8 = 0;
         self.stack_low = @min(self.stack_low, @intFromPtr(&marker));
         self.stack_high = @max(self.stack_high, @intFromPtr(&marker));
@@ -514,7 +481,7 @@ const DepthProbe = struct {
             return childCall(call, if (self.alternating) child_address else Native.address);
         if (call.message.depth == Host.max_call_depth) {
             try equal(.call_depth_exceeded, child.terminalCause());
-            _ = try call.host.setStorage(.fromAddress(Native.address), 0, 1);
+            _ = try ctx.setStorage(Native.address, 0, 1);
         }
         return .{ .done = .{ .status = if (call.message.depth == 0 and self.revert_root) .revert else .success } };
     }
@@ -524,7 +491,8 @@ test "native max depth reenters at one stack depth and unwinds" {
     for ([_]bool{ false, true }) |alternating| {
         for ([_]bool{ false, true }) |revert_root| {
             var probe = DepthProbe{ .alternating = alternating, .revert_root = revert_root };
-            var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, DepthProbe.execute) });
+            var native: Native = .{ .depth = &probe };
+            var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
             defer executor.deinit();
             try t.seedExecutorAccount(&executor, child_address, .{ .code = &relay_code });
             const result = try invoke(&executor, message(1_000_000_000_000, 0));
@@ -546,12 +514,12 @@ fn addedStateGasNine(status: evmz.execution.StorageStatus) evmz.execution.Storag
     return .{ .charge = if (status == .added) 9 else 0 };
 }
 
-// An SSTORE-like native write priced only through `call.rules`, never a fork.
+// An SSTORE-like native write priced only through the context's spec, never a fork.
 const SstoreLike = struct {
-    fn execute(_: *anyopaque, call: Call) !Step {
+    fn execute(_: *SstoreLike, ctx: anytype, call: Call) !Step {
         const ledger = call.ledger;
-        const rules = call.rules.storage;
-        const stored = try call.host.storeStorage(.fromAddress(Native.address), 0, 1);
+        const rules = @TypeOf(ctx).spec.storage;
+        const stored = try ctx.storeStorage(Native.address, 0, 1);
         if (!ledger.trackGas(rules.sstoreAccessGas(stored.access_status) orelse 0)) return .{ .done = .{} };
         const cost = rules.sstoreGas(stored.storage_status);
         if (!ledger.trackGas(cost.cost)) return .{ .done = .{} };
@@ -563,15 +531,16 @@ const SstoreLike = struct {
     }
 };
 
-test "native rules follow the executor's spec, not a builtin fork" {
+test "native context spec follows the executor's spec, not a builtin fork" {
     try expect(addedStateGasFive(.added).charge != addedStateGasNine(.added).charge);
     inline for (.{ addedStateGasFive, addedStateGasNine }) |sstoreStateGas| {
         const Vm = t.CustomVm(.latest, .{
             .native_contract = Native,
             .storage = .{ .sstoreStateGas = sstoreStateGas },
         }).?;
-        var probe: u8 = 0;
-        var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, SstoreLike.execute) });
+        var probe: SstoreLike = .{};
+        var native: Native = .{ .sstore = &probe };
+        var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract = &native });
         defer executor.deinit();
         const result = try invoke(&executor, message(100_000, 1_000));
         try equal(.success, result.status());
@@ -587,19 +556,20 @@ test "native rules follow the executor's spec, not a builtin fork" {
     }
 }
 
+const StipendProbe = struct {
+    fn execute(_: *StipendProbe, ctx: anytype, call: Call) !Step {
+        if (call.child != null) return .{ .done = .{} };
+        const rules = @TypeOf(ctx).spec.call;
+        if (!call.ledger.trackGas(rules.base_gas + rules.value_transfer_gas)) return .{ .done = .{} };
+        // CALL(0, child_address, 1, ...); the executor adds the stipend.
+        var request = childCall(call, child_address);
+        request.call.value = 1;
+        request.call.gas = 0;
+        return request;
+    }
+};
+
 test "native value call returns a custom stipend like bytecode CALL" {
-    const Probe = struct {
-        fn execute(_: *anyopaque, call: Call) !Step {
-            if (call.child != null) return .{ .done = .{} };
-            const rules = call.rules.call;
-            if (!call.ledger.trackGas(rules.base_gas + rules.value_transfer_gas)) return .{ .done = .{} };
-            // CALL(0, child_address, 1, ...); the executor adds the stipend.
-            var request = childCall(call, child_address);
-            request.call.value = 1;
-            request.call.gas = 0;
-            return request;
-        }
-    };
     const caller = evmz.addr(0xcccc);
     // CALL(0, child_address, 1, 0, 0, 0, 0)
     const code = [_]u8{ 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 1, 0x61, 0xbb, 0xbb, 0x60, 0, 0xf1, 0x00 };
@@ -612,8 +582,9 @@ test "native value call returns a custom stipend like bytecode CALL" {
             .call = .{ .value_stipend = stipend, .value_transfer_gas = 0 },
         }).?;
         for ([_]evmz.Address{ Native.address, caller }, [_][]const u8{ &.{}, &code }, 0..) |recipient, bytes, j| {
-            var probe: u8 = 0;
-            var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract_runtime = service(&probe, Probe.execute) });
+            var probe: StipendProbe = .{};
+            var native: Native = .{ .stipend = &probe };
+            var executor = Vm.Executor.init(std.testing.allocator, .{ .native_contract = &native });
             defer executor.deinit();
             // An existing callee keeps account-creation charges out of the comparison.
             try t.seedExecutorAccount(&executor, child_address, .{ .balance = 1 });

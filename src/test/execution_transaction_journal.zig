@@ -94,8 +94,39 @@ const TestJournal = struct {
 const NativeContract = struct {
     const target = evmz.addr(0x1000);
 
+    journal: *TestJournal,
+    reentry_target: evmz.Address,
+
     pub fn active(address: evmz.Address) bool {
         return evmz.Address.eql(address, target);
+    }
+
+    pub fn execute(self: *NativeContract, ctx: anytype, call: execution.NativeContractCall) !execution.NativeContractStep {
+        const command = if (call.message.input_data.len == 0) @as(u8, 1) else call.message.input_data[0];
+        if (call.child) |nested| {
+            if (nested.status() != .revert) return error.ExpectedNestedRevert;
+            return .{ .done = .{} };
+        }
+        const value: u64 = switch (command) {
+            0xff => 0xff,
+            0x30 => 0x30,
+            else => 1,
+        };
+        self.journal.write(value);
+        _ = try ctx.setStorage(call.message.recipient, 1, value);
+
+        if (command == 0x30) return .{ .call = .{
+            .kind = .call,
+            .recipient = self.reentry_target,
+            .code_address = self.reentry_target,
+            .sender = call.message.recipient,
+            .gas = call.ledger.gas_left,
+        } };
+        if (command == 0xff) return .{ .done = .{
+            .status = .revert,
+            .output_data = try call.allocator.dupe(u8, &.{0xde}),
+        } };
+        return .{ .done = .{} };
     }
 };
 
@@ -119,54 +150,16 @@ test "transaction journal is a compile-time executor capability" {
     );
 }
 
-const NativeRuntime = struct {
-    journal: *TestJournal,
-    reentry_target: evmz.Address,
-
-    fn service(self: *NativeRuntime) execution.NativeContractRuntime {
-        return .{ .ptr = self, .vtable = &.{ .execute = execute } };
-    }
-
-    fn execute(ptr: *anyopaque, call: execution.NativeContractCall) !execution.NativeContractStep {
-        const self: *NativeRuntime = @ptrCast(@alignCast(ptr));
-        const command = if (call.message.input_data.len == 0) @as(u8, 1) else call.message.input_data[0];
-        if (call.child) |nested| {
-            if (nested.status() != .revert) return error.ExpectedNestedRevert;
-            return .{ .done = .{} };
-        }
-        const value: u64 = switch (command) {
-            0xff => 0xff,
-            0x30 => 0x30,
-            else => 1,
-        };
-        self.journal.write(value);
-        _ = try call.host.setStorage(.fromAddress(call.message.recipient), 1, value);
-
-        if (command == 0x30) return .{ .call = .{
-            .kind = .call,
-            .recipient = self.reentry_target,
-            .code_address = self.reentry_target,
-            .sender = call.message.recipient,
-            .gas = call.ledger.gas_left,
-        } };
-        if (command == 0xff) return .{ .done = .{
-            .status = .revert,
-            .output_data = try call.allocator.dupe(u8, &.{0xde}),
-        } };
-        return .{ .done = .{} };
-    }
-};
-
 test "transaction journal follows native call and parent frame rollback" {
     const sender = evmz.addr(0xaaaa);
     const reverting_child = evmz.addr(0xbbbb);
     var journal: TestJournal = .{};
-    var native: NativeRuntime = .{
+    var native: NativeContract = .{
         .journal = &journal,
         .reentry_target = reverting_child,
     };
     var executor = JournalVm.Executor.init(std.testing.allocator, .{
-        .native_contract_runtime = native.service(),
+        .native_contract = &native,
         .transaction_journal = &journal,
     });
     defer executor.deinit();
@@ -207,12 +200,12 @@ test "EVM caller observes native revert data and continues after paired rollback
     const sender = evmz.addr(0xaaaa);
     const caller = evmz.addr(0xbbbb);
     var journal: TestJournal = .{};
-    var native: NativeRuntime = .{
+    var native: NativeContract = .{
         .journal = &journal,
         .reentry_target = caller,
     };
     var executor = JournalVm.Executor.init(std.testing.allocator, .{
-        .native_contract_runtime = native.service(),
+        .native_contract = &native,
         .transaction_journal = &journal,
     });
     defer executor.deinit();
