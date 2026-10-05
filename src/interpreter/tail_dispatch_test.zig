@@ -27,7 +27,7 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
     };
 
     for (cases) |case| {
-        const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
+        const code = [_]u8{ @backingInt(case.opcode), @backingInt(Opcode.STOP) };
         var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
         defer bytecode.deinit(std.testing.allocator);
 
@@ -151,7 +151,7 @@ fn expectPreparedStatus(
 }
 
 test "prepared tail dispatch rejects SAR before Constantinople" {
-    const code = [_]u8{ @intFromEnum(Opcode.SAR), @intFromEnum(Opcode.STOP) };
+    const code = [_]u8{ @backingInt(Opcode.SAR), @backingInt(Opcode.STOP) };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -194,7 +194,7 @@ test "prepared tail dispatch reads frame-local values" {
     };
 
     for (cases) |case| {
-        const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
+        const code = [_]u8{ @backingInt(case.opcode), @backingInt(Opcode.STOP) };
         var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
         defer bytecode.deinit(std.testing.allocator);
 
@@ -259,7 +259,7 @@ test "prepared tail dispatch reads execution-context values" {
     };
 
     for (cases) |case| {
-        const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
+        const code = [_]u8{ @backingInt(case.opcode), @backingInt(Opcode.STOP) };
         var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
         defer bytecode.deinit(std.testing.allocator);
 
@@ -298,7 +298,7 @@ test "prepared tail dispatch reads host account values" {
     };
 
     for (cases) |case| {
-        const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
+        const code = [_]u8{ @backingInt(case.opcode), @backingInt(Opcode.STOP) };
         var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
         defer bytecode.deinit(std.testing.allocator);
 
@@ -336,12 +336,12 @@ test "prepared tail dispatch copies frame-local byte slices" {
         expected: []const u8,
     }{
         .{ .opcode = .CALLDATACOPY, .source_offset = 1, .size = 4, .expected = &.{ 0xbb, 0xcc, 0, 0 } },
-        .{ .opcode = .CODECOPY, .source_offset = 0, .size = 2, .expected = &.{ @intFromEnum(Opcode.CODECOPY), @intFromEnum(Opcode.STOP) } },
+        .{ .opcode = .CODECOPY, .source_offset = 0, .size = 2, .expected = &.{ @backingInt(Opcode.CODECOPY), @backingInt(Opcode.STOP) } },
         .{ .opcode = .RETURNDATACOPY, .source_offset = 1, .size = 2, .expected = &.{ 0x22, 0x33 } },
     };
 
     for (cases) |case| {
-        const code = [_]u8{ @intFromEnum(case.opcode), @intFromEnum(Opcode.STOP) };
+        const code = [_]u8{ @backingInt(case.opcode), @backingInt(Opcode.STOP) };
         var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
         defer bytecode.deinit(std.testing.allocator);
 
@@ -371,7 +371,7 @@ test "prepared tail dispatch copies frame-local byte slices" {
 }
 
 test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
-    const code = [_]u8{ @intFromEnum(Opcode.RETURNDATACOPY), @intFromEnum(Opcode.STOP) };
+    const code = [_]u8{ @backingInt(Opcode.RETURNDATACOPY), @backingInt(Opcode.STOP) };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
 
@@ -464,7 +464,7 @@ test "prepared tail dispatch returns and reverts frame-local output" {
     };
 
     for (cases) |case| {
-        const code = [_]u8{@intFromEnum(case.opcode)};
+        const code = [_]u8{@backingInt(case.opcode)};
         var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
         defer bytecode.deinit(std.testing.allocator);
 
@@ -495,7 +495,7 @@ test "prepared tail dispatch returns and reverts frame-local output" {
 test "prepared tail dispatch rejects Byzantium opcodes before activation" {
     const opcodes = [_]Opcode{ .RETURNDATASIZE, .RETURNDATACOPY, .REVERT };
     for (opcodes) |opcode| {
-        const code = [_]u8{ @intFromEnum(opcode), @intFromEnum(Opcode.STOP) };
+        const code = [_]u8{ @backingInt(opcode), @backingInt(Opcode.STOP) };
         var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
         defer bytecode.deinit(std.testing.allocator);
 
@@ -521,12 +521,12 @@ test "prepared tail dispatch rejects Byzantium opcodes before activation" {
 
 test "prepared tail dispatch emits LOG4 data and rejects static context" {
     const code = [_]u8{
-        @intFromEnum(Opcode.PUSH1), 1,
-        @intFromEnum(Opcode.PUSH1), 2,
-        @intFromEnum(Opcode.PUSH1), 3,
-        @intFromEnum(Opcode.PUSH1), 4,
-        @intFromEnum(Opcode.PUSH1), 32,
-        @intFromEnum(Opcode.PUSH0), @intFromEnum(Opcode.LOG4),
+        @backingInt(Opcode.PUSH1), 1,
+        @backingInt(Opcode.PUSH1), 2,
+        @backingInt(Opcode.PUSH1), 3,
+        @backingInt(Opcode.PUSH1), 4,
+        @backingInt(Opcode.PUSH1), 32,
+        @backingInt(Opcode.PUSH0), @backingInt(Opcode.LOG4),
     };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
@@ -586,7 +586,7 @@ test "prepared tail dispatch uses resolved dispatch target for hot opcodes" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(Opcode.ADD)};
+    const code = [_]u8{@backingInt(Opcode.ADD)};
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
@@ -610,11 +610,11 @@ test "untraced interpreter tail dispatch respects resolved dispatch target" {
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
     const code = [_]u8{
-        @intFromEnum(Opcode.PUSH1),
+        @backingInt(Opcode.PUSH1),
         2,
-        @intFromEnum(Opcode.PUSH1),
+        @backingInt(Opcode.PUSH1),
         3,
-        @intFromEnum(Opcode.ADD),
+        @backingInt(Opcode.ADD),
     };
     var bytecode = try evmz.Bytecode.init(std.testing.allocator, &code);
     defer bytecode.deinit(std.testing.allocator);
@@ -634,7 +634,7 @@ test "untraced interpreter tail dispatch respects resolved dispatch target" {
 }
 
 test "untraced interpreter tail dispatch rejects invalid and undefined bytes" {
-    inline for (.{ @intFromEnum(Opcode.INVALID), 0x0c }) |opcode_byte| {
+    inline for (.{ @backingInt(Opcode.INVALID), 0x0c }) |opcode_byte| {
         var mock_host = evmz.t.MockHost.init(std.testing.allocator, null);
         defer mock_host.deinit();
         var host = mock_host.host();
@@ -662,7 +662,7 @@ test "untraced interpreter tail dispatch rejects invalid and undefined bytes" {
 test "builtin enforces the final derived stack minimum" {
     const spec = comptime spec: {
         var exact = evmz.eth.amsterdam.instruction;
-        exact.table[@intFromEnum(Opcode.ADD)].info.stack_in = 3;
+        exact.table[@backingInt(Opcode.ADD)].info.stack_in = 3;
         break :spec evmz.eth.amsterdam.extend(.{ .instruction = exact });
     };
 
@@ -721,20 +721,20 @@ test "custom target receives and charges the final derived spec" {
 
         pub inline fn execute(comptime exact: ExactSpec, frame: *Interpreter.CallFrame) anyerror!void {
             called = true;
-            saw_derived_spec = exact.instruction.entry(@intFromEnum(Opcode.ADD)).info.static_gas == custom_gas;
+            saw_derived_spec = exact.instruction.entry(@backingInt(Opcode.ADD)).info.static_gas == custom_gas;
             _ = frame.push(42);
         }
     };
     const base_spec = comptime spec: {
         var exact = evmz.eth.amsterdam.instruction;
-        const entry = &exact.table[@intFromEnum(Opcode.ADD)];
+        const entry = &exact.table[@backingInt(Opcode.ADD)];
         entry.info.stack_in = 0;
         entry.target = .{ .custom = CustomHandler };
         break :spec evmz.eth.amsterdam.extend(.{ .instruction = exact });
     };
     const spec = comptime spec: {
         var exact = base_spec.instruction;
-        exact.table[@intFromEnum(Opcode.ADD)].info.static_gas = custom_gas;
+        exact.table[@backingInt(Opcode.ADD)].info.static_gas = custom_gas;
         break :spec base_spec.extend(.{ .instruction = exact });
     };
 
@@ -790,14 +790,14 @@ test "custom target enforces the final derived stack minimum" {
     };
     const base_spec = comptime spec: {
         var exact = evmz.eth.amsterdam.instruction;
-        const entry = &exact.table[@intFromEnum(Opcode.ADD)];
+        const entry = &exact.table[@backingInt(Opcode.ADD)];
         entry.info.stack_in = 0;
         entry.target = .{ .custom = CustomHandler };
         break :spec evmz.eth.amsterdam.extend(.{ .instruction = exact });
     };
     const spec = comptime spec: {
         var exact = base_spec.instruction;
-        exact.table[@intFromEnum(Opcode.ADD)].info.stack_in = 1;
+        exact.table[@backingInt(Opcode.ADD)].info.stack_in = 1;
         break :spec base_spec.extend(.{ .instruction = exact });
     };
 
@@ -860,7 +860,7 @@ test "captured custom MSTORE handler retains inherited trace effects" {
     cursor.enterFrame(captured.span.frames[0]);
     const writes = for (captured.span.steps) |row| {
         cursor.finishStep(row);
-        if (row.opcode == @intFromEnum(Opcode.MSTORE)) break try cursor.memoryWrites();
+        if (row.opcode == @backingInt(Opcode.MSTORE)) break try cursor.memoryWrites();
     } else unreachable;
     try std.testing.expectEqual(@as(usize, 1), writes.len);
     const bytes = cursor.memoryWriteBytes(writes[0]);
@@ -873,7 +873,7 @@ fn instructionOverrideSpec(
     comptime target: instruction.Target,
 ) evmz.eth.Spec {
     var exact = evmz.eth.amsterdam.instruction;
-    exact.table[@intFromEnum(opcode)].target = target;
+    exact.table[@backingInt(opcode)].target = target;
     return evmz.eth.amsterdam.extend(.{
         .instruction = exact,
     });
@@ -890,7 +890,7 @@ fn specializedMetadataSpec() evmz.eth.Spec {
         .{ Opcode.SSTORE, 3 },
         .{ Opcode.JUMPDEST, 1 },
     }) |entry| {
-        const info = &exact.table[@intFromEnum(entry[0])].info;
+        const info = &exact.table[@backingInt(entry[0])].info;
         info.static_gas = 7;
         info.stack_in = entry[1];
     }
@@ -912,7 +912,7 @@ fn expectSpecializedAdmission(
     var msg = evmz.t.defaultMessage();
     msg.gas = gas;
     msg.is_static = is_static;
-    const code = [_]u8{@intFromEnum(opcode)};
+    const code = [_]u8{@backingInt(opcode)};
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &mock_host.execution_context,
@@ -940,7 +940,7 @@ fn expectOpcodeHalt(comptime spec: evmz.eth.Spec, opcode: Opcode, expected: Inte
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(opcode)};
+    const code = [_]u8{@backingInt(opcode)};
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
@@ -960,9 +960,9 @@ test "instruction boundary resolves EVM faults without throwing" {
         is_static: bool = false,
         expected: Interpreter.FrameHalt,
     }{
-        .{ .opcode = @intFromEnum(Opcode.ADD), .expected = .stack_underflow },
+        .{ .opcode = @backingInt(Opcode.ADD), .expected = .stack_underflow },
         .{ .opcode = 0x0c, .expected = .invalid_opcode },
-        .{ .opcode = @intFromEnum(Opcode.SSTORE), .is_static = true, .expected = .write_protection },
+        .{ .opcode = @backingInt(Opcode.SSTORE), .is_static = true, .expected = .write_protection },
     };
 
     inline for (cases) |case| {
@@ -989,7 +989,7 @@ test "instruction boundary resolves EVM faults without throwing" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(Opcode.PUSH0)};
+    const code = [_]u8{@backingInt(Opcode.PUSH0)};
     var frame = try Interpreter.Interpreter(evmz.eth.cancun).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &mock_host.execution_context,

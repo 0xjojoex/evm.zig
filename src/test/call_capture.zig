@@ -62,7 +62,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
     try seedCode(&executor, child, &child_code, 0);
-    try seedCode(&executor, grandchild, &.{@intFromEnum(evmz.Opcode.STOP)}, 0);
+    try seedCode(&executor, grandchild, &.{@backingInt(evmz.Opcode.STOP)}, 0);
 
     var capture: CaptureHarness = undefined;
     capture.init();
@@ -134,7 +134,7 @@ test "root insufficient-balance capture preserves unspent gas" {
     for ([_]evmz.Address{ code_recipient, precompile_recipient }) |recipient| {
         var executor = Default.init(std.testing.allocator, .{});
         defer executor.deinit();
-        try seedCode(&executor, code_recipient, &.{@intFromEnum(evmz.Opcode.STOP)}, 0);
+        try seedCode(&executor, code_recipient, &.{@backingInt(evmz.Opcode.STOP)}, 0);
 
         var capture: CaptureHarness = undefined;
         capture.init();

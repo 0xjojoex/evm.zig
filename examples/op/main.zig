@@ -65,7 +65,7 @@ const isthmus_transaction_kinds = kinds: {
 /// its opcode-visible value at one for Ethereum transactions and deposits.
 fn executionEnv(comptime spec: evmz.Spec, inherited: evmz.Env) evmz.Env {
     var resolved = inherited;
-    if (spec.instruction.entry(@intFromEnum(evmz.Opcode.BLOBBASEFEE)).active)
+    if (spec.instruction.entry(@backingInt(evmz.Opcode.BLOBBASEFEE)).active)
         resolved.blob_base_fee = 1;
     return resolved;
 }
@@ -1083,13 +1083,13 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
     const runtime_code = [_]u8{
-        @intFromEnum(evmz.Opcode.BLOBBASEFEE),
-        @intFromEnum(evmz.Opcode.PUSH0),
-        @intFromEnum(evmz.Opcode.MSTORE),
-        @intFromEnum(evmz.Opcode.PUSH1),
+        @backingInt(evmz.Opcode.BLOBBASEFEE),
+        @backingInt(evmz.Opcode.PUSH0),
+        @backingInt(evmz.Opcode.MSTORE),
+        @backingInt(evmz.Opcode.PUSH1),
         0x20,
-        @intFromEnum(evmz.Opcode.PUSH0),
-        @intFromEnum(evmz.Opcode.RETURN),
+        @backingInt(evmz.Opcode.PUSH0),
+        @backingInt(evmz.Opcode.RETURN),
     };
 
     var memory = evmz.state.MemoryStore.init(std.testing.allocator);
@@ -1222,13 +1222,13 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
     const sender = address.addr(0xaaaa);
     const recipient = address.addr(0xbbbb);
     const runtime_code = [_]u8{
-        @intFromEnum(evmz.Opcode.BLOBBASEFEE),
-        @intFromEnum(evmz.Opcode.PUSH0),
-        @intFromEnum(evmz.Opcode.MSTORE),
-        @intFromEnum(evmz.Opcode.PUSH1),
+        @backingInt(evmz.Opcode.BLOBBASEFEE),
+        @backingInt(evmz.Opcode.PUSH0),
+        @backingInt(evmz.Opcode.MSTORE),
+        @backingInt(evmz.Opcode.PUSH1),
         0x20,
-        @intFromEnum(evmz.Opcode.PUSH0),
-        @intFromEnum(evmz.Opcode.RETURN),
+        @backingInt(evmz.Opcode.PUSH0),
+        @backingInt(evmz.Opcode.RETURN),
     };
     const env = evmz.Env{
         .chain_id = 10,

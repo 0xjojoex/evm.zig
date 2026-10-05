@@ -380,10 +380,10 @@ pub const SortedChanges = struct {
 
         const account_order = try allocator.alloc(AccountId, entries.items.len);
         errdefer allocator.free(account_order);
-        for (account_order, 0..) |*id, position| id.* = @enumFromInt(position);
+        for (account_order, 0..) |*id, position| id.* = @fromBackingInt(@intCast(position));
         const storage_order = try allocator.alloc(StorageId, storage_total);
         errdefer allocator.free(storage_order);
-        for (storage_order, 0..) |*id, position| id.* = @enumFromInt(position);
+        for (storage_order, 0..) |*id, position| id.* = @fromBackingInt(@intCast(position));
 
         return .{
             .allocator = allocator,
@@ -431,7 +431,7 @@ pub const SortedChanges = struct {
     }
 
     pub fn storageTrieKey(self: SortedChanges, id: StorageId) [32]u8 {
-        return self.storage[@intFromEnum(id)].key;
+        return self.storage[@backingInt(id)].key;
     }
 
     pub fn accountDirty(_: SortedChanges, _: AccountId) bool {
@@ -460,11 +460,11 @@ pub const SortedChanges = struct {
     }
 
     pub fn storageValue(self: SortedChanges, id: StorageId) u256 {
-        return self.storage[@intFromEnum(id)].value;
+        return self.storage[@backingInt(id)].value;
     }
 
     fn accountEntry(self: SortedChanges, id: AccountId) *const AccountEntry {
-        return &self.accounts[@intFromEnum(id)];
+        return &self.accounts[@backingInt(id)];
     }
 };
 

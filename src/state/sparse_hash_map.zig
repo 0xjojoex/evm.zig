@@ -86,7 +86,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
                 return .{
                     .key_ptr = &self.entries[self.index].key,
                     .value_ptr = &self.entries[self.index].value,
-                    .entry_id = @enumFromInt(self.index),
+                    .entry_id = @fromBackingInt(@intCast(self.index)),
                 };
             }
         };
@@ -174,7 +174,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         pub fn getEntryId(self: Self, key: K) ?EntryId {
             const slot = self.findSlot(key) orelse return null;
-            return @enumFromInt(self.index[slot] - 1);
+            return @fromBackingInt(@intCast(self.index[slot] - 1));
         }
 
         pub fn getPtr(self: *Self, key: K) ?*V {
@@ -184,7 +184,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
 
         /// Access a dense row by an identity returned from `getOrPut`.
         pub fn keyById(self: *const Self, entry_id: EntryId) *const K {
-            const row_index: Index = @intFromEnum(entry_id);
+            const row_index: Index = @backingInt(entry_id);
             std.debug.assert(row_index < self.len);
             return &self.entries[row_index].key;
         }
@@ -194,7 +194,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
         /// still hands out a mutable value: dense rows are the caller's state,
         /// the map only indexes them.
         pub fn valuePtrById(self: *const Self, entry_id: EntryId) *V {
-            const row_index: Index = @intFromEnum(entry_id);
+            const row_index: Index = @backingInt(entry_id);
             std.debug.assert(row_index < self.len);
             return &self.entries[row_index].value;
         }
@@ -217,7 +217,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
             return .{
                 .key_ptr = &self.entries[index].key,
                 .value_ptr = &self.entries[index].value,
-                .entry_id = @enumFromInt(index),
+                .entry_id = @fromBackingInt(@intCast(index)),
             };
         }
 
@@ -260,7 +260,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
                 return .{
                     .key_ptr = &entry.key,
                     .value_ptr = &entry.value,
-                    .entry_id = @enumFromInt(row_index),
+                    .entry_id = @fromBackingInt(@intCast(row_index)),
                     .found_existing = true,
                 };
             }
@@ -290,7 +290,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
                     return .{
                         .key_ptr = &entry.key,
                         .value_ptr = &entry.value,
-                        .entry_id = @enumFromInt(row_index),
+                        .entry_id = @fromBackingInt(@intCast(row_index)),
                         .found_existing = true,
                     };
                 }
@@ -307,7 +307,7 @@ pub fn WithContext(comptime K: type, comptime V: type, comptime Context: type) t
                 return .{
                     .key_ptr = &self.entries[entry_index].key,
                     .value_ptr = &self.entries[entry_index].value,
-                    .entry_id = @enumFromInt(entry_index),
+                    .entry_id = @fromBackingInt(@intCast(entry_index)),
                     .found_existing = false,
                 };
             }

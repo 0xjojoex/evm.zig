@@ -171,7 +171,7 @@ test "stateless wire v1 rejects unknown schema ids" {
     try std.testing.expectError(error.UnsupportedSchemaId, wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, input_bytes));
 
     // Known fork this build does not decode, then a fork index that does not exist.
-    input_bytes[0] = @intFromEnum(wire.ProtocolFork.osaka);
+    input_bytes[0] = @backingInt(wire.ProtocolFork.osaka);
     input_bytes[1] = wire.schema_revision;
     try std.testing.expectError(error.UnsupportedFork, wire.StatelessInput.decodeSchemaPrefixed(std.testing.allocator, input_bytes));
     input_bytes[0] = 0xff;

@@ -941,7 +941,7 @@ test "nested CREATE2 resets storage and enclosing REVERT restores the destinatio
             .CREATE2,      .PUSH0,        .MSTORE, .PUSH1,
             32,            .PUSH0,        .RETURN,
         });
-        if (revert_parent) factory_code[factory_code.len - 1] = @intFromEnum(evmz.Opcode.REVERT);
+        if (revert_parent) factory_code[factory_code.len - 1] = @backingInt(evmz.Opcode.REVERT);
         var memory = MemoryStore.init(std.testing.allocator);
         defer memory.deinit();
         try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 10_000_000 });

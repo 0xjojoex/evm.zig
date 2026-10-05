@@ -78,7 +78,7 @@ pub fn authenticate(
         &workspace,
     );
     for (plan.account_trie_order, account_results) |id, result| {
-        const record = &accounts[@intFromEnum(id)];
+        const record = &accounts[@backingInt(id)];
         switch (result) {
             .present => |encoded| {
                 record.* = .{ .parent = .{ .present = undefined } };
@@ -96,7 +96,7 @@ pub fn authenticate(
     const storage_keys = keys[0..plan.storageCount()];
     const storage_results = results[0..plan.storageCount()];
     for (accounts, 0..) |account, account_index| {
-        const id: claim_plan.AccountId = @enumFromInt(account_index);
+        const id: claim_plan.AccountId = @fromBackingInt(@intCast(account_index));
         const order = plan.storageTrieOrder(id);
         if (order.len == 0) continue;
         const parent = switch (account.parent) {
@@ -118,7 +118,7 @@ pub fn authenticate(
             &workspace,
         );
         for (order, storage_results[begin..end]) |storage_id, result| {
-            const record = &storage[@intFromEnum(storage_id)];
+            const record = &storage[@backingInt(storage_id)];
             switch (result) {
                 .absent => {},
                 .present => |encoded| record.value = try trie.decodeStorageValue(encoded),

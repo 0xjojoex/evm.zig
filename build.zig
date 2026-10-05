@@ -1515,6 +1515,14 @@ fn addFmtCheck(b: *std.Build) *std.Build.Step {
             "eest",
             "bench",
         }),
+        // Zig 0.17 fetches dependencies into each project's local `zig-pkg/`.
+        .exclude_paths = b.pathList(&.{
+            "zig-pkg",
+            "eest/zig-pkg",
+            "bench/zig-pkg",
+            "examples/zig-pkg",
+            "pkg/ssz/bench/zig-pkg",
+        }),
         .check = true,
     });
     const step = b.step("fmt-check", "Check Zig source formatting");

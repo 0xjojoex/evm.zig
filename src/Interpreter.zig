@@ -576,7 +576,7 @@ pub const CallFrame = struct {
 
     pub fn isValidJumpDest(self: *CallFrame, target: usize) !bool {
         if (target >= self.code.len) return false;
-        if (self.code[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
+        if (self.code[target] != @backingInt(Opcode.JUMPDEST)) return false;
         const mask_bits = @bitSizeOf(usize);
         return self.jumpdest_masks[target / mask_bits] &
             (@as(usize, 1) << @intCast(target % mask_bits)) != 0;
@@ -685,12 +685,12 @@ const test_execution_context = ExecutionContext{
 
 test "call frame can execute with externally supplied stack storage" {
     const code = [_]u8{
-        @intFromEnum(Opcode.PUSH1),
+        @backingInt(Opcode.PUSH1),
         0x02,
-        @intFromEnum(Opcode.PUSH1),
+        @backingInt(Opcode.PUSH1),
         0x03,
-        @intFromEnum(Opcode.ADD),
-        @intFromEnum(Opcode.STOP),
+        @backingInt(Opcode.ADD),
+        @backingInt(Opcode.STOP),
     };
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
@@ -731,12 +731,12 @@ test "call frame can execute with externally supplied stack storage" {
 
 test "call frame can execute with externally supplied memory storage" {
     const code = [_]u8{
-        @intFromEnum(Opcode.PUSH1),
+        @backingInt(Opcode.PUSH1),
         0x2a,
-        @intFromEnum(Opcode.PUSH1),
+        @backingInt(Opcode.PUSH1),
         0x00,
-        @intFromEnum(Opcode.MSTORE),
-        @intFromEnum(Opcode.STOP),
+        @backingInt(Opcode.MSTORE),
+        @backingInt(Opcode.STOP),
     };
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
@@ -784,7 +784,7 @@ pub fn traceFrameOutcome(status: Status) trace.TraceFrameOutcome {
 }
 
 test "interpreter trace cursor records step start and end" {
-    const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.POP) };
+    const code = [_]u8{ @backingInt(Opcode.PUSH1), 0x2a, @backingInt(Opcode.POP) };
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.depth = 7;
@@ -812,7 +812,7 @@ test "interpreter trace cursor records step start and end" {
         .step_start => |view| {
             if (starts == 0) {
                 try std.testing.expectEqual(@as(usize, 0), view.row.pc);
-                try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.PUSH1)), view.row.opcode);
+                try std.testing.expectEqual(@as(u8, @backingInt(Opcode.PUSH1)), view.row.opcode);
                 try std.testing.expectEqual(@as(?Opcode, .PUSH1), std.enums.fromInt(Opcode, view.row.opcode));
                 try std.testing.expectEqual(@as(u16, 7), view.frame.depth);
                 try std.testing.expectEqual(@as(i64, 100), view.row.gas_before);
@@ -845,7 +845,7 @@ test "interpreter trace cursor records step start and end" {
 }
 
 test "interpreter captured tail table records a replay span" {
-    const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
+    const code = [_]u8{ @backingInt(Opcode.PUSH1), 0x2a, @backingInt(Opcode.STOP) };
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
@@ -882,13 +882,13 @@ test "interpreter captured tail table records a replay span" {
 
     try std.testing.expectEqual(Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 2), span.steps.len);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.PUSH1)), span.steps[0].opcode);
+    try std.testing.expectEqual(@as(u8, @backingInt(Opcode.PUSH1)), span.steps[0].opcode);
     try std.testing.expectEqual(@as(u32, 2), span.steps[0].pc_next);
     var cursor = trace.TraceCursor.init(span);
     cursor.enterFrame(span.frames[0]);
     try std.testing.expectEqual(@as(usize, 0), cursor.stack().?.len);
     cursor.finishStep(span.steps[0]);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.STOP)), span.steps[1].opcode);
+    try std.testing.expectEqual(@as(u8, @backingInt(Opcode.STOP)), span.steps[1].opcode);
     try std.testing.expectEqualSlices(u256, &.{0x2a}, cursor.stack().?);
 }
 
@@ -967,7 +967,7 @@ test "interpreter captured tail table records optional memory writes" {
     cursor.enterFrame(captured.span.frames[0]);
     const writes = for (captured.span.steps) |row| {
         cursor.finishStep(row);
-        if (row.opcode == @intFromEnum(Opcode.MSTORE)) break try cursor.memoryWrites();
+        if (row.opcode == @backingInt(Opcode.MSTORE)) break try cursor.memoryWrites();
     } else unreachable;
     try std.testing.expectEqual(@as(usize, 1), writes.len);
     const bytes = cursor.memoryWriteBytes(writes[0]);
@@ -976,15 +976,15 @@ test "interpreter captured tail table records optional memory writes" {
 }
 
 test "interpreter captured tail table preserves terminal and fault outcomes" {
-    const explicit_success = [_]u8{@intFromEnum(Opcode.STOP)};
+    const explicit_success = [_]u8{@backingInt(Opcode.STOP)};
     const revert = [_]u8{
-        @intFromEnum(Opcode.PUSH0),
-        @intFromEnum(Opcode.PUSH0),
-        @intFromEnum(Opcode.REVERT),
+        @backingInt(Opcode.PUSH0),
+        @backingInt(Opcode.PUSH0),
+        @backingInt(Opcode.REVERT),
     };
     const invalid = [_]u8{0xfe};
-    const stack_fault = [_]u8{@intFromEnum(Opcode.POP)};
-    const out_of_gas = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a };
+    const stack_fault = [_]u8{@backingInt(Opcode.POP)};
+    const out_of_gas = [_]u8{ @backingInt(Opcode.PUSH1), 0x2a };
     const memory_offset_overflow = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .NOT, .MSTORE });
     const Case = struct {
         code: []const u8,
@@ -1036,7 +1036,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
 }
 
 test "interpreter capture replays minimal EIP-3155 JSONL" {
-    const code = [_]u8{ @intFromEnum(Opcode.PUSH1), 0x2a, @intFromEnum(Opcode.STOP) };
+    const code = [_]u8{ @backingInt(Opcode.PUSH1), 0x2a, @backingInt(Opcode.STOP) };
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;

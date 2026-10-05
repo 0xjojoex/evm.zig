@@ -69,7 +69,7 @@ pub fn evmz_guest_entry() callconv(.c) c_int {
 
     evmz_guest_output = .{
         magic,
-        @intFromEnum(proof.status),
+        @backingInt(proof.status),
         @truncate(proof.gas_used),
         proof.output_len,
         proof.return_word_low,

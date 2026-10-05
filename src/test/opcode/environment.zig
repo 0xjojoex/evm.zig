@@ -17,7 +17,7 @@ test "BALANCE cold account access gas comes from the exact spec" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(evmz.Opcode.BALANCE)};
+    const code = [_]u8{@backingInt(evmz.Opcode.BALANCE)};
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
@@ -52,7 +52,7 @@ test "EXTCODESIZE account access gas comes from the exact spec" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(evmz.Opcode.EXTCODESIZE)};
+    const code = [_]u8{@backingInt(evmz.Opcode.EXTCODESIZE)};
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,

@@ -954,11 +954,11 @@ pub fn ExecutorType(
             // The ref's bit pattern is the index; reserved values fall above
             // `max_index`, so no classification runs on the memo-hit path.
             comptime {
-                std.debug.assert(@intFromEnum(evmz.state.CodeRef.missing) > prepared_code.Execution.max_index);
-                std.debug.assert(@intFromEnum(evmz.state.CodeRef.empty) > prepared_code.Execution.max_index);
+                std.debug.assert(@backingInt(evmz.state.CodeRef.missing) > prepared_code.Execution.max_index);
+                std.debug.assert(@backingInt(evmz.state.CodeRef.empty) > prepared_code.Execution.max_index);
                 std.debug.assert(evmz.state.CodeRef.max_indexed - 1 <= prepared_code.Execution.max_index);
             }
-            return execution.resolve(code.code_hash, code.bytes, @intFromEnum(code.ref), .{
+            return execution.resolve(code.code_hash, code.bytes, @backingInt(code.ref), .{
                 .admit = true,
             });
         }

@@ -326,7 +326,7 @@ test "debug stepping respects finalized specialized builtin admission" {
             .{ evmz.Opcode.SSTORE, 3 },
             .{ evmz.Opcode.JUMPDEST, 1 },
         }) |entry| {
-            const info = &exact.table[@intFromEnum(entry[0])].info;
+            const info = &exact.table[@backingInt(entry[0])].info;
             info.static_gas = 7;
             info.stack_in = entry[1];
         }
@@ -342,12 +342,12 @@ test "debug stepping respects finalized specialized builtin admission" {
         evmz.Opcode.SSTORE,
         evmz.Opcode.JUMPDEST,
     }) |opcode| {
-        const code = [_]u8{@intFromEnum(opcode)};
+        const code = [_]u8{@backingInt(opcode)};
         try expectCallParity(Exact, @tagName(opcode) ++ " static OOG", &code, 6, false, .out_of_gas, .out_of_gas);
         try expectCallParity(Exact, @tagName(opcode) ++ " final stack minimum", &code, 7, false, .invalid, .stack_underflow);
     }
 
-    const sstore = [_]u8{@intFromEnum(evmz.Opcode.SSTORE)};
+    const sstore = [_]u8{@backingInt(evmz.Opcode.SSTORE)};
     try expectCallParity(Exact, "SSTORE static OOG order", &sstore, 6, true, .out_of_gas, .out_of_gas);
     try expectCallParity(Exact, "SSTORE write protection order", &sstore, 7, true, .invalid, .write_protection);
 }

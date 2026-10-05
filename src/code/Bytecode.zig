@@ -82,7 +82,7 @@ pub fn isValidJumpDest(self: *const Bytecode, target: usize) bool {
 test "empty bytecode keeps a readable STOP tail" {
     try std.testing.expectEqual(@as(usize, 0), empty.bytes.len);
     try std.testing.expectEqual(zero_padding_len, empty.readBytes().len);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(Opcode.STOP)), empty.readBytes()[0]);
+    try std.testing.expectEqual(@as(u8, @backingInt(Opcode.STOP)), empty.readBytes()[0]);
     try std.testing.expect(!empty.isValidJumpDest(0));
 }
 

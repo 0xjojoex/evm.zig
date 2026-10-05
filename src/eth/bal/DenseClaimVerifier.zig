@@ -95,13 +95,13 @@ pub fn init(
     errdefer active_storage_ids.deinit(allocator);
 
     for (expected, 0..) |account, account_index| {
-        const account_id: AccountId = @enumFromInt(account_index);
+        const account_id: AccountId = @fromBackingInt(@intCast(account_index));
         std.debug.assert(bal.Address.eql(account.address, plan.accountAddress(account_id)));
         const range = plan.accountStorageRange(account_id);
         var read_index: usize = 0;
         var write_index: usize = 0;
         for (range.start..range.end()) |storage_index| {
-            const storage_id: StorageId = @enumFromInt(storage_index);
+            const storage_id: StorageId = @fromBackingInt(@intCast(storage_index));
             const slot = plan.storageSlot(storage_id);
             const has_read = read_index < account.storage_reads.len;
             const has_write = write_index < account.storage_changes.len;
@@ -163,7 +163,7 @@ pub fn append(
         const record = view.accounts.at(account_index);
         const fields = try observation.accountFields(view, record) orelse continue;
         const id = view.accounts.idAt(account_index);
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         const state = &self.accounts[index];
         if (state.active_generation != self.active_generation) {
             state.active_generation = self.active_generation;
@@ -202,7 +202,7 @@ pub fn append(
         if (!metadata.observation.value_read and !metadata.effect.written) continue;
         const record = view.storage.at(storage_index);
         const id = view.storage.idAt(storage_index);
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         const state = &self.storage[index];
         if (state.active_generation != self.active_generation) {
             state.active_generation = self.active_generation;
@@ -236,9 +236,9 @@ pub fn matchesClaim(self: *DenseClaimVerifier) !bool {
         switch (state.expected) {
             .read => {},
             .write => |write_index| {
-                const storage_id: StorageId = @enumFromInt(storage_index);
+                const storage_id: StorageId = @fromBackingInt(@intCast(storage_index));
                 const account_id = self.plan.storageAccount(storage_id);
-                const expected = self.expected[@intFromEnum(account_id)].storage_changes[write_index];
+                const expected = self.expected[@backingInt(account_id)].storage_changes[write_index];
                 if (state.change_cursor != expected.changes.len) return false;
             },
         }
@@ -250,7 +250,7 @@ fn flush(self: *DenseClaimVerifier) void {
     const block_access_index = self.active_index orelse return;
 
     for (self.active_account_ids.items) |id| {
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         const active = self.active_accounts[index];
         const state = &self.accounts[index];
         state.seen = true;
@@ -263,11 +263,11 @@ fn flush(self: *DenseClaimVerifier) void {
     }
 
     for (self.active_storage_ids.items) |id| {
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         const account_id = self.plan.storageAccount(id);
-        self.accounts[@intFromEnum(account_id)].seen = true;
-        const account_wiped = self.accounts[@intFromEnum(account_id)].active_generation == self.active_generation and
-            self.active_accounts[@intFromEnum(account_id)].storage_wiped;
+        self.accounts[@backingInt(account_id)].seen = true;
+        const account_wiped = self.accounts[@backingInt(account_id)].active_generation == self.active_generation and
+            self.active_accounts[@backingInt(account_id)].storage_wiped;
         const active = self.active_storage[index];
         const actual_read = observation.storageIsRead(
             account_wiped,
@@ -281,7 +281,7 @@ fn flush(self: *DenseClaimVerifier) void {
                 if (!actual_read) self.mismatch = true;
             },
             .write => |write_index| if (!actual_read) {
-                const expected = self.expected[@intFromEnum(account_id)].storage_changes[write_index].changes;
+                const expected = self.expected[@backingInt(account_id)].storage_changes[write_index].changes;
                 const cursor = state.change_cursor;
                 if (cursor >= expected.len or
                     expected[cursor].block_access_index != block_access_index or
@@ -306,7 +306,7 @@ fn expectBalance(
     block_access_index: bal.BlockAccessIndex,
     value: u256,
 ) void {
-    const index = @intFromEnum(id);
+    const index = @backingInt(id);
     const state = &self.accounts[index];
     const expected = self.expected[index].balance_changes;
     const cursor = state.balance_cursor;
@@ -326,7 +326,7 @@ fn expectNonce(
     block_access_index: bal.BlockAccessIndex,
     value: u64,
 ) void {
-    const index = @intFromEnum(id);
+    const index = @backingInt(id);
     const state = &self.accounts[index];
     const expected = self.expected[index].nonce_changes;
     const cursor = state.nonce_cursor;
@@ -346,7 +346,7 @@ fn expectCode(
     block_access_index: bal.BlockAccessIndex,
     value: []const u8,
 ) void {
-    const index = @intFromEnum(id);
+    const index = @backingInt(id);
     const state = &self.accounts[index];
     const expected = self.expected[index].code_changes;
     const cursor = state.code_cursor;
@@ -548,10 +548,10 @@ test "dense claim verification matches generic coalescing and mutation rejection
         .code_changes = &code_changes,
     }};
 
-    const account_id: AccountId = @enumFromInt(0);
-    const read_five: StorageId = @enumFromInt(0);
-    const write_seven: StorageId = @enumFromInt(1);
-    const read_eight: StorageId = @enumFromInt(2);
+    const account_id: AccountId = @fromBackingInt(@intCast(0));
+    const read_five: StorageId = @fromBackingInt(@intCast(0));
+    const write_seven: StorageId = @fromBackingInt(@intCast(1));
+    const read_eight: StorageId = @fromBackingInt(@intCast(2));
     const first_accounts = [_]TestAccountEntry{.{
         .id = account_id,
         .record = .{

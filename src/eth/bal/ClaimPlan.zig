@@ -95,7 +95,7 @@ pub const ClaimPlan = struct {
 
         var storage_index: usize = 0;
         for (block_access_list, 0..) |account, account_index| {
-            const id: AccountId = @enumFromInt(account_index);
+            const id: AccountId = @fromBackingInt(@intCast(account_index));
             const storage_start = storage_index;
             var change_index: usize = 0;
             var read_index: usize = 0;
@@ -115,7 +115,7 @@ pub const ClaimPlan = struct {
                     read_index += 1;
                     break :slot value;
                 };
-                const storage_id: StorageId = @enumFromInt(storage_index);
+                const storage_id: StorageId = @fromBackingInt(@intCast(storage_index));
                 storage_accounts[storage_index] = id;
                 storage_slots[storage_index] = slot;
                 trie.hashedStorageKeyInto(slot, &storage_trie_keys[storage_index]);
@@ -174,27 +174,27 @@ pub const ClaimPlan = struct {
     }
 
     pub fn accountAddressWord(self: *const ClaimPlan, id: AccountId) address.AddressWord {
-        return self.account_addresses[@intFromEnum(id)];
+        return self.account_addresses[@backingInt(id)];
     }
 
     pub fn accountStorageRange(self: *const ClaimPlan, id: AccountId) Range {
-        return self.account_storage_ranges[@intFromEnum(id)];
+        return self.account_storage_ranges[@backingInt(id)];
     }
 
     pub fn accountTrieKey(self: *const ClaimPlan, id: AccountId) Hash {
-        return self.account_trie_keys[@intFromEnum(id)];
+        return self.account_trie_keys[@backingInt(id)];
     }
 
     pub fn storageAccount(self: *const ClaimPlan, id: StorageId) AccountId {
-        return self.storage_accounts[@intFromEnum(id)];
+        return self.storage_accounts[@backingInt(id)];
     }
 
     pub fn storageSlot(self: *const ClaimPlan, id: StorageId) u256 {
-        return self.storage_slots[@intFromEnum(id)];
+        return self.storage_slots[@backingInt(id)];
     }
 
     pub fn storageTrieKey(self: *const ClaimPlan, id: StorageId) Hash {
-        return self.storage_trie_keys[@intFromEnum(id)];
+        return self.storage_trie_keys[@backingInt(id)];
     }
 
     pub fn accountCount(self: *const ClaimPlan) usize {
@@ -228,7 +228,7 @@ pub const ClaimPlan = struct {
             target,
             address.AddressWord.order,
         ) orelse return null;
-        return @enumFromInt(index);
+        return @fromBackingInt(@intCast(index));
     }
 
     /// Resolve one full raw slot inside its account's canonical BAL range.
@@ -242,7 +242,7 @@ pub const ClaimPlan = struct {
         };
         const offset = std.sort.binarySearch(u256, window, slot, S.compareStorageSlot) orelse
             return null;
-        return @enumFromInt(range.start + offset);
+        return @fromBackingInt(@intCast(range.start + offset));
     }
 
     pub fn allocationBytes(self: *const ClaimPlan) usize {
@@ -260,16 +260,16 @@ pub const ClaimPlan = struct {
 fn accountTrieLessThan(trie_keys: []const Hash, lhs: AccountId, rhs: AccountId) bool {
     return std.mem.order(
         u8,
-        &trie_keys[@intFromEnum(lhs)],
-        &trie_keys[@intFromEnum(rhs)],
+        &trie_keys[@backingInt(lhs)],
+        &trie_keys[@backingInt(rhs)],
     ) == .lt;
 }
 
 fn storageTrieLessThan(trie_keys: []const Hash, lhs: StorageId, rhs: StorageId) bool {
     return std.mem.order(
         u8,
-        &trie_keys[@intFromEnum(lhs)],
-        &trie_keys[@intFromEnum(rhs)],
+        &trie_keys[@backingInt(lhs)],
+        &trie_keys[@backingInt(rhs)],
     ) == .lt;
 }
 
@@ -282,8 +282,8 @@ fn rejectTrieKeyCollisions(
     for (order[1..], order[0 .. order.len - 1]) |current, previous| {
         if (std.mem.eql(
             u8,
-            &trie_keys[@intFromEnum(previous)],
-            &trie_keys[@intFromEnum(current)],
+            &trie_keys[@backingInt(previous)],
+            &trie_keys[@backingInt(current)],
         )) return error.TrieKeyCollision;
     }
 }
@@ -308,26 +308,26 @@ test "claim plan assigns raw IDs and separate trie order" {
     defer plan.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), plan.accountCount());
     try std.testing.expectEqual(@as(usize, 5), plan.storageCount());
-    try std.testing.expectEqual(address.addr(1), plan.accountAddress(@enumFromInt(0)));
-    try std.testing.expectEqual(trie.hashedAddressKey(address.addr(1)), plan.accountTrieKey(@enumFromInt(0)));
-    const first_storage = plan.storageSlots(@enumFromInt(0));
+    try std.testing.expectEqual(address.addr(1), plan.accountAddress(@fromBackingInt(@intCast(0))));
+    try std.testing.expectEqual(trie.hashedAddressKey(address.addr(1)), plan.accountTrieKey(@fromBackingInt(@intCast(0))));
+    const first_storage = plan.storageSlots(@fromBackingInt(@intCast(0)));
     try std.testing.expectEqual(@as(usize, 4), first_storage.len);
     try std.testing.expectEqualSlices(u256, &.{ 1, 3, 5, 9 }, first_storage);
-    const second_storage = plan.storageSlots(@enumFromInt(1));
+    const second_storage = plan.storageSlots(@fromBackingInt(@intCast(1)));
     try std.testing.expectEqual(@as(usize, 1), second_storage.len);
     try std.testing.expectEqual(@as(u256, 8), second_storage[0]);
     try expectAccountTrieOrder(plan);
-    try expectStorageTrieOrder(plan, @enumFromInt(0));
-    try expectStorageTrieOrder(plan, @enumFromInt(1));
+    try expectStorageTrieOrder(plan, @fromBackingInt(@intCast(0)));
+    try expectStorageTrieOrder(plan, @fromBackingInt(@intCast(1)));
     try std.testing.expectEqual(@as(usize, 496), plan.allocationBytes());
-    try std.testing.expectEqual(@as(?AccountId, @enumFromInt(0)), plan.accountIdWord(.fromAddress(address.addr(1))));
-    try std.testing.expectEqual(@as(?AccountId, @enumFromInt(1)), plan.accountIdWord(.fromAddress(address.addr(2))));
+    try std.testing.expectEqual(@as(?AccountId, @fromBackingInt(@intCast(0))), plan.accountIdWord(.fromAddress(address.addr(1))));
+    try std.testing.expectEqual(@as(?AccountId, @fromBackingInt(@intCast(1))), plan.accountIdWord(.fromAddress(address.addr(2))));
     try std.testing.expectEqual(@as(?AccountId, null), plan.accountIdWord(.fromAddress(address.addr(3))));
-    try std.testing.expectEqual(@as(?StorageId, @enumFromInt(2)), plan.storageId(@enumFromInt(0), 5));
-    try std.testing.expectEqual(@as(?StorageId, null), plan.storageId(@enumFromInt(0), 4));
-    try std.testing.expectEqual(@as(AccountId, @enumFromInt(0)), plan.storageAccount(@enumFromInt(0)));
-    try std.testing.expectEqual(@as(AccountId, @enumFromInt(1)), plan.storageAccount(@enumFromInt(4)));
-    try std.testing.expectEqual(trie.hashedStorageKey(5), plan.storageTrieKey(@enumFromInt(2)));
+    try std.testing.expectEqual(@as(?StorageId, @fromBackingInt(@intCast(2))), plan.storageId(@fromBackingInt(@intCast(0)), 5));
+    try std.testing.expectEqual(@as(?StorageId, null), plan.storageId(@fromBackingInt(@intCast(0)), 4));
+    try std.testing.expectEqual(@as(AccountId, @fromBackingInt(@intCast(0))), plan.storageAccount(@fromBackingInt(@intCast(0))));
+    try std.testing.expectEqual(@as(AccountId, @fromBackingInt(@intCast(1))), plan.storageAccount(@fromBackingInt(@intCast(4))));
+    try std.testing.expectEqual(trie.hashedStorageKey(5), plan.storageTrieKey(@fromBackingInt(@intCast(2))));
 }
 
 test "claim plan cleans every allocation failure position" {
@@ -374,7 +374,7 @@ test "account lookup resolves a shared-prefix address set and misses at every bo
     defer plan.deinit(std.testing.allocator);
     for (addresses, 0..) |entry, index| {
         try std.testing.expectEqual(
-            @as(?AccountId, @enumFromInt(index)),
+            @as(?AccountId, @fromBackingInt(@intCast(index))),
             plan.accountIdWord(.fromAddress(entry)),
         );
     }

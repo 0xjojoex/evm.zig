@@ -181,7 +181,7 @@ pub const Opcode = enum(u8) {
     }
 
     pub inline fn toByte(self: Opcode) u8 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     pub fn format(self: Opcode, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -211,7 +211,7 @@ pub const table: [256]OpInfo = blk: {
     for (std.enums.values(Opcode)) |op| {
         var row = infoFor(op);
         row.defined = true;
-        t[@intFromEnum(op)] = row;
+        t[@backingInt(op)] = row;
     }
     break :blk t;
 };
@@ -363,7 +363,7 @@ fn infoFor(op: Opcode) OpInfo {
         .DUP15,
         .DUP16,
         => blk2: {
-            const n: u8 = @intFromEnum(op) - @intFromEnum(Opcode.DUP1) + 1;
+            const n: u8 = @backingInt(op) - @backingInt(Opcode.DUP1) + 1;
             break :blk2 .{ .static_gas = 3, .stack_in = n };
         },
 
@@ -385,13 +385,13 @@ fn infoFor(op: Opcode) OpInfo {
         .SWAP15,
         .SWAP16,
         => blk2: {
-            const n: u8 = @intFromEnum(op) - @intFromEnum(Opcode.SWAP1) + 1;
+            const n: u8 = @backingInt(op) - @backingInt(Opcode.SWAP1) + 1;
             break :blk2 .{ .static_gas = 3, .stack_in = n + 1 };
         },
 
         // 0xa0..0xa4 — LOG0..LOG4 (pops mem offset+size + N topics)
         .LOG0, .LOG1, .LOG2, .LOG3, .LOG4 => blk2: {
-            const n: u8 = @intFromEnum(op) - @intFromEnum(Opcode.LOG0);
+            const n: u8 = @backingInt(op) - @backingInt(Opcode.LOG0);
             break :blk2 .{
                 .static_gas = 375 * (@as(u16, n) + 1),
                 .stack_in = n + 2,
@@ -424,37 +424,37 @@ test "opcode table carries baseline gas and trace stack suffixes" {
 
     // Gap bytes are undefined; INVALID remains a named, defined opcode.
     try std.testing.expect(!table[0x0c].defined);
-    try std.testing.expect(table[@intFromEnum(Opcode.INVALID)].defined);
+    try std.testing.expect(table[@backingInt(Opcode.INVALID)].defined);
 
     // A plain binary op charges its baseline gas and captures two inputs.
-    const add = table[@intFromEnum(Opcode.ADD)];
+    const add = table[@backingInt(Opcode.ADD)];
     try expectEqual(@as(i64, 3), add.static_gas);
     try expectEqual(@as(u8, 2), add.stack_in);
 
     // Historically repriced opcodes keep base gas here; fork-resolved gas
     // belongs to the exact instruction spec.
-    try expectEqual(@as(i64, 20), table[@intFromEnum(Opcode.BALANCE)].static_gas);
-    try expectEqual(@as(i64, 20), table[@intFromEnum(Opcode.EXTCODESIZE)].static_gas);
-    try expectEqual(@as(i64, 20), table[@intFromEnum(Opcode.EXTCODECOPY)].static_gas);
-    try expectEqual(@as(i64, 400), table[@intFromEnum(Opcode.EXTCODEHASH)].static_gas);
-    try expectEqual(@as(i64, 50), table[@intFromEnum(Opcode.SLOAD)].static_gas);
-    try expectEqual(@as(i64, 0), table[@intFromEnum(Opcode.SELFDESTRUCT)].static_gas);
+    try expectEqual(@as(i64, 20), table[@backingInt(Opcode.BALANCE)].static_gas);
+    try expectEqual(@as(i64, 20), table[@backingInt(Opcode.EXTCODESIZE)].static_gas);
+    try expectEqual(@as(i64, 20), table[@backingInt(Opcode.EXTCODECOPY)].static_gas);
+    try expectEqual(@as(i64, 400), table[@backingInt(Opcode.EXTCODEHASH)].static_gas);
+    try expectEqual(@as(i64, 50), table[@backingInt(Opcode.SLOAD)].static_gas);
+    try expectEqual(@as(i64, 0), table[@backingInt(Opcode.SELFDESTRUCT)].static_gas);
 
     // Fixed-depth stack operations retain the suffix needed by tracing.
-    try expectEqual(@as(u8, 3), table[@intFromEnum(Opcode.DUP3)].stack_in);
-    try expectEqual(@as(u8, 6), table[@intFromEnum(Opcode.SWAP5)].stack_in);
+    try expectEqual(@as(u8, 3), table[@backingInt(Opcode.DUP3)].stack_in);
+    try expectEqual(@as(u8, 6), table[@backingInt(Opcode.SWAP5)].stack_in);
 
     // Variable-depth EIP-8024 operations declare their fixed minimum.
-    try expectEqual(@as(i64, 3), table[@intFromEnum(Opcode.DUPN)].static_gas);
-    try expectEqual(@as(u8, 17), table[@intFromEnum(Opcode.DUPN)].stack_in);
-    try expectEqual(@as(u8, 18), table[@intFromEnum(Opcode.SWAPN)].stack_in);
-    try expectEqual(@as(u8, 3), table[@intFromEnum(Opcode.EXCHANGE)].stack_in);
+    try expectEqual(@as(i64, 3), table[@backingInt(Opcode.DUPN)].static_gas);
+    try expectEqual(@as(u8, 17), table[@backingInt(Opcode.DUPN)].stack_in);
+    try expectEqual(@as(u8, 18), table[@backingInt(Opcode.SWAPN)].stack_in);
+    try expectEqual(@as(u8, 3), table[@backingInt(Opcode.EXCHANGE)].stack_in);
 
     // LOG4 consumes offset, size, and four topics.
-    try expectEqual(@as(i64, 1875), table[@intFromEnum(Opcode.LOG4)].static_gas);
-    try expectEqual(@as(u8, 6), table[@intFromEnum(Opcode.LOG4)].stack_in);
-    try expectEqual(@as(u8, 7), table[@intFromEnum(Opcode.CALL)].stack_in);
-    try expectEqual(@as(u8, 2), table[@intFromEnum(Opcode.SSTORE)].stack_in);
+    try expectEqual(@as(i64, 1875), table[@backingInt(Opcode.LOG4)].static_gas);
+    try expectEqual(@as(u8, 6), table[@backingInt(Opcode.LOG4)].stack_in);
+    try expectEqual(@as(u8, 7), table[@backingInt(Opcode.CALL)].stack_in);
+    try expectEqual(@as(u8, 2), table[@backingInt(Opcode.SSTORE)].stack_in);
 }
 
 test "opcode table defined rows match Opcode enum exactly" {
@@ -464,7 +464,7 @@ test "opcode table defined rows match Opcode enum exactly" {
         const row = table[opcode_byte];
         var is_named_opcode = false;
         for (std.enums.values(Opcode)) |op| {
-            if (@intFromEnum(op) == opcode_byte) {
+            if (@backingInt(op) == opcode_byte) {
                 is_named_opcode = true;
                 break;
             }
@@ -488,6 +488,6 @@ test "opcode formatter derives named tags and preserves unnamed bytes" {
     const named = try std.fmt.bufPrint(&buffer, "{f}", .{Opcode.ADD});
     try std.testing.expectEqualStrings("ADD", named);
 
-    const unnamed = try std.fmt.bufPrint(&buffer, "{f}", .{@as(Opcode, @enumFromInt(0x0c))});
+    const unnamed = try std.fmt.bufPrint(&buffer, "{f}", .{@as(Opcode, @fromBackingInt(@intCast(0x0c)))});
     try std.testing.expectEqualStrings("0x0c", unnamed);
 }

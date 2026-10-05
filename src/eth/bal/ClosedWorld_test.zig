@@ -40,11 +40,11 @@ test "account dirtiness follows surviving account and storage changes" {
             state.closeSession();
             state.sealAttempt(attempt);
             const reverted = state.pendingView().accepted().commit();
-            try std.testing.expectEqual(parent_changed, reverted.accountDirty(@enumFromInt(0)));
-            try std.testing.expectEqual(parent_changed, reverted.accountChanged(@enumFromInt(0)));
-            try std.testing.expect(!reverted.accountStorageDirty(@enumFromInt(0)));
+            try std.testing.expectEqual(parent_changed, reverted.accountDirty(@fromBackingInt(@intCast(0))));
+            try std.testing.expectEqual(parent_changed, reverted.accountChanged(@fromBackingInt(@intCast(0))));
+            try std.testing.expect(!reverted.accountStorageDirty(@fromBackingInt(@intCast(0))));
             state.discardAttempt(attempt);
-            try std.testing.expect(!state.acceptedView().commit().accountDirty(@enumFromInt(0)));
+            try std.testing.expect(!state.acceptedView().commit().accountDirty(@fromBackingInt(@intCast(0))));
 
             // Storage alone must still put the account in the commitment update.
             const storage_attempt = state.beginAttempt();
@@ -53,13 +53,13 @@ test "account dirtiness follows surviving account and storage changes" {
             state.closeSession();
             state.sealAttempt(storage_attempt);
             const storage_commit = state.pendingView().accepted().commit();
-            try std.testing.expect(storage_commit.accountDirty(@enumFromInt(0)));
-            try std.testing.expect(!storage_commit.accountChanged(@enumFromInt(0)));
-            try std.testing.expect(storage_commit.accountStorageDirty(@enumFromInt(0)));
+            try std.testing.expect(storage_commit.accountDirty(@fromBackingInt(@intCast(0))));
+            try std.testing.expect(!storage_commit.accountChanged(@fromBackingInt(@intCast(0))));
+            try std.testing.expect(storage_commit.accountStorageDirty(@fromBackingInt(@intCast(0))));
             state.retainAttempt(storage_attempt);
-            try std.testing.expect(state.acceptedView().commit().accountDirty(@enumFromInt(0)));
+            try std.testing.expect(state.acceptedView().commit().accountDirty(@fromBackingInt(@intCast(0))));
             state.restoreBranch(&snapshot);
-            try std.testing.expect(!state.acceptedView().commit().accountDirty(@enumFromInt(0)));
+            try std.testing.expect(!state.acceptedView().commit().accountDirty(@fromBackingInt(@intCast(0))));
             try std.testing.expectEqual(@as(u256, 3), try state.getStorage(key, 7));
         }
     }

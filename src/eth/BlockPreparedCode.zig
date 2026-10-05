@@ -258,7 +258,7 @@ test "reverted code refs reuse retained artifacts across executions" {
         const prepared = try execution.resolve(
             cached.view.code_hash,
             cached.view.bytes,
-            @intFromEnum(cached.ref),
+            @backingInt(cached.ref),
             .{},
         );
         if (iteration < codes.len) {

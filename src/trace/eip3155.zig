@@ -123,7 +123,7 @@ fn writeStep(
     try writer.print(",\"refund\":{d}", .{refund});
     // Opcode is non-exhaustive, so every byte converts; only named opcodes get
     // an opName. @tagName on an unnamed value is a safety panic.
-    if (std.enums.tagName(Opcode, @as(Opcode, @enumFromInt(view.row.opcode)))) |name| {
+    if (std.enums.tagName(Opcode, @as(Opcode, @fromBackingInt(@intCast(view.row.opcode))))) |name| {
         try writer.print(",\"opName\":\"{s}\"", .{name});
     }
     try writer.writeAll("}\n");
@@ -190,7 +190,7 @@ test "EIP-3155 replay writes required step fields in canonical order" {
     const push = try trace_tape.appendStep(.{
         .frame_id = 0,
         .pc = 0,
-        .opcode = @intFromEnum(Opcode.PUSH1),
+        .opcode = @backingInt(Opcode.PUSH1),
         .gas_before = 100,
         .refund_before = 2,
         .stack_len = 0,
@@ -200,7 +200,7 @@ test "EIP-3155 replay writes required step fields in canonical order" {
     const stop = try trace_tape.appendStep(.{
         .frame_id = 0,
         .pc = 2,
-        .opcode = @intFromEnum(Opcode.STOP),
+        .opcode = @backingInt(Opcode.STOP),
         .gas_before = 97,
         .refund_before = 2,
         .stack_len = 1,
@@ -290,7 +290,7 @@ test "EIP-3155 replay converts frame-local refunds to global refunds" {
     const parent_step = try trace_tape.appendStep(.{
         .frame_id = 0,
         .pc = 0,
-        .opcode = @intFromEnum(Opcode.CALL),
+        .opcode = @backingInt(Opcode.CALL),
         .gas_before = 100,
         .refund_before = 5,
         .stack_len = 0,
@@ -306,7 +306,7 @@ test "EIP-3155 replay converts frame-local refunds to global refunds" {
     const child_step = try trace_tape.appendStep(.{
         .frame_id = 1,
         .pc = 0,
-        .opcode = @intFromEnum(Opcode.STOP),
+        .opcode = @backingInt(Opcode.STOP),
         .gas_before = 10,
         .refund_before = 2,
         .stack_len = 0,
@@ -345,7 +345,7 @@ test "EIP-3155 replay selects return data version at each step" {
     const step = try trace_tape.appendStep(.{
         .frame_id = 0,
         .pc = 0,
-        .opcode = @intFromEnum(Opcode.RETURNDATASIZE),
+        .opcode = @backingInt(Opcode.RETURNDATASIZE),
         .gas_before = 10,
         .refund_before = 0,
         .stack_len = 0,
@@ -363,7 +363,7 @@ test "EIP-3155 replay selects return data version at each step" {
     const next_step = try trace_tape.appendStep(.{
         .frame_id = 0,
         .pc = 1,
-        .opcode = @intFromEnum(Opcode.RETURNDATASIZE),
+        .opcode = @backingInt(Opcode.RETURNDATASIZE),
         .gas_before = 8,
         .refund_before = 0,
         .stack_len = 1,

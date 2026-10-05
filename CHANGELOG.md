@@ -14,6 +14,9 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
 
 ### Package
 
+- Requires Zig 0.17. `@cImport` bindings are now translated by the build
+  script, and `zig build ssz-conformance` passes the pinned fixtures as
+  `--default-fixture` paths that an explicit fixture path replaces.
 - evmz is released as one Zig package at the repository root. `rlp`, `mpt`, and
   `ssz` ship at the package version instead of being split into standalone
   package trees, and unreleased entries from their changelogs move here.

@@ -96,11 +96,11 @@ pub const CodeRef = enum(u32) {
     empty = std.math.maxInt(u32),
     _,
 
-    pub const max_indexed: usize = @intFromEnum(CodeRef.missing);
+    pub const max_indexed: usize = @backingInt(CodeRef.missing);
 
     pub fn fromIndex(index: usize) CodeRef {
         std.debug.assert(index < CodeRef.max_indexed);
-        return @enumFromInt(index);
+        return @fromBackingInt(@intCast(index));
     }
 };
 
