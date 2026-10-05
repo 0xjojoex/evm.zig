@@ -732,6 +732,13 @@ pub fn ExecutorType(
 
         fn beginCallScratch(self: *Executor, depth: u16) !std.mem.Allocator {
             const index: usize = depth;
+            if (index >= self.call_scratch_slots.items.len) try self.growCallScratch(index);
+            self.call_scratch_slots.items[index].reset();
+            return self.call_scratch_slots.items[index].allocator();
+        }
+
+        fn growCallScratch(self: *Executor, index: usize) !void {
+            @branchHint(.cold);
             while (self.call_scratch_slots.items.len <= index) {
                 const slot = try self.allocator.create(call_scratch_storage.Slot);
                 errdefer self.allocator.destroy(slot);
@@ -739,8 +746,17 @@ pub fn ExecutorType(
                 errdefer slot.deinit();
                 try self.call_scratch_slots.append(self.allocator, slot);
             }
-            self.call_scratch_slots.items[index].reset();
-            return self.call_scratch_slots.items[index].allocator();
+        }
+
+        /// Prepare CREATE initcode in its frame's depth slot, so a transaction holds
+        /// one artifact per live depth rather than one per CREATE. While the frame
+        /// runs its parent is suspended, so nothing else at this depth resets the slot.
+        fn prepareInitcode(self: *Executor, depth: u16, initcode: []const u8) !Bytecode.View {
+            if (initcode.len == 0) return .empty;
+            const bytecode = Bytecode.init(try self.beginCallScratch(depth), initcode) catch |err| switch (err) {
+                error.OutOfMemory => return error.PreparedCodeCapacityExceeded,
+            };
+            return bytecode.view();
         }
 
         fn endCallScratch(self: *Executor, depth: u16) void {
@@ -1145,8 +1161,6 @@ pub fn ExecutorType(
             }
 
             fn pushChildCreate(self: *CallRuntime, child: ChildCreate, call_capture: ?evmz.trace.CallToken) !void {
-                std.debug.assert(self.executor.prepared_code_execution != null);
-                const execution = &self.executor.prepared_code_execution.?;
                 const source_msg = child.source_msg;
                 const address = source_msg.recipient;
                 const msg: Host.Message = .{
@@ -1161,7 +1175,7 @@ pub fn ExecutorType(
                     .is_static = source_msg.is_static,
                     .code_address = address,
                 };
-                const bytecode = try execution.prepareTransient(source_msg.input_data);
+                const bytecode = try self.executor.prepareInitcode(source_msg.depth, source_msg.input_data);
                 try self.pushFrame(
                     &msg,
                     bytecode,

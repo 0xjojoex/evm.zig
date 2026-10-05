@@ -1472,6 +1472,45 @@ test "accepted branch snapshot restores compacted storage change ids" {
     try std.testing.expectEqual(@as(u256, 2), changes.storage_writes.at(1).key);
 }
 
+test "scope revert compaction keeps the accepted prefix and deduplicates the attempt suffix" {
+    var state = initState(std.testing.allocator, null);
+    defer state.deinit();
+    defer abandon(&state);
+
+    const accepted = state.beginAttempt();
+    state.openSession();
+    try state.setBalance(word(1), 1);
+    _ = try state.setStorage(word(1), 1, 11);
+    state.closeSession();
+    state.sealAttempt(accepted);
+    state.retainAttempt(accepted);
+
+    const reverted = state.beginAttempt();
+    state.openSession();
+    const scope = state.checkpoint();
+    try state.setBalance(word(1), 2);
+    try state.setBalance(word(2), 2);
+    _ = try state.setStorage(word(1), 1, 12);
+    _ = try state.setStorage(word(2), 2, 21);
+    state.revertToCheckpoint(scope);
+    // Redirty after the revert: each row must be listed once, prefix rows included.
+    try state.setBalance(word(1), 3);
+    try state.setBalance(word(2), 3);
+    _ = try state.setStorage(word(1), 1, 13);
+    _ = try state.setStorage(word(2), 2, 22);
+    state.closeSession();
+    state.sealAttempt(reverted);
+    state.retainAttempt(reverted);
+
+    const changes = state.acceptedView().changes();
+    try std.testing.expectEqual(@as(u32, 2), changes.accounts.len());
+    try std.testing.expectEqual(addr(1), changes.accounts.at(0).address);
+    try std.testing.expectEqual(addr(2), changes.accounts.at(1).address);
+    try std.testing.expectEqual(@as(u32, 2), changes.storage_writes.len());
+    try std.testing.expectEqual(state_types.StorageChange{ .address = addr(1), .key = 1, .value = 13 }, changes.storage_writes.at(0));
+    try std.testing.expectEqual(state_types.StorageChange{ .address = addr(2), .key = 2, .value = 22 }, changes.storage_writes.at(1));
+}
+
 test "warm-only keys avoid parent I/O and preserve warmth through later row rollback" {
     var backing = TestReader{ .fail_loads = true };
     var state = initState(std.testing.allocator, backing.reader());

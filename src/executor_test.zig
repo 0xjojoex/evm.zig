@@ -365,6 +365,49 @@ test "CREATE initcode preparation remains execution-local" {
     try std.testing.expectEqual(@as(usize, 0), pool.count());
 }
 
+/// MSTORE8 sizes memory to 4 KiB of zero initcode; each CREATE deploys from it.
+fn createLoopCode(comptime creates: usize) [5 + creates * 7 + 1]u8 {
+    const Op = evmz.Opcode;
+    var code: [5 + creates * 7 + 1]u8 = undefined;
+    code[0..5].* = .{ Op.PUSH0.toByte(), Op.PUSH2.toByte(), 0x0f, 0xff, Op.MSTORE8.toByte() };
+    for (0..creates) |index| code[5 + index * 7 ..][0..7].* = .{
+        Op.PUSH2.toByte(), 0x10,              0x00,
+        Op.PUSH0.toByte(), Op.PUSH0.toByte(), Op.CREATE.toByte(),
+        Op.POP.toByte(),
+    };
+    code[code.len - 1] = Op.STOP.toByte();
+    return code;
+}
+
+test "CREATE initcode scratch does not grow with the number of creates" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const sender = evmz.addr(0xaaaa);
+    const once = evmz.addr(0xbbbb);
+    const many = evmz.addr(0xcccc);
+    const execution_context = testExecutionContext(sender, 10_000_000);
+    const once_code = createLoopCode(1);
+    const many_code = createLoopCode(8);
+
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+    try evmz.t.seedExecutorAccount(&executor, once, .{ .code = &once_code });
+    try evmz.t.seedExecutorAccount(&executor, many, .{ .code = &many_code });
+
+    var capacities: [2]usize = undefined;
+    for ([_]evmz.Address{ once, many }, &capacities, 0..) |contract, *capacity, nonce| {
+        try executor.beginTransaction(execution_context, sender, contract);
+        const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(10_000_000), @intCast(nonce));
+        try executor.commitTransaction();
+        try std.testing.expectEqual(Interpreter.Status.success, result.status());
+
+        capacity.* = executor.prepared_code_scratch.capacity();
+        for (executor.call_scratch_slots.items) |slot| capacity.* += slot.capacity();
+    }
+    try std.testing.expectEqual(@as(u64, 8), (try executor.getAccount(many)).?.nonce);
+    try std.testing.expectEqual(capacities[0], capacities[1]);
+}
+
 const CacheInvalidatingTrace = struct {
     pool: *evmz.prepared_code.InMemoryPreparedPool,
     replay_cleared: bool = false,

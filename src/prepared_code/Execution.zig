@@ -138,9 +138,9 @@ fn resolveUncached(
     return bytecode;
 }
 
-/// Prepare ephemeral executable bytes, such as CREATE initcode, for this
-/// top-level execution without consulting or admitting them to the backend.
-pub fn prepareTransient(self: *Execution, raw_code: []const u8) !Bytecode.View {
+/// Prepare bytes the backend did not retain; they live until this top-level
+/// execution ends.
+fn prepareTransient(self: *Execution, raw_code: []const u8) !Bytecode.View {
     if (raw_code.len == 0) return .empty;
 
     var bytecode = Bytecode.init(self.scratch_allocator, raw_code) catch |err| switch (err) {

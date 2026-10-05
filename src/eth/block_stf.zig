@@ -30,6 +30,7 @@ const eip7685 = @import("eip/7685.zig");
 const eth_spec = @import("spec.zig");
 const trie = @import("trie.zig");
 const prepared_code = @import("../prepared_code.zig");
+const BlockPreparedCode = @import("BlockPreparedCode.zig");
 const Withdrawal = @import("Withdrawal.zig");
 const Revision = @import("revision.zig").Revision;
 const transaction = @import("../transaction.zig");
@@ -154,6 +155,7 @@ fn BlockInputType(comptime Transactions: type) type {
         /// Cleared on entry; populated only after every claim matches.
         commit_output: ?*CommitOutput = null,
         /// Caller-owned prepared-artifact service; not part of the VM resource bound.
+        /// Null prepares each code once per block in a block-lifetime cache.
         prepared_code_backend: ?prepared_code.Backend = null,
         /// Optional caller-owned service for the validated BAL-derived resource
         /// plan. Failure falls back to authoritative lazy reads and has no
@@ -246,6 +248,7 @@ fn ProduceInputType(comptime Transactions: type) type {
         /// Cleared on entry; populated only for a produced (valid) block.
         commit_output: ?*CommitOutput = null,
         /// Caller-owned prepared-artifact service; not part of the VM resource bound.
+        /// Null prepares each code once per block in a block-lifetime cache.
         prepared_code_backend: ?prepared_code.Backend = null,
         transactions: Transactions,
         withdrawals: []const Withdrawal = &.{},
@@ -564,8 +567,12 @@ fn applyAssumeDecodedExact(
     comptime revision: Revision,
     comptime Engine: type,
     allocator: std.mem.Allocator,
-    input: AssumeDecodedBlockInput,
+    caller_input: AssumeDecodedBlockInput,
 ) !Result {
+    var block_prepared_code: BlockPreparedCode = .init(allocator);
+    defer block_prepared_code.deinit();
+    var input = caller_input;
+    input.prepared_code_backend = input.prepared_code_backend orelse block_prepared_code.backend();
     resetBalReport(input);
     const result = (if (comptime Engine.spec.block.block_access_list and
         supportsExternalObservationCapture(Engine.World))
@@ -670,6 +677,8 @@ fn produceAssumeDecodedExact(
         std.debug.assert(supportsBlockProduction(Engine.World));
     }
 
+    var block_prepared_code: BlockPreparedCode = .init(allocator);
+    defer block_prepared_code.deinit();
     const observer = {};
     return produceExecution(revision, Engine, allocator, .{
         .env = input.env,
@@ -677,7 +686,7 @@ fn produceAssumeDecodedExact(
         .block_header = input.block_header,
         .state_backend = input.state_backend,
         .commit_output = input.commit_output,
-        .prepared_code_backend = input.prepared_code_backend,
+        .prepared_code_backend = input.prepared_code_backend orelse block_prepared_code.backend(),
         .transactions = input.transactions,
         .withdrawals = input.withdrawals,
         .parent_header = input.parent_header,
