@@ -7,9 +7,9 @@ const ZiskConfig = struct {
 };
 
 const zisk: ZiskConfig = .{
-    .version = "1.2.0-alpha",
-    .commit = "fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3",
-    .rust_toolchain = "zisk-3.0.0",
+    .version = "1.3.1-alpha",
+    .commit = "306a9c934ba4947b1d586d69b67120f8b4c41466",
+    .rust_toolchain = "zisk-4.0.0",
 };
 
 const EvmzBuildConfig = struct {

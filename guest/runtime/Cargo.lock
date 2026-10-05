@@ -769,7 +769,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "log",
  "prettyplease 0.2.37",
  "proc-macro2",
@@ -1226,7 +1226,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2174,7 +2174,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5411,9 +5411,9 @@ dependencies = [
 
 [[package]]
 name = "pil2-std-lib"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61e3b142574e51db9a55d0bd4a79911a0183c895de7ff998ab54a73752719979"
+checksum = "7c978590064142e9692b1446305eb6a6c9ca9a7c8f6a87f68aaee9ad19c7d834"
 dependencies = [
  "colored",
  "proofman-common",
@@ -5635,9 +5635,9 @@ dependencies = [
 
 [[package]]
 name = "proofman"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f9d7620818b29a79692aa7d4d0807c761f714c518dea131b1a188c9b55b6070"
+checksum = "20b5b1efeaeae3c40499d89ff43198e7e4c6dab1af821b74d4a022ce431b5108"
 dependencies = [
  "bincode 2.0.1",
  "blake3",
@@ -5668,14 +5668,13 @@ dependencies = [
 
 [[package]]
 name = "proofman-common"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aae7276e77ad3db5bdd34bc7276c2e4368103ddd10d80d2938dab4ea76f4a908"
+checksum = "53606f78c0b7dd40e618140c3177bb85d3b8fbdffb56c2a2106436da5b2ebcf8"
 dependencies = [
  "borsh",
  "colored",
  "crossbeam-channel",
- "crossbeam-queue",
  "csv",
  "env",
  "libc",
@@ -5698,19 +5697,20 @@ dependencies = [
 
 [[package]]
 name = "proofman-curves"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ca29934b9f7aba523d662cf07ebc6dbf60cd273b87f80f291bdb2a09baaf365"
+checksum = "02583568e18a77e08c302ace22821fb6d833b0c89e60bb40c34ad3b27bc88508"
 dependencies = [
  "proofman-fields",
 ]
 
 [[package]]
 name = "proofman-fields"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "124c75a333fd7209e5f77da6c7734260ad54eaabf7e2e20db24917f7ec4505cd"
+checksum = "288f1cfadffdd60f4297428d41fa27dbae9837a63c89f77ba3e9ce8f5e03f987"
 dependencies = [
+ "blake3",
  "cfg-if",
  "num-bigint 0.4.8",
  "paste",
@@ -5720,9 +5720,9 @@ dependencies = [
 
 [[package]]
 name = "proofman-hints"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15636c9f92d68ad25b1303f6ca79d3183cf1034ec8c1ef325d6d6727fc59e7ce"
+checksum = "8976eb1eeb543a74772fc83b654a96cd7e483750262fa8ca35c8e65ca1c70402"
 dependencies = [
  "itoa",
  "proofman-common",
@@ -5733,9 +5733,9 @@ dependencies = [
 
 [[package]]
 name = "proofman-macros"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3681a5cd4eb1e0bad47c7ef29f9490d588381721eebaa310931e2a7e2ce7486"
+checksum = "541ae1751c469a81f21210f8a2bd0c4e08980a82b08a5cd80eac021bab9e770c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5744,9 +5744,9 @@ dependencies = [
 
 [[package]]
 name = "proofman-starks-lib-c"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1f0b940c17f32bcc0b289fd11bd0f8a812c82a4d44a067cd67d773fef54b13f"
+checksum = "71fbc5a3cbea8630ccc96c4373ee45c8f63f5ac243f9b9456026773e30ab130e"
 dependencies = [
  "crossbeam-channel",
  "proofman-starks-src",
@@ -5754,15 +5754,15 @@ dependencies = [
 
 [[package]]
 name = "proofman-starks-src"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0efcb2cd92919487f86364fc3b51c8efa8ac2ea3a56f3d6c4d39b3bd464a5b50"
+checksum = "ec72725ea4f99741a95b52edc3290d5b9fe904762b6991b14aedb399ce43e86a"
 
 [[package]]
 name = "proofman-util"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "825c9cfb3f3d8a72fe6e50b52190b99a127c38a0ebb5a46a875d51daeb659d03"
+checksum = "1558e3975f49c44713e27d4c49662b3dca24071987892ab88489c9b73afb9e13"
 dependencies = [
  "colored",
  "sysinfo 0.35.2",
@@ -5770,9 +5770,9 @@ dependencies = [
 
 [[package]]
 name = "proofman-verifier"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d265453d0cb920c636de66ef3d7dffbcef6a1a8adea91b8484d1b09398d2f51"
+checksum = "fcfb929d02d38e48617f4badd3c5cc9cf140742dcf539c0d53ea5e6d9c037ab7"
 dependencies = [
  "bincode 2.0.1",
  "num-traits",
@@ -5784,9 +5784,9 @@ dependencies = [
 
 [[package]]
 name = "proofman-witness"
-version = "1.2.0-alpha"
+version = "1.3.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e2be19384d25c30d2ade0f8c5d8ef44ae4d6170fd3d989c196fa77ade573116"
+checksum = "f0fce6674550d900e44ad619a20bc9a5b2a454d3fc8f4385c4fe95497915c1b9"
 dependencies = [
  "libloading",
  "proofman-common",
@@ -5878,7 +5878,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6313,7 +6313,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6372,7 +6372,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8269,7 +8269,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8760,13 +8760,13 @@ dependencies = [
 
 [[package]]
 name = "zisk-circuit"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 
 [[package]]
 name = "zisk-common"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "alloy-sol-types",
  "bincode 2.0.1",
@@ -8787,14 +8787,15 @@ dependencies = [
  "tracing",
  "zisk-core",
  "zisk-definitions",
+ "zisk-pil",
  "zisk-stream",
  "zisk-verifier",
 ]
 
 [[package]]
 name = "zisk-core"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "paste",
  "proofman-fields",
@@ -8808,18 +8809,18 @@ dependencies = [
 
 [[package]]
 name = "zisk-definitions"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 
 [[package]]
 name = "zisk-lib-c"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 
 [[package]]
 name = "zisk-pil"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "proofman-common",
  "proofman-fields",
@@ -8830,8 +8831,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-precomp-helpers"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -8848,8 +8849,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-riscv"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "zisk-core",
  "zisk-definitions",
@@ -8857,8 +8858,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-sm-arith"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "pil2-std-lib",
  "proofman-common",
@@ -8874,8 +8875,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-sm-binary"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "pil2-std-lib",
  "proofman-common",
@@ -8891,8 +8892,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-sm-frequent-ops"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "clap",
  "proofman-common",
@@ -8903,13 +8904,14 @@ dependencies = [
 
 [[package]]
 name = "zisk-sm-mem-common"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "clap",
  "proofman-fields",
  "rayon",
  "static_assertions",
+ "tracing",
  "zisk-common",
  "zisk-core",
  "zisk-pil",
@@ -8917,8 +8919,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-stream"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "libc",
  "quinn",
@@ -8931,8 +8933,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-transpiler-common"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "elf",
  "zisk-core",
@@ -8941,8 +8943,8 @@ dependencies = [
 
 [[package]]
 name = "zisk-transpiler-riscv"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "zisk-core",
  "zisk-transpiler-common",
@@ -8950,24 +8952,25 @@ dependencies = [
 
 [[package]]
 name = "zisk-verifier"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
+ "proofman-fields",
  "proofman-verifier",
 ]
 
 [[package]]
 name = "zisk-zkvm-interface"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "ziskemu"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "clap",
  "flate2",
@@ -8995,8 +8998,8 @@ dependencies = [
 
 [[package]]
 name = "ziskos"
-version = "1.2.0-alpha"
-source = "git+https://github.com/0xPolygonHermez/zisk?rev=fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3#fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3"
+version = "1.3.1-alpha"
+source = "git+https://github.com/0xPolygonHermez/zisk?rev=306a9c934ba4947b1d586d69b67120f8b4c41466#306a9c934ba4947b1d586d69b67120f8b4c41466"
 dependencies = [
  "anyhow",
  "ark-bn254",

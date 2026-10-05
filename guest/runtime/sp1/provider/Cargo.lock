@@ -294,13 +294,13 @@ dependencies = [
 
 [[package]]
 name = "ere-platform-core"
-version = "0.18.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.18.0#ab4598a874d4456d90884072561a39d771e61375"
+version = "0.19.0"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.19.0#d7f5579c0e3d2697b9245d5c43858f36f61845a8"
 
 [[package]]
 name = "ere-platform-sp1"
-version = "0.18.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.18.0#ab4598a874d4456d90884072561a39d771e61375"
+version = "0.19.0"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.19.0#d7f5579c0e3d2697b9245d5c43858f36f61845a8"
 dependencies = [
  "ere-platform-core",
  "libzkevm",

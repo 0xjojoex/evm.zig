@@ -30,9 +30,15 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   stage, and made guest releases promote one explicit strict-run artifact.
   Fixture roots travel in the resolved corpus manifest, and the `rev8` scan
   joined `check-guest-elf`.
-- Updated the pinned ZisK backend to `v1.2.0-alpha`, retaining its exact
-  `zisk-3.0.0` toolchain and unaligned scalar-memory lowering for the Rust
-  provider. Nonzero guest returns now propagate through the ZisK host protocol.
+- Updated ERE platform providers and digest-pinned release images to `v0.19.0`,
+  and ZisK to `v1.3.1-alpha` at its exact source commit with the `zisk-4.0.0`
+  toolchain. ZisK release VKs now use ERE's Blake3 proof family and require
+  fresh guest qualification and key generation. The provider retains unaligned
+  scalar-memory lowering; nonzero guest returns propagate through the host protocol.
+
+- Pinned the zkEVM fixture corpus to `tests-zkevm@v21.0.5`. Execution fixtures
+  remain at `tests@v21.0.0`. Upstream reports no relevant spec/test changes
+  since `tests-zkevm@v21.0.1`.
 
 ### EVM
 
