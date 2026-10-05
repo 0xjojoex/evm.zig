@@ -77,8 +77,8 @@ pub fn isBlockRejection(err: anyerror) bool {
     return switch (err) {
         error.ParentHashMismatch, error.BlockNumberMismatch, error.BlobGasOverflow, error.ExtraDataTooLong, error.HeaderSurfaceMismatch, error.InvalidBlockEncoding, error.BlockRlpTooLarge, error.InvalidSignature, error.UnsupportedLegacyV, error.EmptyTransaction, error.InvalidTransactionEnvelope, error.InvalidTransactionFormat, error.UnsupportedTransactionType, error.Overflow => true,
         else => blk: {
-            inline for (@typeInfo(evmz.rlp.ParseError).error_set.?) |field| {
-                if (err == @field(anyerror, field.name)) break :blk true;
+            inline for (@typeInfo(evmz.rlp.ParseError).error_set.error_names.?) |error_name| {
+                if (err == @field(anyerror, error_name)) break :blk true;
             }
             break :blk false;
         },

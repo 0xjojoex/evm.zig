@@ -6,12 +6,8 @@
 //! Public keys cross into Zig as the 64-byte uncompressed `x || y` form (a
 //! devp2p node id, or the pre-image whose keccak tail is an address).
 
-pub const c = @cImport({
-    @cInclude("secp256k1.h");
-    @cInclude("secp256k1_ecdh.h");
-    @cInclude("secp256k1_preallocated.h");
-    @cInclude("secp256k1_recovery.h");
-});
+/// Translated from `libsecp256k1.h` by the build script.
+pub const c = @import("libsecp256k1_c");
 
 pub const Context = c.secp256k1_context;
 pub const PublicKey = c.secp256k1_pubkey;

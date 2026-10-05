@@ -79,10 +79,11 @@ pub const LookupCache = struct {
     }
 };
 
-/// Node digest as native-endian words. A `[32]u8` digest in a heap record is
-/// align-1 and would compare through byte ladders on targets without
-/// unaligned loads; word keys compare in registers and keep the record
-/// word-aligned. Word 0 also serves as the position-table hash.
+/// Node digest as little-endian words (`@bitCast` is endian-agnostic). A
+/// `[32]u8` digest in a heap record is align-1 and would compare through byte
+/// ladders on targets without unaligned loads; word keys compare in registers
+/// and keep the record word-aligned. Word 0 also serves as the position-table
+/// hash.
 const NodeKey = [4]u64;
 
 fn nodeKey(digest: hash.Root) NodeKey {

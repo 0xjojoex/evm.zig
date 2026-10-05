@@ -390,8 +390,7 @@ fn addAccountGetBench(
     const Context = AccountGetBench(Map, std.meta.Elem(@TypeOf(keys)));
     const context = try allocator.create(Context);
     context.* = .{ .map = map, .keys = keys };
-    const name = try std.fmt.allocPrint(
-        allocator,
+    const name = try allocator.print(
         "account-row-get/{s}/reserve{d}/live{d}/{s}/1024x",
         .{ map_name, case.reserve, case.live, result_name },
     );
@@ -411,8 +410,7 @@ fn addStorageGetBench(
     const Context = StorageGetBench(Map);
     const context = try allocator.create(Context);
     context.* = .{ .map = map, .keys = keys };
-    const name = try std.fmt.allocPrint(
-        allocator,
+    const name = try allocator.print(
         "storage-row-get/{s}/reserve{d}/live{d}/{s}/1024x",
         .{ map_name, case.reserve, case.live, result_name },
     );
@@ -426,7 +424,7 @@ fn benchContract() Address {
 /// Storage rows all belong to one account row, as they would after one
 /// contract's slots were admitted.
 fn initStorageKeys(keys: []StorageKey, offset: u64) void {
-    const account: AccountId = @enumFromInt(0);
+    const account: AccountId = @fromBackingInt(@intCast(0));
     for (keys, 0..) |*key, index| {
         key.* = .{
             .account = account,
@@ -558,22 +556,22 @@ fn addClearBenchmarks(
     hooks: ClearHooks,
 ) !void {
     try bench.add(
-        try std.fmt.allocPrint(allocator, "storage-row-clear/sparse/reserve{s}/live64/8x", .{reserve}),
+        try allocator.print("storage-row-clear/sparse/reserve{s}/live64/8x", .{reserve}),
         sparse_clear,
         .{ .iterations = 512, .hooks = .{ .before_each = hooks.sparse_64 } },
     );
     try bench.add(
-        try std.fmt.allocPrint(allocator, "storage-row-clear/std/reserve{s}/live64/8x", .{reserve}),
+        try allocator.print("storage-row-clear/std/reserve{s}/live64/8x", .{reserve}),
         std_clear,
         .{ .iterations = 512, .hooks = .{ .before_each = hooks.std_64 } },
     );
     try bench.add(
-        try std.fmt.allocPrint(allocator, "storage-row-clear/sparse/reserve{s}/live1024/8x", .{reserve}),
+        try allocator.print("storage-row-clear/sparse/reserve{s}/live1024/8x", .{reserve}),
         sparse_clear,
         .{ .iterations = 512, .hooks = .{ .before_each = hooks.sparse_1024 } },
     );
     try bench.add(
-        try std.fmt.allocPrint(allocator, "storage-row-clear/std/reserve{s}/live1024/8x", .{reserve}),
+        try allocator.print("storage-row-clear/std/reserve{s}/live1024/8x", .{reserve}),
         std_clear,
         .{ .iterations = 512, .hooks = .{ .before_each = hooks.std_1024 } },
     );

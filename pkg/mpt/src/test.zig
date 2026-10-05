@@ -447,8 +447,8 @@ test "catalog lookup matches proof lookup through embedded topology" {
         .absent => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(
-        @intFromEnum(bound.node),
-        @intFromEnum(rebound.node),
+        @backingInt(bound.node),
+        @backingInt(rebound.node),
     );
     const absent = switch (try catalog.lookupBound(root_ref, &[_]u8{0x20})) {
         .present => return error.TestUnexpectedResult,

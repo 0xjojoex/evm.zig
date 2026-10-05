@@ -30,7 +30,7 @@ pub const Contract = enum(u16) {
     p256verify = 0x100,
 
     pub fn toAddress(c: Contract) Address {
-        return address.addr(@as(u160, @intFromEnum(c)));
+        return address.addr(@as(u160, @backingInt(c)));
     }
 };
 
@@ -331,8 +331,8 @@ fn contractFromSelector(contract_id: u16) ?Contract {
 
 test "contractFromAddress round-trips every contract and rejects poisoned high bytes" {
     // Round-trip: every catalog contract resolves from its canonical address.
-    inline for (@typeInfo(Contract).@"enum".fields) |field| {
-        const contract: Contract = @enumFromInt(field.value);
+    inline for (@typeInfo(Contract).@"enum".field_values) |value| {
+        const contract: Contract = @fromBackingInt(@intCast(value));
         try std.testing.expectEqual(@as(?Contract, contract), contractFromAddress(contract.toAddress()));
         try std.testing.expectEqual(
             @as(?Contract, contract),
@@ -347,8 +347,8 @@ test "contractFromAddress round-trips every contract and rejects poisoned high b
         var target = Address.fromBytes(@splat(0));
         std.mem.writeInt(u16, target.bytes[18..20], @intCast(selector), .big);
         var expected: ?Contract = null;
-        inline for (@typeInfo(Contract).@"enum".fields) |field| {
-            const contract: Contract = @enumFromInt(field.value);
+        inline for (@typeInfo(Contract).@"enum".field_values) |value| {
+            const contract: Contract = @fromBackingInt(@intCast(value));
             const canonical = contract.toAddress();
             if (Address.eql(target, canonical)) expected = contract;
         }
@@ -369,8 +369,8 @@ test "contractFromAddress round-trips every contract and rejects poisoned high b
         var target: Address = undefined;
         random.bytes(&target.bytes);
         var expected: ?Contract = null;
-        inline for (@typeInfo(Contract).@"enum".fields) |field| {
-            const contract: Contract = @enumFromInt(field.value);
+        inline for (@typeInfo(Contract).@"enum".field_values) |value| {
+            const contract: Contract = @fromBackingInt(@intCast(value));
             const canonical = contract.toAddress();
             if (Address.eql(target, canonical)) expected = contract;
         }

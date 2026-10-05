@@ -27,13 +27,13 @@ pub fn IntEnum(comptime E: type) type {
         }
 
         pub fn encode(out: []u8, value: Value) Error![]u8 {
-            return TagCodec.encode(out, @as(Tag, @intFromEnum(value)));
+            return TagCodec.encode(out, @as(Tag, @backingInt(value)));
         }
 
         pub fn decode(bytes: []const u8) Error!Value {
             const tag = try TagCodec.decode(bytes);
-            inline for (enum_info.fields) |field| {
-                if (tag == field.value) return @enumFromInt(tag);
+            inline for (enum_info.field_values) |field_value| {
+                if (tag == field_value) return @fromBackingInt(tag);
             }
             return error.InvalidEnumValue;
         }

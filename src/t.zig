@@ -118,14 +118,14 @@ fn bytecodeLen(comptime items: anytype) comptime_int {
             .array => |array| array.len,
             .@"struct" => |info| blk: {
                 if (!info.is_tuple) @compileError("bytecode pointer items must point to an array or tuple literal");
-                break :blk info.fields.len;
+                break :blk info.field_types.len;
             },
             else => @compileError("bytecode pointer items must point to an array or tuple literal"),
         },
         .array => |array| array.len,
         .@"struct" => |info| blk: {
             if (!info.is_tuple) @compileError("bytecode struct items must be a tuple literal");
-            break :blk info.fields.len;
+            break :blk info.field_types.len;
         },
         else => @compileError("bytecode items must be an array, pointer to array, or tuple literal"),
     };

@@ -813,7 +813,7 @@ fn executeFork(
         if (tracing) {
             _ = try capture.finish();
             try traces.append(allocator, .{
-                .name = try std.fmt.allocPrint(allocator, "trace-{d}-0x{x}.jsonl", .{
+                .name = try allocator.print("trace-{d}-0x{x}.jsonl", .{
                     index,
                     evmz.crypto.keccak256(ready.bytes),
                 }),
@@ -1178,7 +1178,7 @@ fn quantity(value: anytype) Quantity {
 }
 
 fn hexAlloc(allocator: Allocator, bytes: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "0x{x}", .{bytes});
+    return allocator.print("0x{x}", .{bytes});
 }
 
 const Alloc = std.json.ArrayHashMap(Account);

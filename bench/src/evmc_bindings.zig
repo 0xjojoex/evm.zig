@@ -1,3 +1,2 @@
-pub const c = @cImport({
-    @cInclude("evmc_bindings.h");
-});
+/// Translated from `evmc_bindings.h` by the build script.
+pub const c = @import("evmc_c");

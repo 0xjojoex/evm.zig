@@ -30,7 +30,7 @@ pub inline fn finish(comptime tag: @EnumLiteral(), value: anytype) @TypeOf(value
 }
 
 inline fn call(comptime tag: @EnumLiteral(), comptime command: Command) void {
-    if (comptime builtin.cpu.arch != .riscv64) {
+    if (comptime builtin.target.cpu.arch != .riscv64) {
         @compileError("ZisK profile tags require a riscv64 guest target");
     }
 
@@ -41,6 +41,6 @@ inline fn call(comptime tag: @EnumLiteral(), comptime command: Command) void {
         \\addi x0, x0, %[command]
         :
         : [name] "r" (&descriptor),
-          [command] "i" (@intFromEnum(command)),
+          [command] "i" (@backingInt(command)),
         : .{ .memory = true });
 }

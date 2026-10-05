@@ -52,7 +52,7 @@ supports one Zig minor, and every module ships at the package version — see
 
 | evmz   | Zig      |
 | ------ | -------- |
-| `main` | `0.16.x` |
+| `main` | `0.17.x` |
 
 ## Quick start
 

@@ -99,7 +99,7 @@ fn readWordBytes(comptime T: type, bytes: []const u8) T {
 }
 
 fn DoubleWidth(comptime T: type) type {
-    return std.meta.Int(.unsigned, @typeInfo(T).int.bits * 2);
+    return @Int(.unsigned, @typeInfo(T).int.bits * 2);
 }
 
 fn modexpWords(comptime T: type, modulus: T, base: u256, exponent_bytes: []const u8) T {

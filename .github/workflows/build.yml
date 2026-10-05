@@ -27,7 +27,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
           use-cache: ${{ github.event_name != 'pull_request' }}
           cache-size-limit: 512
 
@@ -55,7 +55,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
           use-cache: ${{ github.event_name != 'pull_request' }}
           cache-size-limit: 512
 
@@ -74,7 +74,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
           use-cache: ${{ github.event_name != 'pull_request' }}
           cache-size-limit: 512
 
@@ -110,7 +110,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
           use-cache: ${{ github.event_name != 'pull_request' }}
           cache-size-limit: 512
           cache-key: ${{ matrix.target }}

@@ -1,6 +1,6 @@
 # mpt
 
-Structural Ethereum Merkle Patricia Trie primitives for Zig 0.16 — canonical
+Structural Ethereum Merkle Patricia Trie primitives for Zig 0.17 — canonical
 topology, proofs, arbitrary-key updates, and fixed-key mutation.
 
 `mpt` owns the *structure* of Ethereum's MPT, not the meaning carried by it:

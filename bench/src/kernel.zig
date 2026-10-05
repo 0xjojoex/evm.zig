@@ -497,14 +497,14 @@ fn captureStackBytecode(allocator: std.mem.Allocator, depth: usize, iterations: 
     std.debug.assert(depth > 0 and depth <= 1024);
     const code_len = try std.math.add(usize, depth, try std.math.add(usize, try std.math.mul(usize, iterations, 2), 1));
     const code = try allocator.alloc(u8, code_len);
-    @memset(code[0..depth], @intFromEnum(evmz.Opcode.PUSH0));
+    @memset(code[0..depth], @backingInt(evmz.Opcode.PUSH0));
     var offset = depth;
     for (0..iterations) |_| {
-        code[offset] = @intFromEnum(evmz.Opcode.POP);
-        code[offset + 1] = @intFromEnum(evmz.Opcode.PUSH0);
+        code[offset] = @backingInt(evmz.Opcode.POP);
+        code[offset + 1] = @backingInt(evmz.Opcode.PUSH0);
         offset += 2;
     }
-    code[offset] = @intFromEnum(evmz.Opcode.STOP);
+    code[offset] = @backingInt(evmz.Opcode.STOP);
     return code;
 }
 
@@ -514,15 +514,15 @@ fn memoryStoreBytecode(allocator: std.mem.Allocator, iterations: usize, expandin
     const code = try allocator.alloc(u8, code_len);
     var offset: usize = 0;
     for (0..iterations) |index| {
-        code[offset] = @intFromEnum(evmz.Opcode.PUSH1);
+        code[offset] = @backingInt(evmz.Opcode.PUSH1);
         code[offset + 1] = 0x2a;
-        code[offset + 2] = @intFromEnum(evmz.Opcode.PUSH4);
+        code[offset + 2] = @backingInt(evmz.Opcode.PUSH4);
         const memory_offset: u32 = if (expanding) @intCast(index * 32) else 0;
         std.mem.writeInt(u32, code[offset + 3 ..][0..4], memory_offset, .big);
-        code[offset + 7] = @intFromEnum(evmz.Opcode.MSTORE);
+        code[offset + 7] = @backingInt(evmz.Opcode.MSTORE);
         offset += pattern_len;
     }
-    code[offset] = @intFromEnum(evmz.Opcode.STOP);
+    code[offset] = @backingInt(evmz.Opcode.STOP);
     return code;
 }
 
@@ -546,7 +546,7 @@ const FixtureSet = struct {
     patterns: std.ArrayList([]u8) = .empty,
 
     fn load(io: std.Io, allocator: std.mem.Allocator, fixtures_dir: []const u8, case: KernelCase) !FixtureSet {
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ fixtures_dir, @tagName(case) });
+        const path = try allocator.print("{s}/{s}.hex", .{ fixtures_dir, @tagName(case) });
         defer allocator.free(path);
 
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
@@ -646,8 +646,8 @@ fn appendUniqueCases(
 
 fn parseEngine(value: []const u8) ?Engine {
     if (std.mem.eql(u8, value, "evmone")) return .evmone_advanced;
-    inline for (std.meta.fields(Engine)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(Engine)) |tag| {
+        if (tagNameMatches(value, @tagName(tag))) return tag;
     }
     return null;
 }
@@ -665,15 +665,15 @@ fn engineName(engine: Engine) []const u8 {
 }
 
 fn parseCase(value: []const u8) ?KernelCase {
-    inline for (std.meta.fields(KernelCase)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(KernelCase)) |tag| {
+        if (tagNameMatches(value, @tagName(tag))) return tag;
     }
     return null;
 }
 
 fn parseTier(value: []const u8) ?KernelTier {
-    inline for (std.meta.fields(KernelTier)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(KernelTier)) |tag| {
+        if (tagNameMatches(value, @tagName(tag))) return tag;
     }
     return null;
 }

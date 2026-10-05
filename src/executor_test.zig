@@ -110,8 +110,12 @@ test "public executor binds world types and requires admitted closed state" {
     try std.testing.expect(Open == Latest.Executor);
     try std.testing.expect(Open.State == OpenState);
     try std.testing.expect(Closed.State == evmz.eth.bal.ClosedWorld.State);
-    try std.testing.expect(std.meta.fieldInfo(Open.Init, .state).default_value_ptr != null);
-    try std.testing.expect(std.meta.fieldInfo(Closed.Init, .state).default_value_ptr == null);
+    const open_init = @typeInfo(Open.Init).@"struct";
+    const closed_init = @typeInfo(Closed.Init).@"struct";
+    const open_state = std.meta.fieldIndex(Open.Init, "state").?;
+    const closed_state = std.meta.fieldIndex(Closed.Init, "state").?;
+    try std.testing.expect(open_init.field_attrs[open_state].default_value_ptr != null);
+    try std.testing.expect(closed_init.field_attrs[closed_state].default_value_ptr == null);
     var empty = Open.init(std.testing.allocator, .{});
     defer empty.deinit();
     try std.testing.expectEqual(@as(u256, 0), try empty.getBalance(evmz.addr(1)));
@@ -356,7 +360,7 @@ test "CREATE initcode preparation remains execution-local" {
     const request = try beginCreateScope(&executor, execution_context, .{
         .sender = sender,
         .recipient = evmz.address.create(sender, 0),
-        .init_code = &.{@intFromEnum(evmz.Opcode.STOP)},
+        .init_code = &.{@backingInt(evmz.Opcode.STOP)},
     }, .legacy(100_000));
     const result = (try executor.executeMessage(request.message, request.gas));
     try executor.commitTransaction();
@@ -523,7 +527,7 @@ test "prepared caches cannot satisfy code omitted from the active witness" {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
-        const code = [_]u8{@intFromEnum(evmz.Opcode.STOP)};
+        const code = [_]u8{@backingInt(evmz.Opcode.STOP)};
         const code_hash = evmz.crypto.keccak256(&code);
         const account_value = try evmz.eth.trie.accountValueFrom(scratch, .{ .code_hash = code_hash });
         const state_node = try TestTrie.leafNode(scratch, &account_key, account_value);
@@ -1589,7 +1593,7 @@ test "captured runtime records nested call and create frames without generic ste
 
     try evmz.t.seedExecutorAccount(&executor, contract, .{ .code = &code });
 
-    try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &.{@intFromEnum(evmz.Opcode.STOP)} });
+    try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &.{@backingInt(evmz.Opcode.STOP)} });
 
     var bytecode = try executor.prepareBytecode(&code);
     defer bytecode.deinit(std.testing.allocator);
@@ -1623,9 +1627,9 @@ test "captured runtime records nested call and create frames without generic ste
     var create_index: ?usize = null;
     var create_child_index: ?usize = null;
     for (span.steps, 0..) |step, index| {
-        if (step.frame_id == 0 and step.opcode == @intFromEnum(evmz.Opcode.CALL)) call_index = index;
+        if (step.frame_id == 0 and step.opcode == @backingInt(evmz.Opcode.CALL)) call_index = index;
         if (step.frame_id == 1) call_child_index = index;
-        if (step.frame_id == 0 and step.opcode == @intFromEnum(evmz.Opcode.CREATE)) create_index = index;
+        if (step.frame_id == 0 and step.opcode == @backingInt(evmz.Opcode.CREATE)) create_index = index;
         if (step.frame_id == 2) create_child_index = index;
     }
     try std.testing.expect(call_index.? < call_child_index.?);
@@ -1685,7 +1689,7 @@ test "captured span is inspectable before executed transaction resolution" {
 
     const span = (try capture.finish()).?;
     try std.testing.expect(span.steps.len > 0);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(evmz.Opcode.SSTORE)), span.steps[2].opcode);
+    try std.testing.expectEqual(@as(u8, @backingInt(evmz.Opcode.SSTORE)), span.steps[2].opcode);
     try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
 
     executed.discard();
@@ -3274,7 +3278,7 @@ const StepOrderRecorder = struct {
 
     fn firstIndex(self: *const StepOrderRecorder, kind: StepEventKind, opcode: evmz.Opcode, depth: u16) ?usize {
         for (self.events[0..self.len], 0..) |event, index| {
-            if (event.kind == kind and event.opcode == @intFromEnum(opcode) and event.depth == depth) return index;
+            if (event.kind == kind and event.opcode == @backingInt(opcode) and event.depth == depth) return index;
         }
         return null;
     }
@@ -3427,9 +3431,12 @@ test "execution finalization failure preserves the session and lifecycle changes
     }
     // Force the next finalization checkpoint to allocate an account undo.
     executor.state.journal.accounts.shrinkAndFree(executor.allocator, executor.state.journal.accounts.items.len);
+    // Fail in-place growth too: the backing allocator may satisfy it by remap.
     failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
     try std.testing.expectError(error.OutOfMemory, executor.finalizeExecution());
     failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
     try std.testing.expectEqual(.idle, executor.execution_phase);
     try std.testing.expect(executor.state.world.accountRow(executor.state.world.findAccount(.fromAddress(target)).?).flags.selfdestructed);
     try std.testing.expectEqual(@as(u256, 11), try executor.getStorage(target, 7));

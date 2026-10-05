@@ -213,7 +213,7 @@ pub const Context = struct {
         }
         const frame_id = self.next_frame_id;
         const next_frame_id = frame_id + 1;
-        const parent_capture = self.frame_captures.getLastOrNull();
+        const parent_capture = self.frame_captures.last();
         const parent_frame_id = if (parent_capture) |parent| parent.frame_id else null;
         const parent_return_data: trace.tape.ByteRange = if (parent_capture) |parent|
             parent.currentReturnData()

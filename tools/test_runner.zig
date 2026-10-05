@@ -19,8 +19,7 @@ const border: []const u8 = &@as([60]u8, @splat('='));
 var current_test: ?[]const u8 = null;
 
 pub fn main(init: std.process.Init) !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    const gpa = gpa_state.allocator();
+    const gpa = init.gpa;
 
     std.testing.io_instance = .init(init.gpa, .{
         .argv0 = .init(init.minimal.args),
@@ -60,13 +59,16 @@ pub fn main(init: std.process.Init) !void {
         }
 
         current_test = name;
-        std.testing.allocator_instance = .{};
+        std.testing.allocator_instance = .init(std.heap.page_allocator, .{
+            .canary = 0xc3a701ba,
+            .check_write_after_free = true,
+        });
         const start = Io.Clock.awake.now(io);
         const result = t.func();
         const ns: u64 = @intCast(start.durationTo(Io.Clock.awake.now(io)).toNanoseconds());
         current_test = null;
 
-        if (std.testing.allocator_instance.deinit() == .leak) {
+        if (std.testing.allocator_instance.deinit() != 0) {
             leak += 1;
             print(.fail, "\n{s}\n\"{s}\" - memory leak\n{s}\n", .{ border, name, border });
         }

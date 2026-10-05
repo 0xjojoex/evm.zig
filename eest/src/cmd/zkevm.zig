@@ -227,9 +227,9 @@ fn printSummary(path: []const u8, summary: stateless.Summary) void {
         "{s}: files={} fixtures={} passed={} failed={} skipped={} oracle_compared={}\n",
         .{ path, summary.files, summary.fixtures, summary.passed, summary.failed, summary.skipped, summary.oracle_compared },
     );
-    inline for (std.meta.fields(stateless.FailReason), 0..) |field, i| {
+    inline for (@typeInfo(stateless.FailReason).@"enum".field_names, 0..) |reason_name, i| {
         const count = summary.fail_reasons[i];
-        if (count != 0) std.debug.print("  {s}: {}\n", .{ field.name, count });
+        if (count != 0) std.debug.print("  {s}: {}\n", .{ reason_name, count });
     }
 }
 

@@ -50,8 +50,8 @@ pub const Summary = struct {
     failed: usize = 0,
     skipped: usize = 0,
     unchecked: usize = 0,
-    fail_reasons: [std.meta.fields(FailReason).len]usize = @splat(0),
-    unchecked_reasons: [std.meta.fields(UncheckedReason).len]usize = @splat(0),
+    fail_reasons: [std.enums.values(FailReason).len]usize = @splat(0),
+    unchecked_reasons: [std.enums.values(UncheckedReason).len]usize = @splat(0),
 
     pub fn add(self: *Summary, other: Summary) void {
         self.fixtures += other.fixtures;
@@ -70,12 +70,12 @@ pub const Summary = struct {
 
     fn countFail(self: *Summary, reason: FailReason) void {
         self.failed += 1;
-        self.fail_reasons[@intFromEnum(reason)] += 1;
+        self.fail_reasons[@backingInt(reason)] += 1;
     }
 
     fn countUnchecked(self: *Summary, reason: UncheckedReason) void {
         self.unchecked += 1;
-        self.unchecked_reasons[@intFromEnum(reason)] += 1;
+        self.unchecked_reasons[@backingInt(reason)] += 1;
     }
 };
 
@@ -692,7 +692,7 @@ fn runMinimalStateFixtureWithOptions(
     post_account_fields: []const u8,
     options: Options,
 ) !Summary {
-    const fixture = try std.fmt.allocPrint(std.testing.allocator,
+    const fixture = try std.testing.allocator.print(
         \\{{"simple_sstore":{{"env":{{"currentCoinbase":"0x0000000000000000000000000000000000000000","currentGasLimit":"{s}","currentNumber":"0x01","currentDifficulty":"0x00","currentTimestamp":"0x00","currentBaseFee":"0x00"}},"pre":{{"0x0000000000000000000000000000000000001000":{{"balance":"0x00","nonce":"0x00","code":"0x602a600055","storage":{{}}}},"0x000000000000000000000000000000000000aaaa":{{"balance":"0xffff","nonce":"0x00","code":"0x","storage":{{}}}}}},"transaction":{{"sender":"0x000000000000000000000000000000000000aaaa","to":"0x0000000000000000000000000000000000001000","gasLimit":["{s}"],"gasPrice":"0x00","value":["0x00"],"data":["{s}"]{s}}},"post":{{"Cancun":[{{"indexes":{{"data":0,"gas":0,"value":0}}{s},"state":{{"0x0000000000000000000000000000000000001000":{{{s}}}}}}}]}}}}}}
     , .{ block_gas_limit, gas_limit, data, tx_extra, post_extra, post_account_fields });
     defer std.testing.allocator.free(fixture);
@@ -700,7 +700,7 @@ fn runMinimalStateFixtureWithOptions(
 }
 
 test "EEST runner handles consecutive fixtures without leaking state" {
-    const fixture = try std.fmt.allocPrint(std.testing.allocator,
+    const fixture = try std.testing.allocator.print(
         \\{{"{s}":{{"env":{{"currentCoinbase":"0x0000000000000000000000000000000000000000","currentGasLimit":"0x0f4240","currentNumber":"0x01","currentDifficulty":"0x00","currentTimestamp":"0x00","currentBaseFee":"0x00"}},"pre":{{"0x0000000000000000000000000000000000001000":{{"balance":"0x00","nonce":"0x00","code":"0x60{s}600055","storage":{{}}}},"0x000000000000000000000000000000000000aaaa":{{"balance":"0xffff","nonce":"0x00","code":"0x","storage":{{}}}}}},"transaction":{{"sender":"0x000000000000000000000000000000000000aaaa","to":"0x0000000000000000000000000000000000001000","gasLimit":["0x0186a0"],"gasPrice":"0x00","value":["0x00"],"data":["0x"]}},"post":{{"Cancun":[{{"indexes":{{"data":0,"gas":0,"value":0}},"state":{{"0x0000000000000000000000000000000000001000":{{"storage":{{"0x00":"0x{s}"}}}}}}}}]}}}},"{s}":{{"env":{{"currentCoinbase":"0x0000000000000000000000000000000000000000","currentGasLimit":"0x0f4240","currentNumber":"0x02","currentDifficulty":"0x00","currentTimestamp":"0x00","currentBaseFee":"0x00"}},"pre":{{"0x0000000000000000000000000000000000001000":{{"balance":"0x00","nonce":"0x00","code":"0x60{s}600055","storage":{{}}}},"0x000000000000000000000000000000000000aaaa":{{"balance":"0xffff","nonce":"0x00","code":"0x","storage":{{}}}}}},"transaction":{{"sender":"0x000000000000000000000000000000000000aaaa","to":"0x0000000000000000000000000000000000001000","gasLimit":["0x0186a0"],"gasPrice":"0x00","value":["0x00"],"data":["0x"]}},"post":{{"Cancun":[{{"indexes":{{"data":0,"gas":0,"value":0}},"state":{{"0x0000000000000000000000000000000000001000":{{"storage":{{"0x00":"0x{s}"}}}}}}}}]}}}}}}
     , .{ "first_sstore", "2a", "2a", "second_sstore", "2b", "2b" });
     defer std.testing.allocator.free(fixture);
@@ -723,7 +723,7 @@ test "EEST transaction nonce mismatch fails" {
         "\"storage\":{\"0x00\":\"0x2a\"}",
     );
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.transaction_nonce_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.transaction_nonce_mismatch)]);
 }
 
 test "EEST oversized transaction nonce reaches exact-spec validation" {
@@ -742,11 +742,11 @@ test "EEST oversized transaction nonce reaches exact-spec validation" {
 test "EEST post balance and nonce mismatches fail" {
     const balance = try runMinimalStateFixture("", "0x0186a0", "0x", "", "\"balance\":\"0x01\"");
     try std.testing.expectEqual(@as(usize, 1), balance.failed);
-    try std.testing.expectEqual(@as(usize, 1), balance.fail_reasons[@intFromEnum(FailReason.balance_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), balance.fail_reasons[@backingInt(FailReason.balance_mismatch)]);
 
     const nonce = try runMinimalStateFixture("", "0x0186a0", "0x", "", "\"nonce\":\"0x01\"");
     try std.testing.expectEqual(@as(usize, 1), nonce.failed);
-    try std.testing.expectEqual(@as(usize, 1), nonce.fail_reasons[@intFromEnum(FailReason.nonce_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), nonce.fail_reasons[@backingInt(FailReason.nonce_mismatch)]);
 }
 
 test "EEST unsupported assertion fields do not block comparable post state" {
@@ -786,7 +786,7 @@ test "EEST post hash compares the canonical MPT state root" {
         .{ .key = &sender_key, .value = sender_value },
     });
     const root_hex = std.fmt.bytesToHex(expected_root, .lower);
-    const post_extra = try std.fmt.allocPrint(scratch, ",\"hash\":\"0x{s}\"", .{&root_hex});
+    const post_extra = try scratch.print(",\"hash\":\"0x{s}\"", .{&root_hex});
 
     const summary = try runMinimalStateFixture(
         "",
@@ -844,13 +844,13 @@ test "EEST unsupported-only assertion fields are unchecked" {
     try std.testing.expectEqual(@as(usize, 0), summary.passed);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 1), summary.unchecked);
-    try std.testing.expectEqual(@as(usize, 1), summary.unchecked_reasons[@intFromEnum(UncheckedReason.unsupported_assertion_fields)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.unchecked_reasons[@backingInt(UncheckedReason.unsupported_assertion_fields)]);
 }
 
 test "EEST unknown post account key fails" {
     const summary = try runMinimalStateFixture("", "0x0186a0", "0x", "", "\"storage\":{},\"mystery\":\"0x00\"");
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.unsupported_fixture_key)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.unsupported_fixture_key)]);
 }
 
 test "EEST expected exception still compares post state" {
@@ -862,7 +862,7 @@ test "EEST expected exception still compares post state" {
         "\"balance\":\"0x01\"",
     );
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.balance_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.balance_mismatch)]);
 }
 
 test "EEST child revert rolls back transient storage" {
@@ -1108,5 +1108,5 @@ test "EEST still checks output when using tool-owned execution" {
     ;
     const summary = try runSlice(std.testing.allocator, fixture, .{});
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.output_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.output_mismatch)]);
 }

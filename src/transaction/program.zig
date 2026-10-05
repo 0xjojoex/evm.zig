@@ -296,7 +296,7 @@ fn PreludeType(comptime Context: type, comptime PreludeError: type) type {
             };
             if (pointer_info.size != .one)
                 @compileError("transaction prelude must use a single-item pointer");
-            if (pointer_info.is_const)
+            if (pointer_info.attrs.@"const")
                 @compileError("transaction prelude pointer must be mutable");
 
             const actual = @TypeOf(@as(Pointer, undefined).run(@as(Context, undefined)));

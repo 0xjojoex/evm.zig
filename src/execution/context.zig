@@ -24,7 +24,7 @@ pub const TransactionExtension = struct {
         };
         if (info.size != .one)
             @compileError("transaction extension requires a single-item pointer");
-        if (info.is_const)
+        if (info.attrs.@"const")
             @compileError("transaction extension requires mutable transaction state");
         return .{
             .ptr = @ptrCast(runtime),
@@ -128,16 +128,17 @@ test "every borrowed execution context field is compared by value" {
     // field left to it makes two value-identical contexts unequal, and the
     // executor rejects a reopened scope with ExecutionContextMismatch.
     inline for (.{ ChainEnvironment, BlockEnvironment, TransactionEnvironment }) |Environment| {
-        inline for (std.meta.fields(Environment)) |field| {
-            const info = @typeInfo(field.type);
+        const environment_info = @typeInfo(Environment).@"struct";
+        inline for (environment_info.field_names, environment_info.field_types) |field_name, field_type| {
+            const info = @typeInfo(field_type);
             if (info != .pointer or info.pointer.size != .slice) continue;
             comptime var handled = false;
             inline for (ExecutionContext.value_compared_slices) |name| {
-                if (comptime std.mem.eql(u8, name, field.name)) handled = true;
+                if (comptime std.mem.eql(u8, name, field_name)) handled = true;
             }
             if (!handled) @compileError(
                 "ExecutionContext.eql would compare " ++ @typeName(Environment) ++ "." ++
-                    field.name ++ " by pointer identity; compare it by value in eql",
+                    field_name ++ " by pointer identity; compare it by value in eql",
             );
         }
     }

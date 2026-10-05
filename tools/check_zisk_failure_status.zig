@@ -24,7 +24,7 @@ const Checker = struct {
     }
 
     fn failFmt(checker: *Checker, comptime format: []const u8, args: anytype) error{CheckFailed} {
-        checker.failure = std.fmt.allocPrint(checker.allocator, format, args) catch "ZisK failure-status check failed";
+        checker.failure = checker.allocator.print(format, args) catch "ZisK failure-status check failed";
         return error.CheckFailed;
     }
 
@@ -88,8 +88,7 @@ const Checker = struct {
         if (!termOk(term)) return checker.failFmt("ZisK host terminated with {f}", .{fmtTerm(term)});
 
         try checker.validateResponse(&header, payload);
-        return std.fmt.allocPrint(
-            checker.allocator,
+        return checker.allocator.print(
             "nonzero guest exit propagated: {s}",
             .{payload},
         ) catch "nonzero guest exit propagated";
@@ -134,8 +133,8 @@ fn termOk(term: std.process.Child.Term) bool {
 fn formatTerm(term: std.process.Child.Term, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (term) {
         .exited => |code| try writer.print("exit code {d}", .{code}),
-        .signal => |signal| try writer.print("signal {d}", .{@intFromEnum(signal)}),
-        .stopped => |signal| try writer.print("stopped signal {d}", .{@intFromEnum(signal)}),
+        .signal => |signal| try writer.print("signal {d}", .{@backingInt(signal)}),
+        .stopped => |signal| try writer.print("stopped signal {d}", .{@backingInt(signal)}),
         .unknown => |status| try writer.print("unknown status {d}", .{status}),
     }
 }

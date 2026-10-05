@@ -5,7 +5,7 @@ const t = @import("../t.zig");
 
 const JumpDestMap = @This();
 
-bits: std.DynamicBitSetUnmanaged,
+bits: std.bit_set.Dynamic,
 analyzed: bool,
 
 pub const empty = JumpDestMap{
@@ -27,7 +27,7 @@ pub fn deinit(self: *JumpDestMap, allocator: std.mem.Allocator) void {
 pub fn isValidPrepared(self: *const JumpDestMap, bytes: []const u8, target: usize) bool {
     std.debug.assert(self.analyzed);
     if (target >= bytes.len) return false;
-    if (bytes[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
+    if (bytes[target] != @backingInt(Opcode.JUMPDEST)) return false;
     return self.bits.isSet(target);
 }
 
@@ -41,7 +41,7 @@ pub fn analyze(self: *JumpDestMap, allocator: std.mem.Allocator, bytes: []const 
         return;
     }
 
-    self.bits = try std.DynamicBitSetUnmanaged.initEmpty(allocator, bytes.len);
+    self.bits = try std.bit_set.Dynamic.initEmpty(allocator, bytes.len);
     scanner.markJumpDests(&self.bits, bytes);
     self.analyzed = true;
 }
@@ -137,10 +137,10 @@ test "jumpdest map carries PUSH payload across chunks" {
 
 /// Obviously-correct reference scan: walk instruction by instruction, stepping
 /// over PUSH immediates. The bitmask scanner must agree with it exactly.
-fn markLinear(bits: *std.DynamicBitSetUnmanaged, bytes: []const u8) void {
+fn markLinear(bits: *std.bit_set.Dynamic, bytes: []const u8) void {
     var pc: usize = 0;
     while (pc < bytes.len) {
-        const opcode: Opcode = @enumFromInt(bytes[pc]);
+        const opcode: Opcode = @fromBackingInt(@intCast(bytes[pc]));
         if (opcode == .JUMPDEST) bits.set(pc);
 
         pc = @min(bytes.len, pc + 1 + opcode.pushImmediateLen());
@@ -148,7 +148,7 @@ fn markLinear(bits: *std.DynamicBitSetUnmanaged, bytes: []const u8) void {
 }
 
 fn expectMatchesLinear(bytes: []const u8) !void {
-    var linear = try std.DynamicBitSetUnmanaged.initEmpty(std.testing.allocator, bytes.len);
+    var linear = try std.bit_set.Dynamic.initEmpty(std.testing.allocator, bytes.len);
     defer linear.deinit(std.testing.allocator);
     markLinear(&linear, bytes);
 

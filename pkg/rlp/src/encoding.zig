@@ -79,7 +79,7 @@ pub fn assertUnsignedInt(comptime T: type) void {
 }
 
 pub fn intBytes(comptime T: type, value: T) [byteLen(T)]u8 {
-    const Wide = std.meta.Int(.unsigned, byteLen(T) * 8);
+    const Wide = @Int(.unsigned, byteLen(T) * 8);
     var bytes: [byteLen(T)]u8 = undefined;
     std.mem.writeInt(Wide, &bytes, value, .big);
     return bytes;

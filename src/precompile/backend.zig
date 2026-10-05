@@ -94,15 +94,9 @@ fn paddedCopy(input: []const u8, offset: usize, output: []u8) void {
 }
 
 const NativeBackend = struct {
-    const bn254_native = @cImport({
-        @cInclude("bn254.h");
-    });
-    const bls12_native = @cImport({
-        @cInclude("bls12.h");
-    });
-    const kzg_native = @cImport({
-        @cInclude("kzg.h");
-    });
+    const bn254_native = @import("bn254_native");
+    const bls12_native = @import("bls12_native");
+    const kzg_native = @import("kzg_native");
 
     fn ripemd160(input: []const u8, output: *[32]u8) Status {
         const digest = ripemd160Digest(input);

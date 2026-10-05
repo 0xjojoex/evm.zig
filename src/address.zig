@@ -211,7 +211,7 @@ pub const AddressWord = extern struct {
 
 pub const addr = Address.addr;
 
-inline fn fromPointer(comptime T: type, comptime pointer: std.builtin.Type.Pointer, value: T) Address {
+inline fn fromPointer(comptime T: type, comptime pointer: std.lang.Type.Pointer, value: T) Address {
     return switch (pointer.size) {
         .one => {
             if (pointer.child == Address) return value.*;

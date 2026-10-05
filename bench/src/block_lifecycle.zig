@@ -333,8 +333,8 @@ fn growableEnv(block_gas_limit: u64) evmz.Env {
 }
 
 fn parseCase(value: []const u8) ?Case {
-    inline for (std.meta.fields(Case)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(Case)) |tag| {
+        if (tagNameMatches(value, @tagName(tag))) return tag;
     }
     return null;
 }

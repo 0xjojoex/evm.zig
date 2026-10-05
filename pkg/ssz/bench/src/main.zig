@@ -410,7 +410,7 @@ pub fn main(init: std.process.Init) !void {
     for (std.enums.values(Case)) |case| {
         const info = caseInfo(case);
         if (!matchesFilter(info, options.filter)) continue;
-        const index = @intFromEnum(case);
+        const index = @backingInt(case);
         contexts[index] = .{ .case = case, .batch_ops = info.batch_ops, .fixtures = &fixtures };
         const context: *const CaseContext = &contexts[index];
         try bench.addParam(info.name, context, .{});

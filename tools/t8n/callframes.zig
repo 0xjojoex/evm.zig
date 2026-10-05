@@ -17,7 +17,7 @@ pub fn encode(allocator: Allocator, span: evmz.trace.CallSpan) ![]u8 {
             try writeExit(&output.writer, span, span.rows[completed]);
         }
         if (active.items.len != row.depth) return error.InvalidCallSpan;
-        const parent_index = active.getLastOrNull();
+        const parent_index = active.last();
         if (row.parent_index != parent_index or row.status == .running or row.gas < 0 or
             row.gas_used < 0)
         {

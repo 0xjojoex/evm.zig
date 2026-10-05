@@ -66,13 +66,13 @@ pub const Catalog = struct {
         pub const FollowError = error{ MissingNode, InvalidNodeReference };
 
         fn fromNode(id: NodeId) Link {
-            return @enumFromInt(@intFromEnum(id));
+            return @fromBackingInt(@intCast(@backingInt(id)));
         }
 
         pub fn node(self: Link) ?NodeId {
-            const raw = @intFromEnum(self);
-            if (raw >= @intFromEnum(Link.@"opaque")) return null;
-            return @enumFromInt(raw);
+            const raw = @backingInt(self);
+            if (raw >= @backingInt(Link.@"opaque")) return null;
+            return @fromBackingInt(@intCast(raw));
         }
 
         pub fn follow(self: Link) FollowError!?NodeId {
@@ -128,7 +128,7 @@ pub const Catalog = struct {
 
         pub fn extensionChild(self: Node) ?Link {
             if (self.kind != .extension) return null;
-            return @enumFromInt(self.payload);
+            return @fromBackingInt(@intCast(self.payload));
         }
 
         comptime {
@@ -171,7 +171,7 @@ pub const Catalog = struct {
     }
 
     pub fn node(self: Catalog, id: NodeId) ?*const Node {
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         if (index >= self.nodes.items.len) return null;
         return &self.nodes.items[index];
     }
@@ -397,7 +397,7 @@ pub const Catalog = struct {
             id: NodeId,
         ) error{ InvalidNode, InvalidNodeReference }!?[]const u8 {
             std.debug.assert(!self.sealed and self.work.items.len == 0);
-            const index = @intFromEnum(id);
+            const index = @backingInt(id);
             if (index >= self.nodes.items.len) return error.InvalidNodeReference;
             const entry = self.nodes.items[index];
             if (entry.kind != .leaf) return null;
@@ -439,7 +439,7 @@ pub const Catalog = struct {
         fn decodePending(self: *Builder) BuildError!void {
             // appendNode schedules each new ID once; linkIndexed reuses it without requeueing.
             while (self.work.pop()) |id| {
-                const index = @intFromEnum(id);
+                const index = @backingInt(id);
                 var decoded_node = try node_codec.decodeForCatalog(self.nodes.items[index].encoded);
                 const compact = try self.compactNode(self.nodes.items[index].encoded, &decoded_node);
                 self.nodes.items[index] = compact;
@@ -494,16 +494,16 @@ pub const Catalog = struct {
 
         fn linkIndexed(self: *Builder, indexed: proof.IndexedNode) BuildError!NodeId {
             if (self.positions[indexed.position] != no_node) {
-                return @enumFromInt(self.positions[indexed.position]);
+                return @fromBackingInt(@intCast(self.positions[indexed.position]));
             }
             const id = try self.appendNode(indexed.encoded);
-            self.positions[indexed.position] = @intFromEnum(id);
+            self.positions[indexed.position] = @backingInt(id);
             return id;
         }
 
         fn appendNode(self: *Builder, encoded: []const u8) BuildError!NodeId {
-            if (self.nodes.items.len >= @intFromEnum(Link.@"opaque")) return error.ResourceLimitExceeded;
-            const id: NodeId = @enumFromInt(self.nodes.items.len);
+            if (self.nodes.items.len >= @backingInt(Link.@"opaque")) return error.ResourceLimitExceeded;
+            const id: NodeId = @fromBackingInt(@intCast(self.nodes.items.len));
             const undecoded: Node = .{
                 .encoded = encoded,
                 .payload = undefined,
@@ -551,7 +551,7 @@ pub const Catalog = struct {
                 },
                 .extension => |extension| {
                     try setPath(&compact, extension.path);
-                    compact.payload = @intFromEnum(try self.linkReference(extension.child));
+                    compact.payload = @backingInt(try self.linkReference(extension.child));
                     compact.value_offset = try referenceOffset(encoded, extension.child);
                     compact.kind = .extension;
                 },
@@ -612,14 +612,14 @@ pub const Catalog = struct {
                     .leaf => {},
                     .extension => {
                         if ((entry.extensionChild() orelse return error.InvalidNodeReference).node()) |child| {
-                            if (@intFromEnum(child) >= self.nodes.items.len) return error.InvalidNodeReference;
-                            const target = self.nodes.items[@intFromEnum(child)];
+                            if (@backingInt(child) >= self.nodes.items.len) return error.InvalidNodeReference;
+                            const target = self.nodes.items[@backingInt(child)];
                             if (target.kind != .branch) return error.NonCanonicalNode;
                         }
                     },
                     .branch => for ((try self.branchData(entry)).links) |child| {
                         if (child.node()) |id| {
-                            if (@intFromEnum(id) >= self.nodes.items.len) return error.InvalidNodeReference;
+                            if (@backingInt(id) >= self.nodes.items.len) return error.InvalidNodeReference;
                         }
                     },
                 }
@@ -644,7 +644,7 @@ pub const Catalog = struct {
 
             self.work.clearRetainingCapacity();
             for (incoming, 0..) |count, index| {
-                if (count == 0) try self.work.append(self.allocator, @enumFromInt(index));
+                if (count == 0) try self.work.append(self.allocator, @fromBackingInt(@intCast(index)));
             }
 
             var visited: usize = 0;
@@ -652,7 +652,7 @@ pub const Catalog = struct {
             while (queue_index < self.work.items.len) : (queue_index += 1) {
                 const id = self.work.items[queue_index];
                 visited += 1;
-                const entry = self.nodes.items[@intFromEnum(id)];
+                const entry = self.nodes.items[@backingInt(id)];
                 switch (entry.kind) {
                     .leaf => {},
                     .extension => try self.removeIncoming(incoming, entry.extensionChild() orelse return error.InvalidNodeReference),
@@ -669,14 +669,14 @@ pub const Catalog = struct {
 
         fn removeIncoming(self: *Builder, incoming: []u32, link: Link) BuildError!void {
             const id = link.node() orelse return;
-            const index = @intFromEnum(id);
+            const index = @backingInt(id);
             if (incoming[index] == 0) return error.InvalidNodeReference;
             incoming[index] -= 1;
             if (incoming[index] == 0) try self.work.append(self.allocator, id);
         }
 
         fn addIncoming(incoming: []u32, id: NodeId) error{ResourceLimitExceeded}!void {
-            const value = &incoming[@intFromEnum(id)];
+            const value = &incoming[@backingInt(id)];
             value.* = std.math.add(u32, value.*, 1) catch return error.ResourceLimitExceeded;
         }
     };

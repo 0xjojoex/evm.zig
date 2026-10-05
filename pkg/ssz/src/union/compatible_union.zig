@@ -8,8 +8,8 @@ const container = @import("../container/typed_container.zig");
 /// Return the codec for an SSZ `CompatibleUnion({selector: type})`.
 pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
     comptime validateSchema(T, config);
-    const fields = @typeInfo(T).@"union".fields;
-    const Tag = @typeInfo(T).@"union".tag_type.?;
+    const info = @typeInfo(T).@"union";
+    const Tag = info.tag_type.?;
 
     const Common = struct {
         pub const Value = T;
@@ -17,14 +17,14 @@ pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
         pub const union_options = config;
         pub const is_variable_size = true;
         pub const fixed_size: ?usize = null;
-        pub const requires_allocator = hasAllocatingOptions(fields, config);
+        pub const requires_allocator = hasAllocatingOptions(info, config);
 
         pub fn encodedLen(value: T) Error!usize {
             const active = std.meta.activeTag(value);
-            inline for (fields) |field| {
-                if (active == @field(Tag, field.name)) {
-                    const Codec = optionCodec(config, field.name, field.type);
-                    return std.math.add(usize, 1, try Codec.encodedLen(@field(value, field.name))) catch
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                if (active == @field(Tag, field_name)) {
+                    const Codec = optionCodec(config, field_name, field_type);
+                    return std.math.add(usize, 1, try Codec.encodedLen(@field(value, field_name))) catch
                         error.EncodedLengthOverflow;
                 }
             }
@@ -36,11 +36,11 @@ pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
             if (out.len < len) return error.BufferTooSmall;
 
             const active = std.meta.activeTag(value);
-            inline for (fields) |field| {
-                if (active == @field(Tag, field.name)) {
-                    out[0] = selectorOf(@field(config, field.name));
-                    const Codec = optionCodec(config, field.name, field.type);
-                    _ = try Codec.encode(out[1..len], @field(value, field.name));
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                if (active == @field(Tag, field_name)) {
+                    out[0] = selectorOf(@field(config, field_name));
+                    const Codec = optionCodec(config, field_name, field_type);
+                    _ = try Codec.encode(out[1..len], @field(value, field_name));
                     return out[0..len];
                 }
             }
@@ -49,12 +49,12 @@ pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
 
         pub fn decodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) (Error || std.mem.Allocator.Error)!T {
             const selector = try validateSelector(bytes);
-            inline for (fields) |field| {
-                if (selector == selectorOf(@field(config, field.name))) {
-                    const Codec = optionCodec(config, field.name, field.type);
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                if (selector == selectorOf(@field(config, field_name))) {
+                    const Codec = optionCodec(config, field_name, field_type);
                     return @unionInit(
                         T,
-                        field.name,
+                        field_name,
                         try codec.decodeOwned(Codec, allocator, bytes[1..]),
                     );
                 }
@@ -64,10 +64,10 @@ pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
 
         pub fn decode(bytes: []const u8) Error!T {
             const selector = try validateSelector(bytes);
-            inline for (fields) |field| {
-                if (selector == selectorOf(@field(config, field.name))) {
-                    const Codec = optionCodec(config, field.name, field.type);
-                    return @unionInit(T, field.name, try Codec.decode(bytes[1..]));
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                if (selector == selectorOf(@field(config, field_name))) {
+                    const Codec = optionCodec(config, field_name, field_type);
+                    return @unionInit(T, field_name, try Codec.decode(bytes[1..]));
                 }
             }
             unreachable;
@@ -75,9 +75,9 @@ pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
 
         pub fn validate(bytes: []const u8) Error!void {
             const selector = try validateSelector(bytes);
-            inline for (fields) |field| {
-                if (selector == selectorOf(@field(config, field.name))) {
-                    const Codec = optionCodec(config, field.name, field.type);
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                if (selector == selectorOf(@field(config, field_name))) {
+                    const Codec = optionCodec(config, field_name, field_type);
                     try Codec.validate(bytes[1..]);
                     return;
                 }
@@ -87,10 +87,10 @@ pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
 
         pub fn deinit(allocator: std.mem.Allocator, value: *T) void {
             const active = std.meta.activeTag(value.*);
-            inline for (fields) |field| {
-                if (active == @field(Tag, field.name)) {
-                    const Codec = optionCodec(config, field.name, field.type);
-                    codec.deinitOwned(Codec, allocator, &@field(value, field.name));
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                if (active == @field(Tag, field_name)) {
+                    const Codec = optionCodec(config, field_name, field_type);
+                    codec.deinitOwned(Codec, allocator, &@field(value, field_name));
                     return;
                 }
             }
@@ -104,8 +104,8 @@ pub fn CompatibleUnion(comptime T: type, comptime config: anytype) type {
         fn validateSelector(bytes: []const u8) Error!u8 {
             if (bytes.len == 0) return error.InvalidByteLength;
             const selector = bytes[0];
-            inline for (fields) |field| {
-                if (selector == selectorOf(@field(config, field.name))) return selector;
+            inline for (info.field_names) |field_name| {
+                if (selector == selectorOf(@field(config, field_name))) return selector;
             }
             return error.InvalidUnionSelector;
         }
@@ -148,36 +148,43 @@ fn validateSchema(comptime T: type, comptime config: anytype) void {
         else => @compileError("SSZ CompatibleUnion requires a Zig union(enum)"),
     };
     if (union_info.tag_type == null) @compileError("SSZ CompatibleUnion requires a tagged Zig union");
-    if (union_info.fields.len == 0) @compileError("SSZ CompatibleUnion requires at least one option");
+    if (union_info.field_names.len == 0) @compileError("SSZ CompatibleUnion requires at least one option");
 
-    const config_fields = switch (@typeInfo(@TypeOf(config))) {
-        .@"struct" => |value| value.fields,
+    const config_info = switch (@typeInfo(@TypeOf(config))) {
+        .@"struct" => |value| value,
         else => @compileError("SSZ CompatibleUnion config must be a struct"),
     };
-    if (config_fields.len != union_info.fields.len) {
+    if (config_info.field_names.len != union_info.field_names.len) {
         @compileError("SSZ CompatibleUnion requires one config entry per union field");
     }
 
-    inline for (config_fields) |entry| {
-        if (!@hasField(T, entry.name)) @compileError("unknown SSZ CompatibleUnion option: " ++ entry.name);
-        validateEntry(@field(config, entry.name));
+    inline for (config_info.field_names) |entry_name| {
+        if (!@hasField(T, entry_name)) @compileError("unknown SSZ CompatibleUnion option: " ++ entry_name);
+        validateEntry(@field(config, entry_name));
     }
 
-    inline for (union_info.fields, 0..) |field, index| {
-        if (!@hasField(@TypeOf(config), field.name)) {
-            @compileError("missing SSZ CompatibleUnion option: " ++ field.name);
+    inline for (
+        union_info.field_names,
+        union_info.field_types,
+        0..,
+    ) |field_name, field_type, index| {
+        if (!@hasField(@TypeOf(config), field_name)) {
+            @compileError("missing SSZ CompatibleUnion option: " ++ field_name);
         }
-        const Codec = optionCodec(config, field.name, field.type);
+        const Codec = optionCodec(config, field_name, field_type);
         codec.assertCodec(Codec);
-        if (Codec.Value != field.type) {
-            @compileError("SSZ CompatibleUnion codec Value does not match option field: " ++ field.name);
+        if (Codec.Value != field_type) {
+            @compileError("SSZ CompatibleUnion codec Value does not match option field: " ++ field_name);
         }
 
-        inline for (union_info.fields[index + 1 ..]) |later| {
-            if (selectorOf(@field(config, field.name)) == selectorOf(@field(config, later.name))) {
+        inline for (
+            union_info.field_names[index + 1 ..],
+            union_info.field_types[index + 1 ..],
+        ) |later_name, later_type| {
+            if (selectorOf(@field(config, field_name)) == selectorOf(@field(config, later_name))) {
                 @compileError("SSZ CompatibleUnion selectors must be unique");
             }
-            if (!compatibility.compatible(Codec, optionCodec(config, later.name, later.type))) {
+            if (!compatibility.compatible(Codec, optionCodec(config, later_name, later_type))) {
                 @compileError("SSZ CompatibleUnion options must have compatible Merkleization");
             }
         }
@@ -185,16 +192,16 @@ fn validateSchema(comptime T: type, comptime config: anytype) void {
 }
 
 fn validateEntry(comptime entry: anytype) void {
-    const fields = switch (@typeInfo(@TypeOf(entry))) {
-        .@"struct" => |value| value.fields,
+    const entry_info = switch (@typeInfo(@TypeOf(entry))) {
+        .@"struct" => |value| value,
         else => @compileError("SSZ CompatibleUnion entries must be structs"),
     };
     if (!@hasField(@TypeOf(entry), "selector")) {
         @compileError("SSZ CompatibleUnion entry is missing selector");
     }
-    inline for (fields) |field| {
-        if (!std.mem.eql(u8, field.name, "selector") and !std.mem.eql(u8, field.name, "codec")) {
-            @compileError("unknown SSZ CompatibleUnion entry field: " ++ field.name);
+    inline for (entry_info.field_names) |field_name| {
+        if (!std.mem.eql(u8, field_name, "selector") and !std.mem.eql(u8, field_name, "codec")) {
+            @compileError("unknown SSZ CompatibleUnion entry field: " ++ field_name);
         }
     }
     if (@hasField(@TypeOf(entry), "codec") and @TypeOf(entry.codec) != type) {
@@ -220,9 +227,9 @@ fn optionCodec(comptime config: anytype, comptime name: []const u8, comptime T: 
     return if (@hasField(@TypeOf(entry), "codec")) entry.codec else container.codecFor(T);
 }
 
-fn hasAllocatingOptions(comptime fields: anytype, comptime config: anytype) bool {
-    inline for (fields) |field| {
-        if (optionCodec(config, field.name, field.type).requires_allocator) return true;
+fn hasAllocatingOptions(comptime info: std.lang.Type.Union, comptime config: anytype) bool {
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (optionCodec(config, field_name, field_type).requires_allocator) return true;
     }
     return false;
 }

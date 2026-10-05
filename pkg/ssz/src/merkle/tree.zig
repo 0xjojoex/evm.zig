@@ -34,7 +34,7 @@ pub const TreePath = struct {
         if (self.depth >= 256) return null;
         const parent = self.parent orelse return 1;
         const parent_index = parent.generalizedIndex() orelse return null;
-        return (parent_index << 1) | @intFromEnum(self.direction.?);
+        return (parent_index << 1) | @backingInt(self.direction.?);
     }
 
     /// Iterate directions from the current node back toward the root.
@@ -80,7 +80,7 @@ pub fn visitorType(comptime VisitorPointer: type) type {
         .pointer => |value| value,
         else => @compileError("SSZ tree visitor must be passed by pointer"),
     };
-    if (pointer.size != .one or pointer.is_const) {
+    if (pointer.size != .one or pointer.attrs.@"const") {
         @compileError("SSZ tree visitor must be a mutable single-item pointer");
     }
     return pointer.child;

@@ -1888,6 +1888,15 @@ fn addNativeSecp256k1(module: *std.Build.Module, dependency: ?*std.Build.Depende
     module.link_libc = true;
     module.addIncludePath(dep.path("include"));
     module.addIncludePath(dep.path("src"));
+    const b = module.owner;
+    // Zig 0.17 removed `@cImport`; translate the bindings' header in the build.
+    const bindings = b.addTranslateC(.{
+        .root_source_file = b.path("src/crypto/libsecp256k1.h"),
+        .target = target,
+        .optimize = module.optimize.?,
+    });
+    bindings.addIncludePath(dep.path("include"));
+    module.addImport("libsecp256k1_c", bindings.createModule());
     module.addCSourceFile(.{ .file = dep.path("src/secp256k1.c"), .flags = flags });
     module.addCSourceFile(.{ .file = dep.path("src/precomputed_ecmult.c"), .flags = flags });
     module.addCSourceFile(.{ .file = dep.path("src/precomputed_ecmult_gen.c"), .flags = flags });
@@ -1901,6 +1910,15 @@ fn addPrecompileNative(
     module.link_libc = true;
     module.link_libcpp = true;
     module.addIncludePath(b.path("src/precompile"));
+    // Zig 0.17 removed `@cImport`; translate each binding header in the build.
+    for ([_][]const u8{ "bn254", "bls12", "kzg" }) |name| {
+        const bindings = b.addTranslateC(.{
+            .root_source_file = b.path(b.fmt("src/precompile/{s}.h", .{name})),
+            .target = module.resolved_target.?,
+            .optimize = module.optimize.?,
+        });
+        module.addImport(b.fmt("{s}_native", .{name}), bindings.createModule());
+    }
     module.addObject(deps.object);
     module.linkLibrary(deps.blst_lib);
 }
@@ -1975,7 +1993,10 @@ fn buildBlstLibrary(
         .aarch64, .x86_64 => {
             const blst_flags = &[_][]const u8{ "-O2", "-ffreestanding", "-D__BLST_PORTABLE__" };
             module.addCSourceFile(.{ .file = blst_dep.path("src/server.c"), .flags = blst_flags });
-            module.addAssemblyFile(blst_dep.path("build/assembly.S"));
+            // Preprocess the assembly with the C flags: Zig 0.17 forwards target
+            // CPU features (`__ADX__`) to `.S` files, which would otherwise emit
+            // only the mulx entry points while portable C calls the generic ones.
+            module.addCSourceFile(.{ .file = blst_dep.path("build/assembly.S"), .flags = blst_flags });
         },
         else => {
             const blst_flags = &[_][]const u8{ "-O2", "-ffreestanding", "-D__BLST_PORTABLE__", "-D__BLST_NO_ASM__" };

@@ -325,7 +325,7 @@ pub const Recorder = struct {
     }
 
     fn closeCheckpoint(self: *Recorder, event: trace.Checkpoint, reverted: bool) !void {
-        const marker = self.checkpoints.getLastOrNull() orelse return error.UnmatchedCheckpoint;
+        const marker = self.checkpoints.last() orelse return error.UnmatchedCheckpoint;
         if (marker.depth != event.depth or
             marker.journal_len != event.journal_len or
             marker.logs_len != event.logs_len)

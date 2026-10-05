@@ -40,12 +40,12 @@ const Row = struct {
 };
 
 fn row(values: anytype) Row {
-    const fields = std.meta.fields(Row);
-    comptime std.debug.assert(std.meta.fields(@TypeOf(values)).len == fields.len);
+    const field_names = @typeInfo(Row).@"struct".field_names;
+    comptime std.debug.assert(values.len == field_names.len);
 
     var result: Row = undefined;
-    inline for (fields, 0..) |field, i| {
-        @field(result, field.name) = values[i];
+    inline for (field_names, 0..) |field_name, i| {
+        @field(result, field_name) = values[i];
     }
     return result;
 }
@@ -92,9 +92,9 @@ fn actual(comptime revision: Revision) Row {
     const zero = [_]u8{0};
     return .{
         .revision = revision,
-        .balance_static_gas = spec.instruction.entry(@intFromEnum(Opcode.BALANCE)).info.static_gas,
+        .balance_static_gas = spec.instruction.entry(@backingInt(Opcode.BALANCE)).info.static_gas,
         .cold_account_surcharge = spec.call.cold_account_access_gas,
-        .sload_static_gas = spec.instruction.entry(@intFromEnum(Opcode.SLOAD)).info.static_gas,
+        .sload_static_gas = spec.instruction.entry(@backingInt(Opcode.SLOAD)).info.static_gas,
         .cold_sload_surcharge = spec.storage.sload_cold_access_gas,
         .sstore_set_cost = spec.storage.sstoreGas(.added).cost,
         .sstore_clear_refund = spec.storage.sstoreGas(.deleted).refund,
@@ -114,9 +114,9 @@ test "every revision charges its pinned gas parameters" {
     comptime std.debug.assert(table.len == std.enums.values(Revision).len);
     inline for (table) |expected| {
         const got = actual(expected.revision);
-        inline for (std.meta.fields(Row)[1..]) |field| {
-            std.testing.expectEqual(@field(expected, field.name), @field(got, field.name)) catch |err| {
-                std.debug.print("{s}: field '{s}' diverged\n", .{ @tagName(expected.revision), field.name });
+        inline for (@typeInfo(Row).@"struct".field_names[1..]) |field_name| {
+            std.testing.expectEqual(@field(expected, field_name), @field(got, field_name)) catch |err| {
+                std.debug.print("{s}: field '{s}' diverged\n", .{ @tagName(expected.revision), field_name });
                 return err;
             };
         }

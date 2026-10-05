@@ -279,7 +279,7 @@ fn hashContainer(
     value: Codec.Value,
 ) Walker.WalkError!Root {
     const source = ContainerSource(Walker, Codec){ .walker = walker, .value = &value };
-    return walker.merkleizeSource(source, @typeInfo(Codec.Value).@"struct".fields.len, path);
+    return walker.merkleizeSource(source, @typeInfo(Codec.Value).@"struct".field_names.len, path);
 }
 
 fn hashProgressiveContainer(
@@ -305,14 +305,15 @@ fn ProgressiveContainerSource(comptime Walker: type, comptime Codec: type) type 
         }
 
         pub fn leaf(self: @This(), index: usize, path: *const TreePath) Walker.WalkError!Root {
-            const fields = @typeInfo(Codec.Value).@"struct".fields;
+            const info = @typeInfo(Codec.Value).@"struct";
             comptime var field_index: usize = 0;
             inline for (Codec.active_fields, 0..) |active, position| {
                 if (index == position) {
                     if (!active) return self.walker.leaf(path, merkle.zero);
-                    const field = fields[field_index];
-                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field.name, field.type);
-                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field.name));
+                    const field_name = info.field_names[field_index];
+                    const field_type = info.field_types[field_index];
+                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field_name, field_type);
+                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field_name));
                 }
                 if (active) field_index += 1;
             }
@@ -332,17 +333,17 @@ fn hashUnion(
         return hashOptionalUnion(Walker, walker, path, Codec, value);
     }
 
-    const fields = @typeInfo(Codec.Value).@"union".fields;
-    const Tag = @typeInfo(Codec.Value).@"union".tag_type.?;
+    const info = @typeInfo(Codec.Value).@"union";
+    const Tag = info.tag_type.?;
     const active = std.meta.activeTag(value);
-    inline for (fields, 0..) |field, selector| {
-        if (active == @field(Tag, field.name)) {
-            const OptionCodec = Codec.OptionCodec(field.name, field.type);
+    inline for (info.field_names, info.field_types, 0..) |field_name, field_type, selector| {
+        if (active == @field(Tag, field_name)) {
+            const OptionCodec = Codec.OptionCodec(field_name, field_type);
             var value_path = path.child(.left);
             const root = if (OptionCodec == union_codec.None)
                 try walker.leaf(&value_path, merkle.zero)
             else
-                try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field.name));
+                try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field_name));
             return walker.mixInSelector(path, root, @intCast(selector));
         }
     }
@@ -371,15 +372,15 @@ fn hashCompatibleUnion(
     comptime Codec: type,
     value: Codec.Value,
 ) Walker.WalkError!Root {
-    const fields = @typeInfo(Codec.Value).@"union".fields;
-    const Tag = @typeInfo(Codec.Value).@"union".tag_type.?;
+    const info = @typeInfo(Codec.Value).@"union";
+    const Tag = info.tag_type.?;
     const active = std.meta.activeTag(value);
-    inline for (fields) |field| {
-        if (active == @field(Tag, field.name)) {
-            const OptionCodec = Codec.OptionCodec(field.name, field.type);
-            const selector: u8 = @intCast(@field(Codec.union_options, field.name).selector);
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (active == @field(Tag, field_name)) {
+            const OptionCodec = Codec.OptionCodec(field_name, field_type);
+            const selector: u8 = @intCast(@field(Codec.union_options, field_name).selector);
             var value_path = path.child(.left);
-            const root = try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field.name));
+            const root = try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field_name));
             return walker.mixInSelector(path, root, selector);
         }
     }
@@ -498,14 +499,19 @@ fn ContainerSource(comptime Walker: type, comptime Codec: type) type {
         value: *const Codec.Value,
 
         pub fn count(_: @This()) Walker.WalkError!usize {
-            return @typeInfo(Codec.Value).@"struct".fields.len;
+            return @typeInfo(Codec.Value).@"struct".field_names.len;
         }
 
         pub fn leaf(self: @This(), index: usize, path: *const TreePath) Walker.WalkError!Root {
-            inline for (@typeInfo(Codec.Value).@"struct".fields, 0..) |field, field_index| {
+            const info = @typeInfo(Codec.Value).@"struct";
+            inline for (
+                info.field_names,
+                info.field_types,
+                0..,
+            ) |field_name, field_type, field_index| {
                 if (index == field_index) {
-                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field.name, field.type);
-                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field.name));
+                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field_name, field_type);
+                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field_name));
                 }
             }
             unreachable;

@@ -168,25 +168,25 @@ pub fn Observer(comptime Engine: type, comptime Operations: type) type {
 
 fn comparisonStatus(candidate: anytype, canonical: anytype) Status {
     comptime assertArtifactComparisonSchema(@TypeOf(candidate), @TypeOf(canonical));
-    inline for (@typeInfo(@TypeOf(candidate)).@"struct".fields) |field| {
+    inline for (@typeInfo(@TypeOf(candidate)).@"struct".field_names) |field_name| {
         if (!artifactFieldMatches(
-            field.name,
-            @field(candidate, field.name),
-            @field(canonical, field.name),
+            field_name,
+            @field(candidate, field_name),
+            @field(canonical, field_name),
         )) return .candidate_artifact_mismatch;
     }
     return if (canonical.block_access_list_matched) .matched else .candidate_matched;
 }
 
 fn assertArtifactComparisonSchema(comptime Candidate: type, comptime Canonical: type) void {
-    for (@typeInfo(Candidate).@"struct".fields) |field| {
-        if (!@hasField(Canonical, field.name)) {
-            @compileError("candidate artifact missing from comparison: " ++ field.name);
+    for (@typeInfo(Candidate).@"struct".field_names) |field_name| {
+        if (!@hasField(Canonical, field_name)) {
+            @compileError("candidate artifact missing from comparison: " ++ field_name);
         }
     }
-    for (@typeInfo(Canonical).@"struct".fields) |field| {
-        if (!@hasField(Candidate, field.name) and !isComparisonMetadata(field.name)) {
-            @compileError("comparison field is neither an artifact nor metadata: " ++ field.name);
+    for (@typeInfo(Canonical).@"struct".field_names) |field_name| {
+        if (!@hasField(Candidate, field_name) and !isComparisonMetadata(field_name)) {
+            @compileError("comparison field is neither an artifact nor metadata: " ++ field_name);
         }
     }
 }

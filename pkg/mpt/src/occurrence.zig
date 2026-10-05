@@ -226,7 +226,7 @@ fn Context(
         }
 
         fn occurrence(self: *Self, id: OccurrenceId) *Occurrence {
-            const index = @intFromEnum(id);
+            const index = @backingInt(id);
             std.debug.assert(index < self.nodes.items.len);
             return &self.nodes.items[index];
         }
@@ -239,7 +239,7 @@ fn Context(
             dirty: bool,
         ) Allocator.Error!OccurrenceId {
             if (self.nodes.items.len > std.math.maxInt(u32)) return error.OutOfMemory;
-            const id: OccurrenceId = @enumFromInt(self.nodes.items.len);
+            const id: OccurrenceId = @fromBackingInt(@intCast(self.nodes.items.len));
             try self.nodes.append(self.allocator, .{
                 .kind = kind,
                 .parent = parent,

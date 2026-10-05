@@ -35,13 +35,19 @@ pub fn build(b: *std.Build) void {
     const evmone_libgcc = nativeEvmoneLibgcc(b, target);
     const evmz_mod = evmz_dep.module("evmz");
     evmz_mod.omit_frame_pointer = true;
+    // Zig 0.17 removed `@cImport`; translate the EVMC header in the build.
+    const evmc_translate = b.addTranslateC(.{
+        .root_source_file = b.path("src/evmc_bindings.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    evmc_translate.addIncludePath(evmone_dep.path("evmc/include"));
     const evmc_bindings_mod = b.createModule(.{
         .root_source_file = b.path("src/evmc_bindings.zig"),
         .target = target,
         .optimize = optimize,
     });
-    evmc_bindings_mod.addIncludePath(b.path("src"));
-    evmc_bindings_mod.addIncludePath(evmone_dep.path("evmc/include"));
+    evmc_bindings_mod.addImport("evmc_c", evmc_translate.createModule());
     const vm_loop_support_min = b.option(
         []const u8,
         "bench-support-min",

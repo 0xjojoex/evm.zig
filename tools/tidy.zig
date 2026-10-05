@@ -77,7 +77,7 @@ const reflective_markers = [_][]const u8{
     "refAllDecls",
     "@hasDecl",
     "@field(",
-    ".decls",
+    ".decl_names",
     "usingnamespace",
 };
 

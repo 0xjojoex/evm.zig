@@ -2,7 +2,7 @@ const std = @import("std");
 const Opcode = @import("../opcode.zig").Opcode;
 const t = @import("../t.zig");
 
-const BitSet = std.DynamicBitSetUnmanaged;
+const BitSet = std.bit_set.Dynamic;
 
 /// Marks jump destinations. `map` must already be zeroed and cover every
 /// bit of `bytes`.
@@ -36,7 +36,7 @@ pub fn markJumpDestWords(masks: []usize, bytes: []const u8) void {
 fn referenceMark(map: *BitSet, bytes: []const u8) void {
     var pc: usize = 0;
     while (pc < bytes.len) {
-        const opcode: Opcode = @enumFromInt(bytes[pc]);
+        const opcode: Opcode = @fromBackingInt(@intCast(bytes[pc]));
         if (opcode == .JUMPDEST) map.set(pc);
 
         pc = @min(bytes.len, pc + 1 + opcode.pushImmediateLen());

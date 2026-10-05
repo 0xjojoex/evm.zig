@@ -45,8 +45,7 @@ fn resultFor(arena: std.mem.Allocator, name: []const u8, summary: block_stf.Summ
     return .{
         .name = name,
         .pass = pass,
-        .@"error" = if (pass) "" else try std.fmt.allocPrint(
-            arena,
+        .@"error" = if (pass) "" else try arena.print(
             "blockchain fixture incomplete: blocks={} passed={} failed={} skipped={} ({s})",
             .{ summary.fixtures, summary.passed, summary.failed, summary.skipped, firstProblem(summary) },
         ),
@@ -54,11 +53,11 @@ fn resultFor(arena: std.mem.Allocator, name: []const u8, summary: block_stf.Summ
 }
 
 fn firstProblem(summary: block_stf.Summary) []const u8 {
-    inline for (std.meta.fields(block_stf.FailReason), 0..) |field, i| {
-        if (summary.fail_reasons[i] != 0) return field.name;
+    inline for (@typeInfo(block_stf.FailReason).@"enum".field_names, 0..) |reason_name, i| {
+        if (summary.fail_reasons[i] != 0) return reason_name;
     }
-    inline for (std.meta.fields(block_stf.SkipReason), 0..) |field, i| {
-        if (summary.skip_reasons[i] != 0) return field.name;
+    inline for (@typeInfo(block_stf.SkipReason).@"enum".field_names, 0..) |reason_name, i| {
+        if (summary.skip_reasons[i] != 0) return reason_name;
     }
     if (summary.passed == 0) return "no_blocks";
     return "inconsistent_summary";
@@ -81,7 +80,7 @@ test "blocktest rejects skipped execution" {
     try std.testing.expect(passing.pass);
 
     var skipped_summary = block_stf.Summary{ .skipped = 1 };
-    skipped_summary.skip_reasons[@intFromEnum(block_stf.SkipReason.expected_exception)] = 1;
+    skipped_summary.skip_reasons[@backingInt(block_stf.SkipReason.expected_exception)] = 1;
     const skipped = try resultFor(std.testing.allocator, "skip", skipped_summary);
     defer std.testing.allocator.free(skipped.@"error");
     try std.testing.expect(!skipped.pass);

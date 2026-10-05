@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     const fixtures = if (options.fixtures.items.len == 0) default_fixtures[0..] else options.fixtures.items;
     const engines: []const Engine = if (options.engines.items.len == 0) engine_order[0..] else options.engines.items;
     const timestamp = std.Io.Clock.real.now(init.io).nanoseconds;
-    const out_dir = options.out_dir orelse try std.fmt.allocPrint(arena, "zig-out/compare/{d}", .{timestamp});
+    const out_dir = options.out_dir orelse try arena.print("zig-out/compare/{d}", .{timestamp});
 
     try std.Io.Dir.cwd().createDirPath(init.io, out_dir);
 
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
         const fixture_name = baseName(fixture);
         for (engines) |engine| {
             const argv = try engineCommand(arena, options, fixture, engine);
-            const label = try std.fmt.allocPrint(arena, "{s}-{s}", .{ fixture_name, engineName(engine) });
+            const label = try arena.print("{s}-{s}", .{ fixture_name, engineName(engine) });
             const raw = try runCommand(init.io, arena, label, argv, out_dir);
             const row = try parseMeasurement(arena, fixture, engine, raw);
             try rows.append(arena, row);
@@ -291,18 +291,18 @@ fn engineCommand(
 
     switch (engine) {
         .evmz, .evmone_baseline, .evmone_advanced => {
-            try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Doptimize={s}", .{options.optimize}));
+            try argv.append(allocator, try allocator.print("-Doptimize={s}", .{options.optimize}));
         },
         .revm_interpreter => {},
     }
     if (engine == .evmz) {
-        try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dprofile={s}", .{options.profile}));
-        try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dnative-keccak={s}", .{options.native_keccak}));
+        try argv.append(allocator, try allocator.print("-Dprofile={s}", .{options.profile}));
+        try argv.append(allocator, try allocator.print("-Dnative-keccak={s}", .{options.native_keccak}));
         if (options.support_min) |support_min| {
-            try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dbench-support-min={s}", .{support_min}));
+            try argv.append(allocator, try allocator.print("-Dbench-support-min={s}", .{support_min}));
         }
         if (options.support_max) |support_max| {
-            try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dbench-support-max={s}", .{support_max}));
+            try argv.append(allocator, try allocator.print("-Dbench-support-max={s}", .{support_max}));
         }
     }
 
@@ -345,10 +345,10 @@ fn appendFixtureArgs(
     }
     if (num_runs) |runs| {
         try argv.append(allocator, "--num-runs");
-        try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{runs}));
+        try argv.append(allocator, try allocator.print("{d}", .{runs}));
     }
     try argv.append(allocator, "--warmup-ms");
-    try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{warmup_ms}));
+    try argv.append(allocator, try allocator.print("{d}", .{warmup_ms}));
 }
 
 fn runCommand(
@@ -396,7 +396,7 @@ fn writeText(
     suffix: []const u8,
     data: []const u8,
 ) !void {
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}.{s}", .{ out_dir, label, suffix });
+    const path = try allocator.print("{s}/{s}.{s}", .{ out_dir, label, suffix });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
 }
 
@@ -539,13 +539,13 @@ fn maxMs(values: []const f64) f64 {
 fn writeArtifacts(io: std.Io, allocator: std.mem.Allocator, rows: []const Row, out_dir: []const u8) !void {
     const csv = try renderCsv(allocator, rows);
     defer allocator.free(csv);
-    const csv_path = try std.fmt.allocPrint(allocator, "{s}/summary.csv", .{out_dir});
+    const csv_path = try allocator.print("{s}/summary.csv", .{out_dir});
     defer allocator.free(csv_path);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = csv_path, .data = csv });
 
     const json = try std.json.Stringify.valueAlloc(allocator, rows, .{ .whitespace = .indent_2 });
     defer allocator.free(json);
-    const json_path = try std.fmt.allocPrint(allocator, "{s}/summary.json", .{out_dir});
+    const json_path = try allocator.print("{s}/summary.json", .{out_dir});
     defer allocator.free(json_path);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = json_path, .data = json });
 }

@@ -175,8 +175,7 @@ fn canonicalOutcome(
     duration_nanos: u64,
 ) !Outcome {
     if (payload.len < canonical_len) return .{ .crashed = .{
-        .reason = try std.fmt.allocPrint(
-            allocator,
+        .reason = try allocator.print(
             "guest public output is {d} bytes, expected at least {d}",
             .{ payload.len, canonical_len },
         ),
@@ -447,7 +446,7 @@ fn guestHostFailureAfterKill(
 
 fn childPid(child: *const std.process.Child) ?u64 {
     const id = child.id orelse return null;
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .windows => @intFromPtr(id),
         .wasi => null,
         else => @intCast(id),
@@ -474,8 +473,8 @@ fn writePipeAll(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
 fn formatTerm(term: std.process.Child.Term, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (term) {
         .exited => |code| try writer.print("exit code {d}", .{code}),
-        .signal => |signal| try writer.print("signal {d}", .{@intFromEnum(signal)}),
-        .stopped => |signal| try writer.print("stopped signal {d}", .{@intFromEnum(signal)}),
+        .signal => |signal| try writer.print("signal {d}", .{@backingInt(signal)}),
+        .stopped => |signal| try writer.print("stopped signal {d}", .{@backingInt(signal)}),
         .unknown => |status| try writer.print("unknown status {d}", .{status}),
     }
 }
@@ -547,7 +546,7 @@ test "guest host failure names the backend phase fixture cause and process outco
         .term = .{ .exited = 137 },
         .max_rss_bytes = 4096,
     };
-    const rendered = try std.fmt.allocPrint(std.testing.allocator, "{f}", .{failure});
+    const rendered = try std.testing.allocator.print("{f}", .{failure});
     defer std.testing.allocator.free(rendered);
     try std.testing.expectEqualStrings(
         "sp1 host failed phase=response_header fixture=case-1 pid=42 " ++
@@ -557,7 +556,7 @@ test "guest host failure names the backend phase fixture cause and process outco
 }
 
 test "guest host failure diagnosis preserves an early child exit" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.SkipZigTest;
 
     const argv = [_][]const u8{"/usr/bin/false"};
     var child = try std.process.spawn(std.testing.io, .{

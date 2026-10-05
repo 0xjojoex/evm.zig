@@ -27,8 +27,8 @@ pub fn encodedSize(comptime T: type) usize {
         .@"struct" => |structure| blk: {
             validateStruct(structure);
             comptime var total: usize = 0;
-            inline for (structure.fields) |field| {
-                total += comptime encodedSize(field.type);
+            inline for (structure.field_types) |field_type| {
+                total += comptime encodedSize(field_type);
             }
             if (total > std.math.maxInt(u32)) @compileError("SSZ encoded size exceeds the 32-bit offset range");
             break :blk total;
@@ -68,18 +68,18 @@ pub fn decodeSlice(comptime T: type, bytes: []const u8) Error!T {
     return decode(T, exact);
 }
 
-fn validateInteger(comptime int: std.builtin.Type.Int) void {
+fn validateInteger(comptime int: std.lang.Type.Int) void {
     if (int.signedness != .unsigned) @compileError("SSZ integers must be unsigned");
     if (int.bits != 8 and int.bits != 16 and int.bits != 32 and int.bits != 64 and int.bits != 128 and int.bits != 256) {
         @compileError("SSZ integer width must be 8, 16, 32, 64, 128, or 256 bits");
     }
 }
 
-fn validateStruct(comptime structure: std.builtin.Type.Struct) void {
+fn validateStruct(comptime structure: std.lang.Type.Struct) void {
     if (structure.is_tuple) @compileError("SSZ fixed structs cannot be tuples");
-    if (structure.fields.len == 0) @compileError("SSZ containers cannot be empty");
-    inline for (structure.fields) |field| {
-        if (field.is_comptime) @compileError("SSZ fixed structs cannot contain comptime fields");
+    if (structure.field_names.len == 0) @compileError("SSZ containers cannot be empty");
+    inline for (structure.field_attrs) |field_attrs| {
+        if (field_attrs.@"comptime") @compileError("SSZ fixed structs cannot contain comptime fields");
     }
 }
 
@@ -102,12 +102,12 @@ fn encodeValue(comptime T: type, out: []u8, value: T) void {
         },
         .@"struct" => |structure| {
             comptime var offset: usize = 0;
-            inline for (structure.fields) |field| {
-                const field_size = comptime encodedSize(field.type);
+            inline for (structure.field_names, structure.field_types) |field_name, field_type| {
+                const field_size = comptime encodedSize(field_type);
                 encodeValue(
-                    field.type,
+                    field_type,
                     out[offset..][0..field_size],
-                    @field(value, field.name),
+                    @field(value, field_name),
                 );
                 offset += field_size;
             }
@@ -141,10 +141,10 @@ fn decodeValue(comptime T: type, bytes: []const u8) Error!T {
         .@"struct" => |structure| blk: {
             var value: T = undefined;
             comptime var offset: usize = 0;
-            inline for (structure.fields) |field| {
-                const field_size = comptime encodedSize(field.type);
-                @field(value, field.name) = try decodeValue(
-                    field.type,
+            inline for (structure.field_names, structure.field_types) |field_name, field_type| {
+                const field_size = comptime encodedSize(field_type);
+                @field(value, field_name) = try decodeValue(
+                    field_type,
                     bytes[offset..][0..field_size],
                 );
                 offset += field_size;

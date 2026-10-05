@@ -62,22 +62,22 @@ pub const HostCounters = struct {
 
     pub fn total(self: HostCounters) u64 {
         var sum: u64 = 0;
-        inline for (std.meta.fields(HostCounters)) |field| {
-            sum += @field(self, field.name);
+        inline for (@typeInfo(HostCounters).@"struct".field_names) |field_name| {
+            sum += @field(self, field_name);
         }
         return sum;
     }
 
     pub fn add(self: *HostCounters, other: HostCounters) void {
-        inline for (std.meta.fields(HostCounters)) |field| {
-            @field(self, field.name) += @field(other, field.name);
+        inline for (@typeInfo(HostCounters).@"struct".field_names) |field_name| {
+            @field(self, field_name) += @field(other, field_name);
         }
     }
 
     pub fn print(self: HostCounters, label: []const u8) void {
-        inline for (std.meta.fields(HostCounters)) |field| {
-            const value = @field(self, field.name);
-            if (value != 0) std.debug.print("{s}.{s}={d}\n", .{ label, field.name, value });
+        inline for (@typeInfo(HostCounters).@"struct".field_names) |field_name| {
+            const value = @field(self, field_name);
+            if (value != 0) std.debug.print("{s}.{s}={d}\n", .{ label, field_name, value });
         }
     }
 };
@@ -367,15 +367,15 @@ pub const parseNonZeroUsize = cli.parseNonZeroUsize;
 pub const parseUsize = cli.parseUsize;
 
 pub fn parseHostProfile(value: []const u8) ?HostProfile {
-    inline for (std.meta.fields(HostProfile)) |field| {
-        if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(HostProfile)) |tag| {
+        if (std.mem.eql(u8, value, @tagName(tag))) return tag;
     }
     return null;
 }
 
 pub fn parseSpec(value: []const u8) ?evmz.eth.Revision {
-    inline for (std.meta.fields(evmz.eth.Revision)) |field| {
-        if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(evmz.eth.Revision)) |tag| {
+        if (std.mem.eql(u8, value, @tagName(tag))) return tag;
     }
     if (std.mem.eql(u8, value, "latest")) return .latest;
     return null;

@@ -2,7 +2,7 @@
     .name = .evmz_eest,
     .version = "0.0.0",
     .fingerprint = 0x71c78220c019d8dc, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .evmz = .{
             .path = "..",

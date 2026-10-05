@@ -34,17 +34,17 @@ pub const Summary = struct {
     passed: usize = 0,
     failed: usize = 0,
     skipped: usize = 0,
-    skip_reasons: [std.meta.fields(SkipReason).len]usize = @splat(0),
-    fail_reasons: [std.meta.fields(FailReason).len]usize = @splat(0),
+    skip_reasons: [std.enums.values(SkipReason).len]usize = @splat(0),
+    fail_reasons: [std.enums.values(FailReason).len]usize = @splat(0),
 
     fn countSkip(self: *Summary, reason: SkipReason) void {
         self.skipped += 1;
-        self.skip_reasons[@intFromEnum(reason)] += 1;
+        self.skip_reasons[@backingInt(reason)] += 1;
     }
 
     fn countFail(self: *Summary, reason: FailReason) void {
         self.failed += 1;
-        self.fail_reasons[@intFromEnum(reason)] += 1;
+        self.fail_reasons[@backingInt(reason)] += 1;
     }
 };
 
@@ -329,7 +329,7 @@ test "direct blockchain case does not consume Engine fixture shapes" {
     const summary = try runCase(std.testing.allocator, parsed.value);
     try std.testing.expectEqual(@as(usize, 0), summary.fixtures);
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.malformed_fixture)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.malformed_fixture)]);
 }
 
 test "expected block exception requires the matching typed status" {

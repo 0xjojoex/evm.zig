@@ -10,7 +10,7 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
         namespace: u8,
 
         pub inline fn trieKey(self: @This(), key: DomainKey) mpt.FixedKey {
-            const input = [_]u8{ self.namespace, @intFromEnum(key) };
+            const input = [_]u8{ self.namespace, @backingInt(key) };
             return mpt.StdKeccak256Context.keccak256(.{}, &input);
         }
     };

@@ -196,7 +196,7 @@ test "invalid raw signature is rejected without expectation metadata" {
     const r = try tx.nextBytesExact(32);
     const offset = @intFromPtr(r.ptr) - @intFromPtr(raw.ptr);
     @memset(raw[offset..][0..32], 0xff);
-    const encoded = try std.fmt.allocPrint(std.testing.allocator, "0x{x}", .{raw});
+    const encoded = try std.testing.allocator.print("0x{x}", .{raw});
     defer std.testing.allocator.free(encoded);
     // Replace an existing value without transferring ownership to parsed JSON.
     entry.getPtr("rlp").?.* = .{ .string = encoded };

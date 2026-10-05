@@ -62,7 +62,7 @@ pub const Summary = struct {
     failed: usize = 0,
     skipped: usize = 0,
     oracle_compared: usize = 0,
-    fail_reasons: [std.meta.fields(FailReason).len]usize = @splat(0),
+    fail_reasons: [std.enums.values(FailReason).len]usize = @splat(0),
 
     pub fn add(self: *Summary, other: Summary) void {
         self.files += other.files;
@@ -76,7 +76,7 @@ pub const Summary = struct {
 
     fn countFail(self: *Summary, reason: FailReason) void {
         self.failed += 1;
-        self.fail_reasons[@intFromEnum(reason)] += 1;
+        self.fail_reasons[@backingInt(reason)] += 1;
     }
 };
 
@@ -564,7 +564,7 @@ test "stateless zkevm runner compares canonical SSZ bytes" {
     defer std.testing.allocator.free(input_hex);
     const output_hex = try hexAlloc(std.testing.allocator, output);
     defer std.testing.allocator.free(output_hex);
-    const fixture = try std.fmt.allocPrint(std.testing.allocator,
+    const fixture = try std.testing.allocator.print(
         \\{{"smoke":{{"blocks":[{{"statelessInputBytes":"0x{s}","statelessOutputBytes":"0x{s}"}}]}}}}
     , .{ input_hex, output_hex });
     defer std.testing.allocator.free(fixture);

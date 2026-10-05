@@ -32,13 +32,13 @@ pub fn report(comptime T: type, comptime options: Options) []const u8 {
         const storage = size * 8 / unit;
 
         // Auto-layout structs need not follow declaration order.
-        var order: [info.fields.len]usize = undefined;
+        var order: [info.field_names.len]usize = undefined;
         var len: usize = 0;
-        for (info.fields, 0..) |field, index| {
-            if (field.is_comptime) continue;
+        for (info.field_names, info.field_attrs, 0..) |field_name, field_attrs, index| {
+            if (field_attrs.@"comptime") continue;
             var pos = len;
             while (pos > 0 and
-                @bitOffsetOf(T, info.fields[order[pos - 1]].name) > @bitOffsetOf(T, field.name))
+                @bitOffsetOf(T, info.field_names[order[pos - 1]]) > @bitOffsetOf(T, field_name))
             {
                 order[pos] = order[pos - 1];
                 pos -= 1;
@@ -60,9 +60,10 @@ pub fn report(comptime T: type, comptime options: Options) []const u8 {
         var cursor: usize = 0;
         var field_storage: usize = 0;
         for (order[0..len]) |index| {
-            const field = info.fields[index];
-            const start = @bitOffsetOf(T, field.name) / unit;
-            const width = if (packed_layout) @bitSizeOf(field.type) else @sizeOf(field.type);
+            const field_name = info.field_names[index];
+            const FieldType = info.field_types[index];
+            const start = @bitOffsetOf(T, field_name) / unit;
+            const width = if (packed_layout) @bitSizeOf(FieldType) else @sizeOf(FieldType);
             if (width > 0 and start > cursor) {
                 text = text ++ gap(cursor, start, "<padding>");
             }
@@ -72,13 +73,15 @@ pub fn report(comptime T: type, comptime options: Options) []const u8 {
             text = text ++ if (packed_layout)
                 "    -"
             else
-                std.fmt.comptimePrint("{d:>5}", .{field.alignment orelse @alignOf(field.type)});
-            text = text ++ std.fmt.comptimePrint("  {s}: {s}", .{ field.name, @typeName(field.type) });
+                std.fmt.comptimePrint("{d:>5}", .{
+                    info.field_attrs[index].@"align" orelse @alignOf(FieldType),
+                });
+            text = text ++ std.fmt.comptimePrint("  {s}: {s}", .{ field_name, @typeName(FieldType) });
             if (!packed_layout) {
-                switch (@typeInfo(field.type)) {
+                switch (@typeInfo(FieldType)) {
                     .optional => |optional| {
                         text = text ++ std.fmt.comptimePrint(" [optional growth: {d} B]", .{
-                            @sizeOf(field.type) - @sizeOf(optional.child),
+                            @sizeOf(FieldType) - @sizeOf(optional.child),
                         });
                     },
                     .pointer => text = text ++ " [pointee excluded]",

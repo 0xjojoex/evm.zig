@@ -42,7 +42,7 @@ pub const Names = struct {
 
         var index: usize = 1;
         while (true) : (index += 1) {
-            const suffix = if (index == 1) "" else try std.fmt.allocPrint(self.allocator, "__{d}", .{index});
+            const suffix = if (index == 1) "" else try self.allocator.print("__{d}", .{index});
             defer if (index != 1) self.allocator.free(suffix);
 
             const candidate = try truncateFixtureName(self.allocator, base, suffix);
@@ -151,7 +151,7 @@ fn outputPath(
     target: executor.Target,
     name: []const u8,
 ) ![]u8 {
-    const file_name = try std.fmt.allocPrint(allocator, "{s}.json", .{name});
+    const file_name = try allocator.print("{s}.json", .{name});
     defer allocator.free(file_name);
     return std.fs.path.join(allocator, &.{ output_folder, target.label(), file_name });
 }
@@ -179,7 +179,7 @@ pub fn relativeSourcePath(allocator: std.mem.Allocator, path: []const u8, roots:
 fn fixtureName(allocator: std.mem.Allocator, test_name: []const u8, block_index: usize) ![]u8 {
     const sanitized = try sanitizeFixtureName(allocator, test_name);
     defer allocator.free(sanitized);
-    return std.fmt.allocPrint(allocator, "eest__{s}__block{d}", .{ sanitized, block_index });
+    return allocator.print("eest__{s}__block{d}", .{ sanitized, block_index });
 }
 
 /// Collapses runs of path and parameter punctuation into single underscores so
@@ -207,11 +207,11 @@ fn sanitizeFixtureName(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
 fn truncateFixtureName(allocator: std.mem.Allocator, base: []const u8, suffix: []const u8) ![]u8 {
     const base_max_len = safe_file_stem_max_len -| suffix.len;
     if (base.len <= base_max_len) {
-        return std.fmt.allocPrint(allocator, "{s}{s}", .{ base, suffix });
+        return allocator.print("{s}{s}", .{ base, suffix });
     }
     var end = base_max_len;
     while (end > 0 and base[end - 1] == '_') end -= 1;
-    return std.fmt.allocPrint(allocator, "{s}{s}", .{ base[0..end], suffix });
+    return allocator.print("{s}{s}", .{ base[0..end], suffix });
 }
 
 fn hexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -237,8 +237,7 @@ fn rfc3339TimestampAlloc(allocator: std.mem.Allocator, timestamp_nanos: u128) ![
     const year_day = day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const time = epoch.getDaySeconds();
-    return std.fmt.allocPrint(
-        allocator,
+    return allocator.print(
         "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>9}Z",
         .{
             year_day.year,

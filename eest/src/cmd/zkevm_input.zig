@@ -140,7 +140,7 @@ test "selects stateless input from fixture JSON" {
     defer std.testing.allocator.free(input_hex);
     const output_hex = try hexAlloc(std.testing.allocator, output);
     defer std.testing.allocator.free(output_hex);
-    const fixture = try std.fmt.allocPrint(std.testing.allocator,
+    const fixture = try std.testing.allocator.print(
         \\{{"smoke":{{"blocks":[{{"statelessInputBytes":"0x{s}","statelessOutputBytes":"0x{s}"}}]}}}}
     , .{ input_hex, output_hex });
     defer std.testing.allocator.free(fixture);

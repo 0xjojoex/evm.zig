@@ -201,7 +201,7 @@ pub const CallArena = struct {
         try self.ensureBytes(event.input.len);
         try self.ensureActiveRows(1);
 
-        const parent_index = self.active_rows.getLastOrNull();
+        const parent_index = self.active_rows.last();
         const child_ordinal = if (parent_index) |parent| blk: {
             const parent_row = &self.rows.items[parent];
             const ordinal = parent_row.construction_state & Row.child_count_mask;
@@ -242,7 +242,7 @@ pub const CallArena = struct {
     /// Finish is infallible once `reserveOutput` has succeeded for this output.
     pub fn finishReserved(self: *CallArena, token: Token, event: Finish) void {
         std.debug.assert(self.phase == .recording);
-        std.debug.assert(self.active_rows.getLastOrNull() == token.row_index);
+        std.debug.assert(self.active_rows.last() == token.row_index);
         std.debug.assert(self.bytes.capacity - self.bytes.items.len >= event.output.len);
 
         const output_start = std.math.cast(u32, self.bytes.items.len) orelse unreachable;

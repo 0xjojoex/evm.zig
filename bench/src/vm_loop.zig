@@ -424,8 +424,8 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
 }
 
 fn parseEngine(value: []const u8) ?Engine {
-    inline for (std.meta.fields(Engine)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(Engine)) |tag| {
+        if (tagNameMatches(value, @tagName(tag))) return tag;
     }
     return null;
 }
@@ -470,7 +470,7 @@ fn tagNameMatches(value: []const u8, tag_name: []const u8) bool {
 }
 
 fn fixturePath(allocator: std.mem.Allocator, fixture_dir: []const u8, name: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ fixture_dir, name });
+    return allocator.print("{s}/{s}", .{ fixture_dir, name });
 }
 
 fn readOptionalFixtureText(
@@ -510,16 +510,16 @@ fn defaultGasLimit() u64 {
 }
 
 fn parseBuildSpec(comptime value: []const u8) evmz.eth.Revision {
-    inline for (std.meta.fields(evmz.eth.Revision)) |field| {
-        if (comptime tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(evmz.eth.Revision)) |tag| {
+        if (comptime tagNameMatches(value, @tagName(tag))) return tag;
     }
     if (comptime std.mem.eql(u8, value, "latest")) return .latest;
     @compileError("invalid VM-loop support revision: " ++ value);
 }
 
 fn compiledSupportContains(revision: evmz.eth.Revision) bool {
-    return @intFromEnum(revision) >= @intFromEnum(support_min) and
-        @intFromEnum(revision) <= @intFromEnum(support_max);
+    return @backingInt(revision) >= @backingInt(support_min) and
+        @backingInt(revision) <= @backingInt(support_max);
 }
 
 fn deployRuntime(

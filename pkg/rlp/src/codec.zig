@@ -520,10 +520,11 @@ pub fn Struct(comptime T: type, comptime overrides: anytype) type {
 
         pub fn decodeInto(decoder: anytype, value: *T) DecodeError!void {
             var fields = try decoder.nextList();
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const FieldCodec = fieldCodec(overrides, field.name, field.type);
+            const info = @typeInfo(T).@"struct";
+            inline for (info.field_names, info.field_types) |field_name, field_type| {
+                const FieldCodec = fieldCodec(overrides, field_name, field_type);
                 if (FieldCodec.requires_allocator) unreachable;
-                try decodeIntoValue(FieldCodec, &fields, &@field(value.*, field.name));
+                try decodeIntoValue(FieldCodec, &fields, &@field(value.*, field_name));
             }
             try fields.expectDone();
         }
@@ -900,8 +901,8 @@ fn codecFor(comptime T: type) type {
             ArrayOf(codecFor(array.child), array.len),
         .pointer => |pointer| if (pointer.size == .slice)
             if (pointer.child == u8)
-                if (pointer.is_const) Bytes else OwnedBytes
-            else if (pointer.is_const)
+                if (pointer.attrs.@"const") Bytes else OwnedBytes
+            else if (pointer.attrs.@"const")
                 ListOf(codecFor(pointer.child))
             else
                 @compileError("RLP infers non-byte lists only from const slices")
@@ -941,8 +942,8 @@ fn normalizeValue(comptime T: type, value: anytype) T {
     }
     if (@typeInfo(T) == .@"struct" and @typeInfo(Value) == .@"struct") {
         var normalized: T = undefined;
-        inline for (@typeInfo(T).@"struct".fields) |field| {
-            @field(normalized, field.name) = @field(value, field.name);
+        inline for (@typeInfo(T).@"struct".field_names) |field_name| {
+            @field(normalized, field_name) = @field(value, field_name);
         }
         return normalized;
     }
@@ -1000,25 +1001,27 @@ fn validateStruct(comptime T: type, comptime overrides: anytype) void {
         .@"struct" => |value| value,
         else => @compileError("RLP Struct requires a Zig struct"),
     };
-    inline for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |override| {
-        if (!@hasField(T, override.name)) {
-            @compileError("unknown RLP Struct override: " ++ override.name);
+    const overrides_info = @typeInfo(@TypeOf(overrides)).@"struct";
+    inline for (overrides_info.field_names, overrides_info.field_types) |name, Override| {
+        if (!@hasField(T, name)) {
+            @compileError("unknown RLP Struct override: " ++ name);
         }
-        if (override.type != type) @compileError("RLP Struct overrides must be codec types");
+        if (Override != type) @compileError("RLP Struct overrides must be codec types");
     }
 
-    inline for (info.fields) |field| {
-        const FieldCodec = fieldCodec(overrides, field.name, field.type);
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        const FieldCodec = fieldCodec(overrides, field_name, field_type);
         assertCodec(FieldCodec);
-        if (FieldCodec.Value != field.type) {
-            @compileError("RLP field codec Value mismatch: " ++ field.name);
+        if (FieldCodec.Value != field_type) {
+            @compileError("RLP field codec Value mismatch: " ++ field_name);
         }
     }
 }
 
 fn structRequiresAllocator(comptime T: type, comptime overrides: anytype) bool {
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (fieldCodec(overrides, field.name, field.type).requires_allocator) return true;
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (fieldCodec(overrides, field_name, field_type).requires_allocator) return true;
     }
     return false;
 }
@@ -1026,11 +1029,12 @@ fn structRequiresAllocator(comptime T: type, comptime overrides: anytype) bool {
 fn structFieldsEncodedLen(comptime T: type, comptime overrides: anytype, value: anytype) EncodeError!usize {
     comptime validateStructSource(T, @TypeOf(value));
     var payload_len: usize = 0;
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        const FieldCodec = fieldCodec(overrides, field.name, field.type);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        const FieldCodec = fieldCodec(overrides, field_name, field_type);
         const field_value = switch (@typeInfo(@TypeOf(value))) {
-            .pointer => @field(value.*, field.name),
-            else => @field(value, field.name),
+            .pointer => @field(value.*, field_name),
+            else => @field(value, field_name),
         };
         payload_len = try checkedAdd(payload_len, try FieldCodec.encodedLen(field_value));
     }
@@ -1044,11 +1048,12 @@ fn encodeStructFields(
     value: anytype,
 ) EncodeError!void {
     comptime validateStructSource(T, @TypeOf(value));
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        const FieldCodec = fieldCodec(overrides, field.name, field.type);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        const FieldCodec = fieldCodec(overrides, field_name, field_type);
         const field_value = switch (@typeInfo(@TypeOf(value))) {
-            .pointer => @field(value.*, field.name),
-            else => @field(value, field.name),
+            .pointer => @field(value.*, field_name),
+            else => @field(value, field_name),
         };
         try FieldCodec.encodeTo(encoder, field_value);
     }
@@ -1067,15 +1072,16 @@ fn validateStructSource(comptime T: type, comptime Source: type) void {
         else => @compileError("RLP struct fields require a struct value or pointer"),
     };
 
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        const source_field = comptime blk: {
-            for (source_info.fields) |candidate| {
-                if (std.mem.eql(u8, field.name, candidate.name)) break :blk candidate;
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        const SourceField = comptime blk: {
+            for (source_info.field_names, source_info.field_types) |candidate, Candidate| {
+                if (std.mem.eql(u8, field_name, candidate)) break :blk Candidate;
             }
-            @compileError("RLP struct field source is missing: " ++ field.name);
+            @compileError("RLP struct field source is missing: " ++ field_name);
         };
-        if (source_field.type != field.type) {
-            @compileError("RLP struct field source type mismatch: " ++ field.name);
+        if (SourceField != field_type) {
+            @compileError("RLP struct field source type mismatch: " ++ field_name);
         }
     }
 }
@@ -1088,13 +1094,13 @@ fn decodeStructFields(
     value: *T,
     comptime index: usize,
 ) (DecodeError || Allocator.Error)!void {
-    const fields = @typeInfo(T).@"struct".fields;
-    if (index == fields.len) return;
+    const info = @typeInfo(T).@"struct";
+    if (index == info.field_names.len) return;
 
-    const field = fields[index];
-    const FieldCodec = fieldCodec(overrides, field.name, field.type);
-    @field(value, field.name) = try decodeValue(FieldCodec, allocator, decoder);
-    errdefer deinitValue(FieldCodec, allocator, &@field(value, field.name));
+    const field_name = info.field_names[index];
+    const FieldCodec = fieldCodec(overrides, field_name, info.field_types[index]);
+    @field(value, field_name) = try decodeValue(FieldCodec, allocator, decoder);
+    errdefer deinitValue(FieldCodec, allocator, &@field(value, field_name));
     try decodeStructFields(T, overrides, allocator, decoder, value, index + 1);
 }
 
@@ -1104,9 +1110,10 @@ fn deinitStruct(
     allocator: Allocator,
     value: *T,
 ) void {
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        const FieldCodec = fieldCodec(overrides, field.name, field.type);
-        deinitValue(FieldCodec, allocator, &@field(value, field.name));
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        const FieldCodec = fieldCodec(overrides, field_name, field_type);
+        deinitValue(FieldCodec, allocator, &@field(value, field_name));
     }
 }
 

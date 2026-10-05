@@ -136,7 +136,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         const DispatchTableArg = if (carry_dispatch_table) *const DispatchTable else void;
         const Handler = fn (ip: [*]const u8, sp: [*]u256, next_gas: i64, *Context, DispatchTableArg) TailStatus;
 
-        const JumpDestMaskInt = std.DynamicBitSetUnmanaged.MaskInt;
+        const JumpDestMaskInt = std.bit_set.Dynamic.MaskInt;
 
         const Context = struct {
             frame: *CallFrame,
@@ -159,7 +159,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
 
             inline fn isValidJumpTarget(self: *const Context, target: usize) bool {
                 if (target >= self.code_len) return false;
-                if (self.code_base[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
+                if (self.code_base[target] != @backingInt(Opcode.JUMPDEST)) return false;
                 const shift: std.math.Log2Int(JumpDestMaskInt) = @truncate(target);
                 return (self.jumpdest_masks[target / @bitSizeOf(JumpDestMaskInt)] & (@as(JumpDestMaskInt, 1) << shift)) != 0;
             }
@@ -291,7 +291,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         }
 
         fn BuiltinHandler(comptime opcode_byte: u8) type {
-            const opcode: Opcode = @enumFromInt(opcode_byte);
+            const opcode: Opcode = @fromBackingInt(@intCast(opcode_byte));
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: DispatchTableArg) TailStatus {
                     const info = spec.instruction.entry(opcode_byte).info;
@@ -1027,11 +1027,11 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: DispatchTableArg) TailStatus {
                     if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
-                    const immediate_len: usize = @intFromEnum(opcode) - @intFromEnum(Opcode.PUSH0);
+                    const immediate_len: usize = @backingInt(opcode) - @backingInt(Opcode.PUSH0);
                     // `code_base` carries Bytecode.zero_padding_len (33) trailing zero
                     // bytes, so a full-width big-endian load is always in bounds and
                     // preserves truncated-push zero-fill semantics.
-                    const Int = std.meta.Int(.unsigned, immediate_len * 8);
+                    const Int = @Int(.unsigned, immediate_len * 8);
                     const immediate_bytes: *const [immediate_len]u8 = @ptrCast(ip);
                     sp[0] = std.mem.readInt(Int, immediate_bytes, .big);
                     return tailNext(ip + immediate_len, sp + 1, gas, ctx, dispatch);
@@ -1042,7 +1042,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         fn DupHandler(comptime opcode: Opcode) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: DispatchTableArg) TailStatus {
-                    const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.DUP1) + 1;
+                    const depth = @backingInt(opcode) - @backingInt(Opcode.DUP1) + 1;
                     if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
                     sp[0] = (sp - depth)[0];
                     return tailNext(ip, sp + 1, gas, ctx, dispatch);
@@ -1053,7 +1053,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         fn SwapHandler(comptime opcode: Opcode) type {
             return struct {
                 fn run(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: DispatchTableArg) TailStatus {
-                    const depth = @intFromEnum(opcode) - @intFromEnum(Opcode.SWAP1) + 1;
+                    const depth = @backingInt(opcode) - @backingInt(Opcode.SWAP1) + 1;
                     const top = sp - 1;
                     const target = top - depth;
                     const tmp = target[0];
@@ -1273,8 +1273,8 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             const entry = comptime spec.instruction.entry(opcode_byte);
             if (!entry.defined() or before_len < entry.info.stack_in) return 0;
 
-            if (opcode_byte >= @intFromEnum(Opcode.DUP1) and
-                opcode_byte <= @intFromEnum(Opcode.DUP16))
+            if (opcode_byte >= @backingInt(Opcode.DUP1) and
+                opcode_byte <= @backingInt(Opcode.DUP16))
             {
                 return before_len;
             }
@@ -1282,9 +1282,9 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             // These instructions encode their affected suffix in an
             // immediate byte. Fall back to a full post-stack until
             // prepared-code metadata exposes that depth.
-            if (opcode_byte == @intFromEnum(Opcode.DUPN) or
-                opcode_byte == @intFromEnum(Opcode.SWAPN) or
-                opcode_byte == @intFromEnum(Opcode.EXCHANGE))
+            if (opcode_byte == @backingInt(Opcode.DUPN) or
+                opcode_byte == @backingInt(Opcode.SWAPN) or
+                opcode_byte == @backingInt(Opcode.EXCHANGE))
             {
                 return 0;
             }
@@ -1342,21 +1342,21 @@ fn memoryRangeFromStack(
 test "captured memory plans use each opcode's destination operands" {
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 3, .size = 5 },
-        builtinMemoryWritePlan(@intFromEnum(Opcode.CALLDATACOPY), &.{ 5, 11, 3 }).?,
+        builtinMemoryWritePlan(@backingInt(Opcode.CALLDATACOPY), &.{ 5, 11, 3 }).?,
     );
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 7, .size = 9 },
-        builtinMemoryWritePlan(@intFromEnum(Opcode.EXTCODECOPY), &.{ 9, 11, 7, 13 }).?,
+        builtinMemoryWritePlan(@backingInt(Opcode.EXTCODECOPY), &.{ 9, 11, 7, 13 }).?,
     );
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 17, .size = 19 },
-        builtinMemoryWritePlan(@intFromEnum(Opcode.CALL), &.{ 19, 17, 0, 0, 0, 0x1234, 100_000 }).?,
+        builtinMemoryWritePlan(@backingInt(Opcode.CALL), &.{ 19, 17, 0, 0, 0, 0x1234, 100_000 }).?,
     );
     try std.testing.expectEqual(
         trace.tape.MemoryWritePlan{ .offset = 23, .size = 29 },
-        builtinMemoryWritePlan(@intFromEnum(Opcode.STATICCALL), &.{ 29, 23, 0, 0, 0x1234, 100_000 }).?,
+        builtinMemoryWritePlan(@backingInt(Opcode.STATICCALL), &.{ 29, 23, 0, 0, 0x1234, 100_000 }).?,
     );
-    try std.testing.expect(builtinMemoryWritePlan(@intFromEnum(Opcode.MLOAD), &.{0}) == null);
+    try std.testing.expect(builtinMemoryWritePlan(@backingInt(Opcode.MLOAD), &.{0}) == null);
 }
 
 test {

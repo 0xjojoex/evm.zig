@@ -48,7 +48,7 @@ const Checker = struct {
     }
 
     fn failFmt(checker: *Checker, comptime format: []const u8, args: anytype) error{InvalidElf} {
-        checker.failure = std.fmt.allocPrint(checker.allocator, format, args) catch "invalid ELF";
+        checker.failure = checker.allocator.print(format, args) catch "invalid ELF";
         return error.InvalidElf;
     }
 
