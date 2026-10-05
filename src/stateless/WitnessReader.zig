@@ -318,12 +318,12 @@ test "witness reader reads storage through account storage root" {
     try std.testing.expectEqual(@as(u256, 0), try state_reader.getStorage(target, 4));
 
     // The catalog authenticates at build time and never reconsults `state_root`.
-    witness.state_root = [_]u8{0xaa} ** 32;
+    witness.state_root = @splat(0xaa);
     try std.testing.expectEqual(@as(u256, 42), try state_reader.getStorage(target, 3));
 }
 
 test "witness reader rejects a root the witness does not contain" {
-    const missing_root = [_]u8{0xab} ** 32;
+    const missing_root: [32]u8 = @splat(0xab);
     try std.testing.expectError(
         error.InvalidNode,
         initFromNodes(std.testing.allocator, missing_root, &.{}, &.{}),
@@ -397,7 +397,7 @@ test "witness reader rejects missing witness nodes and code" {
     const scratch = arena.allocator();
 
     const target = address.addr(0x3000);
-    const storage_root = [_]u8{0xab} ** 32;
+    const storage_root: [32]u8 = @splat(0xab);
     const code_hash = crypto.keccak256(&.{0x5f});
     const account_value = try trie.accountValueFrom(scratch, .{
         .storage_root = storage_root,

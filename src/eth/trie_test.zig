@@ -41,8 +41,8 @@ const updateRoot = trie.updateRoot;
 const max_rlp_account: Account = .{
     .nonce = std.math.maxInt(u64),
     .balance = std.math.maxInt(u256),
-    .storage_root = [_]u8{0xff} ** 32,
-    .code_hash = [_]u8{0xff} ** 32,
+    .storage_root = @splat(0xff),
+    .code_hash = @splat(0xff),
 };
 
 fn encodeNode(allocator: Allocator, pairs: []const Pair, depth: usize) Error![]const u8 {
@@ -286,8 +286,8 @@ test "MPT account value uses typed RLP with one allocation" {
     const input: Account = .{
         .nonce = 7,
         .balance = 42,
-        .storage_root = [_]u8{0x11} ** 32,
-        .code_hash = [_]u8{0x22} ** 32,
+        .storage_root = @splat(0x11),
+        .code_hash = @splat(0x22),
     };
     var direct_buffer: [128]u8 = undefined;
     const direct = try rlp.encode(Account, &direct_buffer, &input);
@@ -731,7 +731,7 @@ test "MPT update root delete materializes hashed sibling before branch collapse"
 
     const deleted_key = [_]u8{0x10};
     const remaining_key = [_]u8{0x20};
-    var large_value = [_]u8{0xab} ** 40;
+    var large_value: [40]u8 = @splat(0xab);
     const base_pairs = [_]Pair{
         .{ .key = &deleted_key, .value = &[_]u8{0x01} },
         .{ .key = &remaining_key, .value = &large_value },
@@ -762,7 +762,7 @@ test "MPT batch inserts before deletes to avoid unnecessary sibling witness" {
     const deleted_key = [_]u8{0x10};
     const inserted_key = [_]u8{0x11};
     const preserved_key = [_]u8{0x20};
-    var large_value = [_]u8{0xab} ** 40;
+    var large_value: [40]u8 = @splat(0xab);
     const base_pairs = [_]Pair{
         .{ .key = &deleted_key, .value = &[_]u8{0x01} },
         .{ .key = &preserved_key, .value = &large_value },

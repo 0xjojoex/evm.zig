@@ -963,7 +963,7 @@ test "nested CREATE2 resets storage and enclosing REVERT restores the destinatio
             try std.testing.expectEqual(@as(usize, 0), deployed.len);
             try std.testing.expectEqual(@as(u64, 0), executor.cachedAccount(target).?.nonce);
         } else {
-            try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), deployed);
+            try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), deployed);
         }
     }
 }

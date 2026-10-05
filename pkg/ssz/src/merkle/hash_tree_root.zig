@@ -580,8 +580,8 @@ test "SSZ byte-valued custom codecs retain their encoding during Merkleization" 
         }
     };
     const InvertedByte = ssz.Mapped(u8, ssz.Fixed(u8), Invert);
-    const input = [_]u8{0x35} ** 33;
-    const encoded = [_]u8{0xca} ** 33;
+    const input: [33]u8 = @splat(0x35);
+    const encoded: [33]u8 = @splat(0xca);
     try std.testing.expectEqual(
         try ssz.hashTreeRoot(ssz.ByteList(64), &encoded),
         try ssz.hashTreeRoot(ssz.ListOf(InvertedByte, 64), &input),
@@ -646,11 +646,11 @@ test "SSZ ByteList HTR preserves an abstract schema capacity" {
 test "SSZ packed bitfield HTR matches boolean codecs across chunk boundaries" {
     const BoolVector = ssz.Bitvector(257);
     const PackedVector = ssz.PackedBitvector(257);
-    var vector_bits = [_]bool{false} ** 257;
+    var vector_bits: [257]bool = @splat(false);
     vector_bits[0] = true;
     vector_bits[255] = true;
     vector_bits[256] = true;
-    var vector_bytes = [_]u8{0} ** 33;
+    var vector_bytes: [33]u8 = @splat(0);
     vector_bytes[0] = 0x01;
     vector_bytes[31] = 0x80;
     vector_bytes[32] = 0x01;
@@ -663,10 +663,10 @@ test "SSZ packed bitfield HTR matches boolean codecs across chunk boundaries" {
 
     const BoolList = ssz.Bitlist(512);
     const PackedList = ssz.PackedBitlist(512);
-    var list_bits = [_]bool{false} ** 256;
+    var list_bits: [256]bool = @splat(false);
     list_bits[0] = true;
     list_bits[255] = true;
-    var list_bytes = [_]u8{0} ** 33;
+    var list_bytes: [33]u8 = @splat(0);
     list_bytes[0] = 0x01;
     list_bytes[31] = 0x80;
     list_bytes[32] = 0x01;
@@ -787,7 +787,7 @@ test "SSZ hashTreeRoot mixes ordinary union selectors" {
     };
     const ChoiceSsz = ssz.Union(Choice, .{ .none = ssz.None });
 
-    var input = [_]u8{0} ** 64;
+    var input: [64]u8 = @splat(0);
     var expected_none: ssz.Root = undefined;
     std.crypto.hash.sha2.Sha256.hash(&input, &expected_none, .{});
     try std.testing.expectEqual(

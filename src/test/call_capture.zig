@@ -503,7 +503,7 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
         .PUSH0,          .PUSH0,
         .RETURNDATACOPY,
     });
-    const stack_overflow = [_]u8{evmz.Opcode.PUSH0.toByte()} ** 1025;
+    const stack_overflow: [1025]u8 = @splat(evmz.Opcode.PUSH0.toByte());
 
     const Case = struct {
         name: []const u8,

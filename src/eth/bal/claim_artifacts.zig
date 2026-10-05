@@ -216,7 +216,7 @@ test "code store authenticates borrowed codes and owns introduced code" {
     try std.testing.expect(parent_ref != .empty);
     try std.testing.expect(parent_ref != .missing);
     try std.testing.expectEqualSlices(u8, &parent_code, store.view(parent_ref).?.bytes);
-    try std.testing.expect(store.bind([_]u8{0x99} ** 32) == .missing);
+    try std.testing.expect(store.bind(@as([32]u8, @splat(0x99))) == .missing);
     try std.testing.expect(store.bind(crypto.keccak256_empty) == .empty);
 
     const empty = try store.cacheIntroduced(std.testing.allocator, &.{});

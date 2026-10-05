@@ -316,7 +316,7 @@ pub const Result = struct {
     excess_blob_gas: ?u256 = null,
     requests_hash: [32]u8 = empty_requests_hash,
     block_access_list_hash: [32]u8 = eth_bal.empty_hash,
-    block_hash: [32]u8 = [_]u8{0} ** 32,
+    block_hash: [32]u8 = @splat(0),
 };
 
 /// Execution-derived block fields available before complete header material is

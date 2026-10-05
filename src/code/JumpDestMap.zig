@@ -82,7 +82,7 @@ test "jumpdest map handles sparse long bytecode" {
     var map = JumpDestMap.empty;
     defer map.deinit(std.testing.allocator);
 
-    var bytecode = [_]u8{0} ** 128;
+    var bytecode: [128]u8 = @splat(0);
     bytecode[0] = Opcode.PUSH2.toByte();
     bytecode[1] = 0;
     bytecode[2] = 127;
@@ -122,7 +122,7 @@ test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
 }
 
 test "jumpdest map carries PUSH payload across chunks" {
-    var bytecode = [_]u8{0} ** 48;
+    var bytecode: [48]u8 = @splat(0);
     bytecode[0] = Opcode.PUSH32.toByte();
     bytecode[1] = Opcode.JUMPDEST.toByte();
     bytecode[16] = Opcode.PUSH1.toByte();

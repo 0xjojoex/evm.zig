@@ -265,7 +265,7 @@ fn storageKeysForEntry(total_keys: usize, entry_count: usize, index: usize) usiz
 }
 
 fn syntheticAccessListAddress(index: usize) evmz.Address {
-    var address = [_]u8{0} ** 20;
+    var address: [20]u8 = @splat(0);
     address[0] = 0xaa;
     var value: u64 = @intCast(index + 1);
     var i: usize = 0;

@@ -47,7 +47,7 @@ test "stateless wire v1 normalizes payload words with field-specific byte order"
     const scratch = arena.allocator();
 
     var input = try smoke.smokeInput(scratch);
-    var bytes = [_]u8{0} ** 32;
+    var bytes: [32]u8 = @splat(0);
     bytes[0] = 0x01;
     bytes[31] = 0x02;
     input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.prev_randao = bytes;
@@ -188,7 +188,7 @@ test "stateless wire v1 schema id packs fork index and revision" {
 }
 
 test "stateless wire v1 enforces witness resource bounds before execution" {
-    const oversized_code = [_]u8{0} ** ((1 << 16) + 1);
+    const oversized_code: [((1 << 16) + 1)]u8 = @splat(0);
     const codes = [_][]const u8{&oversized_code};
     const witness = wire.ExecutionWitness{ .codes = &codes };
     try std.testing.expectError(error.InvalidListLength, witness.encode(std.testing.allocator));
@@ -203,7 +203,7 @@ test "stateless wire v1 enforces witness resource bounds before execution" {
         .codes = ssz.ListOf(ssz.ByteList(1 << 16), 1 << 18),
         .headers = ssz.ListOf(ssz.ByteList(1 << 10), 257),
     });
-    const headers = [_][]const u8{&.{}} ** 257;
+    const headers: [257][]const u8 = @splat(&.{});
     const encoded = try ssz.encodeAlloc(TestWitnessSsz, std.testing.allocator, .{
         .state = &.{},
         .codes = &.{},
@@ -308,7 +308,7 @@ test "stateless wire v1 rejects request claims not derived by BlockSTF" {
 
     const withdrawal_requests = [_]wire.WithdrawalRequest{.{
         .source_address = address.addr(0x7002),
-        .validator_pubkey = [_]u8{0x11} ** 48,
+        .validator_pubkey = @splat(0x11),
         .amount = 1,
     }};
     const claimed_request_input = try smoke.amsterdamSmokeInput(scratch, .{
@@ -332,7 +332,7 @@ test "stateless wire v1 returns failure result for malformed guest input" {
 
         const result = try wire.StatelessValidationResult.decode(std.testing.allocator, output_bytes);
         try std.testing.expect(!result.successful_validation);
-        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &result.new_payload_request_root);
+        try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &result.new_payload_request_root);
         try std.testing.expectEqual(@as(u64, 0), result.chain_id);
         try std.testing.expectEqual(@as(u16, 0), result.schema_id);
     }
@@ -382,7 +382,7 @@ test "stateless wire v1 rejects noncanonical SSZ before allocation" {
         }
         try std.testing.expectError(error.InvalidFirstOffset, wire.StatelessInput.decodeSchemaPrefixed(std.testing.failing_allocator, bytes));
         const output = try wire.validateStatelessBytes(scratch, bytes);
-        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 43), output);
+        try std.testing.expectEqualSlices(u8, &(@as([43]u8, @splat(0))), output);
     }
 }
 
@@ -412,7 +412,7 @@ test "stateless wire v1 protocol fork values match tests-zkevm v21.0.1" {
 
 test "stateless wire v1 output exposes chain and full schema id" {
     const result = wire.StatelessValidationResult{
-        .new_payload_request_root = [_]u8{0xaa} ** 32,
+        .new_payload_request_root = @splat(0xaa),
         .successful_validation = true,
         .chain_id = 1,
         .schema_id = wire.schema_id,

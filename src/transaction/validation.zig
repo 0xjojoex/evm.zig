@@ -280,7 +280,7 @@ test "transaction prepayment uses comptime blob gas" {
             .hash_version = 0x01,
         } } },
     });
-    const hashes = [_]u256{@as(u256, 0x01) << 248} ** 2;
+    const hashes: [2]u256 = @splat(@as(u256, 0x01) << 248);
     const Validation = @TypeOf(testRuntime(@import("../eth/spec.zig").cancun));
     const input = Validation.Input{
         .kind = .blob,
@@ -402,7 +402,7 @@ test "transaction validation rejects invalid single-condition inputs" {
 }
 
 test "transaction validation applies Amsterdam calldata floor" {
-    const amsterdam_floor_input = [_]u8{1} ** 63;
+    const amsterdam_floor_input: [63]u8 = @splat(1);
     try std.testing.expectEqual(@as(?ValidationError, null), testRuntime(@import("../eth/spec.zig").prague).validate(.{
         .gas_limit = 21_200,
         .input = &.{ 1, 1, 1, 1 },
@@ -654,8 +654,8 @@ test "transaction validation caps Amsterdam calldata floor gas" {
 }
 
 test "transaction validation rejects blob shape errors" {
-    const seven_blob_hashes = [_]u256{@as(u256, 0x01) << 248} ** 7;
-    const ten_blob_hashes = [_]u256{@as(u256, 0x01) << 248} ** 10;
+    const seven_blob_hashes: [7]u256 = @splat(@as(u256, 0x01) << 248);
+    const ten_blob_hashes: [10]u256 = @splat(@as(u256, 0x01) << 248);
 
     try std.testing.expectEqual(ValidationError.type_3_tx_zero_blobs, testRuntime(@import("../eth/spec.zig").cancun).validate(.{
         .kind = .blob,
@@ -718,7 +718,7 @@ test "transaction validation rejects set-code shape errors" {
 test "transaction validation rejects oversized initcode" {
     const eth_transaction = @import("../eth/transaction.zig");
     const eth_eip8037 = @import("../eth/eip/8037.zig");
-    var initcode = [_]u8{0} ** (eth_transaction.max_initcode_size + 1);
+    var initcode: [(eth_transaction.max_initcode_size + 1)]u8 = @splat(0);
     try std.testing.expectEqual(ValidationError.initcode_size_exceeded, testRuntime(@import("../eth/spec.zig").shanghai).validate(.{
         .is_create = true,
         .gas_limit = 1_000_000,

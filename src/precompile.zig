@@ -634,7 +634,7 @@ fn adjustedExponentLength(exponent_len: u256, exponent_head: u256) ?u256 {
 }
 
 fn modexpExponentHead(input: []const u8, exponent_offset: u256, exponent_len: u256) u256 {
-    var word = [_]u8{0} ** 32;
+    var word: [32]u8 = @splat(0);
     const offset = std.math.cast(usize, exponent_offset) orelse return 0;
     if (offset >= input.len or exponent_len == 0) return 0;
 
@@ -900,7 +900,7 @@ fn recoverAddress(input: []const u8) ?Address {
 }
 
 fn paddedWord(input: []const u8, word_index: usize) [32]u8 {
-    var word = [_]u8{0} ** 32;
+    var word: [32]u8 = @splat(0);
     const start = word_index * 32;
     if (start >= input.len) return word;
     const size = @min(32, input.len - start);
@@ -1033,7 +1033,7 @@ test modexp {
         "03" ++
         "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2e" ++
         "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f");
-    var expected: [32]u8 = [_]u8{0} ** 32;
+    var expected: [32]u8 = @splat(0);
     expected[31] = 1;
 
     const byzantium = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.modexp.toAddress(), &eip198_input, 13056)).?;
@@ -1113,14 +1113,14 @@ test modexp {
     try std.testing.expectEqual(Status.success, zero_modulus.status);
     try std.testing.expectEqualSlices(u8, &[_]u8{0}, zero_modulus.output_data);
 
-    var zero_complexity_input: [96]u8 = [_]u8{0} ** 96;
+    var zero_complexity_input: [96]u8 = @splat(0);
     zero_complexity_input[32] = 0x80;
     const zero_complexity = (try executeEthereumPrecompileForTest(std.testing.allocator, .berlin, Contract.modexp.toAddress(), &zero_complexity_input, 200)).?;
     try std.testing.expectEqual(Status.success, zero_complexity.status);
     try std.testing.expectEqual(@as(i64, 0), zero_complexity.gas_left);
     try std.testing.expectEqual(@as(usize, 0), zero_complexity.output_data.len);
 
-    var over_osaka_limit_input: [96]u8 = [_]u8{0} ** 96;
+    var over_osaka_limit_input: [96]u8 = @splat(0);
     std.mem.writeInt(u256, over_osaka_limit_input[0..32], @import("eth/precompile.zig").osaka_config.modexp_max_input_len.? + 1, .big);
     const oversized_prague = (try executeEthereumPrecompileForTest(std.testing.allocator, .prague, Contract.modexp.toAddress(), &over_osaka_limit_input, 6000)).?;
     try std.testing.expectEqual(Status.success, oversized_prague.status);
@@ -1139,7 +1139,7 @@ test "input size limit fails oversized calls before dispatch" {
 
     // One byte over the cap fails outright, consuming the provided gas —
     // the OP Granite/Isthmus bounded-input behavior.
-    const over = [_]u8{0} ** (bn254_pair_size + 1);
+    const over: [(bn254_pair_size + 1)]u8 = @splat(0);
     const over_result = try Capped.execute(.bn254_pairing, .{
         .allocator = std.testing.allocator,
         .input_data = &over,
@@ -1149,7 +1149,7 @@ test "input size limit fails oversized calls before dispatch" {
     try std.testing.expectEqual(@as(i64, 0), over_result.gas_left);
 
     // At the cap the contract runs normally.
-    const at = [_]u8{0} ** bn254_pair_size;
+    const at: [bn254_pair_size]u8 = @splat(0);
     const at_result = try Capped.execute(.bn254_pairing, .{
         .allocator = std.testing.allocator,
         .input_data = &at,
@@ -1164,7 +1164,7 @@ test "P256VERIFY precompile" {
     const Scheme = std.crypto.sign.ecdsa.EcdsaP256Sha256;
     const Hash = std.crypto.hash.sha2.Sha256;
 
-    const seed = [_]u8{0x42} ** Scheme.KeyPair.seed_length;
+    const seed: [Scheme.KeyPair.seed_length]u8 = @splat(0x42);
     const key_pair = try Scheme.KeyPair.generateDeterministic(seed);
     const message = "p256verify precompile test";
     var message_hash: [Hash.digest_length]u8 = undefined;
@@ -1187,7 +1187,7 @@ test "P256VERIFY precompile" {
     const valid = (try executeEthereumPrecompileForTest(std.testing.allocator, .osaka, Contract.p256verify.toAddress(), &input, ethereum_p256verify_gas + 1)).?;
     defer std.testing.allocator.free(valid.output_data);
 
-    var expected = [_]u8{0} ** 32;
+    var expected: [32]u8 = @splat(0);
     expected[31] = 1;
     try std.testing.expectEqual(Status.success, valid.status);
     try std.testing.expectEqual(@as(i64, 1), valid.gas_left);
@@ -1262,12 +1262,12 @@ test "bn254 add and mul" {
     try std.testing.expectEqual(@as(i64, 1), mul_result.gas_left);
     try std.testing.expectEqualSlices(u8, &tripled_expected, mul_result.output_data);
 
-    const invalid = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_add.toAddress(), &[_]u8{0xff} ** 32, 500)).?;
+    const invalid = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_add.toAddress(), &@as([32]u8, @splat(0xff)), 500)).?;
     try std.testing.expectEqual(Status.failure, invalid.status);
 }
 
 test "bn254 pairing" {
-    var true_output = [_]u8{0} ** 32;
+    var true_output: [32]u8 = @splat(0);
     true_output[31] = 1;
 
     const empty = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_pairing.toAddress(), &.{}, 100_001)).?;
@@ -1292,7 +1292,7 @@ test "bn254 pairing" {
 }
 
 test "bn254 pairing rejects field elements outside modulus" {
-    var input = [_]u8{0} ** bn254_pair_size;
+    var input: [bn254_pair_size]u8 = @splat(0);
     _ = try std.fmt.hexToBytes(input[0..32], "30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47");
 
     const invalid = (try executeEthereumPrecompileForTest(std.testing.allocator, .byzantium, Contract.bn254_pairing.toAddress(), &input, 180_000)).?;
@@ -1301,7 +1301,7 @@ test "bn254 pairing rejects field elements outside modulus" {
 }
 
 test "bn254 pairing rejects G2 points outside subgroup" {
-    var input = [_]u8{0} ** bn254_pair_size;
+    var input: [bn254_pair_size]u8 = @splat(0);
     _ = try std.fmt.hexToBytes(input[64..], "0000000000000000000000000000000000000000000000000000000000000002" ++
         "0000000000000000000000000000000000000000000000000000000000000001" ++
         "153a361d3c501ba172d1324812b5f5ea564d064be862f79fd1693e4d292972e1" ++

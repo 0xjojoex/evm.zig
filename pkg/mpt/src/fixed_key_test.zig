@@ -72,9 +72,9 @@ test "catalog fixed batch binds shared prefixes without allocation" {
     var catalog = try builder.finishAssumeCollisionResistant();
     defer catalog.deinit();
 
-    const key0: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
-    const key1: mpt.FixedKey = [_]u8{0x10} ++ [_]u8{0} ** (@sizeOf(mpt.FixedKey) - 1);
-    const key2: mpt.FixedKey = [_]u8{0x20} ++ [_]u8{0} ** (@sizeOf(mpt.FixedKey) - 1);
+    const key0: mpt.FixedKey = @splat(0);
+    const key1: mpt.FixedKey = [_]u8{0x10} ++ @as([(@sizeOf(mpt.FixedKey) - 1)]u8, @splat(0));
+    const key2: mpt.FixedKey = [_]u8{0x20} ++ @as([(@sizeOf(mpt.FixedKey) - 1)]u8, @splat(0));
     const keys = [_]mpt.FixedKey{ key0, key1, key2 };
     var results: [keys.len]mpt.FixedLookup = undefined;
     var workspace: mpt.Catalog.BindWorkspace = .{};
@@ -94,8 +94,8 @@ test "catalog fixed batch binds shared prefixes without allocation" {
 }
 
 test "catalog fixed batch rejects key order before walking" {
-    const low: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
-    const high: mpt.FixedKey = [_]u8{0xff} ** @sizeOf(mpt.FixedKey);
+    const low: mpt.FixedKey = @splat(0);
+    const high: mpt.FixedKey = @splat(0xff);
     var results: [2]mpt.FixedLookup = undefined;
     var workspace: mpt.Catalog.BindWorkspace = .{};
     var builder = try mpt.Catalog.Builder.init(std.testing.allocator, mpt.WitnessIndex.empty);
@@ -116,12 +116,12 @@ test "catalog fixed batch rejects key order before walking" {
 }
 
 test "catalog fixed batch preserves fixed-key validation and missing-node errors" {
-    const key: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
+    const key: mpt.FixedKey = @splat(0);
     var results: [1]mpt.FixedLookup = undefined;
     var workspace: mpt.Catalog.BindWorkspace = .{};
     const trie = mpt.init(std.testing.allocator);
 
-    const short_leaf = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x01};
+    const short_leaf = [_]u8{ 0xe2, 0xa0, 0x30 } ++ @as([31]u8, @splat(0)) ++ [_]u8{0x01};
     const short_nodes = [_][]const u8{&short_leaf};
     var short_indexed = try trie.indexWitness(&short_nodes);
     defer short_indexed.deinit();
@@ -137,9 +137,9 @@ test "catalog fixed batch preserves fixed-key validation and missing-node errors
         short_catalog.bindSorted(short_root, &.{key}, &results, &workspace),
     );
 
-    const missing_digest = [_]u8{0x55} ** 32;
+    const missing_digest: [32]u8 = @splat(0x55);
     const missing_child = [_]u8{0xf3} ++ [_]u8{0xa0} ++ missing_digest ++
-        [_]u8{0x80} ** 14 ++ [_]u8{ 0xc2, 0x20, 0x02, 0x80 };
+        @as([14]u8, @splat(0x80)) ++ [_]u8{ 0xc2, 0x20, 0x02, 0x80 };
     const missing_nodes = [_][]const u8{&missing_child};
     var missing_indexed = try trie.indexWitness(&missing_nodes);
     defer missing_indexed.deinit();
@@ -157,11 +157,11 @@ test "catalog fixed batch preserves fixed-key validation and missing-node errors
 }
 
 test "catalog fixed batch rejects branch values" {
-    const key: mpt.FixedKey = [_]u8{0} ** @sizeOf(mpt.FixedKey);
-    const child = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x02};
+    const key: mpt.FixedKey = @splat(0);
+    const child = [_]u8{ 0xe2, 0xa0, 0x30 } ++ @as([31]u8, @splat(0)) ++ [_]u8{0x02};
     const child_hash = mpt.StdKeccak256Context.keccak256(.{}, &child);
     const branch = [_]u8{0xf1} ++ [_]u8{0xa0} ++ child_hash ++
-        [_]u8{0x80} ** 15 ++ [_]u8{0x01};
+        @as([15]u8, @splat(0x80)) ++ [_]u8{0x01};
     const nodes = [_][]const u8{ &branch, &child };
     const trie = mpt.init(std.testing.allocator);
     var indexed = try trie.indexWitness(&nodes);

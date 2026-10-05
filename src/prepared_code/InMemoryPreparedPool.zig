@@ -133,7 +133,7 @@ test "wrong hash rejects admission atomically" {
     defer pool.deinit();
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
-    const wrong_hash = [_]u8{0xff} ** 32;
+    const wrong_hash: [32]u8 = @splat(0xff);
     try std.testing.expectError(error.CodeHashMismatch, pool.getOrPrepare(wrong_hash, &raw_code));
     try std.testing.expectEqual(@as(usize, 0), pool.count());
     try std.testing.expectEqual(@as(usize, 0), pool.retained_code_bytes);

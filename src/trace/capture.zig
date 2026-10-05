@@ -161,7 +161,7 @@ test "trace capture stores one memory transition only when requested" {
             .memory_size = 0,
             .memory_write = .{ .offset = 0, .size = 32 },
         });
-        var memory = [_]u8{0} ** 32;
+        var memory: [32]u8 = @splat(0);
         memory[31] = 0x2a;
         try capture.finishStep(.{
             .pc_next = 1,

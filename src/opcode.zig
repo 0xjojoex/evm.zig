@@ -207,7 +207,7 @@ pub const OpInfo = struct {
 
 /// 256-entry opcode property table. Gap bytes default to an undefined row.
 pub const table: [256]OpInfo = blk: {
-    var t = [_]OpInfo{.{}} ** 256;
+    var t: [256]OpInfo = @splat(.{});
     for (std.enums.values(Opcode)) |op| {
         var row = infoFor(op);
         row.defined = true;

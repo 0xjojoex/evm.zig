@@ -14,7 +14,7 @@ pub const empty_ommers_hash = [_]u8{
     0xf0, 0xa1, 0x42, 0xfd, 0x40, 0xd4, 0x93, 0x47,
 };
 
-pub const pos_nonce = [_]u8{0} ** 8;
+pub const pos_nonce: [8]u8 = @splat(0);
 
 pub const Error = std.mem.Allocator.Error || error{
     ExtraDataTooLong,
@@ -128,7 +128,7 @@ fn emitHeader(fields: anytype, header: *const ExecutionHeader) rlp.EncodeError!v
 }
 
 test "execution header reproduces Ethereum mainnet genesis hash" {
-    const zero_hash = [_]u8{0} ** 32;
+    const zero_hash: [32]u8 = @splat(0);
     const empty_root = testHex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
     const header = ExecutionHeader{
         .parent_hash = zero_hash,
@@ -136,7 +136,7 @@ test "execution header reproduces Ethereum mainnet genesis hash" {
         .state_root = testHex("d7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544"),
         .transactions_root = empty_root,
         .receipts_root = empty_root,
-        .logs_bloom = [_]u8{0} ** 256,
+        .logs_bloom = @splat(0),
         .difficulty = 17_179_869_184,
         .number = 0,
         .gas_limit = 5_000,
@@ -154,15 +154,15 @@ test "execution header reproduces Ethereum mainnet genesis hash" {
 }
 
 test "execution header reproduces Amsterdam EEST genesis hash" {
-    const zero_hash = [_]u8{0} ** 32;
+    const zero_hash: [32]u8 = @splat(0);
     const empty_root = testHex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
     const header = ExecutionHeader{
         .parent_hash = zero_hash,
-        .coinbase = Address.fromBytes([_]u8{0} ** 20),
+        .coinbase = Address.fromBytes(@as([20]u8, @splat(0))),
         .state_root = testHex("d5ef849c559173e07d44d46a906eb95cbe0f1e417bf7aef21109efc88c3cf5fc"),
         .transactions_root = empty_root,
         .receipts_root = empty_root,
-        .logs_bloom = [_]u8{0} ** 256,
+        .logs_bloom = @splat(0),
         .number = 0,
         .gas_limit = 0x210f3e20,
         .gas_used = 0,
@@ -186,14 +186,14 @@ test "execution header reproduces Amsterdam EEST genesis hash" {
 }
 
 test "execution header rejects fork-inconsistent field presence" {
-    const zero_hash = [_]u8{0} ** 32;
+    const zero_hash: [32]u8 = @splat(0);
     const header = ExecutionHeader{
         .parent_hash = zero_hash,
-        .coinbase = Address.fromBytes([_]u8{0} ** 20),
+        .coinbase = Address.fromBytes(@as([20]u8, @splat(0))),
         .state_root = zero_hash,
         .transactions_root = zero_hash,
         .receipts_root = zero_hash,
-        .logs_bloom = [_]u8{0} ** 256,
+        .logs_bloom = @splat(0),
         .number = 0,
         .gas_limit = 0,
         .gas_used = 0,
@@ -242,21 +242,21 @@ test "execution header selects the exact revision wire surface with one allocati
             field_count += 1;
         }
         if (case.revision.isImpl(.shanghai)) {
-            try std.testing.expectEqualSlices(u8, &([_]u8{0x22} ** 32), try fields.nextBytesExact(32));
+            try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0x22))), try fields.nextBytesExact(32));
             field_count += 1;
         }
         if (case.revision.isImpl(.cancun)) {
             try std.testing.expectEqual(@as(u64, 0x31), try fields.nextInt(u64));
             try std.testing.expectEqual(@as(u64, 0x32), try fields.nextInt(u64));
-            try std.testing.expectEqualSlices(u8, &([_]u8{0x33} ** 32), try fields.nextBytesExact(32));
+            try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0x33))), try fields.nextBytesExact(32));
             field_count += 3;
         }
         if (case.revision.isImpl(.prague)) {
-            try std.testing.expectEqualSlices(u8, &([_]u8{0x44} ** 32), try fields.nextBytesExact(32));
+            try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0x44))), try fields.nextBytesExact(32));
             field_count += 1;
         }
         if (case.revision.isImpl(.amsterdam)) {
-            try std.testing.expectEqualSlices(u8, &([_]u8{0x55} ** 32), try fields.nextBytesExact(32));
+            try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0x55))), try fields.nextBytesExact(32));
             try std.testing.expectEqual(@as(u64, 0x56), try fields.nextInt(u64));
             field_count += 2;
         }
@@ -266,14 +266,14 @@ test "execution header selects the exact revision wire surface with one allocati
 }
 
 fn testHeader(revision: Revision) ExecutionHeader {
-    const zero_hash = [_]u8{0} ** 32;
+    const zero_hash: [32]u8 = @splat(0);
     return .{
         .parent_hash = zero_hash,
-        .coinbase = Address.fromBytes([_]u8{0} ** 20),
+        .coinbase = Address.fromBytes(@as([20]u8, @splat(0))),
         .state_root = zero_hash,
         .transactions_root = zero_hash,
         .receipts_root = zero_hash,
-        .logs_bloom = [_]u8{0} ** 256,
+        .logs_bloom = @splat(0),
         .number = 1,
         .gas_limit = 30_000_000,
         .gas_used = 21_000,
@@ -281,12 +281,12 @@ fn testHeader(revision: Revision) ExecutionHeader {
         .extra_data = &.{},
         .prev_randao = zero_hash,
         .base_fee_per_gas = if (revision.isImpl(.london)) 0x10 else null,
-        .withdrawals_root = if (revision.isImpl(.shanghai)) [_]u8{0x22} ** 32 else null,
+        .withdrawals_root = if (revision.isImpl(.shanghai)) @as([32]u8, @splat(0x22)) else null,
         .blob_gas_used = if (revision.isImpl(.cancun)) 0x31 else null,
         .excess_blob_gas = if (revision.isImpl(.cancun)) 0x32 else null,
-        .parent_beacon_block_root = if (revision.isImpl(.cancun)) [_]u8{0x33} ** 32 else null,
-        .requests_hash = if (revision.isImpl(.prague)) [_]u8{0x44} ** 32 else null,
-        .block_access_list_hash = if (revision.isImpl(.amsterdam)) [_]u8{0x55} ** 32 else null,
+        .parent_beacon_block_root = if (revision.isImpl(.cancun)) @as([32]u8, @splat(0x33)) else null,
+        .requests_hash = if (revision.isImpl(.prague)) @as([32]u8, @splat(0x44)) else null,
+        .block_access_list_hash = if (revision.isImpl(.amsterdam)) @as([32]u8, @splat(0x55)) else null,
         .slot_number = if (revision.isImpl(.amsterdam)) 0x56 else null,
     };
 }

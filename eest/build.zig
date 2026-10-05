@@ -33,19 +33,19 @@ pub fn build(b: *std.Build) void {
     {
         const eest_tests = b.addTest(.{
             .root_module = eestModule(b, "src/test.zig", target, optimize, evmz_mod, evmz_dep.module("fixtures"), evmz_dep.module("statetest"), evmz_dep.module("blocktest")),
-            .filters = b.args orelse &.{},
+            .test_runner = evmzTestRunner(evmz_dep),
         });
         // Zig 0.16's self-hosted x86_64 backend cannot lower `.always_tail`.
         // Match the root test lane and compile the evmz-backed test root with LLVM.
         eest_tests.use_llvm = true;
         const ssz_tests = b.addTest(.{
             .root_module = sszConformanceModule(b, "src/ssz_test.zig", target, optimize, ssz_mod, snappy_mod),
-            .filters = b.args orelse &.{},
+            .test_runner = evmzTestRunner(evmz_dep),
         });
 
         const test_step = b.step("test", "Run EEST runner tests");
-        test_step.dependOn(&b.addRunArtifact(eest_tests).step);
-        test_step.dependOn(&b.addRunArtifact(ssz_tests).step);
+        test_step.dependOn(&passthruRun(b, eest_tests).step);
+        test_step.dependOn(&passthruRun(b, ssz_tests).step);
     }
 
     {
@@ -55,11 +55,14 @@ pub fn build(b: *std.Build) void {
         });
         b.installArtifact(ssz_conformance_exe);
         const run = b.addRunArtifact(ssz_conformance_exe);
-        if (pinned_consensus_fixtures and !hasFixturePath(b.args)) {
-            for (ConsensusFixtures.create(b)) |path| run.addDirectoryArg(path);
+        if (pinned_consensus_fixtures) {
+            for (ConsensusFixtures.create(b)) |path| {
+                run.addArg("--default-fixture");
+                run.addDirectoryArg(path);
+            }
         }
         run.setCwd(b.path(".."));
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         b.step(
             "ssz-conformance",
             "Run consensus-spec General, Mainnet, and Minimal SSZ fixtures",
@@ -106,23 +109,6 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-fn hasFixturePath(args: ?[]const []const u8) bool {
-    const values = args orelse return false;
-    var skip_next = false;
-    for (values) |value| {
-        if (skip_next) {
-            skip_next = false;
-            continue;
-        }
-        if (std.mem.eql(u8, value, "--jobs")) {
-            skip_next = true;
-            continue;
-        }
-        if (!std.mem.startsWith(u8, value, "-")) return true;
-    }
-    return false;
-}
-
 const default_execution_input = "tests@v21.0.0";
 const default_zkevm_input = "tests-zkevm@v21.0.5";
 
@@ -157,7 +143,7 @@ fn addConsumeStep(
     });
     consume.addFileArg(eest_exe.getEmittedBin());
     consume.addArgs(&.{ "-p", plugin, "-m", selection, "--dist=loadgroup" });
-    if (b.args) |args| consume.addArgs(args);
+    consume.addPassthruArgs();
     b.step(step_name, description).dependOn(&consume.step);
 }
 
@@ -172,7 +158,7 @@ fn addResolveZkevmStep(b: *std.Build) void {
         "--manifest",
         ".zig-cache/eest-consume/zkevm-corpus.json",
     });
-    if (b.args) |args| resolve.addArgs(args);
+    resolve.addPassthruArgs();
     b.step("resolve-zkevm", "Resolve tests-zkevm through execution-specs").dependOn(&resolve.step);
 }
 
@@ -196,7 +182,7 @@ fn addStep(
 ) void {
     const run = b.addRunArtifact(exe);
     run.addArgs(prefix);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step(step_name, description).dependOn(&run.step);
 }
 
@@ -204,7 +190,7 @@ fn sszConformanceModule(
     b: *std.Build,
     root: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     ssz_mod: *std.Build.Module,
     snappy_mod: *std.Build.Module,
 ) *std.Build.Module {
@@ -223,7 +209,7 @@ fn eestModule(
     b: *std.Build,
     root: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     evmz_mod: *std.Build.Module,
     fixtures_mod: *std.Build.Module,
     statetest_mod: *std.Build.Module,
@@ -241,4 +227,16 @@ fn eestModule(
             .{ .name = "blocktest", .module = blocktest_mod },
         },
     });
+}
+
+/// The root's runner filters by passthru argv (`zig build test -- <substring>`)
+/// at runtime, since Zig 0.17 build scripts cannot observe passthru args.
+fn evmzTestRunner(evmz_dep: *std.Build.Dependency) std.Build.Step.Compile.TestRunner {
+    return .{ .path = evmz_dep.path("tools/test_runner.zig"), .mode = .simple };
+}
+
+fn passthruRun(b: *std.Build, artifact: *std.Build.Step.Compile) *std.Build.Step.Run {
+    const run = b.addRunArtifact(artifact);
+    run.addPassthruArgs();
+    return run;
 }

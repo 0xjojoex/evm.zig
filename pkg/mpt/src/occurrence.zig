@@ -144,7 +144,7 @@ fn MutableNode(comptime mode: SourceMode) type {
             // invalidate this representation.
             pub const empty = Branch{
                 .source = null,
-                .children = [_]Child{.empty} ** 16,
+                .children = @splat(.empty),
             };
         };
 

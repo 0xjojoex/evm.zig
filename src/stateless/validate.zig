@@ -354,7 +354,7 @@ fn blockRlpEncodedLen(
     revision: Revision,
     block: *const input_mod.Block,
 ) (rlp.EncodeError || eth_header.Error)!usize {
-    const zero_hash = [_]u8{0} ** 32;
+    const zero_hash: [32]u8 = @splat(0);
     const header = eth_header.ExecutionHeader{
         .parent_hash = block.parent_hash,
         .coinbase = block.fee_recipient,
@@ -537,11 +537,11 @@ fn parseHeader(encoded_header: []const u8) Error!ParsedHeader {
 
 test "normalized stateless block shape uses actual fields" {
     const base = input_mod.Block{
-        .parent_hash = [_]u8{0} ** 32,
-        .fee_recipient = address.Address.fromBytes([_]u8{0} ** 20),
-        .state_root = [_]u8{0} ** 32,
-        .receipts_root = [_]u8{0} ** 32,
-        .logs_bloom = [_]u8{0} ** 256,
+        .parent_hash = @splat(0),
+        .fee_recipient = address.Address.fromBytes(@as([20]u8, @splat(0))),
+        .state_root = @splat(0),
+        .receipts_root = @splat(0),
+        .logs_bloom = @splat(0),
         .prev_randao = 0,
         .number = 1,
         .gas_limit = 30_000_000,
@@ -549,7 +549,7 @@ test "normalized stateless block shape uses actual fields" {
         .timestamp = 1,
         .extra_data = &.{},
         .base_fee_per_gas = 1,
-        .block_hash = [_]u8{0} ** 32,
+        .block_hash = @splat(0),
     };
 
     try std.testing.expect(blockShapeValid(.merge, &base));
@@ -558,7 +558,7 @@ test "normalized stateless block shape uses actual fields" {
     inactive_withdrawals.withdrawals = &.{.{
         .index = 0,
         .validator_index = 0,
-        .address = address.Address.fromBytes([_]u8{0} ** 20),
+        .address = address.Address.fromBytes(@as([20]u8, @splat(0))),
         .amount = 0,
     }};
     try std.testing.expect(!blockShapeValid(.merge, &inactive_withdrawals));
@@ -570,7 +570,7 @@ test "normalized stateless block shape uses actual fields" {
     var cancun = base;
     cancun.blob_gas_used = 0;
     cancun.excess_blob_gas = 0;
-    cancun.parent_beacon_block_root = [_]u8{0} ** 32;
+    cancun.parent_beacon_block_root = @splat(0);
     try std.testing.expect(blockShapeValid(.cancun, &cancun));
 
     var incomplete_cancun = cancun;
@@ -583,7 +583,7 @@ test "normalized stateless block shape uses actual fields" {
     const transactions = [_]block_stf.TransactionInput{.{
         .tx = .{
             .kind = .blob,
-            .sender = address.Address.fromBytes([_]u8{0} ** 20),
+            .sender = address.Address.fromBytes(@as([20]u8, @splat(0))),
             .gas_limit = 21_000,
             .blob_hashes = &blob_hashes,
         },
@@ -678,11 +678,11 @@ test "revision stateless validator binds matching tracked specs" {
 test "shape rejection clears reused commit output" {
     const Amsterdam = Validator(@import("../eth/spec.zig").amsterdam);
     const invalid_block = input_mod.Block{
-        .parent_hash = [_]u8{0} ** 32,
-        .fee_recipient = address.Address.fromBytes([_]u8{0} ** 20),
-        .state_root = [_]u8{0} ** 32,
-        .receipts_root = [_]u8{0} ** 32,
-        .logs_bloom = [_]u8{0} ** 256,
+        .parent_hash = @splat(0),
+        .fee_recipient = address.Address.fromBytes(@as([20]u8, @splat(0))),
+        .state_root = @splat(0),
+        .receipts_root = @splat(0),
+        .logs_bloom = @splat(0),
         .prev_randao = 0,
         .number = 1,
         .gas_limit = 30_000_000,
@@ -690,7 +690,7 @@ test "shape rejection clears reused commit output" {
         .timestamp = 1,
         .extra_data = &.{},
         .base_fee_per_gas = 1,
-        .block_hash = [_]u8{0} ** 32,
+        .block_hash = @splat(0),
     };
     var output: CommitOutput = .{
         .mpt_nodes = trie.NodeUpdates.init(std.testing.allocator),
@@ -749,11 +749,11 @@ test "witness node bound scales with gas and keeps a gas-free floor" {
 test "oversized state witness is refused before any node is hashed" {
     const Amsterdam = Validator(@import("../eth/spec.zig").amsterdam);
     const block = input_mod.Block{
-        .parent_hash = [_]u8{0} ** 32,
-        .fee_recipient = address.Address.fromBytes([_]u8{0} ** 20),
-        .state_root = [_]u8{0} ** 32,
-        .receipts_root = [_]u8{0} ** 32,
-        .logs_bloom = [_]u8{0} ** 256,
+        .parent_hash = @splat(0),
+        .fee_recipient = address.Address.fromBytes(@as([20]u8, @splat(0))),
+        .state_root = @splat(0),
+        .receipts_root = @splat(0),
+        .logs_bloom = @splat(0),
         .prev_randao = 0,
         .number = 1,
         .gas_limit = 0,
@@ -761,10 +761,10 @@ test "oversized state witness is refused before any node is hashed" {
         .timestamp = 1,
         .extra_data = &.{},
         .base_fee_per_gas = 1,
-        .block_hash = [_]u8{0} ** 32,
+        .block_hash = @splat(0),
         .blob_gas_used = 0,
         .excess_blob_gas = 0,
-        .parent_beacon_block_root = [_]u8{0} ** 32,
+        .parent_beacon_block_root = @splat(0),
         .requests_hash = block_stf.empty_requests_hash,
         .block_access_list = &.{},
     };
@@ -792,9 +792,9 @@ test "recent block hash lookup is positional over the authenticated ancestry" {
     var headers: [4]ParsedHeader = undefined;
     for (&headers, 0..) |*header, index| {
         header.* = .{
-            .hash = [_]u8{@intCast(index + 1)} ** 32,
-            .parent_hash = [_]u8{0} ** 32,
-            .state_root = [_]u8{0} ** 32,
+            .hash = @splat(@intCast(index + 1)),
+            .parent_hash = @splat(0),
+            .state_root = @splat(0),
             .number = 100 + index,
             .gas_limit = 0,
             .gas_used = 0,

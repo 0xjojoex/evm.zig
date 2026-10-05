@@ -153,7 +153,7 @@ test "catalog records bind typed account and storage records without another top
     const storage_value = try trie.storageValue(scratch, 42);
     const storage_leaf = try testLeafNode(scratch, storage_key, storage_value);
     const storage_root = mpt.StdKeccak256Context.keccak256(.{}, storage_leaf);
-    const account_value = try trie.accountValue(scratch, 3, 9, storage_root, [_]u8{0x44} ** 32);
+    const account_value = try trie.accountValue(scratch, 3, 9, storage_root, @as([32]u8, @splat(0x44)));
     const account_leaf = try testLeafNode(scratch, trie.hashedAddressKey(target), account_value);
     const state_root = mpt.StdKeccak256Context.keccak256(.{}, account_leaf);
     const nodes = [_][]const u8{ account_leaf, storage_leaf };

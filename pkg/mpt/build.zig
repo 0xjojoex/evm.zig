@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("mpt", mpt_mod);
     const tests = b.addTest(.{
         .root_module = test_mod,
-        .filters = b.args orelse &.{},
+        .filters = b.option([]const []const u8, "test-filter", "Compile only tests whose names contain this filter (repeatable)") orelse &.{},
     });
     const test_step = b.step("test", "Run the standalone MPT package tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);

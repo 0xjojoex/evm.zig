@@ -225,7 +225,7 @@ const NativeBackend = struct {
     }
 
     fn p256ScalarFromWord(word: [32]u8) std.crypto.ecc.P256.scalar.Scalar {
-        var expanded = [_]u8{0} ** 64;
+        var expanded: [64]u8 = @splat(0);
         @memcpy(expanded[32..64], &word);
         return std.crypto.ecc.P256.scalar.Scalar.fromBytes64(expanded, .big);
     }
@@ -242,7 +242,7 @@ test "native KZG proof verification known answers" {
         0x51, 0x97, 0xe9, 0x7b, 0xcf, 0xa4, 0x06, 0xdc, 0x5a, 0x36, 0x97, 0x48,
         0xdf, 0xef, 0xa3, 0xeb, 0x3f, 0x0b, 0x54, 0xfc, 0x6a, 0x05, 0x08, 0x61,
     };
-    const z = [_]u8{0} ** 31 ++ [_]u8{0x02};
+    const z = @as([31]u8, @splat(0)) ++ [_]u8{0x02};
     const y = [_]u8{
         0x5a, 0x47, 0x73, 0xa2, 0x49, 0x78, 0xd7, 0x93, 0xda, 0xa1, 0x76, 0x2c,
         0xa1, 0xd8, 0x89, 0x38, 0x13, 0x74, 0xcf, 0x4f, 0xe7, 0xfd, 0x73, 0x3f,
@@ -271,13 +271,13 @@ test "native KZG proof verification known answers" {
 
     // On-curve point outside the r-order subgroup (x = 4): the subgroup check
     // must reject it as commitment and as proof.
-    const non_subgroup = [_]u8{0x80} ++ [_]u8{0} ** 46 ++ [_]u8{0x04};
+    const non_subgroup = [_]u8{0x80} ++ @as([46]u8, @splat(0)) ++ [_]u8{0x04};
     try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(non_subgroup, z, y, proof));
     try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(commitment, z, y, non_subgroup));
 
     // Zero polynomial: infinity commitment and proof, y = 0, any canonical z.
-    const infinity = [_]u8{0xc0} ++ [_]u8{0} ** 47;
-    const zero = [_]u8{0} ** 32;
+    const infinity = [_]u8{0xc0} ++ @as([47]u8, @splat(0));
+    const zero: [32]u8 = @splat(0);
     try std.testing.expectEqual(.ok, NativeBackend.kzgPointEvaluation(infinity, z, zero, infinity));
     try std.testing.expectEqual(.invalid, NativeBackend.kzgPointEvaluation(infinity, z, y, infinity));
 }
@@ -643,7 +643,7 @@ fn ripemd160Digest(input: []const u8) [20]u8 {
         ripemd160Compress(&state, input[offset..][0..64]);
     }
 
-    var block = [_]u8{0} ** 128;
+    var block: [128]u8 = @splat(0);
     const remaining = input[offset..];
     @memcpy(block[0..remaining.len], remaining);
     block[remaining.len] = 0x80;
@@ -781,8 +781,8 @@ test "RIPEMD-160 vectors" {
 }
 
 test "BLS12 zkvm adapter rejects non-zero EVM field padding" {
-    var evm_fp = [_]u8{0} ** 64;
-    var compact = [_]u8{0} ** 48;
+    var evm_fp: [64]u8 = @splat(0);
+    var compact: [48]u8 = @splat(0);
     try std.testing.expect(ZkvmBackend.compactFp(&compact, &evm_fp));
 
     evm_fp[15] = 1;
@@ -790,7 +790,7 @@ test "BLS12 zkvm adapter rejects non-zero EVM field padding" {
 }
 
 test "BLS12 zkvm adapter compacts and expands G1 points" {
-    var evm_g1 = [_]u8{0} ** 128;
+    var evm_g1: [128]u8 = @splat(0);
     for (0..48) |i| {
         evm_g1[16 + i] = @intCast(i + 1);
         evm_g1[80 + i] = @intCast(0x80 + i);

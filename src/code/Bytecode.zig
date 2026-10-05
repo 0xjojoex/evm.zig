@@ -115,7 +115,7 @@ test "bytecode owns a copy of the code behind a zero-padded tail" {
     try std.testing.expect(bytecode.bytes.ptr != raw[0..].ptr);
     try std.testing.expectEqualSlices(
         u8,
-        &([_]u8{0} ** Bytecode.zero_padding_len),
+        &(@as([Bytecode.zero_padding_len]u8, @splat(0))),
         bytecode.readBytes()[raw.len..],
     );
 

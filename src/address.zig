@@ -285,7 +285,7 @@ fn fromHash(hash: [32]u8) Address {
 test addr {
     const address0 = addr(0);
     try std.testing.expectEqual(Address.zero, address0);
-    var a = [_]u8{0} ** 20;
+    var a: [20]u8 = @splat(0);
     const address1 = addr(1);
     a[19] = 1;
     try std.testing.expectEqual(Address.fromBytes(a), address1);
@@ -299,7 +299,7 @@ test addr {
 
 test "Address.fromU256" {
     const word = (@as(u256, 1) << 160) | 0x1234;
-    var expected = [_]u8{0} ** 20;
+    var expected: [20]u8 = @splat(0);
     expected[18] = 0x12;
     expected[19] = 0x34;
     try std.testing.expectEqual(Address.fromBytes(expected), Address.fromU256(word));
@@ -357,7 +357,7 @@ test "address conversion uses Ethereum byte order" {
     const address1 = addr(1);
     try std.testing.expectEqual(@as(u256, 1), address1.toU256());
 
-    var address1234 = [_]u8{0} ** 20;
+    var address1234: [20]u8 = @splat(0);
     address1234[18] = 0x12;
     address1234[19] = 0x34;
     const canonical = Address.fromBytes(address1234);
@@ -391,7 +391,7 @@ test "address SSZ preserves the canonical byte-vector schema" {
 }
 
 test "Address.fromHex" {
-    var expected = [_]u8{0} ** 20;
+    var expected: [20]u8 = @splat(0);
     expected[18] = 0x12;
     expected[19] = 0x34;
 

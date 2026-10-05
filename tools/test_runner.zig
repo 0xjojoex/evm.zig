@@ -13,7 +13,7 @@ const builtin = @import("builtin");
 
 const Io = std.Io;
 
-const border = "=" ** 60;
+const border: []const u8 = &@as([60]u8, @splat('='));
 
 // Named by the panic handler so a crash points at the running test.
 var current_test: ?[]const u8 = null;

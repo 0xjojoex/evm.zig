@@ -776,5 +776,5 @@ fn encodeBranch(node_buffer: []u8, branch: *const SparseNode.Branch) UpdateError
 }
 
 fn emptyBranch() SparseNode.Branch {
-    return .{ .children = [_]SparseNode.BranchChild{.empty} ** 16, .value = null };
+    return .{ .children = @splat(.empty), .value = null };
 }

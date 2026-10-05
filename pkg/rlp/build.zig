@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-        .filters = b.args orelse &.{},
+        .filters = b.option([]const []const u8, "test-filter", "Compile only tests whose names contain this filter (repeatable)") orelse &.{},
     });
     b.step("test", "Run RLP package tests").dependOn(&b.addRunArtifact(tests).step);
 

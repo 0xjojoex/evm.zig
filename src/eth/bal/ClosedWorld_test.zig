@@ -377,7 +377,7 @@ test "introduced code satisfies a later optional witness code read" {
 
 test "claim state code reference preserves lazy invalid-witness rejection" {
     const target = address.addr(1);
-    const missing_hash = [_]u8{0x77} ** 32;
+    const missing_hash: [32]u8 = @splat(0x77);
     const claims = [_]bal.AccountChanges{.{ .address = target }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const account_records = [_]records.AccountRecord{.{
@@ -408,7 +408,7 @@ test "sealed storage wipe removes stale point writes" {
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const account_records = [_]records.AccountRecord{.{
-        .parent = .{ .present = .{ .nonce = 1, .storage_root = [_]u8{0x77} ** 32 } },
+        .parent = .{ .present = .{ .nonce = 1, .storage_root = @splat(0x77) } },
     }};
     const storage_records = [_]records.StorageRecord{.{
         .value = 3,
@@ -443,7 +443,7 @@ test "sealed discard preserves prior accepted storage projection" {
     const claims = [_]bal.AccountChanges{.{ .address = target, .storage_reads = &.{7} }};
     const plan = try claim_plan.ClaimPlan.initAssumeValidated(std.testing.allocator, &claims);
     const account_records = [_]records.AccountRecord{.{
-        .parent = .{ .present = .{ .nonce = 1, .storage_root = [_]u8{0x77} ** 32 } },
+        .parent = .{ .present = .{ .nonce = 1, .storage_root = @splat(0x77) } },
     }};
     const storage_records = [_]records.StorageRecord{.{
         .value = 3,
@@ -608,7 +608,7 @@ test "claim state commit reclaims independent storage roots and error scopes" {
     state.retainAttempt(attempt);
 
     const accepted = state.acceptedView();
-    const wrong_root = [_]u8{0x42} ** 32;
+    const wrong_root: [32]u8 = @splat(0x42);
     var commit_buffer: [128 * 1024]u8 = undefined;
     var commit_fixed = std.heap.FixedBufferAllocator.init(&commit_buffer);
     try std.testing.expectError(

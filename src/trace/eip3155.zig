@@ -264,7 +264,7 @@ test "EIP-3155 replay writes caller-supplied summary" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     try writeSummary(&output.writer, .{
-        .state_root = [_]u8{0xab} ** 32,
+        .state_root = @splat(0xab),
         .output = &.{ 0x01, 0x02 },
         .gas_used = 21_000,
         .pass = true,

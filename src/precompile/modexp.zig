@@ -252,7 +252,7 @@ fn modexpMontgomeryLimbsInto(
     if (sig_mod[sig_mod.len - 1] & 1 == 0) return false;
 
     const limb_count = (sig_mod.len + 7) / 8;
-    var m_limbs = [_]u64{0} ** max_montgomery_limbs;
+    var m_limbs: [max_montgomery_limbs]u64 = @splat(0);
     limbsFromBytes(m_limbs[0..limb_count], sig_mod);
 
     // -m^-1 mod 2^64 via Newton iteration; m is odd so the inverse exists.
@@ -261,8 +261,8 @@ fn modexpMontgomeryLimbsInto(
     const n0 = 0 -% inverse;
 
     // One-time big-int precomputes, both < m so they fit limb_count limbs.
-    var r2_limbs = [_]u64{0} ** max_montgomery_limbs;
-    var base_limbs = [_]u64{0} ** max_montgomery_limbs;
+    var r2_limbs: [max_montgomery_limbs]u64 = @splat(0);
+    var base_limbs: [max_montgomery_limbs]u64 = @splat(0);
     {
         var modulus_big = try managedFromBytes(allocator, sig_mod);
         defer modulus_big.deinit();
@@ -284,10 +284,10 @@ fn modexpMontgomeryLimbsInto(
         limbsFromBytes(base_limbs[0..limb_count], reduced);
     }
 
-    var one = [_]u64{0} ** max_montgomery_limbs;
+    var one: [max_montgomery_limbs]u64 = @splat(0);
     one[0] = 1;
-    var base_mont = [_]u64{0} ** max_montgomery_limbs;
-    var result_mont = [_]u64{0} ** max_montgomery_limbs;
+    var base_mont: [max_montgomery_limbs]u64 = @splat(0);
+    var result_mont: [max_montgomery_limbs]u64 = @splat(0);
     montMulLimbs(limb_count, &base_limbs, &r2_limbs, &m_limbs, n0, &base_mont);
     // R mod m, the Montgomery form of 1.
     montMulLimbs(limb_count, &one, &r2_limbs, &m_limbs, n0, &result_mont);
@@ -355,7 +355,7 @@ fn montMulLimbs(
     n0: u64,
     out: *[max_montgomery_limbs]u64,
 ) void {
-    var t = [_]u64{0} ** (max_montgomery_limbs + 2);
+    var t: [(max_montgomery_limbs + 2)]u64 = @splat(0);
     for (0..limb_count) |i| {
         const bi = b[i];
         var carry: u64 = 0;
@@ -438,9 +438,9 @@ fn mulMod(
 
 test "modexp limb Montgomery boundary sizes match big-int path" {
     const allocator = std.testing.allocator;
-    const base = [_]u8{0xa5} ** (max_montgomery_limbs * 8 + 1);
+    const base: [(max_montgomery_limbs * 8 + 1)]u8 = @splat(0xa5);
     const exponent = [_]u8{3};
-    const modulus = [_]u8{0xff} ** (max_montgomery_limbs * 8);
+    const modulus: [(max_montgomery_limbs * 8)]u8 = @splat(0xff);
     var fast_out: [max_montgomery_limbs * 8]u8 = undefined;
     var slow_out: [max_montgomery_limbs * 8]u8 = undefined;
 
@@ -460,13 +460,13 @@ test "modexp fast paths match big-int path" {
         // operands, even moduli, powers of two, tiny exponents, and odd
         // moduli on both sides of the small/limb boundary.
         const corpus = [_][]const u8{
-            &[_]u8{0} ** 4,
-            &[_]u8{0xff} ** 48,
+            &@as([4]u8, @splat(0)),
+            &@as([48]u8, @splat(0xff)),
             &[_]u8{ 0x01, 0x21, 0x21, 0x11, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x03 },
             &[_]u8{ 0x02, 0x08, 0x02, 0x04, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xff, 0xfe },
             &[_]u8{ 0x03, 0x10, 0x30, 0x20, 0x00, 0x01, 0x00, 0x80 },
-            &([_]u8{ 0x00, 0x01, 0x01, 0x20, 0x02, 0x03 } ++ [_]u8{0xff} ** 33),
-            &([_]u8{ 0x00, 0x01, 0x01, 0x5f, 0x02, 0x03 } ++ [_]u8{0xff} ** 96),
+            &([_]u8{ 0x00, 0x01, 0x01, 0x20, 0x02, 0x03 } ++ @as([33]u8, @splat(0xff))),
+            &([_]u8{ 0x00, 0x01, 0x01, 0x5f, 0x02, 0x03 } ++ @as([96]u8, @splat(0xff))),
         };
 
         fn oracle(_: void, smith: *std.testing.Smith) anyerror!void {

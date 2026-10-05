@@ -160,8 +160,8 @@ test "closed world executor matches open world checkpoint discard" {
     defer claim.deinit();
 
     const context = testExecutionContext(target, 100_000);
-    var tracked_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
-    var claim_observer = DenseTransitionObserver{ .code_hash = [_]u8{0} ** 32 };
+    var tracked_observer = DenseTransitionObserver{ .code_hash = @splat(0) };
+    var claim_observer = DenseTransitionObserver{ .code_hash = @splat(0) };
     const observed_tracked = tracked.observe(&tracked_observer);
     const observed_claim = claim.observe(&claim_observer);
     try observed_tracked.beginStateTransition(context);
@@ -1237,7 +1237,7 @@ test "iterative call runtime preserves precompile output" {
         .value = 0,
     });
 
-    var expected: [32]u8 = .{0} ** 32;
+    var expected: [32]u8 = @splat(0);
     expected[31] = 0x2a;
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &expected, result.output_data);

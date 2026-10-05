@@ -16,14 +16,14 @@ pub fn View(comptime source: []const u8) type {
     ) catch unreachable);
     const masks: [mask_count]usize = masks: {
         @setEvalBranchQuota(20_000);
-        var result = [_]usize{0} ** mask_count;
+        var result: [mask_count]usize = @splat(0);
         scanner.markJumpDestWords(&result, source);
         break :masks result;
     };
 
     return struct {
         pub const read_bytes = source[0..source.len].* ++
-            [_]u8{0} ** Bytecode.zero_padding_len;
+            @as([Bytecode.zero_padding_len]u8, @splat(0));
         pub const view = Bytecode.View{
             .bytes = read_bytes[0..source.len],
             .jumpdest_masks = &masks,
@@ -58,7 +58,7 @@ test "static view matches runtime preparation" {
     );
     try std.testing.expectEqualSlices(
         u8,
-        &([_]u8{0} ** Bytecode.zero_padding_len),
+        &(@as([Bytecode.zero_padding_len]u8, @splat(0))),
         Prepared.read_bytes[raw.len..],
     );
 }

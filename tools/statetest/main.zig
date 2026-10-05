@@ -152,7 +152,7 @@ test "observation ignores expected assertions and trace preserves root" {
     try execute(std.testing.allocator, test_fixture, true, &traced.writer, null);
     try std.testing.expect(std.mem.indexOf(u8, traced.written(), "\"op\":85") != null);
     try std.testing.expect(std.mem.endsWith(u8, traced.written(), plain.written()));
-    try std.testing.expect(std.mem.indexOf(u8, plain.written(), "0x" ++ "0" ** 64) == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain.written(), "0x" ++ @as([64]u8, @splat('0'))) == null);
 
     const changed = try std.mem.replaceOwned(u8, std.testing.allocator, test_fixture, "\"hash\":", "\"expectException\":\"TransactionException.INVALID_CHAINID\",\"hash\":");
     defer std.testing.allocator.free(changed);

@@ -290,7 +290,7 @@ test "raw parser preserves exact spans and rejects trailing input" {
 }
 
 test "raw parser distinguishes length overflow from truncated payload" {
-    const overflowing = [_]u8{0xb7 + @sizeOf(usize)} ++ [_]u8{0xff} ** @sizeOf(usize);
+    const overflowing = [_]u8{0xb7 + @sizeOf(usize)} ++ @as([@sizeOf(usize)]u8, @splat(0xff));
     try std.testing.expectError(error.LengthOverflow, rlp.parseExact(&overflowing));
     try std.testing.expectError(error.InputTooShort, rlp.parseExact(&.{ 0xb8, 0x38 }));
 }
@@ -334,7 +334,7 @@ test "typed struct encodes nested lists directly into caller storage" {
         .{ .index = 2, .value = 0x100 },
     };
     const account = Account{
-        .address = [_]u8{0x11} ** 20,
+        .address = @splat(0x11),
         .nonce = 7,
         .changes = &changes,
     };
@@ -583,8 +583,8 @@ test "optional struct fields tell an absent value from an empty list" {
 }
 
 test "typed byte codecs cover the canonical 55 and 56 byte boundary" {
-    const short = [_]u8{0xaa} ** 55;
-    const long = [_]u8{0xbb} ** 56;
+    const short: [55]u8 = @splat(0xaa);
+    const long: [56]u8 = @splat(0xbb);
     var out: [58]u8 = undefined;
 
     const short_encoded = try rlp.encode([]const u8, &out, &short);
@@ -680,7 +680,7 @@ test "all nested typed allocation failure positions clean up" {
                 .{ .index = 2, .value = 2 },
             };
             const account = Account{
-                .address = [_]u8{0x11} ** 20,
+                .address = @splat(0x11),
                 .nonce = 7,
                 .changes = &changes,
             };

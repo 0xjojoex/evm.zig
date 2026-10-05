@@ -97,10 +97,10 @@ test "full root matches canonical string-key example" {
 }
 
 test "root sorts descriptors without copying key or value bytes" {
-    const low_key = [_]u8{0x11} ** 128;
-    const high_key = [_]u8{0xee} ** 128;
-    const low_value = [_]u8{0xaa} ** 128;
-    const high_value = [_]u8{0xbb} ** 128;
+    const low_key: [128]u8 = @splat(0x11);
+    const high_key: [128]u8 = @splat(0xee);
+    const low_value: [128]u8 = @splat(0xaa);
+    const high_value: [128]u8 = @splat(0xbb);
     const entries = [_]mpt.Entry{
         .{ .key = &high_key, .value = &high_value },
         .{ .key = &low_key, .value = &low_value },
@@ -230,7 +230,7 @@ test "indexed proof lookup authenticates presence and absence without allocation
 }
 
 test "decoded proof cache preserves lookup and canonicality results" {
-    const leaf = [_]u8{ 0xe2, 0x20, 0xa0 } ++ [_]u8{0x01} ** 32;
+    const leaf = [_]u8{ 0xe2, 0x20, 0xa0 } ++ @as([32]u8, @splat(0x01));
     const leaf_hash = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
     const extension = [_]u8{ 0xe2, 0x11, 0xa0 } ++ leaf_hash;
     const extension_hash = mpt.StdKeccak256Context.keccak256(.{}, &extension);
@@ -287,7 +287,7 @@ test "node index hashes once, deduplicates, and rejects conflicts" {
 
     const ConstantKeccak = struct {
         pub fn keccak256(_: @This(), _: []const u8) mpt.Root {
-            return [_]u8{0} ** 32;
+            return @as([32]u8, @splat(0));
         }
     };
     const conflicting = [_][]const u8{ "a", "b" };
@@ -303,7 +303,7 @@ test "proof lookup distinguishes missing witness from malformed topology" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var missing_root_node = [_]u8{0} ** 35;
+    var missing_root_node: [35]u8 = @splat(0);
     missing_root_node[0] = 0xe2;
     missing_root_node[1] = 0x11;
     missing_root_node[2] = 0xa0;
@@ -314,7 +314,7 @@ test "proof lookup distinguishes missing witness from malformed topology" {
     const missing_root = mpt.StdKeccak256Context.keccak256(.{}, &missing_root_node);
     try std.testing.expectError(error.MissingNode, missing_indexed.lookup(missing_root, &[_]u8{0x10}));
 
-    const one_occupant_branch = [_]u8{0xd1} ++ [_]u8{0x80} ** 17;
+    const one_occupant_branch = [_]u8{0xd1} ++ @as([17]u8, @splat(0x80));
     const malformed_nodes = [_][]const u8{&one_occupant_branch};
     const malformed_indexed = try trie.indexWitness(&malformed_nodes);
     const malformed_root = mpt.StdKeccak256Context.keccak256(.{}, &one_occupant_branch);
@@ -546,7 +546,7 @@ test "catalog links shared hashed nodes once" {
 
 test "catalog ignores unreachable malformed witness entries" {
     const root_node = [_]u8{ 0xc2, 0x20, 0x01 };
-    const malformed = [_]u8{0xd1} ++ [_]u8{0x80} ** 17;
+    const malformed = [_]u8{0xd1} ++ @as([17]u8, @splat(0x80));
     const trie = mpt.init(std.testing.allocator);
     const encoded_nodes = [_][]const u8{ &malformed, &root_node };
     var indexed = try trie.indexWitness(&encoded_nodes);
@@ -567,7 +567,7 @@ test "catalog ignores unreachable malformed witness entries" {
 }
 
 test "catalog validates resolved extension topology before sealing" {
-    const leaf = [_]u8{ 0xe2, 0x20, 0xa0 } ++ [_]u8{0x01} ** 32;
+    const leaf = [_]u8{ 0xe2, 0x20, 0xa0 } ++ @as([32]u8, @splat(0x01));
     const leaf_hash = mpt.StdKeccak256Context.keccak256(.{}, &leaf);
     const extension = [_]u8{ 0xe2, 0x11, 0xa0 } ++ leaf_hash;
     const trie = mpt.init(std.testing.allocator);
@@ -618,10 +618,10 @@ test "catalog keeps stable handles across authenticated roots" {
 test "catalog rejects a resolved content-addressed cycle" {
     const ConstantKeccak = struct {
         pub fn keccak256(_: @This(), _: []const u8) mpt.Root {
-            return [_]u8{0} ** 32;
+            return @as([32]u8, @splat(0));
         }
     };
-    const root_node = branchWithHash([_]u8{0} ** 32);
+    const root_node = branchWithHash(@as([32]u8, @splat(0)));
     const trie = mpt.Trie(ConstantKeccak).init(std.testing.allocator, .{});
     const encoded_nodes = [_][]const u8{&root_node};
     var indexed = try trie.indexWitness(&encoded_nodes);
@@ -629,7 +629,7 @@ test "catalog rejects a resolved content-addressed cycle" {
 
     var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
     defer builder.deinit();
-    _ = try builder.authenticateRoot([_]u8{0} ** 32);
+    _ = try builder.authenticateRoot(@as([32]u8, @splat(0)));
     try std.testing.expectError(error.InvalidNodeReference, builder.finish());
 }
 
@@ -666,7 +666,7 @@ test "sparse update inserts into empty trie" {
 }
 
 test "sparse insert preserves a witness path longer than the update key" {
-    const long_key = [_]u8{0xff} ** 32;
+    const long_key: [32]u8 = @splat(0xff);
     var root_node: [36]u8 = undefined;
     root_node[0] = 0xe3;
     root_node[1] = 0xa1;
@@ -727,7 +727,7 @@ test "allocating APIs clean every allocation failure position" {
 
 test "empty-root batch does not reserve key-depth times node capacity" {
     const entry_count = 256;
-    var keys: [entry_count][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** entry_count;
+    var keys: [entry_count][32]u8 = @splat(@splat(0));
     var values: [entry_count][1]u8 = undefined;
     var updates: [entry_count]mpt.Update = undefined;
     for (0..entry_count) |index| {
@@ -819,7 +819,7 @@ test "sparse branch collapse reveals the sole hashed sibling" {
     const actual = try trie.updateSorted(root_hash, indexed, &deletion);
     const expected_entries = [_]mpt.Entry{.{
         .key = &[_]u8{0x10},
-        .value = &([_]u8{0xab} ** 40),
+        .value = &(@as([40]u8, @splat(0xab))),
     }};
     const expected = try trie.rootSorted(&expected_entries);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
@@ -834,11 +834,11 @@ test "sparse branch collapse reveals the sole hashed sibling" {
 }
 
 test "occurrence catalog update rejects branch values" {
-    const key = [_]u8{0} ** 32;
-    const child = [_]u8{ 0xe2, 0xa0, 0x30 } ++ [_]u8{0} ** 31 ++ [_]u8{0x02};
+    const key: [32]u8 = @splat(0);
+    const child = [_]u8{ 0xe2, 0xa0, 0x30 } ++ @as([31]u8, @splat(0)) ++ [_]u8{0x02};
     const child_hash = mpt.StdKeccak256Context.keccak256(.{}, &child);
     const branch = [_]u8{0xf1} ++ [_]u8{0xa0} ++ child_hash ++
-        [_]u8{0x80} ** 15 ++ [_]u8{0x01};
+        @as([15]u8, @splat(0x80)) ++ [_]u8{0x01};
     const nodes = [_][]const u8{ &branch, &child };
     const trie = mpt.init(std.testing.allocator);
     var indexed = try trie.indexWitness(&nodes);
@@ -876,7 +876,7 @@ test "occurrence catalog update rejects variable-width leaves" {
     defer catalog.deinit();
     var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const key = [_]u8{0} ** 32;
+    const key: [32]u8 = @splat(0);
     const update = [_]mpt.FixedUpdate{.{ .key = key, .value = &[_]u8{0x02} }};
     try std.testing.expectError(
         error.InvalidNode,
@@ -1112,7 +1112,7 @@ test "occurrence catalog update replaces, splits, deletes, and compresses catalo
 test "sparse update uses bounded frames for deep Patricia topology" {
     const key_bytes = 64;
     const entry_count = key_bytes * 2 + 1;
-    var keys: [entry_count][key_bytes]u8 = [_][key_bytes]u8{[_]u8{0} ** key_bytes} ** entry_count;
+    var keys: [entry_count][key_bytes]u8 = @splat(@splat(0));
     var values: [entry_count][1]u8 = undefined;
     var entries: [entry_count]mpt.Entry = undefined;
     var updates: [entry_count]mpt.Update = undefined;
@@ -1271,7 +1271,7 @@ fn branchWithTwoHashes(digest: mpt.Root) [83]u8 {
 }
 
 fn fixedKey(first: u8) mpt.Root {
-    var key = [_]u8{0} ** 32;
+    var key: [32]u8 = @splat(0);
     key[0] = first;
     return key;
 }

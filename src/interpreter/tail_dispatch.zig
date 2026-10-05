@@ -1127,7 +1127,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
 
         fn tailCalldataLoad(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: DispatchTableArg) TailStatus {
             const offset_word = (sp - 1)[0];
-            var buffer: [32]u8 = [_]u8{0} ** 32;
+            var buffer: [32]u8 = @splat(0);
             if (std.math.cast(usize, offset_word)) |offset| {
                 const input = ctx.frame.msg.input_data;
                 if (offset < input.len) {

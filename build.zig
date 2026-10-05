@@ -26,7 +26,7 @@ const PackageModules = struct {
 
 const EvmzModuleConfig = struct {
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     build_options: *std.Build.Step.Options,
     stateless_profile: *std.Build.Module,
     packages: PackageModules,
@@ -42,7 +42,7 @@ const EvmzModuleConfig = struct {
 
 const TestConfig = struct {
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     packages: PackageModules,
     stateless_profile: *std.Build.Module,
     native_build_options: *std.Build.Step.Options,
@@ -131,10 +131,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const bench_optimize = b.option(
-        std.builtin.OptimizeMode,
+        std.lang.Optimize,
         "bench-optimize",
         "Optimization mode forwarded to benchmark runners",
-    ) orelse .ReleaseFast;
+    ) orelse .fast;
     const bench_support_min = b.option(
         []const u8,
         "bench-support-min",
@@ -152,7 +152,7 @@ pub fn build(b: *std.Build) void {
     );
     // Frame pointers cost ~3 instructions per tail-dispatch handler; bench
     // builds already omit them, so keep shipped release artifacts identical.
-    const omit_frame_pointer = optimize != .Debug;
+    const omit_frame_pointer = optimize != .debug;
 
     const packages = createPackageModules(b, target, optimize, null, true);
     const native_evmz_mod = createEvmzModule(b, .{
@@ -322,13 +322,13 @@ pub fn build(b: *std.Build) void {
     b.step("cli-build", "Build the evmz command-line tool").dependOn(&install_cli.step);
     const run_cli = b.addRunArtifact(cli);
     run_cli.stdio = .inherit;
-    if (b.args) |args| run_cli.addArgs(args);
+    run_cli.addPassthruArgs();
     b.step("run", "Run evmz with subcommands").dependOn(&run_cli.step);
     for ([_][]const u8{ "t8n", "statetest", "blocktest", "debug" }) |command| {
         const run = b.addRunArtifact(cli);
         run.addArg(command);
         if (std.mem.eql(u8, command, "debug")) run.stdio = .inherit;
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         b.step(command, b.fmt("Run evmz {s}", .{command})).dependOn(&run.step);
     }
     const t8n_tests = b.addTest(.{ .root_module = t8n_mod });
@@ -601,25 +601,17 @@ fn addT8nSteps(
     };
 
     const fill = addEestFill(b, install_t8n, source, "eest-fill");
-    if (b.args) |args| fill.addArgs(args) else fill.addArgs(&.{
-        "--fork",
-        "Shanghai",
-        "tests/shanghai/eip3855_push0/test_push0.py",
-        "-k",
-        "key_sstore",
-    });
+    fill.addPassthruArgs();
     fill_step.dependOn(&fill.step);
 
     const diff = addEestFill(b, install_t8n, source, "eest-diff");
-    diff.addArgs(&.{
-        "-p",
-        "evmz_differential",
-        "--evmz-diff-output",
-        mismatch_output orelse b.pathFromRoot(".zig-cache/eest-diff/mismatches"),
-        "-x",
-    });
+    diff.addArgs(&.{ "-p", "evmz_differential", "--evmz-diff-output" });
+    if (mismatch_output) |path| diff.addArg(path) else {
+        diff.addDirectoryArg2(std.Build.LazyPath.cache_root.path(b, "eest-diff/mismatches"), .{});
+    }
+    diff.addArg("-x");
     if (reference_binary) |reference| diff.addArgs(&.{ "--evmz-diff-reference", reference });
-    if (b.args) |args| diff.addArgs(args) else diff.addArg("tests");
+    diff.addPassthruArgs();
     diff_step.dependOn(&diff.step);
 }
 
@@ -631,11 +623,11 @@ fn addEestFill(
     source: []const u8,
     cache_name: []const u8,
 ) *std.Build.Step.Run {
-    const cache = b.pathFromRoot(b.fmt(".zig-cache/{s}", .{cache_name}));
+    const cache = std.Build.LazyPath.cache_root.path(b, cache_name);
     const fill = b.addSystemCommand(&.{ "uv", "run", "--frozen", "--project" });
     fill.addDirectoryArg(b.path("eest/consume"));
     fill.addArgs(&.{ "fill", "--evm-bin" });
-    fill.addArg(b.getInstallPath(.bin, install_t8n.dest_sub_path));
+    fill.addArtifactArg2(install_t8n.artifact, .{});
     fill.step.dependOn(&install_t8n.step);
     fill.addArgs(&.{
         "-p",
@@ -643,11 +635,13 @@ fn addEestFill(
         "--filler-path",
         "tests",
         "--output",
-        b.fmt("{s}/fixtures", .{cache}),
-        "--log-to",
-        b.fmt("{s}/logs", .{cache}),
-        "-o",
-        b.fmt("cache_dir={s}/pytest-cache", .{cache}),
+    });
+    fill.addDirectoryArg2(cache.path(b, "fixtures"), .{});
+    fill.addArg("--log-to");
+    fill.addDirectoryArg2(cache.path(b, "logs"), .{});
+    fill.addArg("-o");
+    fill.addDirectoryArg2(cache.path(b, "pytest-cache"), .{ .prefix = "cache_dir=" });
+    fill.addArgs(&.{
         "--clean",
         "--no-html",
         "-q",
@@ -709,7 +703,7 @@ fn buildOptions(
 fn createPackageModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     omit_frame_pointer: ?bool,
     exported: bool,
 ) PackageModules {
@@ -785,7 +779,7 @@ fn createEvmzModule(b: *std.Build, config: EvmzModuleConfig) *std.Build.Module {
 /// filters; argv changes re-run the cached binary without recompiling.
 fn runTests(b: *std.Build, tests: *std.Build.Step.Compile) *std.Build.Step {
     const run = b.addRunArtifact(tests);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     return &run.step;
 }
 
@@ -1057,7 +1051,7 @@ const GuestHeap = enum { fixed, platform };
 
 const GuestCompilePolicy = struct {
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     omit_frame_pointer: bool,
     strip: bool,
 
@@ -1100,7 +1094,7 @@ const GuestPayload = enum {
 fn addGuestPayloadTests(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     evmz_mod: *std.Build.Module,
     heap_bytes: u64,
 ) GuestPayloadSteps {
@@ -1190,7 +1184,7 @@ fn addGuestPayloadTests(
 fn addGuest(
     b: *std.Build,
     backend: GuestBackend,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     provider_path_option: ?[]const u8,
     guest_payload: GuestPayload,
     guest_input_path: ?[]const u8,
@@ -1341,12 +1335,11 @@ fn addGuest(
 
 fn buildOpenVmProvider(b: *std.Build) std.Build.LazyPath {
     const manifest = b.path("guest/runtime/openvm/provider/Cargo.toml");
-    const target_dir = b.cache_root.join(b.allocator, &.{"openvm-provider"}) catch @panic("OOM");
     const build_provider = b.addSystemCommand(&.{"sh"});
     build_provider.addFileArg(b.path("guest/runtime/openvm/provider/build.sh"));
     const archive = build_provider.addOutputFileArg("libevmz_openvm_crypto_provider.a");
     build_provider.addFileArg(manifest);
-    build_provider.addArg(b.pathFromRoot(target_dir));
+    build_provider.addDirectoryArg2(std.Build.LazyPath.cache_root.path(b, "openvm-provider"), .{});
     for ([_][]const u8{
         "guest/runtime/openvm/provider/Cargo.lock",
         "guest/runtime/openvm/provider/.cargo/config.toml",
@@ -1357,9 +1350,7 @@ fn buildOpenVmProvider(b: *std.Build) std.Build.LazyPath {
 
 fn buildSp1Provider(b: *std.Build) std.Build.LazyPath {
     const builder_manifest = b.path("guest/runtime/sp1/provider-builder/Cargo.toml");
-    const provider_dir = b.pathFromRoot("guest/runtime/sp1/provider");
-    const builder_target_dir = b.cache_root.join(b.allocator, &.{"sp1-provider-builder"}) catch @panic("OOM");
-    const provider_target_dir = b.cache_root.join(b.allocator, &.{"sp1-provider"}) catch @panic("OOM");
+    const cache_root = std.Build.LazyPath.cache_root;
     const build_provider = b.addSystemCommand(&.{
         "cargo",
         "run",
@@ -1369,9 +1360,12 @@ fn buildSp1Provider(b: *std.Build) std.Build.LazyPath {
         "--manifest-path",
     });
     build_provider.addFileArg(builder_manifest);
-    build_provider.addArgs(&.{ "--target-dir", builder_target_dir, "--", provider_dir });
+    build_provider.addArg("--target-dir");
+    build_provider.addDirectoryArg2(cache_root.path(b, "sp1-provider-builder"), .{});
+    build_provider.addArg("--");
+    build_provider.addDirectoryArg2(b.path("guest/runtime/sp1/provider"), .{});
     const archive = build_provider.addOutputFileArg("libevmz_sp1_provider.a");
-    build_provider.addArg(provider_target_dir);
+    build_provider.addDirectoryArg2(cache_root.path(b, "sp1-provider"), .{});
     for ([_][]const u8{
         "guest/runtime/sp1/provider-builder/Cargo.lock",
         "guest/runtime/sp1/provider-builder/src/main.rs",
@@ -1406,8 +1400,7 @@ fn addGuestRunner(
             run_step.dependOn(&run.step);
         },
         .sp1 => {
-            const host_manifest = b.pathFromRoot("guest/runtime/Cargo.toml");
-            const host_target = b.cache_root.join(b.allocator, &.{"sp1-host"}) catch @panic("OOM");
+            const host_target = std.Build.LazyPath.cache_root.path(b, "sp1-host");
             const build_host = b.addSystemCommand(&.{
                 "cargo",
                 "build",
@@ -1415,16 +1408,15 @@ fn addGuestRunner(
                 "--release",
                 "--locked",
                 "--manifest-path",
-                host_manifest,
-                "--package",
-                "evmz-sp1-host",
-                "--target-dir",
-                host_target,
             });
+            build_host.addFileArg2(b.path("guest/runtime/Cargo.toml"), .{});
+            build_host.addArgs(&.{ "--package", "evmz-sp1-host", "--target-dir" });
+            build_host.addDirectoryArg2(host_target, .{});
             build_host.has_side_effects = true;
 
-            const host_exe = b.pathJoin(&.{ host_target, "release", "evmz-sp1-host" });
-            const run = b.addSystemCommand(&.{ host_exe, "--elf" });
+            const run = std.Build.Step.Run.create(b, "run evmz-sp1-host");
+            run.addFileArg2(host_target.path(b, "release/evmz-sp1-host"), .{});
+            run.addArg("--elf");
             run.step.dependOn(&build_host.step);
             run.addFileArg(guest.getEmittedBin());
             if (guest_input_path) |path| run.addArgs(&.{ "--input", path });
@@ -1445,13 +1437,13 @@ fn addTidy(b: *std.Build) *std.Build.Step {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/tidy.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
     const run = b.addRunArtifact(tidy);
     run.has_side_effects = true;
     run.addDirectoryArg(b.path("."));
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
 
     const step = b.step("tidy", "Report unused private declarations and orphan files");
     step.dependOn(&run.step);
@@ -1462,14 +1454,14 @@ fn addCheckGuestElf(b: *std.Build) *std.Build.Step {
     const module = b.createModule(.{
         .root_source_file = b.path("tools/check_guest_elf.zig"),
         .target = b.graph.host,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     const executable = b.addExecutable(.{
         .name = "check-guest-elf",
         .root_module = module,
     });
     const run = b.addRunArtifact(executable);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("check-guest-elf", "Validate a zkEVM guest ELF").dependOn(&run.step);
 
     const tests = b.addTest(.{
@@ -1477,7 +1469,7 @@ fn addCheckGuestElf(b: *std.Build) *std.Build.Step {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/check_guest_elf.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
     return &b.addRunArtifact(tests).step;
@@ -1487,14 +1479,14 @@ fn addCheckZiskFailureStatus(b: *std.Build) *std.Build.Step {
     const module = b.createModule(.{
         .root_source_file = b.path("tools/check_zisk_failure_status.zig"),
         .target = b.graph.host,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     const executable = b.addExecutable(.{
         .name = "check-zisk-failure-status",
         .root_module = module,
     });
     const run = b.addRunArtifact(executable);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step(
         "check-zisk-failure-status",
         "Require ZisK to propagate a failure-probe guest return",
@@ -1505,7 +1497,7 @@ fn addCheckZiskFailureStatus(b: *std.Build) *std.Build.Step {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/check_zisk_failure_status.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
     return &b.addRunArtifact(tests).step;
@@ -1513,7 +1505,7 @@ fn addCheckZiskFailureStatus(b: *std.Build) *std.Build.Step {
 
 fn addFmtCheck(b: *std.Build) *std.Build.Step {
     const fmt = b.addFmt(.{
-        .paths = &.{
+        .paths = b.pathList(&.{
             "build.zig",
             "src",
             "pkg",
@@ -1522,7 +1514,7 @@ fn addFmtCheck(b: *std.Build) *std.Build.Step {
             "examples",
             "eest",
             "bench",
-        },
+        }),
         .check = true,
     });
     const step = b.step("fmt-check", "Check Zig source formatting");
@@ -1531,7 +1523,7 @@ fn addFmtCheck(b: *std.Build) *std.Build.Step {
 }
 
 fn pathExists(b: *std.Build, sub_path: []const u8) bool {
-    b.build_root.handle.access(b.graph.io, sub_path, .{}) catch return false;
+    b.root.access(b.graph.io, sub_path, .{}) catch return false;
     return true;
 }
 
@@ -1543,7 +1535,7 @@ const NativePrecompileDeps = struct {
 fn nativePrecompileDeps(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     pic: ?bool,
 ) ?NativePrecompileDeps {
     const blst_dep = b.lazyDependency("blst", .{ .target = target, .optimize = optimize }) orelse return null;
@@ -1590,10 +1582,10 @@ fn addChildBuild(b: *std.Build, config: ChildBuildConfig) void {
     run.addArgs(config.build_args);
     addEvmzBuildArgs(run, b, config.evmz);
     run.addArg(config.child_step);
-    if (config.forward_args) if (b.args) |args| {
+    if (config.forward_args) {
         run.addArg("--");
-        run.addArgs(args);
-    };
+        run.addPassthruArgs();
+    }
     run.setCwd(b.path(config.directory));
 
     const step = b.step(config.step_name, config.description);
@@ -1674,10 +1666,8 @@ fn addSszBenchDelegate(b: *std.Build, optimize_name: []const u8) void {
         b.fmt("-Doptimize={s}", .{optimize_name}),
         "bench",
     });
-    if (b.args) |args| {
-        run.addArg("--");
-        run.addArgs(args);
-    }
+    run.addArg("--");
+    run.addPassthruArgs();
     run.setCwd(b.path("pkg/ssz/bench"));
 
     const step = b.step("ssz-bench", "Run standalone SSZ codec benchmarks");
@@ -1738,7 +1728,7 @@ const XkcpLane = enum {
 fn buildXkcpObject(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     dep: *std.Build.Dependency,
     name: []const u8,
     pic: ?bool,
@@ -1918,7 +1908,7 @@ fn addPrecompileNative(
 fn buildNativePrecompileObject(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     blst_dep: *std.Build.Dependency,
     mcl_dep: *std.Build.Dependency,
     pic: ?bool,
@@ -1971,7 +1961,7 @@ fn buildNativePrecompileObject(
 fn buildBlstLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     blst_dep: *std.Build.Dependency,
     pic: ?bool,
 ) *std.Build.Step.Compile {

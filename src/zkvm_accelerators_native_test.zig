@@ -395,7 +395,7 @@ fn recoverSecp256k1(message: [32]u8, signature: [64]u8, recovery_id: u8) ?[64]u8
 }
 
 fn secp256k1ScalarFromWord(word: [32]u8) std.crypto.ecc.Secp256k1.scalar.Scalar {
-    var expanded = [_]u8{0} ** 64;
+    var expanded: [64]u8 = @splat(0);
     @memcpy(expanded[32..64], &word);
     return std.crypto.ecc.Secp256k1.scalar.Scalar.fromBytes64(expanded, .big);
 }
@@ -423,7 +423,7 @@ test "hash, RIPEMD padding, modexp, and BLAKE2f ABI semantics" {
     }, &hash.data);
 
     try std.testing.expectEqual(zkvm.EOK, zkvm_ripemd160(&empty, 0, &hash));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 12), hash.data[0..12]);
+    try std.testing.expectEqualSlices(u8, &(@as([12]u8, @splat(0))), hash.data[0..12]);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         0x9c, 0x11, 0x85, 0xa5, 0xc5, 0xe9, 0xfc, 0x54, 0x61, 0x28,
         0x08, 0x97, 0x7e, 0xe8, 0xf5, 0x48, 0xb2, 0x25, 0x8d, 0x31,
@@ -439,9 +439,9 @@ test "hash, RIPEMD padding, modexp, and BLAKE2f ABI semantics" {
     );
     try std.testing.expectEqual(@as(u8, 6), modexp_output[0]);
 
-    var h: zkvm.Blake2fState = .{ .data = [_]u8{0} ** 64 };
-    const message: zkvm.Blake2fMessage = .{ .data = [_]u8{0} ** 128 };
-    const offset: zkvm.Blake2fOffset = .{ .data = [_]u8{0} ** 16 };
+    var h: zkvm.Blake2fState = .{ .data = @splat(0) };
+    const message: zkvm.Blake2fMessage = .{ .data = @splat(0) };
+    const offset: zkvm.Blake2fOffset = .{ .data = @splat(0) };
     try std.testing.expectEqual(zkvm.EOK, zkvm_blake2f(0, &h, &message, &offset, 0));
     const iv = [_]u64{
         0x6a09e667f3bcc908,
@@ -527,18 +527,18 @@ test "secp256k1 and secp256r1 verification ABI semantics" {
 }
 
 test "BN254 and KZG accelerator ABI semantics" {
-    const infinity: zkvm.Bn254G1Point = .{ .data = [_]u8{0} ** 64 };
-    var result: zkvm.Bn254G1Point = .{ .data = [_]u8{0xff} ** 64 };
+    const infinity: zkvm.Bn254G1Point = .{ .data = @splat(0) };
+    var result: zkvm.Bn254G1Point = .{ .data = @splat(0xff) };
     try std.testing.expectEqual(
         zkvm.EOK,
         zkvm_bn254_g1_add(&infinity, &infinity, &result),
     );
     try std.testing.expectEqualSlices(u8, &infinity.data, &result.data);
 
-    var generator: zkvm.Bn254G1Point = .{ .data = [_]u8{0} ** 64 };
+    var generator: zkvm.Bn254G1Point = .{ .data = @splat(0) };
     generator.data[31] = 1;
     generator.data[63] = 2;
-    var one: zkvm.Bn254Scalar = .{ .data = [_]u8{0} ** 32 };
+    var one: zkvm.Bn254Scalar = .{ .data = @splat(0) };
     one.data[31] = 1;
     try std.testing.expectEqual(
         zkvm.EOK,
@@ -546,7 +546,7 @@ test "BN254 and KZG accelerator ABI semantics" {
     );
     try std.testing.expectEqualSlices(u8, &generator.data, &result.data);
 
-    const invalid: zkvm.Bn254G1Point = .{ .data = [_]u8{0xff} ** 64 };
+    const invalid: zkvm.Bn254G1Point = .{ .data = @splat(0xff) };
     try std.testing.expectEqual(
         zkvm.EFAIL,
         zkvm_bn254_g1_add(&invalid, &infinity, &result),
@@ -559,10 +559,10 @@ test "BN254 and KZG accelerator ABI semantics" {
     );
     try std.testing.expect(verified);
 
-    var commitment: zkvm.KzgCommitment = .{ .data = [_]u8{0} ** 48 };
+    var commitment: zkvm.KzgCommitment = .{ .data = @splat(0) };
     commitment.data[0] = 0xc0;
-    const zero: zkvm.KzgFieldElement = .{ .data = [_]u8{0} ** 32 };
-    var proof: zkvm.KzgProof = .{ .data = [_]u8{0} ** 48 };
+    const zero: zkvm.KzgFieldElement = .{ .data = @splat(0) };
+    var proof: zkvm.KzgProof = .{ .data = @splat(0) };
     proof.data[0] = 0xc0;
     try std.testing.expectEqual(
         zkvm.EOK,
@@ -578,8 +578,8 @@ test "BN254 and KZG accelerator ABI semantics" {
 }
 
 test "BLS12 compact points, MSM, pairing, and map ABI semantics" {
-    const g1_infinity: zkvm.Bls12G1Point = .{ .data = [_]u8{0} ** 96 };
-    var g1: zkvm.Bls12G1Point = .{ .data = [_]u8{0xff} ** 96 };
+    const g1_infinity: zkvm.Bls12G1Point = .{ .data = @splat(0) };
+    var g1: zkvm.Bls12G1Point = .{ .data = @splat(0xff) };
     try std.testing.expectEqual(
         zkvm.EOK,
         zkvm_bls12_g1_add(&g1_infinity, &g1_infinity, &g1),
@@ -592,8 +592,8 @@ test "BLS12 compact points, MSM, pairing, and map ABI semantics" {
     );
     try std.testing.expectEqualSlices(u8, &g1_infinity.data, &g1.data);
 
-    const g2_infinity: zkvm.Bls12G2Point = .{ .data = [_]u8{0} ** 192 };
-    var g2: zkvm.Bls12G2Point = .{ .data = [_]u8{0xff} ** 192 };
+    const g2_infinity: zkvm.Bls12G2Point = .{ .data = @splat(0) };
+    var g2: zkvm.Bls12G2Point = .{ .data = @splat(0xff) };
     try std.testing.expectEqual(
         zkvm.EOK,
         zkvm_bls12_g2_add(&g2_infinity, &g2_infinity, &g2),
@@ -614,14 +614,14 @@ test "BLS12 compact points, MSM, pairing, and map ABI semantics" {
     );
     try std.testing.expect(verified);
 
-    const fp: zkvm.Bls12Fp = .{ .data = [_]u8{0} ** 48 };
+    const fp: zkvm.Bls12Fp = .{ .data = @splat(0) };
     try std.testing.expectEqual(zkvm.EOK, zkvm_bls12_map_fp_to_g1(&fp, &g1));
     try std.testing.expect(!std.mem.allEqual(u8, &g1.data, 0));
-    const fp2: zkvm.Bls12Fp2 = .{ .data = [_]u8{0} ** 96 };
+    const fp2: zkvm.Bls12Fp2 = .{ .data = @splat(0) };
     try std.testing.expectEqual(zkvm.EOK, zkvm_bls12_map_fp2_to_g2(&fp2, &g2));
     try std.testing.expect(!std.mem.allEqual(u8, &g2.data, 0));
 
-    const invalid_fp: zkvm.Bls12Fp = .{ .data = [_]u8{0xff} ** 48 };
+    const invalid_fp: zkvm.Bls12Fp = .{ .data = @splat(0xff) };
     try std.testing.expectEqual(
         zkvm.EFAIL,
         zkvm_bls12_map_fp_to_g1(&invalid_fp, &g1),

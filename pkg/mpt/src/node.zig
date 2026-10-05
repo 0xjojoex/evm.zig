@@ -230,7 +230,7 @@ fn decodeShort(compact_item: rlp.Item, value_or_reference: rlp.Item) Error!Node 
 
 fn decodeBranch(items: *const [17]rlp.Item, mode: BranchMode) Error!Node {
     var branch: Node.Branch = .{
-        .children = [_]Reference{.empty} ** 16,
+        .children = @splat(.empty),
         .value = null,
     };
     var occupied: usize = 0;

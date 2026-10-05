@@ -5,7 +5,7 @@ const schema_limit = @import("../schema_limit.zig");
 const precomputed_zero_roots = @import("zero_roots.zig");
 
 pub const Root = [32]u8;
-pub const zero = [_]u8{0} ** 32;
+pub const zero: [32]u8 = @splat(0);
 const root_word_alignment = @alignOf(u64);
 const DefaultContext = hash_context.StdSha256Context;
 pub const precomputed_zero_root_count = precomputed_zero_roots.count;

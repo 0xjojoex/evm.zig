@@ -127,7 +127,7 @@ test "BlockSTF validates a single witnessed transaction" {
         .root_checks = testRootChecks(
             expected_state_root,
             try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
-            [_]u8{0xff} ** 32,
+            @as([32]u8, @splat(0xff)),
         ),
     });
     try std.testing.expectEqual(Status.receipts_root_mismatch, first_result.status);
@@ -291,7 +291,7 @@ test "BlockSTF validates a single witnessed transaction" {
             try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
             first_result.receipts_root,
         ),
-        .header_claims = .{ .logs_bloom = [_]u8{0xff} ** 256 },
+        .header_claims = .{ .logs_bloom = @splat(0xff) },
     });
     try std.testing.expectEqual(Status.logs_bloom_mismatch, logs_bloom_mismatch.status);
 }
@@ -327,7 +327,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
         .encoded = "create-prevrandao",
     }};
 
-    var randao_bytes = [_]u8{0} ** 32;
+    var randao_bytes: [32]u8 = @splat(0);
     randao_bytes[0] = 0x01;
     randao_bytes[31] = 0x02;
     const prev_randao = std.mem.readInt(u256, &randao_bytes, .big);
@@ -359,7 +359,7 @@ test "BlockSTF stores PREVRANDAO as EVM word" {
         .root_checks = testRootChecks(
             expected_state_root,
             try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
-            [_]u8{0xff} ** 32,
+            @as([32]u8, @splat(0xff)),
         ),
     });
     try std.testing.expectEqual(Status.receipts_root_mismatch, first_result.status);
@@ -402,9 +402,9 @@ test "BlockSTF reports root mismatches and invalid witness" {
         .state_backend = try Backend.fromWitness(scratch, pre_state_root, &nodes, &.{}),
         .transactions = &tx_input,
         .root_checks = testRootChecks(
-            [_]u8{0xff} ** 32,
+            @as([32]u8, @splat(0xff)),
             try trie.transactionRoot(scratch, &.{tx_input[0].encoded}),
-            [_]u8{0xff} ** 32,
+            @as([32]u8, @splat(0xff)),
         ),
     });
     try std.testing.expectEqual(Status.state_root_mismatch, mismatch.status);
@@ -535,7 +535,7 @@ test "BlockSTF validates withdrawals root" {
             expected_state_root,
             trie.empty_root_hash,
             trie.empty_root_hash,
-            [_]u8{0xff} ** 32,
+            @as([32]u8, @splat(0xff)),
         ),
     });
     try std.testing.expectEqual(Status.withdrawals_root_mismatch, mismatch.status);
@@ -605,7 +605,7 @@ test "BlockSTF applies Cancun block-start system contract" {
     const nodes = [_][]const u8{state_node};
     const codes = [_][]const u8{beacon_code};
 
-    var parent_beacon_root = [_]u8{0} ** 32;
+    var parent_beacon_root: [32]u8 = @splat(0);
     parent_beacon_root[31] = 0xbb;
     const timestamp: u64 = 12;
     const timestamp_key = trie.hashedStorageKey(timestamp);
@@ -623,7 +623,7 @@ test "BlockSTF applies Cancun block-start system contract" {
     });
     const post_state_pairs = [_]trie.Pair{.{ .key = &account_key, .value = post_account_value }};
     const expected_state_root = try trie.root(scratch, &post_state_pairs);
-    const parent_hash = [_]u8{0x11} ** 32;
+    const parent_hash: [32]u8 = @splat(0x11);
 
     const result = try StfCancun.applyAssumeDecoded(scratch, .{
         .env = .{ .number = 1, .timestamp = timestamp, .gas_limit = 30_000_000 },
@@ -659,14 +659,14 @@ test "BlockSTF rejects missing or inconsistent parent context" {
     });
     try std.testing.expectEqual(Status.parent_header_mismatch, missing.status);
 
-    const parent_hash = [_]u8{0x11} ** 32;
+    const parent_hash: [32]u8 = @splat(0x11);
     const inconsistent = try Latest.applyAssumeDecoded(std.testing.allocator, .{
         .env = .{ .number = 1, .timestamp = 2, .gas_limit = 30_000_000 },
         .block_header = .{
             .number = 1,
             .timestamp = 3,
             .parent_hash = parent_hash,
-            .parent_beacon_block_root = [_]u8{0} ** 32,
+            .parent_beacon_block_root = @splat(0),
         },
         .state_backend = try Backend.fromWitness(std.testing.allocator, trie.empty_root_hash, &.{}, &.{}),
         .transactions = &.{},
@@ -745,7 +745,7 @@ test "BlockSTF reconstructs Amsterdam header and makes block hash mismatch reach
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    const zero_hash = [_]u8{0} ** 32;
+    const zero_hash: [32]u8 = @splat(0);
     const input = AssumeDecodedBlockInput{
         .env = .{
             .number = 0,
@@ -814,7 +814,7 @@ test "BlockSTF compares derived block access list artifact and hash claims" {
         .transactions = &.{},
         .block_access_list = empty_claim,
         .root_checks = testRootChecks(trie.empty_root_hash, trie.empty_root_hash, trie.empty_root_hash),
-        .header_claims = .{ .block_access_list_hash = [_]u8{0xff} ** 32 },
+        .header_claims = .{ .block_access_list_hash = @splat(0xff) },
     });
     try std.testing.expectEqual(Status.block_access_list_hash_mismatch, hash_mismatch.status);
 
@@ -1055,7 +1055,7 @@ test "BlockSTF validates blob gas header fields" {
         .root_checks = testRootChecks(
             expected_state_root,
             expected_transactions_root,
-            [_]u8{0xff} ** 32,
+            @as([32]u8, @splat(0xff)),
         ),
     });
     try std.testing.expectEqual(Status.receipts_root_mismatch, first_result.status);

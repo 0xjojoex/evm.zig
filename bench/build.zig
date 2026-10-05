@@ -10,11 +10,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const micro_optimize = b.option(
-        std.builtin.OptimizeMode,
+        std.lang.Optimize,
         "micro-optimize",
         "Optimization mode for micro benchmark tests",
-    ) orelse if (optimize == .Debug) .ReleaseFast else optimize;
-    const compare_optimize = if (optimize == .Debug) .ReleaseFast else optimize;
+    ) orelse if (optimize == .debug) .fast else optimize;
+    const compare_optimize = if (optimize == .debug) .fast else optimize;
     const micro_filter = b.option(
         []const u8,
         "micro-filter",
@@ -67,7 +67,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(vm_loop);
 
         const run_vm_loop = b.addRunArtifact(vm_loop);
-        if (b.args) |args| run_vm_loop.addArgs(args);
+        run_vm_loop.addPassthruArgs();
         b.step("vm-loop", "Run evmz VM-loop fixture runner").dependOn(&run_vm_loop.step);
     }
 
@@ -80,7 +80,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(block_lifecycle);
 
         const run_block_lifecycle = b.addRunArtifact(block_lifecycle);
-        if (b.args) |args| run_block_lifecycle.addArgs(args);
+        run_block_lifecycle.addPassthruArgs();
         b.step("block-lifecycle", "Run VM block lifecycle benchmark").dependOn(&run_block_lifecycle.step);
     }
 
@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(kernel);
 
         const run_kernel = b.addRunArtifact(kernel);
-        if (b.args) |args| run_kernel.addArgs(args);
+        run_kernel.addPassthruArgs();
         b.step("kernel", "Run pure opcode kernel benchmark").dependOn(&run_kernel.step);
     }
 
@@ -111,7 +111,7 @@ pub fn build(b: *std.Build) void {
         });
         run_revm_kernel.setCwd(b.path("."));
         addRevmNativeRustFlags(run_revm_kernel);
-        if (b.args) |args| run_revm_kernel.addArgs(args);
+        run_revm_kernel.addPassthruArgs();
         b.step("revm-kernel", "Run revm opcode kernel benchmark").dependOn(&run_revm_kernel.step);
     }
 
@@ -128,7 +128,7 @@ pub fn build(b: *std.Build) void {
         });
         run_revm_vm_loop.setCwd(b.path("."));
         addRevmNativeRustFlags(run_revm_vm_loop);
-        if (b.args) |args| run_revm_vm_loop.addArgs(args);
+        run_revm_vm_loop.addPassthruArgs();
         b.step("revm-vm-loop", "Run revm VM-loop fixture runner").dependOn(&run_revm_vm_loop.step);
     }
 
@@ -159,7 +159,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(evmone_vm_loop);
 
         const run_evmone_vm_loop = b.addRunArtifact(evmone_vm_loop);
-        if (b.args) |args| run_evmone_vm_loop.addArgs(args);
+        run_evmone_vm_loop.addPassthruArgs();
         b.step("evmone-vm-loop", "Run standalone evmone VM-loop fixture runner").dependOn(&run_evmone_vm_loop.step);
     }
 
@@ -191,7 +191,7 @@ pub fn build(b: *std.Build) void {
             "--support-max",
             vm_loop_support_max,
         });
-        if (b.args) |args| run_compare.addArgs(args);
+        run_compare.addPassthruArgs();
         b.step("compare", "Run VM-core comparison").dependOn(&run_compare.step);
     }
 
@@ -207,7 +207,7 @@ pub fn build(b: *std.Build) void {
             @tagName(native_keccak),
         });
         run_report.setCwd(b.path("."));
-        if (b.args) |args| run_report.addArgs(args);
+        run_report.addPassthruArgs();
         b.step("report", "Run all benchmark layers and write a comparison report").dependOn(&run_report.step);
     }
 
@@ -249,7 +249,7 @@ pub fn build(b: *std.Build) void {
         const bench_tests = b.addTest(.{
             .name = "evmz-bench-tests",
             .root_module = bench_tests_mod,
-            .filters = b.args orelse &.{},
+            .test_runner = evmzTestRunner(evmz_dep),
         });
         const kernel_tests = b.addTest(.{
             .name = "evmone-kernel-tests",
@@ -259,7 +259,7 @@ pub fn build(b: *std.Build) void {
                 addEvmoneVm(kernel_test_mod, evmone_dep, intx_dep, evmone_libgcc);
                 break :blk kernel_test_mod;
             },
-            .filters = b.args orelse &.{},
+            .test_runner = evmzTestRunner(evmz_dep),
         });
         const compare_tests = b.addTest(.{
             .name = "compare-tests",
@@ -268,12 +268,12 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
-            .filters = b.args orelse &.{},
+            .test_runner = evmzTestRunner(evmz_dep),
         });
         const test_step = b.step("test", "Run benchmark sidecar tests");
-        test_step.dependOn(&b.addRunArtifact(bench_tests).step);
-        test_step.dependOn(&b.addRunArtifact(kernel_tests).step);
-        test_step.dependOn(&b.addRunArtifact(compare_tests).step);
+        test_step.dependOn(&passthruRun(b, bench_tests).step);
+        test_step.dependOn(&passthruRun(b, kernel_tests).step);
+        test_step.dependOn(&passthruRun(b, compare_tests).step);
     }
 }
 
@@ -353,7 +353,7 @@ fn benchModule(
     b: *std.Build,
     root: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     evmz_mod: *std.Build.Module,
 ) *std.Build.Module {
     return b.createModule(.{
@@ -366,4 +366,16 @@ fn benchModule(
             .{ .name = "evmz", .module = evmz_mod },
         },
     });
+}
+
+/// The root's runner filters by passthru argv (`zig build test -- <substring>`)
+/// at runtime, since Zig 0.17 build scripts cannot observe passthru args.
+fn evmzTestRunner(evmz_dep: *std.Build.Dependency) std.Build.Step.Compile.TestRunner {
+    return .{ .path = evmz_dep.path("tools/test_runner.zig"), .mode = .simple };
+}
+
+fn passthruRun(b: *std.Build, artifact: *std.Build.Step.Compile) *std.Build.Step.Run {
+    const run = b.addRunArtifact(artifact);
+    run.addPassthruArgs();
+    return run;
 }

@@ -145,17 +145,17 @@ fn hex(comptime s: []const u8) [s.len / 2]u8 {
 }
 
 fn testContext() !Context {
-    return Context.init(testing.allocator, [_]u8{0x5a} ** 32);
+    return Context.init(testing.allocator, @as([32]u8, @splat(0x5a)));
 }
 
 test "context allocation failure is an error, not an abort" {
-    try testing.expectError(error.OutOfMemory, Context.init(testing.failing_allocator, [_]u8{0x5a} ** 32));
+    try testing.expectError(error.OutOfMemory, Context.init(testing.failing_allocator, @as([32]u8, @splat(0x5a))));
 }
 
 test "secret key 1 maps to the generator" {
     const ctx = try testContext();
     defer ctx.deinit();
-    var one: SecretKey = [_]u8{0} ** 32;
+    var one: SecretKey = @splat(0);
     one[31] = 1;
     const generator = hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" ++
         "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
@@ -166,13 +166,13 @@ test "secret key 1 maps to the generator" {
 test "rejects zero and out-of-range secret keys" {
     const ctx = try testContext();
     defer ctx.deinit();
-    const zero: SecretKey = [_]u8{0} ** 32;
-    const too_big: SecretKey = [_]u8{0xff} ** 32;
+    const zero: SecretKey = @splat(0);
+    const too_big: SecretKey = @splat(0xff);
     try testing.expect(!ctx.isValidSecretKey(zero));
     try testing.expect(!ctx.isValidSecretKey(too_big));
     try testing.expectError(error.InvalidSecretKey, ctx.publicKey(zero));
-    try testing.expectError(error.InvalidSecretKey, ctx.sign([_]u8{1} ** 32, too_big));
-    try testing.expect(!ctx.isValidPublicKey([_]u8{0} ** 64));
+    try testing.expectError(error.InvalidSecretKey, ctx.sign(@as([32]u8, @splat(1)), too_big));
+    try testing.expect(!ctx.isValidPublicKey(@as([64]u8, @splat(0))));
 }
 
 test "recovers go-ethereum's reference signature" {
@@ -216,27 +216,27 @@ test "sign, recover, verify round trip" {
     var tampered = message_hash;
     tampered[0] ^= 1;
     try testing.expectError(error.SignatureVerificationFailed, ctx.verify(tampered, signature.rs, public));
-    try testing.expectError(error.InvalidSignature, Signature.fromBytes([_]u8{0} ** 64 ++ [_]u8{4}));
+    try testing.expectError(error.InvalidSignature, Signature.fromBytes(@as([64]u8, @splat(0)) ++ [_]u8{4}));
 }
 
 test "ecdh is symmetric and rejects bad inputs" {
     const ctx = try testContext();
     defer ctx.deinit();
-    const a: SecretKey = [_]u8{0x11} ** 32;
-    const b: SecretKey = [_]u8{0x22} ** 32;
+    const a: SecretKey = @splat(0x11);
+    const b: SecretKey = @splat(0x22);
     const shared = try ctx.ecdh(try ctx.publicKey(b), a);
     try testing.expectEqualSlices(u8, &shared, &try ctx.ecdh(try ctx.publicKey(a), b));
 
-    try testing.expectError(error.InvalidPublicKey, ctx.ecdh([_]u8{0} ** 64, a));
-    try testing.expectError(error.InvalidSecretKey, ctx.ecdh(try ctx.publicKey(b), [_]u8{0} ** 32));
+    try testing.expectError(error.InvalidPublicKey, ctx.ecdh(@as([64]u8, @splat(0)), a));
+    try testing.expectError(error.InvalidSecretKey, ctx.ecdh(try ctx.publicKey(b), @as([32]u8, @splat(0))));
 }
 
 test "decoding preserves high-s signatures for recovery but verification rejects them" {
     const ctx = try testContext();
     defer ctx.deinit();
-    const secret: SecretKey = [_]u8{0x11} ** 32;
+    const secret: SecretKey = @splat(0x11);
     const public = try ctx.publicKey(secret);
-    const message_hash: MessageHash = [_]u8{1} ** 32;
+    const message_hash: MessageHash = @splat(1);
     const signature = try ctx.sign(message_hash, secret);
     const order: u256 = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
     const s = std.mem.readInt(u256, signature.rs[32..64], .big);

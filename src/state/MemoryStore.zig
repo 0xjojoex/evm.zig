@@ -462,7 +462,7 @@ test "memory store rejects empty code with non-empty explicit hash" {
 
     var account = MemoryAccount.init(std.testing.allocator);
     defer account.deinit();
-    account.account.code_hash = [_]u8{0xaa} ** 32;
+    account.account.code_hash = @splat(0xaa);
 
     try std.testing.expectError(error.CodeHashMismatch, memory.putAccount(address, &account));
     try std.testing.expect(memory.getAccount(address) == null);

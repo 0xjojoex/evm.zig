@@ -533,8 +533,8 @@ test "dense claim verification matches generic coalescing and mutation rejection
     };
     const code_a = [_]u8{ 0x60, 0x01 };
     const code_b = [_]u8{ 0x60, 0x02 };
-    const code_hash_a = [_]u8{0xa1} ** 32;
-    const code_hash_b = [_]u8{0xb2} ** 32;
+    const code_hash_a: [32]u8 = @splat(0xa1);
+    const code_hash_b: [32]u8 = @splat(0xb2);
     const code_changes = [_]bal.CodeChange{.{
         .block_access_index = 3,
         .new_code = &code_b,

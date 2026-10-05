@@ -48,7 +48,7 @@ pub fn build(b: *std.Build) void {
         });
         b.default_step.dependOn(&executable.step);
         const run = b.addRunArtifact(executable);
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
 
         const tests = b.addTest(.{
             .root_module = exampleModule(b, example.path, target, optimize, evmz_mod),
@@ -73,7 +73,7 @@ fn exampleModule(
     b: *std.Build,
     path: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     evmz_mod: *std.Build.Module,
 ) *std.Build.Module {
     return b.createModule(.{

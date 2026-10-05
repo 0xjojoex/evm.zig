@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
         .root_module = module,
     });
     const run = b.addRunArtifact(executable);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("bench", "Run the zbench-backed SSZ benchmark matrix").dependOn(&run.step);
 
     const tests = b.addTest(.{ .root_module = module });

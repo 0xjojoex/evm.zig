@@ -259,7 +259,7 @@ fn hashEqual(lhs: [32]u8, rhs: [32]u8) bool {
 }
 
 test "BlockSTF validates parent-derived header rules before execution" {
-    const parent_hash = [_]u8{0x11} ** 32;
+    const parent_hash: [32]u8 = @splat(0x11);
     var input = block_stf.AssumeDecodedProduceInput{
         .env = .{ .number = 8, .timestamp = 11, .gas_limit = 10_000_000, .base_fee = 7 },
         .block_header = .{ .number = 8, .timestamp = 11, .parent_hash = parent_hash },
@@ -276,7 +276,7 @@ test "BlockSTF validates parent-derived header rules before execution" {
     };
     try std.testing.expectEqual(@as(?Status, null), parentHeaderStatus(.merge, input));
 
-    input.block_header.?.parent_hash = [_]u8{0x22} ** 32;
+    input.block_header.?.parent_hash = @splat(0x22);
     try std.testing.expectEqual(Status.parent_hash_mismatch, parentHeaderStatus(.merge, input).?);
     input.block_header.?.parent_hash = parent_hash;
 
@@ -302,7 +302,7 @@ test "BlockSTF validates parent-derived header rules before execution" {
 
 test "BlockSTF derives EIP-1559 base fee from parent usage" {
     const parent = ParentHeaderContext{
-        .hash = [_]u8{0} ** 32,
+        .hash = @splat(0),
         .number = 0,
         .timestamp = 0,
         .gas_limit = 20_000_000,

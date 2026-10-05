@@ -19,6 +19,8 @@ pub fn main(init: std.process.Init) !void {
 
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(allocator);
+    var default_paths: std.ArrayList([]const u8) = .empty;
+    defer default_paths.deinit(allocator);
     var jobs: usize = default_jobs;
     while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
@@ -28,9 +30,15 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const value = args.next() orelse return error.MissingJobs;
             jobs = try fixture_pool.parseJobs(value, max_jobs);
+        } else if (std.mem.eql(u8, arg, "--default-fixture")) {
+            const value = args.next() orelse return error.MissingFixturePath;
+            try default_paths.append(allocator, try arena.dupe(u8, value));
         } else try paths.append(allocator, try arena.dupe(u8, arg));
     }
 
+    // The build step passes the pinned fixtures as defaults because it cannot
+    // observe the user's passthru args; an explicit path replaces them.
+    if (paths.items.len == 0) try paths.appendSlice(allocator, default_paths.items);
     if (paths.items.len == 0) return error.MissingFixturePath;
 
     var total = Summary{};
@@ -208,7 +216,8 @@ fn printUsage() void {
         \\
         \\Runs consensus-spec General, Mainnet, and Minimal SSZ fixtures.
         \\Uses {d} workers by default; --jobs 1 runs sequentially (maximum {d}).
-        \\zig build ssz-conformance supplies the pinned fixture directories.
+        \\zig build ssz-conformance supplies the pinned fixture directories as
+        \\--default-fixture DIR, used only when no fixture path is given.
         \\The installed executable requires at least one fixture path.
         \\
     , .{ default_jobs, max_jobs });

@@ -148,7 +148,7 @@ test "execution context equality compares borrowed blob values" {
     var b_hashes = [_]u256{ 41, 43 };
     const a: ExecutionContext = .{
         .chain = .{ .chain_id = 7 },
-        .transaction = .{ .origin = Address.fromBytes([_]u8{0x11} ** 20), .blob_hashes = &a_hashes },
+        .transaction = .{ .origin = Address.fromBytes(@as([20]u8, @splat(0x11))), .blob_hashes = &a_hashes },
     };
     var b = a;
     b.transaction.blob_hashes = &b_hashes;
@@ -177,10 +177,10 @@ test "transaction extension preserves type and identity" {
 test "multi-root context may only rebind origin" {
     const first: ExecutionContext = .{
         .chain = .{ .chain_id = 1 },
-        .transaction = .{ .origin = Address.fromBytes([_]u8{1} ** 20) },
+        .transaction = .{ .origin = Address.fromBytes(@as([20]u8, @splat(1))) },
     };
     var second = first;
-    second.transaction.origin = Address.fromBytes([_]u8{2} ** 20);
+    second.transaction.origin = Address.fromBytes(@as([20]u8, @splat(2)));
     try std.testing.expect(first.sameRootSession(second));
     second.transaction.gas_price = 1;
     try std.testing.expect(!first.sameRootSession(second));

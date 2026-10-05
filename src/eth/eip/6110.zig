@@ -55,7 +55,7 @@ fn wordEquals(data: []const u8, offset: usize, expected: u256) bool {
 }
 
 test "EIP-6110 derives deposit request bytes from logs" {
-    var event_data = [_]u8{0} ** event_data_len;
+    var event_data: [event_data_len]u8 = @splat(0);
     writeWord(&event_data, 0, pubkey_offset);
     writeWord(&event_data, 32, withdrawal_credentials_offset);
     writeWord(&event_data, 64, amount_offset);

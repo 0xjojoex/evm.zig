@@ -285,7 +285,7 @@ test "prepared tail dispatch reads execution-context values" {
 
 test "prepared tail dispatch reads host account values" {
     const target = evmz.addr(0x1234);
-    var target_code = [_]u8{0xaa} ** 1337;
+    var target_code: [1337]u8 = @splat(0xaa);
     const cases = [_]struct {
         opcode: Opcode,
         expected: u256,
@@ -551,7 +551,7 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     try std.testing.expectEqual(@as(usize, 1), mock_host.logs.items.len);
     const event_log = mock_host.logs.items[0];
     try std.testing.expectEqualSlices(u256, &.{ 4, 3, 2, 1 }, event_log.topics);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), event_log.data);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), event_log.data);
 
     var static_host_state = evmz.t.MockHost.init(std.testing.allocator, null);
     defer static_host_state.deinit();

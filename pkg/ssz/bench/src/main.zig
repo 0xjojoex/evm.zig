@@ -687,9 +687,9 @@ fn headerValue() Header {
     return .{
         .slot = 123_456,
         .proposer_index = 42,
-        .parent_root = [_]u8{0x11} ** 32,
-        .state_root = [_]u8{0x22} ** 32,
-        .body_root = [_]u8{0x33} ** 32,
+        .parent_root = @splat(0x11),
+        .state_root = @splat(0x22),
+        .body_root = @splat(0x33),
     };
 }
 

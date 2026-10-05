@@ -45,7 +45,7 @@ fn referenceMark(map: *BitSet, bytes: []const u8) void {
 
 test "jumpdest scan matches instruction oracle" {
     const short_len = 16;
-    var bytecode = [_]u8{Opcode.STOP.toByte()} ** 96;
+    var bytecode: [96]u8 = @splat(Opcode.STOP.toByte());
     var map = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
     defer map.deinit(std.testing.allocator);
     var expected = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
@@ -89,7 +89,7 @@ test "scanner marks jumpdests while ignoring PUSH payload noise" {
 }
 
 test "scanner skips a complete PUSH payload" {
-    var bytecode = [_]u8{0} ** 48;
+    var bytecode: [48]u8 = @splat(0);
     bytecode[0] = Opcode.PUSH32.toByte();
     bytecode[1] = Opcode.JUMPDEST.toByte();
     bytecode[31] = Opcode.JUMPDEST.toByte();

@@ -355,7 +355,7 @@ test "account lookup resolves a shared-prefix address set and misses at every bo
     const count = 64;
     var addresses: [count]address.Address = undefined;
     for (&addresses, 0..) |*entry, index| {
-        var bytes = [_]u8{0xab} ** address.Address.len;
+        var bytes: [address.Address.len]u8 = @splat(0xab);
         bytes[0] = @intCast(index / 32);
         bytes[7] = @intCast((index * 37) & 0xff);
         bytes[19] = @intCast(index % 32);
@@ -379,8 +379,8 @@ test "account lookup resolves a shared-prefix address set and misses at every bo
         );
     }
 
-    const below = [_]u8{0} ** address.Address.len;
-    const above = [_]u8{0xff} ** address.Address.len;
+    const below: [address.Address.len]u8 = @splat(0);
+    const above: [address.Address.len]u8 = @splat(0xff);
     var between = addresses[count / 2].bytes;
     between[10] ^= 0x01;
     for ([_][address.Address.len]u8{ below, above, between }) |miss| {

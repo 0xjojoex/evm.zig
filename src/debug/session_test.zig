@@ -300,7 +300,7 @@ test "debug session matches call, create, precompile, and terminal outcomes" {
     const out_of_gas = evmz.t.bytecode(.{ .PUSH1, 0x2a });
     const invalid_jump = evmz.t.bytecode(.{ .PUSH0, .JUMP });
     const stack_underflow = evmz.t.bytecode(.{.ADD});
-    const stack_overflow = [_]u8{evmz.Opcode.PUSH0.toByte()} ** 1025;
+    const stack_overflow: [1025]u8 = @splat(evmz.Opcode.PUSH0.toByte());
     const static_violation = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .SSTORE });
 
     try expectCallParity(Exact, "empty code", &empty, 100, false, .success, .none);

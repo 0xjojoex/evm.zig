@@ -73,7 +73,7 @@ test "BlockSTF BAL state precheck classifies a missing trie path as invalid witn
     // so the declared slot has no proven path.
     const account = evmz.addr(0x7928);
     const account_key = trie.hashedAddressKey(account);
-    const account_value = try trie.accountValueFrom(scratch, .{ .storage_root = [_]u8{0xab} ** 32 });
+    const account_value = try trie.accountValueFrom(scratch, .{ .storage_root = @splat(0xab) });
     const state_node = try leafNode(scratch, &account_key, account_value);
     const nodes = [_][]const u8{state_node};
 

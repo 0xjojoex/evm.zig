@@ -87,7 +87,7 @@ pub const ExecutionRequests = struct {
     builder_deposits: []const BuilderDepositRequest = &.{},
     builder_exits: []const BuilderExitRequest = &.{},
 
-    pub const Ssz = ssz.ProgressiveContainer(@This(), [_]bool{true} ** 5, .{
+    pub const Ssz = ssz.ProgressiveContainer(@This(), @as([5]bool, @splat(true)), .{
         .deposits = ssz.ProgressiveList(DepositRequest),
         .withdrawals = ssz.ProgressiveList(WithdrawalRequest),
         .consolidations = ssz.ProgressiveList(ConsolidationRequest),
@@ -775,7 +775,7 @@ const ExecutionPayloadV4Wire = struct {
     block_access_list: []const u8,
     slot_number: u64,
 
-    pub const Ssz = ssz.ProgressiveContainer(@This(), [_]bool{true} ** 19, .{
+    pub const Ssz = ssz.ProgressiveContainer(@This(), @as([19]bool, @splat(true)), .{
         .extra_data = ssz.ByteList(max_extra_data_bytes),
         .transactions = TransactionsSsz,
         .withdrawals = WithdrawalsSsz,
@@ -849,7 +849,7 @@ const StatelessInputWire = struct {
     pub const Ssz = ssz.Container(@This(), .{});
 };
 
-const BorrowedExecutionPayloadV4Ssz = ssz.ProgressiveContainer(ExecutionPayloadV4Wire, [_]bool{true} ** 19, .{
+const BorrowedExecutionPayloadV4Ssz = ssz.ProgressiveContainer(ExecutionPayloadV4Wire, @as([19]bool, @splat(true)), .{
     .extra_data = ssz.Borrowed(ssz.ByteList(max_extra_data_bytes)),
     .transactions = BorrowedTransactionsSsz,
     .withdrawals = WithdrawalsSsz,
@@ -1076,7 +1076,7 @@ pub fn validateStatelessBytesReusable(allocator: std.mem.Allocator, bytes: []con
 fn validateStatelessResultUsing(scratch: std.mem.Allocator, bytes: []const u8) Error!StatelessValidationResult {
     const input = StatelessInput.decodeSchemaPrefixedBorrowed(scratch, bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(0, 0, [_]u8{0} ** 32),
+        else => return failureResult(0, 0, @as([32]u8, @splat(0))),
     };
     return validateStatelessUsing(AmsterdamValidator, scratch, input);
 }
@@ -1124,7 +1124,7 @@ fn validateStatelessUsing(
 ) Error!StatelessValidationResult {
     const request_root = input.new_payload_request.hashTreeRoot(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return failureResult(0, 0, [_]u8{0} ** 32),
+        else => return failureResult(0, 0, @as([32]u8, @splat(0))),
     };
     var normalized = normalize(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1252,12 +1252,12 @@ test "stateless wire v1 request root failure returns the complete sentinel" {
     defer arena.deinit();
     const scratch = arena.allocator();
     var input = try @import("v1_smoke.zig").smokeInput(scratch);
-    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.extra_data = &([_]u8{0} ** 33);
+    input.new_payload_request.amsterdam.execution_payload.v3.v2.v1.extra_data = &(@as([33]u8, @splat(0)));
 
     // A typed input can exceed the SSZ bound and fail the actual root computation.
     try std.testing.expectError(error.InvalidListLength, input.new_payload_request.hashTreeRoot(scratch));
     const result = try validateStatelessUsing(AmsterdamValidator, scratch, input);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 43), try result.encode(scratch));
+    try std.testing.expectEqualSlices(u8, &(@as([43]u8, @splat(0))), try result.encode(scratch));
 }
 
 test "borrowed witness decoding keeps byte lists in the wire input" {

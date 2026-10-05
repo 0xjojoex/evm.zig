@@ -756,7 +756,7 @@ fn runExample(comptime revision: OpRevision, allocator: std.mem.Allocator) !void
     const executed = try vm.transactDeposit(
         .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .{
-            .source_hash = [_]u8{0x11} ** 32,
+            .source_hash = @splat(0x11),
             .from = sender,
             .to = recipient,
             .mint = 10,
@@ -799,7 +799,7 @@ fn seedTestStorage(executor: anytype, account_address: Address, entries: []const
 
 test "deposit codec preserves the exact typed envelope" {
     const tx = DepositTransaction{
-        .source_hash = [_]u8{0x11} ** 32,
+        .source_hash = @splat(0x11),
         .from = address.addr(0xaaaa),
         .to = null,
         .mint = 7,
@@ -831,7 +831,7 @@ test "successful deposit preserves mint and advances nonce" {
     const outcome = try vm.transact(.{
         .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .tx = .{ .deposit = .{
-            .source_hash = [_]u8{0x22} ** 32,
+            .source_hash = @splat(0x22),
             .from = sender,
             .to = recipient,
             .mint = 10,
@@ -863,7 +863,7 @@ test "reverted deposit keeps mint and nonce but rolls back EVM writes" {
     const outcome = try vm.transact(.{
         .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .tx = .{ .deposit = .{
-            .source_hash = [_]u8{0x33} ** 32,
+            .source_hash = @splat(0x33),
             .from = sender,
             .to = recipient,
             .mint = 10,
@@ -891,7 +891,7 @@ test "insufficient-value deposit becomes an included failure after mint" {
     const outcome = try vm.transact(.{
         .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .tx = .{ .deposit = .{
-            .source_hash = [_]u8{0x34} ** 32,
+            .source_hash = @splat(0x34),
             .from = sender,
             .to = recipient,
             .mint = 2,
@@ -917,7 +917,7 @@ test "intrinsic-gas failure is included after mint with one nonce increment" {
     const outcome = try vm.transact(.{
         .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .tx = .{ .deposit = .{
-            .source_hash = [_]u8{0x44} ** 32,
+            .source_hash = @splat(0x44),
             .from = sender,
             .to = address.addr(0xbbbb),
             .mint = 5,
@@ -945,7 +945,7 @@ test "halted deposit is included as failed with the full limit consumed" {
     const outcome = try vm.transact(.{
         .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .tx = .{ .deposit = .{
-            .source_hash = [_]u8{0x46} ** 32,
+            .source_hash = @splat(0x46),
             .from = sender,
             .to = spinner,
             .mint = 777,
@@ -970,7 +970,7 @@ test "create deposit derives address from the pre-execution deposit nonce" {
         .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .tx = .{
             .deposit = .{
-                .source_hash = [_]u8{0x45} ** 32,
+                .source_hash = @splat(0x45),
                 .from = sender,
                 .to = null,
                 .gas_limit = 100_000,
@@ -995,7 +995,7 @@ test "legacy system deposit is included as failed, never rejected" {
     const result = try vm.transactDeposit(
         .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .{
-            .source_hash = [_]u8{0x55} ** 32,
+            .source_hash = @splat(0x55),
             .from = sender,
             .to = address.addr(0xbbbb),
             .mint = 5,
@@ -1040,7 +1040,7 @@ test "typed block prelude propagates its non-empty error and rolls back" {
             .{
                 .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
                 .tx = .{ .deposit = .{
-                    .source_hash = [_]u8{0x56} ** 32,
+                    .source_hash = @splat(0x56),
                     .from = sender,
                     .to = address.addr(0xbbbb),
                     .mint = 5,
@@ -1132,7 +1132,7 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
     }
 
     const deposit = switch (try block.transact(.{ .deposit = .{
-        .source_hash = [_]u8{0x99} ** 32,
+        .source_hash = @splat(0x99),
         .from = sender,
         .to = recipient,
         .gas_limit = 100_000,
@@ -1172,7 +1172,7 @@ test "OP block execution normalizes and folds Ethereum and deposit transactions"
 test "OP family ingress owns execution environment normalization" {
     const inherited = evmz.Env{ .blob_base_fee = 99 };
     const tx: OpTransaction = .{ .deposit = .{
-        .source_hash = [_]u8{0x01} ** 32,
+        .source_hash = @splat(0x01),
         .from = address.addr(0xaaaa),
         .to = address.addr(0xbbbb),
         .gas_limit = 100_000,
@@ -1266,7 +1266,7 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
         const outcome = try deposit_vm.transact(.{
             .env = env,
             .tx = .{ .deposit = .{
-                .source_hash = [_]u8{0x88} ** 32,
+                .source_hash = @splat(0x88),
                 .from = sender,
                 .to = recipient,
                 .gas_limit = 100_000,
@@ -1299,7 +1299,7 @@ test "Fjord activates RIP-7212 P256VERIFY at 3450 gas" {
 
 test "Granite bounds the bn254 pairing input" {
     const pairing_address = evmz.precompile.Contract.bn254_pairing.toAddress();
-    const oversized = [_]u8{0} ** (112_687 + 1);
+    const oversized: [(112_687 + 1)]u8 = @splat(0);
 
     // Fjord accepts the length (it fails later on the 192-byte alignment);
     // Granite fails it outright with all gas consumed.
@@ -1477,7 +1477,7 @@ test "Isthmus charges the operator fee on the limit and refunds on gas used" {
 }
 
 fn expectWordOne(output: []const u8) !void {
-    var expected = [_]u8{0} ** 32;
+    var expected: [32]u8 = @splat(0);
     expected[31] = 1;
     try std.testing.expectEqualSlices(u8, &expected, output);
 }
@@ -1496,7 +1496,7 @@ test "deposit transition uses its exact spec value" {
     const result = try vm.transact(.{
         .env = .{ .chain_id = 10, .gas_limit = 30_000_000 },
         .tx = .{ .deposit = .{
-            .source_hash = [_]u8{0x77} ** 32,
+            .source_hash = @splat(0x77),
             .from = sender,
             .to = address.addr(0xbbbb),
             .mint = 1,
@@ -1572,7 +1572,7 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
     const deposit = try vm.transact(.{
         .env = env,
         .tx = .{ .deposit = .{
-            .source_hash = [_]u8{0x66} ** 32,
+            .source_hash = @splat(0x66),
             .from = sender,
             .to = deposit_recipient,
             .mint = 7,
@@ -1588,7 +1588,7 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
         .env = env,
         .tx = .{
             .deposit = .{
-                .source_hash = [_]u8{0x77} ** 32,
+                .source_hash = @splat(0x77),
                 .from = sender,
                 .to = null,
                 .mint = 5,

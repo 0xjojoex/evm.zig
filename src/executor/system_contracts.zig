@@ -333,9 +333,9 @@ test "before block calls Prague and Cancun system contracts" {
     try beacon_account.setCode(&system_prepared_code.beacon_roots_code);
     try executor.state.seedAccount(ethereum.beacon_roots_address, beacon_account);
 
-    var parent_hash = [_]u8{0} ** 32;
+    var parent_hash: [32]u8 = @splat(0);
     parent_hash[31] = 0xaa;
-    var beacon_root = [_]u8{0} ** 32;
+    var beacon_root: [32]u8 = @splat(0);
     beacon_root[31] = 0xbb;
 
     const execution_context = testExecutionContext();
@@ -384,8 +384,8 @@ test "before-block system call failures roll back writes and retain BAL reads" {
     const calls = Latest.spec.block.beforeBlock(.{
         .number = 1,
         .timestamp = 12,
-        .parent_hash = [_]u8{0xaa} ** 32,
-        .parent_beacon_block_root = [_]u8{0xbb} ** 32,
+        .parent_hash = @splat(0xaa),
+        .parent_beacon_block_root = @splat(0xbb),
     });
     try std.testing.expectEqual(@as(usize, 2), calls.slice().len);
     for (codes) |code| {
@@ -469,8 +469,8 @@ test "Amsterdam before-block system calls reserve state gas" {
     const calls = Latest.spec.block.beforeBlock(.{
         .number = 1,
         .timestamp = 12,
-        .parent_hash = [_]u8{0xaa} ** 32,
-        .parent_beacon_block_root = [_]u8{0xbb} ** 32,
+        .parent_hash = @splat(0xaa),
+        .parent_beacon_block_root = @splat(0xbb),
     });
 
     for (calls.slice()) |call| {

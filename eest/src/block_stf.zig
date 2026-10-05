@@ -34,8 +34,8 @@ pub const Summary = struct {
     passed: usize = 0,
     failed: usize = 0,
     skipped: usize = 0,
-    skip_reasons: [std.meta.fields(SkipReason).len]usize = [_]usize{0} ** std.meta.fields(SkipReason).len,
-    fail_reasons: [std.meta.fields(FailReason).len]usize = [_]usize{0} ** std.meta.fields(FailReason).len,
+    skip_reasons: [std.meta.fields(SkipReason).len]usize = @splat(0),
+    fail_reasons: [std.meta.fields(FailReason).len]usize = @splat(0),
 
     fn countSkip(self: *Summary, reason: SkipReason) void {
         self.skipped += 1;

@@ -73,10 +73,10 @@ const cases = [_]Case{
 
 pub const Summary = struct {
     canonical_inputs: usize = 0,
-    resolved: [cases.len]bool = [_]bool{false} ** cases.len,
+    resolved: [cases.len]bool = @splat(false),
     /// First status a still-unresolved mutation did reach, so a failing gate
     /// names the wrong verdict instead of only the missing one.
-    observed: [cases.len]?block_stf.Status = [_]?block_stf.Status{null} ** cases.len,
+    observed: [cases.len]?block_stf.Status = @splat(null),
 
     pub fn resolvedCount(self: Summary) usize {
         var count: usize = 0;

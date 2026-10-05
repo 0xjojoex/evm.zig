@@ -190,8 +190,8 @@ pub const Account = struct {
 const max_rlp_account: Account = .{
     .nonce = std.math.maxInt(u64),
     .balance = std.math.maxInt(u256),
-    .storage_root = [_]u8{0xff} ** 32,
-    .code_hash = [_]u8{0xff} ** 32,
+    .storage_root = @splat(0xff),
+    .code_hash = @splat(0xff),
 };
 
 pub const StorageValueBuffer = [fixedRlpEncodedLen(u256, std.math.maxInt(u256))]u8;

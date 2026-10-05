@@ -437,7 +437,7 @@ fn initStorageKeys(keys: []StorageKey, offset: u64) void {
 
 fn initAddresses(addresses: []Address, offset: u64) void {
     for (addresses, 0..) |*address, index| {
-        var bytes = [_]u8{0} ** Address.len;
+        var bytes: [Address.len]u8 = @splat(0);
         bytes[0] = 0x20;
         std.mem.writeInt(u64, bytes[12..20], offset + @as(u64, @intCast(index)) + 1, .big);
         address.* = .fromBytes(bytes);

@@ -566,7 +566,7 @@ test "raw stateless tx decoder counts but skips unrecoverable authorization tupl
     defer list.deinit();
 
     try tuple_fields.int(u8, 1);
-    try tuple_fields.bytes(&([_]u8{0x11} ** 20));
+    try tuple_fields.bytes(&(@as([20]u8, @splat(0x11))));
     try tuple_fields.int(u64, 0);
     try tuple_fields.int(u8, 0);
     try tuple_fields.int(u8, 0);
@@ -671,11 +671,11 @@ const AssumeSender = struct {
 fn dynamicFeeTransactionForTest(allocator: std.mem.Allocator, malformed_y_parity: bool) ![]u8 {
     var storage_keys = rlp.Writer.alloc(allocator);
     defer storage_keys.deinit();
-    try storage_keys.bytes(&([_]u8{0x22} ** 32));
+    try storage_keys.bytes(&(@as([32]u8, @splat(0x22))));
 
     var access_entry = rlp.Writer.alloc(allocator);
     defer access_entry.deinit();
-    try access_entry.bytes(&([_]u8{0x11} ** 20));
+    try access_entry.bytes(&(@as([20]u8, @splat(0x11))));
     try access_entry.listPayload(storage_keys.written());
 
     var access_list = rlp.Writer.alloc(allocator);
@@ -689,7 +689,7 @@ fn dynamicFeeTransactionForTest(allocator: std.mem.Allocator, malformed_y_parity
     try fields.int(u8, 1); // max priority fee
     try fields.int(u8, 2); // max fee
     try fields.int(u64, 21_000);
-    try fields.bytes(&([_]u8{0x33} ** 20));
+    try fields.bytes(&(@as([20]u8, @splat(0x33))));
     try fields.int(u8, 0); // value
     try fields.bytes(&.{}); // input
     try fields.listPayload(access_list.written());

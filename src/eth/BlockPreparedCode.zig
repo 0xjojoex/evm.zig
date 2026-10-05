@@ -226,7 +226,7 @@ test "indexed admission rejects a wrong hash atomically" {
     const be = block_pool.backend();
 
     const raw_code = [_]u8{ 0x60, 0x01, 0x00 };
-    const wrong_hash = [_]u8{0xff} ** 32;
+    const wrong_hash: [32]u8 = @splat(0xff);
     try std.testing.expectError(error.CodeHashMismatch, be.admitIndexed(2, wrong_hash, &raw_code));
     try std.testing.expectEqual(@as(usize, 0), block_pool.pool.count());
     try std.testing.expectEqual(@as(?Bytecode.View, null), be.lookupIndexed(2, wrong_hash));

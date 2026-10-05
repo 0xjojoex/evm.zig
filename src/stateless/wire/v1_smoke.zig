@@ -43,12 +43,12 @@ pub fn amsterdamSmokeInput(
         .gas_used = 0,
         .timestamp = 1,
         .extra_data = &.{},
-        .prev_randao = [_]u8{0x22} ** 32,
+        .prev_randao = @splat(0x22),
         .base_fee_per_gas = 0,
         .withdrawals_root = trie.empty_root_hash,
         .blob_gas_used = 0,
         .excess_blob_gas = 0,
-        .parent_beacon_block_root = [_]u8{0} ** 32,
+        .parent_beacon_block_root = @splat(0),
         .requests_hash = block_stf.empty_requests_hash,
         .block_access_list_hash = bal.empty_hash,
         .slot_number = 0,
@@ -68,12 +68,12 @@ pub fn amsterdamSmokeInput(
                             .state_root = smoke_parent_state_root,
                             .receipts_root = trie.empty_root_hash,
                             .logs_bloom = block_stf.empty_logs_bloom,
-                            .prev_randao = [_]u8{0x22} ** 32,
+                            .prev_randao = @splat(0x22),
                             .block_number = 0,
                             .gas_limit = 30_000_000,
                             .gas_used = 0,
                             .timestamp = 1,
-                            .base_fee_per_gas = [_]u8{0} ** 32,
+                            .base_fee_per_gas = @splat(0),
                             .block_hash = block_hash,
                         },
                         .withdrawals = &.{},
@@ -84,7 +84,7 @@ pub fn amsterdamSmokeInput(
                 .block_access_list = &empty_block_access_list,
                 .slot_number = 0,
             },
-            .parent_beacon_block_root = [_]u8{0} ** 32,
+            .parent_beacon_block_root = @splat(0),
             .execution_requests = execution_requests,
         } },
         .witness = .{ .headers = parent_headers },
@@ -98,9 +98,9 @@ fn smokeParentHeader(allocator: std.mem.Allocator) wire.Error![]u8 {
     var header = rlp.Writer.alloc(allocator);
     defer header.deinit();
 
-    const zero_hash = [_]u8{0} ** 32;
-    const zero_address = [_]u8{0} ** 20;
-    const zero_bloom = [_]u8{0} ** 256;
+    const zero_hash: [32]u8 = @splat(0);
+    const zero_address: [20]u8 = @splat(0);
+    const zero_bloom: [256]u8 = @splat(0);
     const uncles_hash = t.hexBytes("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347");
     const empty_trie_root = t.hexBytes("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
     const extra_data = t.hexBytes("11bbe8db4e347b4e8c937c1c8370e4b5ed33adb3db69cbdb7a38e1e50b1b82fa");
@@ -119,7 +119,7 @@ fn smokeParentHeader(allocator: std.mem.Allocator) wire.Error![]u8 {
     try writeAllocatingRlp(fields.int(u64, 0));
     try writeAllocatingRlp(fields.bytes(&extra_data));
     try writeAllocatingRlp(fields.bytes(&zero_hash));
-    try writeAllocatingRlp(fields.bytes(&([_]u8{0} ** 8)));
+    try writeAllocatingRlp(fields.bytes(&(@as([8]u8, @splat(0)))));
     try writeAllocatingRlp(fields.int(u256, 0));
     try writeAllocatingRlp(header.listPayload(fields.written()));
 

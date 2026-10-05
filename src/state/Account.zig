@@ -44,5 +44,5 @@ test "EIP-161 emptiness ignores storage and tracks each field" {
     try std.testing.expect((Account{}).isEip161Empty());
     try std.testing.expect(!(Account{ .nonce = 1 }).isEip161Empty());
     try std.testing.expect(!(Account{ .balance = 1 }).isEip161Empty());
-    try std.testing.expect(!(Account{ .code_hash = [_]u8{0xaa} ** 32 }).isEip161Empty());
+    try std.testing.expect(!(Account{ .code_hash = @splat(0xaa) }).isEip161Empty());
 }

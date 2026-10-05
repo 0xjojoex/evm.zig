@@ -531,7 +531,7 @@ test "canonical outcome rejects non-zero padding" {
 }
 
 test "a guest public region shorter than the expected result is a crash" {
-    const short = [_]u8{1} ** 8;
+    const short: [8]u8 = @splat(1);
     var outcome = try canonicalOutcome(std.testing.allocator, &short, 69, 0, 0, 0);
     defer outcome.deinit(std.testing.allocator);
     try std.testing.expect(outcome == .crashed);

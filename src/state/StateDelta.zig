@@ -174,7 +174,7 @@ test "owned delta detaches values and introduced code" {
             pub fn at(_: @This(), _: u32) AccountChange {
                 return .{
                     .address = .addr(0x1234),
-                    .account = .{ .code_hash = [_]u8{0xab} ** 32 },
+                    .account = .{ .code_hash = @splat(0xab) },
                 };
             }
         };
@@ -200,7 +200,7 @@ test "owned delta detaches values and introduced code" {
         storage_wipes: Wipes = .{},
 
         pub fn introducedCode(_: @This(), hash: [32]u8) ?CodeView {
-            const code_hash = [_]u8{0xab} ** 32;
+            const code_hash: [32]u8 = @splat(0xab);
             if (!std.mem.eql(u8, &hash, &code_hash)) return null;
             return .{ .code_hash = code_hash, .bytes = &.{ 0x60, 0x00 } };
         }

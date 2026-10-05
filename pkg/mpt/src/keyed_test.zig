@@ -56,7 +56,7 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
 test "typed key facade detects collisions after projection" {
     const KeyContext = struct {
         pub fn trieKey(_: @This(), _: u8) mpt.FixedKey {
-            return [_]u8{0x11} ** 32;
+            return @as([32]u8, @splat(0x11));
         }
     };
     const Structural = mpt.Trie(mpt.StdKeccak256Context);
