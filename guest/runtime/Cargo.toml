@@ -27,6 +27,6 @@ openvm-sdk-config = { git = "https://github.com/han0110/openvm.git", rev = "a391
 
 sp1-core-executor = { git = "https://github.com/succinctlabs/sp1", tag = "v6.6.0" }
 
-zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3" }
-zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3" }
-ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "fbbc69bcd2ea9a78d1a438b4a897bc48ff0b00a3" }
+zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "306a9c934ba4947b1d586d69b67120f8b4c41466" }
+zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "306a9c934ba4947b1d586d69b67120f8b4c41466" }
+ziskemu = { git = "https://github.com/0xPolygonHermez/zisk", rev = "306a9c934ba4947b1d586d69b67120f8b4c41466" }
