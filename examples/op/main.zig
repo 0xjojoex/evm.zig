@@ -477,7 +477,7 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
             state_reader: ?evmz.StateReader = null,
             prepared_code_backend: ?evmz.PreparedCodeBackend = null,
             block_hash_source: ?evmz.BlockHashSource = null,
-            reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+            native_contract: ?*spec.native_contract = null,
         };
         pub const Transaction = OpTransaction;
         pub const TransactInput = OpInput;
@@ -674,7 +674,7 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                 .state = .{ .reader = options.state_reader },
                 .prepared_code_backend = options.prepared_code_backend,
                 .block_hash_source = options.block_hash_source,
-                .reentrant_native_contract_runtime = options.reentrant_native_contract_runtime,
+                .native_contract = options.native_contract,
             }) };
         }
 

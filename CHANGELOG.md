@@ -48,6 +48,9 @@ Added
   raw-x ECDH over libsecp256k1 behind a seeded, allocator-backed `Context`,
   so a node built on evmz shares one curve implementation with the EVM
   instead of linking its own. Native profile only.
+- `CompileOptions.transaction_journal`: an embedding-owned journal whose
+  checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
+  with it. See `examples/transaction_journal.zig`.
 
 Changed
 
@@ -55,6 +58,24 @@ Changed
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the
   precompiles, so no consumer loses a C-free configuration.
+- Native contracts are renamed for the tier, and their code is selected at
+  compile time. `Spec.reentrant_native_contract` is `Spec.native_contract`, a type
+  that declares `active` and `execute(self, ctx, call)`. `ReentrantNativeContractRuntime`
+  and its vtable are gone: the executor option `native_contract` binds an instance
+  of that type, and an active address without one fails with `MissingNativeContract`.
+  `ReentrantNativeContractCall` is `NativeContractCall` and `NoReentrantNativeContracts`
+  is `NoNativeContracts`.
+- Native contracts no longer receive a `Host`. `ctx` is the executor's
+  `NativeContext`: journaled state, logs, and `addBalance`/`subtractBalance` for
+  issuance, with no call. An entry returns a `NativeContractStep`: `.done`, or
+  `.call` with one CALL-family child. The executor runs and settles the child, then
+  enters the native again, so native recursion no longer uses the Zig stack.
+  `ReentrantNativeContractResult` is gone; gas lives in the executor-owned
+  `NativeContractLedger`. See `doc/native-contracts.md`.
+- Native effects respect static context, and a failed activation unwinds state gas
+  and drops refunds like a failed bytecode frame. `@TypeOf(ctx).spec` is the
+  executor's own spec, so native pricing follows `Spec.extend` overrides.
+- System-call entry rejects native targets with `NativeSystemCallUnsupported`.
 
 Removed
 

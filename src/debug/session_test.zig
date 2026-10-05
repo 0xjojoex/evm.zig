@@ -1045,3 +1045,85 @@ test "failed debug session init leaves no prepared-code execution scope" {
     defer controlled.deinit();
     try std.testing.expectEqual(@as(u8, 0x60), (try controlled.pause()).opcode.opcode);
 }
+
+test "debug session runs native rows through and steps their bytecode children" {
+    const Native = struct {
+        const address = evmz.addr(0x1234);
+        pub fn active(candidate: evmz.Address) bool {
+            return candidate.eql(address);
+        }
+        // Forwards to `child` and returns its output.
+        pub fn execute(_: *@This(), _: anytype, call: evmz.execution.NativeContractCall) !evmz.execution.NativeContractStep {
+            if (call.child) |result| return .{ .done = .{ .output_data = try call.allocator.dupe(u8, result.output_data) } };
+            return .{ .call = .{
+                .kind = .call,
+                .recipient = evmz.addr(0xbbbb),
+                .code_address = evmz.addr(0xbbbb),
+                .sender = call.message.recipient,
+                .gas = call.ledger.gas_left,
+            } };
+        }
+    };
+    const Exact = evmz.t.CustomVm(.latest, .{ .native_contract = Native }).?;
+    const Executor = Exact.Executor;
+    const Session = session.SessionType(Exact);
+    const sender = evmz.addr(0x1111);
+    const recipient = evmz.addr(0x2222);
+    const root_code = evmz.t.bytecode(.{
+        .PUSH1, 32,    .PUSH0, .PUSH0, .PUSH0, .PUSH0, .PUSH2,  0x12, 0x34,
+        .GAS,   .CALL, .POP,   .PUSH1, 32,     .PUSH0, .RETURN,
+    });
+    const child_code = evmz.t.bytecode(.{ .PUSH1, 0x2a, .PUSH0, .MSTORE, .PUSH1, 32, .PUSH0, .RETURN });
+    const message = Host.Message{
+        .depth = 0,
+        .kind = .call,
+        .gas = 200_000,
+        .recipient = recipient,
+        .sender = sender,
+        .input_data = &.{},
+        .value = 0,
+        .code_address = recipient,
+    };
+    const context = evmz.t.defaultExecutionContext(sender, 200_000);
+    var native: Native = .{};
+
+    var normal_executor = Executor.init(std.testing.allocator, .{ .native_contract = &native });
+    defer normal_executor.deinit();
+    try evmz.t.seedExecutorAccount(&normal_executor, evmz.addr(0xbbbb), .{ .code = &child_code });
+    try normal_executor.beginTransaction(context, sender, recipient);
+    defer normal_executor.discardStateTransition();
+    normal_executor.beginPreparedCodeExecution();
+    defer normal_executor.endPreparedCodeExecution();
+    var normal_code = try normal_executor.prepareBytecode(&root_code);
+    defer normal_code.deinit(std.testing.allocator);
+    const normal = try Executor.executePreparedCallMessage(&normal_executor, message, normal_code.view());
+
+    var controlled_executor = Executor.init(std.testing.allocator, .{ .native_contract = &native });
+    defer controlled_executor.deinit();
+    try evmz.t.seedExecutorAccount(&controlled_executor, evmz.addr(0xbbbb), .{ .code = &child_code });
+    try controlled_executor.beginTransaction(context, sender, recipient);
+    defer controlled_executor.discardStateTransition();
+    var controlled_code = try controlled_executor.prepareBytecode(&root_code);
+    defer controlled_code.deinit(std.testing.allocator);
+    var controlled: Session = undefined;
+    try controlled.init(&controlled_executor, message, controlled_code.view());
+    defer controlled.deinit();
+
+    var max_depth: u16 = 0;
+    var pause = try controlled.pause();
+    const stepped = while (true) switch (pause) {
+        .opcode => |event| {
+            max_depth = @max(max_depth, event.site.depth);
+            pause = try controlled.step();
+        },
+        .suspended => pause = try controlled.dispatchSuspension(),
+        .finished => |finished| break finished.canonical,
+    };
+
+    try std.testing.expectEqual(@as(u16, 2), max_depth);
+    try std.testing.expectEqual(Interpreter.Status.success, stepped.status());
+    try std.testing.expectEqual(@as(u256, 0x2a), std.mem.readInt(u256, stepped.output_data[0..32], .big));
+    try std.testing.expectEqual(normal.gas_left, stepped.gas_left);
+    try std.testing.expectEqualSlices(u8, normal.output_data, stepped.output_data);
+    try std.testing.expectEqual(@as(usize, 0), controlled_executor.native_frames.items.len);
+}

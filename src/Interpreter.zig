@@ -427,20 +427,7 @@ pub const CallFrame = struct {
     /// Fold a returned child frame's gas accounting into this one. Returns
     /// whether execution may continue.
     fn settleChild(self: *CallFrame, gas_limit: i64, state_gas_charged: i64, child: Host.Result) bool {
-        const succeeded = child.outcome.status == .success;
-        const gas_charged = self.trackGas(gas_limit - @max(child.gas_left, 0));
-        self.gas_reservoir = child.gas_reservoir;
-        self.state_gas_spent +|= child.state_gas_spent;
-        self.state_gas_from_gas_left +|= child.state_gas_from_gas_left;
-        if (succeeded) {
-            self.repayStateGasSpill();
-        } else {
-            self.refillStateGas(state_gas_charged);
-        }
-        if (!gas_charged) return false;
-        // EIP-2200: child call-frame refunds only survive committed frames.
-        if (succeeded) self.gas_refund += child.gas_refund;
-        return true;
+        return @import("execution/accounting.zig").settleChild(self, gas_limit, state_gas_charged, child);
     }
 
     /// Returns whether execution may continue after the charge.
@@ -458,43 +445,12 @@ pub const CallFrame = struct {
     /// `gas_left` only after the reservoir is empty. Returns whether execution
     /// may continue after the charge.
     pub fn trackStateGas(self: *CallFrame, gas: i64) bool {
-        if (gas <= 0) return true;
-        const reservoir_available = @max(self.gas_reservoir, 0);
-        const from_reservoir = @min(reservoir_available, gas);
-        const from_regular = gas - from_reservoir;
-        if (from_regular > self.gas_left) {
-            @branchHint(.unlikely);
-            self.halt(.out_of_gas);
-            return false;
-        }
-        self.gas_reservoir -= from_reservoir;
-        self.gas_left -= from_regular;
-        self.state_gas_from_gas_left +|= from_regular;
-        self.state_gas_spent +|= gas;
-        return true;
+        return @import("execution/accounting.zig").trackStateGas(self, gas);
     }
 
-    /// Refill state gas in LIFO order: gas spilled from `gas_left` is restored
-    /// first, then the reservoir is credited.
+    /// State credits repay regular-gas spill before increasing the reservoir.
     pub inline fn refillStateGas(self: *CallFrame, gas: i64) void {
-        if (gas <= 0) return;
-        const to_regular = @min(self.state_gas_from_gas_left, gas);
-        self.gas_left +|= to_regular;
-        self.state_gas_from_gas_left -= to_regular;
-        const to_reservoir = gas - to_regular;
-        self.gas_reservoir +|= to_reservoir;
-        self.state_gas_spent -|= gas;
-    }
-
-    /// Repay merged state-gas spill from reservoir credit after a successful child.
-    inline fn repayStateGasSpill(self: *CallFrame) void {
-        std.debug.assert(self.gas_reservoir >= 0);
-        std.debug.assert(self.state_gas_from_gas_left >= 0);
-        const repayment = @min(self.gas_reservoir, self.state_gas_from_gas_left);
-        self.gas_left += repayment;
-        self.gas_reservoir -= repayment;
-        self.state_gas_from_gas_left -= repayment;
-        std.debug.assert(self.gas_reservoir == 0 or self.state_gas_from_gas_left == 0);
+        @import("execution/accounting.zig").refillStateGas(self, gas);
     }
 
     /// Terminal EVM transition. Fault halts consume all remaining gas;

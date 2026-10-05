@@ -22,6 +22,7 @@
 const std = @import("std");
 
 const evmz = @import("./evm.zig");
+const accounting = @import("./execution/accounting.zig");
 const call_scratch_storage = @import("./executor/call_scratch.zig");
 const Checkpoint = @import("state.zig").Checkpoint;
 const LogBuffer = @import("./state/LogBuffer.zig");
@@ -29,6 +30,7 @@ const CheckpointGuard = @import("./executor/checkpoint.zig").Guard;
 const frame_io = @import("./frame_io.zig");
 const FrameStore = @import("./executor/FrameStore.zig");
 const HostCallbacks = @import("./executor/host.zig").Callbacks;
+const native_contract = @import("./execution/native_contract.zig");
 const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 const top_frame_gas = @import("./executor/top_frame_gas.zig");
 const trace_capture = @import("./executor/trace_capture.zig");
@@ -83,7 +85,29 @@ const ScopeRoot = struct {
 
 /// An open world may start empty or load through a reader. Other worlds must
 /// arrive as an admitted state, whose ownership transfers to the executor.
-fn ExecutorInitType(comptime World: type) type {
+/// `native_contract` binds the instance of the spec's native type; specs without
+/// native code ignore it.
+fn ExecutorInitType(comptime World: type, comptime TransactionJournal: ?type, comptime NativeContract: type) type {
+    if (TransactionJournal) |Journal| {
+        if (World == evmz.state.OpenWorld) {
+            return struct {
+                transaction_journal: *Journal,
+                state: struct { reader: ?evmz.state.Reader = null } = .{},
+                /// Caller-owned derived-artifact service. Its allocation, I/O,
+                /// synchronization, and capacity policy are outside executor bounds.
+                prepared_code_backend: ?prepared_code.Backend = null,
+                block_hash_source: ?BlockHashSource = null,
+                native_contract: ?*NativeContract = null,
+            };
+        }
+        return struct {
+            state: evmz.state.WorldState(World),
+            transaction_journal: *Journal,
+            prepared_code_backend: ?prepared_code.Backend = null,
+            block_hash_source: ?BlockHashSource = null,
+            native_contract: ?*NativeContract = null,
+        };
+    }
     if (World == evmz.state.OpenWorld) {
         return struct {
             state: struct { reader: ?evmz.state.Reader = null } = .{},
@@ -91,14 +115,14 @@ fn ExecutorInitType(comptime World: type) type {
             /// synchronization, and capacity policy are outside executor bounds.
             prepared_code_backend: ?prepared_code.Backend = null,
             block_hash_source: ?BlockHashSource = null,
-            reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+            native_contract: ?*NativeContract = null,
         };
     }
     return struct {
         state: evmz.state.WorldState(World),
         prepared_code_backend: ?prepared_code.Backend = null,
         block_hash_source: ?BlockHashSource = null,
-        reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+        native_contract: ?*NativeContract = null,
     };
 }
 
@@ -128,6 +152,12 @@ pub const CaptureContext = capture_context.Context;
 pub const CompileOptions = struct {
     /// Include opcode-step capture and its traced dispatch table.
     step_capture: bool = false,
+    /// Embedding-owned journal coupled to transaction and CALL/CREATE rollback.
+    /// The concrete type must provide the six infallible lifecycle methods used
+    /// by Executor. `null` removes its field and all calls from the generated type.
+    /// Executor borrows one instance; concurrent executors need distinct instances
+    /// unless the concrete journal provides its own synchronization.
+    transaction_journal: ?type = null,
 };
 
 /// Compile one exact executor over `WorldState(World)`. Admission, authenticated
@@ -147,14 +177,24 @@ pub fn ExecutorType(
         pub const ExecutionPhase = enum { idle, running, closed };
 
         const BoundInterpreter = Interpreter.Interpreter(spec);
+        /// Comptime: specs without native contracts compile every native row path out.
+        const has_native_contracts = spec.native_contract != evmz.execution.NoNativeContracts;
 
         const callbacks = HostCallbacks(spec, World, options_value);
+        /// What a native entry receives as `ctx`.
+        pub const NativeContext = callbacks.NativeContext;
 
         pub const State = evmz.state.WorldState(World);
 
         pub const BranchSnapshot = State.BranchSnapshot;
 
-        pub const Init = ExecutorInitType(World);
+        const transaction_journal_enabled = options_value.transaction_journal != null;
+        const TransactionJournal = if (transaction_journal_enabled)
+            *options_value.transaction_journal.?
+        else
+            void;
+
+        pub const Init = ExecutorInitType(World, options_value.transaction_journal, spec.native_contract);
 
         allocator: std.mem.Allocator,
         state: State,
@@ -171,12 +211,93 @@ pub fn ExecutorType(
         active_block_execution_generation: ?u64 = null,
         next_block_execution_generation: u64 = 0,
         block_hash_source: ?BlockHashSource = null,
-        reentrant_native_contract_runtime: ?evmz.execution.ReentrantNativeContractRuntime = null,
+        transaction_journal: TransactionJournal,
+        native_contract: if (has_native_contracts) ?*spec.native_contract else void,
+        /// Native activations, interleaved with `frame_store` rows. Reserved to
+        /// the depth limit on first use, so suspended actions never move.
+        /// Zero-size without native contracts: its 24 bytes pushed hot fields
+        /// past the RV64 12-bit load offset (~0.9% guest steps on call-heavy code).
+        native_frames: if (has_native_contracts) std.ArrayList(NativeFrame) else void =
+            if (has_native_contracts) .empty else {},
         prepared_code_backend: ?prepared_code.Backend,
         prepared_code_execution: ?prepared_code.Execution = null,
         prepared_code_execution_depth: usize = 0,
         trace_depth: u16 = 0,
         last_call_output: frame_io.ByteSlot,
+
+        /// A native activation's row. It suspends on one child and resumes from
+        /// its result the way `Interpreter.CallFrame` does.
+        const NativeFrame = struct {
+            message: Host.Message,
+            ledger: native_contract.Ledger,
+            guard: NativeContext.Guard,
+            /// Null for a root activation; its caller owns the transaction scope.
+            checkpoint: ?Checkpoint,
+            call_capture: ?evmz.trace.CallToken,
+            /// `frame_store` length at push; a bytecode child occupies this row.
+            frame_len: usize,
+            allocator: std.mem.Allocator,
+            /// Pending child, present while suspended.
+            action: ?Interpreter.Action = null,
+            /// Settled child for the next entry; output lives in `allocator`.
+            child: ?Host.Result = null,
+            continuation: ?*anyopaque = null,
+
+            /// The CALL-opcode half of a native request: derive the child message
+            /// and its forwarded gas, then suspend on it. False when the request
+            /// ends the activation instead.
+            fn suspendOn(self: *NativeFrame, request: native_contract.ChildRequest) !bool {
+                // Mirror CALL: a static caller cannot move value.
+                if (self.guard.is_static and request.kind == .call and request.value != 0)
+                    self.guard.violated_static = true;
+                if (self.guard.violated_static or self.ledger.out_of_gas) return false;
+
+                const forwarded = spec.call.childGas(.{ .requested = request.gas, .available = self.ledger.gas_left });
+                if (forwarded.out_of_gas) {
+                    self.ledger.out_of_gas = true;
+                    return false;
+                }
+                var msg: Host.Message = .{
+                    .depth = self.message.depth + 1,
+                    .kind = request.kind.callKind(),
+                    .gas = forwarded.gas,
+                    .gas_reservoir = self.ledger.gas_reservoir,
+                    .recipient = request.recipient,
+                    .sender = request.sender,
+                    .input_data = request.input_data,
+                    .value = request.value,
+                    .is_static = self.message.is_static or request.kind == .staticcall,
+                    .code_address = request.code_address,
+                };
+                if (request.value != 0 and (request.kind == .call or request.kind == .callcode)) {
+                    msg.gas += spec.call.value_stipend;
+                    self.ledger.gas_left += spec.call.value_stipend;
+                }
+                std.debug.assert(self.action == null);
+                self.action = .{ .call = .{
+                    .msg = msg,
+                    .continuation = .{ .gas_limit = msg.gas, .out_offset = 0, .out_size = 0 },
+                } };
+                self.continuation = request.continuation;
+                return true;
+            }
+
+            fn suspendedAction(self: *const NativeFrame) ?*const Interpreter.Action {
+                return if (self.action) |*action| action else null;
+            }
+
+            /// Settle the child into the ledger and copy its output out of a row
+            /// that pops before the next entry.
+            fn resumeWith(self: *NativeFrame, child: Host.Result) !void {
+                const action = self.action orelse return error.FrameNotSuspended;
+                var retained = child;
+                retained.output_data = try self.allocator.dupe(u8, child.output_data);
+                const continuation = action.call.continuation;
+                _ = accounting.settleChild(&self.ledger, continuation.gas_limit, continuation.state_gas_charged, child);
+                self.action = null;
+                self.child = retained;
+            }
+        };
 
         /// Construct and take exclusive ownership of the execution state.
         pub fn init(allocator: std.mem.Allocator, options: Init) Executor {
@@ -190,7 +311,10 @@ pub fn ExecutorType(
                 .call_scratch_slots = .empty,
                 .prepared_code_scratch = .init(allocator),
                 .block_hash_source = options.block_hash_source,
-                .reentrant_native_contract_runtime = options.reentrant_native_contract_runtime,
+                .native_contract = if (has_native_contracts) options.native_contract else {},
+                .transaction_journal = if (transaction_journal_enabled)
+                    options.transaction_journal
+                else {},
                 .prepared_code_backend = options.prepared_code_backend,
                 .last_call_output = .init(allocator),
             };
@@ -200,12 +324,14 @@ pub fn ExecutorType(
         pub fn deinit(self: *Executor) void {
             std.debug.assert(!self.hasActiveBlockExecution());
             std.debug.assert(self.frame_store.len() == 0);
+            if (has_native_contracts) std.debug.assert(self.native_frames.items.len == 0);
             std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             std.debug.assert(self.prepared_code_execution_depth == 0);
             std.debug.assert(self.prepared_code_execution == null);
             self.state.deinit();
             self.frame_store.deinit(self.allocator);
+            if (has_native_contracts) self.native_frames.deinit(self.allocator);
             self.prepared_code_scratch.deinit();
             for (self.call_scratch_slots.items) |slot| {
                 slot.deinit();
@@ -283,6 +409,7 @@ pub fn ExecutorType(
             else
                 self.state.beginAttempt();
             self.state.openSession();
+            if (comptime transaction_journal_enabled) self.transaction_journal.beginTransaction();
             self.attempt = .{ .id = state_attempt_id, .mode = mode, .owner = .manual };
             self.execution_context = context;
             self.execution_phase = .idle;
@@ -494,6 +621,7 @@ pub fn ExecutorType(
             std.debug.assert(self.state.sessionActive());
             const state_attempt_id = (self.attempt orelse unreachable).id;
             self.state.closeSession();
+            if (comptime transaction_journal_enabled) self.transaction_journal.discardTransaction();
             self.state.discardAttempt(state_attempt_id);
             self.closeManualTransactionLifetime();
         }
@@ -506,11 +634,13 @@ pub fn ExecutorType(
             self.state.sealAttempt(state_attempt_id);
             if (comptime @TypeOf(observer) != void)
                 observer.observe(self.currentObservation()) catch |err| {
+                    if (comptime transaction_journal_enabled) self.transaction_journal.discardTransaction();
                     self.state.discardAttempt(state_attempt_id);
                     self.closeManualTransactionLifetime();
                     return err;
                 };
             self.state.retainAttempt(state_attempt_id);
+            if (comptime transaction_journal_enabled) self.transaction_journal.retainTransaction();
             self.closeManualTransactionLifetime();
         }
 
@@ -533,6 +663,7 @@ pub fn ExecutorType(
         fn discardCurrentTransaction(self: *Executor) void {
             std.debug.assert(self.hasCurrentTransaction());
             defer self.finishCurrentTransaction(true);
+            if (comptime transaction_journal_enabled) self.transaction_journal.discardTransaction();
             self.state.discardAttempt(self.attempt.?.id);
         }
 
@@ -603,6 +734,7 @@ pub fn ExecutorType(
                 pub fn retain(self: Execution) void {
                     _ = self.state();
                     self.executor.state.retainAttempt(self.executor.attempt.?.id);
+                    if (comptime transaction_journal_enabled) self.executor.transaction_journal.retainTransaction();
                     self.executor.finishCurrentTransaction(false);
                 }
 
@@ -642,17 +774,37 @@ pub fn ExecutorType(
         /// Caller-owned journal checkpoint. Opened only inside an active
         /// transaction scope while dispatch is idle; it never finalizes or closes
         /// that scope, so the owning runtime can span prelude writes and payload execution.
-        pub const ExecutionCheckpoint = CheckpointGuard(State);
+        pub const ExecutionCheckpoint = CheckpointGuard(Executor);
 
         /// Open one journal-backed checkpoint inside the active session.
         pub fn checkpoint(self: *Executor) ExecutionCheckpoint {
             self.requireTransactionScope();
             std.debug.assert(self.execution_phase != .running);
-            return .begin(&self.state);
+            return .begin(self);
+        }
+
+        /// Interior scope checkpoint spanning EVM state and the transaction journal.
+        /// The journal is stack-addressed, so only the state checkpoint is stored.
+        pub const ScopeCheckpoint = Checkpoint;
+
+        pub fn openScope(self: *Executor) ScopeCheckpoint {
+            if (comptime transaction_journal_enabled) self.transaction_journal.checkpoint();
+            return self.state.checkpoint();
+        }
+
+        pub fn commitScope(self: *Executor, checkpoint_state: ScopeCheckpoint) void {
+            self.state.commitCheckpoint(checkpoint_state);
+            if (comptime transaction_journal_enabled) self.transaction_journal.commitCheckpoint();
+        }
+
+        pub fn revertScope(self: *Executor, checkpoint_state: ScopeCheckpoint) void {
+            self.state.revertToCheckpoint(checkpoint_state);
+            if (comptime transaction_journal_enabled) self.transaction_journal.revertCheckpoint();
         }
 
         /// Copy the accepted branch so a later `restoreBranch` can roll back
         /// across whole transactions. Allocates; only valid between them.
+        /// The embedding owns snapshots of retained transaction-journal data.
         pub fn branchSnapshot(self: *Executor) !BranchSnapshot {
             return self.state.branchSnapshot();
         }
@@ -1020,9 +1172,9 @@ pub fn ExecutorType(
             return account.balance >= value;
         }
 
-        inline fn nativeContractActive(address: Address) bool {
+        inline fn nativeTargetActive(address: Address) bool {
             return spec.precompile.active(address) or
-                spec.reentrant_native_contract.active(address);
+                spec.native_contract.active(address);
         }
 
         // Capture wrappers. The mapping itself lives in `executor/trace_capture.zig`;
@@ -1066,6 +1218,7 @@ pub fn ExecutorType(
         const StartedCall = union(enum) {
             immediate: Host.Result,
             child: ChildCall,
+            native: Checkpoint,
         };
 
         const ChildCall = struct {
@@ -1099,6 +1252,7 @@ pub fn ExecutorType(
             host_iface: Host,
             frames: *FrameStore,
             frame_base: usize,
+            native_base: if (has_native_contracts) usize else void,
             capture_context: ?*CaptureContext,
             top_frame_resolved: bool,
 
@@ -1108,23 +1262,37 @@ pub fn ExecutorType(
                     .host_iface = executor.host(),
                     .frames = &executor.frame_store,
                     .frame_base = executor.frame_store.len(),
+                    .native_base = if (has_native_contracts) executor.native_frames.items.len else {},
                     .capture_context = executor.currentCaptureContext(),
                     .top_frame_resolved = false,
                 };
             }
 
+            /// One LIFO row: a bytecode frame or a native activation. Without
+            /// native contracts the native arm is uninhabited, so its prongs compile out.
+            pub const Row = union(enum) {
+                frame: usize,
+                native: if (has_native_contracts) usize else noreturn,
+            };
+
             /// Restore every unresolved child checkpoint owned by this runtime.
             pub fn deinit(self: *CallRuntime) void {
                 if (self.top_frame_resolved) self.popResolvedFrame();
-                while (self.frames.len() > self.frame_base) {
-                    const index = self.frames.len() - 1;
-                    switch (self.frames.control(index).kind) {
-                        .root_call => {},
-                        .call => |checkpoint_state| self.executor.state.revertToCheckpoint(checkpoint_state),
-                        .create => |child| self.executor.state.revertToCheckpoint(child.checkpoint_state),
-                    }
-                    self.dropFrame();
-                }
+                while (self.top()) |row| switch (row) {
+                    .native => {
+                        const native = self.executor.native_frames.pop().?;
+                        if (native.checkpoint) |checkpoint_state| self.executor.revertScope(checkpoint_state);
+                        self.executor.endCallScratch(native.message.depth);
+                    },
+                    .frame => |index| {
+                        switch (self.frames.control(index).kind) {
+                            .root_call => {},
+                            .call => |checkpoint_state| self.executor.revertScope(checkpoint_state),
+                            .create => |child| self.executor.revertScope(child.checkpoint_state),
+                        }
+                        self.dropFrame();
+                    },
+                };
             }
 
             pub fn prepare(self: *CallRuntime) !void {
@@ -1252,7 +1420,8 @@ pub fn ExecutorType(
             }
 
             fn run(self: *CallRuntime) !Host.Result {
-                while (self.frames.len() > self.frame_base) {
+                while (true) {
+                    if (try self.runNatives()) |final| return final;
                     const index = self.frames.len() - 1;
                     const call_frame = self.frames.frame(index);
                     var interpreter = BoundInterpreter.init(call_frame);
@@ -1269,48 +1438,208 @@ pub fn ExecutorType(
                         break :result try interpreter.executeUntilSuspended();
                     };
                     switch (run_result) {
-                        .suspended => |action| try self.dispatchSuspension(index, action),
+                        .suspended => |action| try self.dispatchSuspension(.{ .frame = index }, action),
                         .finished => |result| {
                             const host_result = try self.finishFrame(index, result);
-                            if (self.frames.len() == self.frame_base + 1) {
+                            // `returnToParent` spelled out: its optional result
+                            // costs the guest ~15 steps per returning call.
+                            const parent = self.rowAt(index) orelse {
                                 const stable = try self.executor.stabilizeFinalResult(host_result);
                                 self.popResolvedFrame();
                                 return stable;
-                            }
-
-                            const parent_index = self.frames.len() - 2;
-                            try self.resumeSuspended(parent_index, host_result);
+                            };
+                            try self.resumeSuspended(parent, host_result);
                             self.popResolvedFrame();
                         },
                     }
                 }
-                unreachable;
             }
 
-            pub fn dispatchSuspension(self: *CallRuntime, frame_index: usize, action: *const Interpreter.Action) !void {
-                // Executor reserves pointer-bearing frame storage before the
-                // root frame is acquired, so child pushes cannot move action.
+            /// The newest row while `frame_store` holds `frame_len` rows: a native
+            /// pushed at that length, else the frame below it. Specs without
+            /// native contracts compile the native check out.
+            fn rowAt(self: *const CallRuntime, frame_len: usize) ?Row {
+                if (has_native_contracts) {
+                    const natives = self.executor.native_frames.items;
+                    if (natives.len > self.native_base and natives[natives.len - 1].frame_len == frame_len)
+                        return .{ .native = natives.len - 1 };
+                }
+                if (frame_len == self.frame_base) return null;
+                return .{ .frame = frame_len - 1 };
+            }
+
+            pub fn top(self: *const CallRuntime) ?Row {
+                return self.rowAt(self.frames.len());
+            }
+
+            /// Resume the row below a finished one, then drop a finished frame,
+            /// whose row holds the output until delivery. Returns the stable
+            /// result when the finished row was the root.
+            pub fn returnToParent(self: *CallRuntime, row: Row, result: Host.Result) !?Host.Result {
+                const below = switch (row) {
+                    .frame => |index| index,
+                    .native => self.frames.len(),
+                };
+                const final: ?Host.Result = if (self.rowAt(below)) |parent| final: {
+                    try self.resumeSuspended(parent, result);
+                    break :final null;
+                } else try self.executor.stabilizeFinalResult(result);
+                if (row == .frame) self.popResolvedFrame();
+                return final;
+            }
+
+            fn pushNative(
+                self: *CallRuntime,
+                msg: *const Host.Message,
+                checkpoint_state: ?Checkpoint,
+                call_capture: ?evmz.trace.CallToken,
+            ) !void {
+                const executor = self.executor;
+                if (executor.native_contract == null) return error.MissingNativeContract;
+                try executor.native_frames.ensureTotalCapacityPrecise(executor.allocator, default_max_live_frames);
+                const allocator = try executor.beginCallScratch(msg.depth);
+                errdefer executor.endCallScratch(msg.depth);
+                executor.native_frames.appendAssumeCapacity(.{
+                    .message = msg.*,
+                    .ledger = .init(msg),
+                    .guard = .{ .is_static = msg.is_static },
+                    .checkpoint = checkpoint_state,
+                    .call_capture = call_capture,
+                    .frame_len = self.frames.len(),
+                    .allocator = allocator,
+                });
+            }
+
+            /// Step native rows until a bytecode frame is on top. Returns the
+            /// stable result instead when the root finishes first.
+            pub fn runNatives(self: *CallRuntime) !?Host.Result {
+                if (!has_native_contracts) return null;
+                while (true) switch (self.top().?) {
+                    .native => |index| if (try self.stepNative(index)) |final| return final,
+                    .frame => return null,
+                };
+            }
+
+            /// Enter a native once: dispatch the child it suspends on, or return
+            /// its result to the parent. Returns the stable result at the root.
+            fn stepNative(self: *CallRuntime, index: usize) !?Host.Result {
+                const native = &self.executor.native_frames.items[index];
+                const request = switch (try self.enterNative(native)) {
+                    .done => |done| return self.returnToParent(.{ .native = index }, try self.finishNative(done)),
+                    .call => |request| request,
+                };
+                if (!try native.suspendOn(request))
+                    return self.returnToParent(.{ .native = index }, try self.finishNative(.{}));
+                try self.dispatchSuspension(.{ .native = index }, &native.action.?);
+                return null;
+            }
+
+            fn enterNative(self: *CallRuntime, native: *NativeFrame) !native_contract.Step {
+                const executor = self.executor;
+                const previous_depth = executor.trace_depth;
+                executor.trace_depth = native.message.depth;
+                defer executor.trace_depth = previous_depth;
+                defer native.child = null;
+                const context: NativeContext = .{ .executor = executor, .guard = &native.guard };
+                return spec.native_contract.execute(executor.native_contract.?, context, .{
+                    .allocator = native.allocator,
+                    .message = &native.message,
+                    .ledger = &native.ledger,
+                    .child = if (native.child) |*child| child else null,
+                    .continuation = native.continuation,
+                }) catch |err| {
+                    // The recorded violation, not the caught error, ends the activation.
+                    if (err == error.StaticModeViolation and native.guard.violated_static) return .{ .done = .{} };
+                    return err;
+                };
+            }
+
+            /// Pop the top activation, normalize its ledger once and resolve its checkpoint.
+            fn finishNative(self: *CallRuntime, done: native_contract.Done) !Host.Result {
+                const executor = self.executor;
+                const native = executor.native_frames.pop().?;
+                defer executor.endCallScratch(native.message.depth);
+                var native_checkpoint: ?ExecutionCheckpoint = if (native.checkpoint) |checkpoint_state|
+                    .init(executor, checkpoint_state)
+                else
+                    null;
+                defer if (native_checkpoint) |*guard| guard.deinit();
+
+                const ledger = native.ledger;
+                const violated = native.guard.violated_static;
+                const status: evmz.execution.Status = if (violated)
+                    .invalid
+                else if (ledger.out_of_gas) .out_of_gas else done.status;
+                const keeps_output = status == .success or status == .revert;
+                var result: Host.Result = .{
+                    .outcome = .{
+                        .status = status,
+                        .cause = if (violated) .write_protection else switch (status) {
+                            .revert => .revert,
+                            .success => .none,
+                            .out_of_gas => .out_of_gas,
+                            .invalid => .invalid,
+                        },
+                    },
+                    .output_data = try executor.retainNativeOutput(if (keeps_output) done.output_data else &.{}),
+                    .gas_left = if (keeps_output) ledger.gas_left else 0,
+                    .gas_refund = if (status == .success) ledger.gas_refund else 0,
+                    .gas_reservoir = ledger.gas_reservoir,
+                    .state_gas_spent = ledger.state_gas_spent,
+                    .state_gas_from_gas_left = ledger.state_gas_from_gas_left,
+                };
+                evmz.execution.finalizeStateGas(&result);
+                std.debug.assert(result.gas_left >= 0 and result.gas_reservoir >= 0);
+                if (status == .success) try executor.touchEmptyCallRecipient(&native.message);
+                if (native_checkpoint) |*guard| {
+                    guard.finish(status);
+                    result.checkpoint_reverted = status != .success;
+                }
+                if (native.call_capture) |token| try trace_capture.finishCall(self.capture_context, token, result);
+                return result;
+            }
+
+            pub fn dispatchSuspension(self: *CallRuntime, row: Row, action: *const Interpreter.Action) !void {
+                // Executor reserves pointer-bearing row storage before the row is
+                // acquired, so child pushes cannot move action.
+                std.debug.assert(action == self.suspendedAction(row).?);
+                const frame_index = switch (row) {
+                    .native => |index| {
+                        std.debug.assert(self.executor.native_frames.capacity >= default_max_live_frames);
+                        const result = try self.startCall(&action.call.msg) orelse return;
+                        return self.executor.native_frames.items[index].resumeWith(result);
+                    },
+                    .frame => |index| index,
+                };
                 std.debug.assert(self.frames.metadataPointersStable());
-                std.debug.assert(action == self.frames.frame(frame_index).suspendedAction().?);
                 switch (action.*) {
                     .call => |*call_action| {
                         const continuation = call_action.continuation;
-                        if (try self.startCall(&call_action.msg)) |host_result| {
-                            try self.frames.frame(frame_index).resumeWith(host_result);
-                            self.captureCallOutput(frame_index, continuation, host_result.output_data.len);
-                            try self.captureReturnData(frame_index);
-                        }
+                        const result = try self.startCall(&call_action.msg) orelse return;
+                        try self.frames.frame(frame_index).resumeWith(result);
+                        self.captureCallOutput(frame_index, continuation, result.output_data.len);
+                        try self.captureReturnData(frame_index);
                     },
                     .create => |*create_action| {
-                        if (try self.startCreate(&create_action.msg)) |host_result| {
-                            try self.frames.frame(frame_index).resumeWith(host_result);
-                            try self.captureReturnData(frame_index);
-                        }
+                        const result = try self.startCreate(&create_action.msg) orelse return;
+                        try self.frames.frame(frame_index).resumeWith(result);
+                        try self.captureReturnData(frame_index);
                     },
                 }
             }
 
-            pub fn resumeSuspended(self: *CallRuntime, frame_index: usize, result: Host.Result) !void {
+            fn suspendedAction(self: *CallRuntime, row: Row) ?*const Interpreter.Action {
+                return switch (row) {
+                    .frame => |index| self.frames.frame(index).suspendedAction(),
+                    .native => |index| self.executor.native_frames.items[index].suspendedAction(),
+                };
+            }
+
+            pub fn resumeSuspended(self: *CallRuntime, row: Row, result: Host.Result) !void {
+                const frame_index = switch (row) {
+                    .native => |index| return self.executor.native_frames.items[index].resumeWith(result),
+                    .frame => |index| index,
+                };
                 const frame = self.frames.frame(frame_index);
                 const action = frame.suspendedAction() orelse return error.FrameNotSuspended;
                 const call_continuation: ?Interpreter.Action.CallResume = switch (action.*) {
@@ -1362,10 +1691,18 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(self.executor, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCall(msg, child.bytecode, child.checkpoint_state, call_capture);
+                        child_checkpoint.disarm();
+                        return null;
+                    },
+                    .native => |checkpoint_state| {
+                        if (!has_native_contracts) unreachable;
+                        var child_checkpoint = ExecutionCheckpoint.init(self.executor, checkpoint_state);
+                        defer child_checkpoint.deinit();
+                        try self.pushNative(msg, checkpoint_state, call_capture);
                         child_checkpoint.disarm();
                         return null;
                     },
@@ -1394,7 +1731,7 @@ pub fn ExecutorType(
                         return result;
                     },
                     .child => |child| {
-                        var child_checkpoint = ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state);
+                        var child_checkpoint = ExecutionCheckpoint.init(self.executor, child.checkpoint_state);
                         defer child_checkpoint.deinit();
 
                         try self.pushChildCreate(child, call_capture);
@@ -1412,8 +1749,8 @@ pub fn ExecutorType(
                 const call_capture = control.call_capture;
                 var frame_checkpoint: ?ExecutionCheckpoint = switch (frame_kind) {
                     .root_call => null,
-                    .call => |checkpoint_state| ExecutionCheckpoint.init(&self.executor.state, checkpoint_state),
-                    .create => |child| ExecutionCheckpoint.init(&self.executor.state, child.checkpoint_state),
+                    .call => |checkpoint_state| ExecutionCheckpoint.init(self.executor, checkpoint_state),
+                    .create => |child| ExecutionCheckpoint.init(self.executor, child.checkpoint_state),
                 };
                 defer if (frame_checkpoint) |*guard| guard.deinit();
 
@@ -1470,7 +1807,7 @@ pub fn ExecutorType(
             if (resolved.delegated) try self.traceAccountAccess(resolved.address);
             const code = try self.resolvedCodeView(resolved);
 
-            var call_checkpoint = ExecutionCheckpoint.begin(&self.state);
+            var call_checkpoint = ExecutionCheckpoint.begin(self);
             defer call_checkpoint.deinit();
 
             if (msg.value > 0 and (msg.kind == .call or msg.kind == .callcode)) {
@@ -1490,16 +1827,19 @@ pub fn ExecutorType(
                 }
             }
 
-            if (!resolved.delegated and nativeContractActive(msg.code_address)) {
-                if (try self.runNativeCall(msg)) |result_value| {
-                    var result = result_value;
-                    if (result.status() == .success) {
-                        try self.touchEmptyCallRecipient(msg);
-                    }
-                    call_checkpoint.finish(result.status());
-                    result.checkpoint_reverted = result.status() != .success;
-                    return .{ .immediate = result };
+            if (!resolved.delegated and nativeTargetActive(msg.code_address)) {
+                if (spec.native_contract.active(msg.code_address)) {
+                    std.debug.assert(spec.precompile.resolve(msg.code_address) == null);
+                    call_checkpoint.disarm();
+                    return .{ .native = call_checkpoint.checkpoint };
                 }
+                var result = try self.runPrecompile(msg, spec.precompile.resolve(msg.code_address).?);
+                if (result.status() == .success) {
+                    try self.touchEmptyCallRecipient(msg);
+                }
+                call_checkpoint.finish(result.status());
+                result.checkpoint_reverted = result.status() != .success;
+                return .{ .immediate = result };
             }
 
             if (code.bytes.len == 0) {
@@ -1522,51 +1862,31 @@ pub fn ExecutorType(
             } };
         }
 
-        fn runNativeCall(
+        fn runPrecompile(
             self: *Executor,
             msg: *const Host.Message,
-        ) !?Host.Result {
+            entry: evmz.precompile.Exact(spec.precompile).Entry,
+        ) !Host.Result {
             self.clearLastOutput();
             var scratch = try self.callScratch(msg.depth);
             defer scratch.deinit();
 
-            const precompile = spec.precompile.resolve(msg.code_address);
-            const reentrant = spec.reentrant_native_contract.active(msg.code_address);
-            std.debug.assert(precompile == null or !reentrant);
-            const result = if (precompile) |entry|
-                spec.precompile.execute(entry, .{
-                    .allocator = scratch.allocator,
-                    .input_data = msg.input_data,
-                    .gas = msg.gas,
-                }) catch |err| switch (err) {
-                    error.NotImplemented => return .{
-                        .outcome = .{ .status = .invalid, .cause = .invalid },
-                        .output_data = &.{},
-                        .gas_left = 0,
-                        .gas_refund = 0,
-                        .gas_reservoir = msg.gas_reservoir,
-                    },
-                    else => return err,
-                }
-            else if (reentrant) blk: {
-                const runtime = self.reentrant_native_contract_runtime orelse
-                    return error.MissingReentrantNativeContractRuntime;
-                var host_iface = self.host();
-                break :blk try runtime.execute(.{
-                    .allocator = scratch.allocator,
-                    .host = &host_iface,
-                    .message = msg,
-                });
-            } else return null;
-
-            defer if (result.output_owned) scratch.allocator.free(result.output_data);
-            const output = if (result.output_owned) output: {
-                break :output try self.setLastOutput(result.output_data);
-            } else if (result.output_data.len == 0) output: {
-                break :output &.{};
-            } else {
-                return error.InvalidNativeContractOutput;
+            const result = spec.precompile.execute(entry, .{
+                .allocator = scratch.allocator,
+                .input_data = msg.input_data,
+                .gas = msg.gas,
+            }) catch |err| switch (err) {
+                error.NotImplemented => return .{
+                    .outcome = .{ .status = .invalid, .cause = .invalid },
+                    .output_data = &.{},
+                    .gas_left = 0,
+                    .gas_refund = 0,
+                    .gas_reservoir = msg.gas_reservoir,
+                },
+                else => return err,
             };
+            defer if (result.output_data.len != 0) scratch.allocator.free(result.output_data);
+            const output = try self.retainNativeOutput(result.output_data);
             const status: evmz.TxStatus = switch (result.status) {
                 .success => .success,
                 .failure => .invalid,
@@ -1587,6 +1907,14 @@ pub fn ExecutorType(
                 .gas_refund = 0,
                 .gas_reservoir = msg.gas_reservoir,
             };
+        }
+
+        fn retainNativeOutput(self: *Executor, output_data: []u8) ![]u8 {
+            if (output_data.len == 0) {
+                self.clearLastOutput();
+                return &.{};
+            }
+            return self.setLastOutput(output_data);
         }
 
         fn touchEmptyCallRecipient(self: *Executor, msg: *const Host.Message) !void {
@@ -1617,7 +1945,7 @@ pub fn ExecutorType(
             return switch (try begin(self, &msg)) {
                 .immediate => |result| result,
                 .child => |child| blk: {
-                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(self, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -1668,7 +1996,7 @@ pub fn ExecutorType(
 
         fn beginPreparedCreate(self: *Executor, msg: *const Host.Message) !StartedCreate {
             const create_address = msg.recipient;
-            var create_checkpoint = ExecutionCheckpoint.begin(&self.state);
+            var create_checkpoint = ExecutionCheckpoint.begin(self);
             defer create_checkpoint.deinit();
 
             if (try self.createCollision(create_address)) {
@@ -1792,7 +2120,7 @@ pub fn ExecutorType(
         }
 
         fn createCollision(self: *Executor, address: Address) !bool {
-            if (nativeContractActive(address)) return true;
+            if (nativeTargetActive(address)) return true;
             if (try self.state.getAccount(.fromAddress(address))) |account| {
                 if (account.nonce != 0) return true;
             }
@@ -1806,8 +2134,14 @@ pub fn ExecutorType(
             defer self.execution_phase = previous_phase;
 
             // Write protection is enforced through `is_static` alone; a
-            // static call kind that fails to inherit it is a constructor bug.
+            // static call kind that fails to inherit it, or a static message
+            // that creates or transfers value, is a constructor bug.
             std.debug.assert(msg.kind != .staticcall or msg.is_static);
+            std.debug.assert(!msg.is_static or switch (msg.kind) {
+                .create, .create2 => false,
+                .call => msg.value == 0,
+                .staticcall, .delegatecall, .callcode => true,
+            });
             self.beginPreparedCodeExecution();
             defer self.endPreparedCodeExecution();
 
@@ -1827,7 +2161,7 @@ pub fn ExecutorType(
             } else switch (try self.beginCall(&msg)) {
                 .immediate => |immediate| immediate,
                 .child => |child| blk: {
-                    var child_checkpoint = ExecutionCheckpoint.init(&self.state, child.checkpoint_state);
+                    var child_checkpoint = ExecutionCheckpoint.init(self, child.checkpoint_state);
                     defer child_checkpoint.deinit();
 
                     var runtime = CallRuntime.init(self);
@@ -1837,6 +2171,17 @@ pub fn ExecutorType(
                     child_checkpoint.disarm();
                     const result = try runtime.run();
                     break :blk result;
+                },
+                .native => |checkpoint_state| blk: {
+                    if (!has_native_contracts) unreachable;
+                    var child_checkpoint = ExecutionCheckpoint.init(self, checkpoint_state);
+                    defer child_checkpoint.deinit();
+                    var runtime = CallRuntime.init(self);
+                    defer runtime.deinit();
+                    try runtime.prepareNested();
+                    try runtime.pushNative(&msg, checkpoint_state, null);
+                    child_checkpoint.disarm();
+                    break :blk try runtime.run();
                 },
             };
             if (call_capture) |token| try trace_capture.finishCall(capture_value, token, result);
@@ -1849,7 +2194,7 @@ pub fn ExecutorType(
             const state_target: AddressWord = .fromAddress(target);
             const already_warm = self.state.isAccountWarm(state_target);
             const access = spec.call.topLevelDelegatedAccountAccess(.{
-                .target_is_native_contract = nativeContractActive(target),
+                .target_is_native_contract = nativeTargetActive(target),
                 .already_warm = already_warm,
             }) orelse return null;
             if (access.status == .cold and !already_warm) {
@@ -2075,7 +2420,7 @@ pub fn ExecutorType(
             }
 
             const resolved = try self.resolveCode(recipient);
-            if (!resolved.delegated and nativeContractActive(recipient)) {
+            if (!resolved.delegated and nativeTargetActive(recipient)) {
                 var result = try self.runNativeCallTransaction(sender, recipient, input, execution_gas, value);
                 top_frame_gas.finish(&result, top_frame_state_gas);
                 return .{ .stage = .payload, .result = result };
@@ -2146,9 +2491,17 @@ pub fn ExecutorType(
                 .value = value,
                 .code_address = recipient,
             };
-            const call_result = (try self.runNativeCall(&message)) orelse unreachable;
-            if (call_result.status() == .success) try self.touchEmptyCallRecipient(&message);
-            return call_result.executionResult(self.lastOutputData());
+            if (spec.precompile.resolve(recipient)) |entry| {
+                const call_result = try self.runPrecompile(&message, entry);
+                if (call_result.status() == .success) try self.touchEmptyCallRecipient(&message);
+                return call_result.executionResult(self.lastOutputData());
+            }
+            if (!has_native_contracts) unreachable;
+            var runtime = CallRuntime.init(self);
+            defer runtime.deinit();
+            try runtime.prepare();
+            try runtime.pushNative(&message, null, null);
+            return (try runtime.run()).executionResult(self.lastOutputData());
         }
 
         pub fn executePreparedCallTransaction(self: *Executor, options: PreparedCallTransaction) !ExecutionResult {
@@ -2350,6 +2703,8 @@ pub fn ExecutorType(
             defer execution_checkpoint.deinit();
 
             const resolved = try self.resolveCode(recipient);
+            if (!resolved.delegated and nativeTargetActive(recipient))
+                return error.NativeSystemCallUnsupported;
             const resolved_view = try self.resolvedCodeView(resolved);
             const bytecode = try self.resolveExecutionCodeView(resolved_view);
             try self.traceAccountAccess(recipient);
@@ -2570,14 +2925,14 @@ test "interior checkpoint guard restores unresolved state and preserves commits"
     }
 
     {
-        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor);
         defer checkpoint.deinit();
         try executor.state.addBalance(.fromAddress(address), 7);
     }
     try std.testing.expectEqual(@as(u256, 0), try executor.state.getBalance(.fromAddress(address)));
 
     {
-        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor.state);
+        var checkpoint = Executor.ExecutionCheckpoint.begin(&executor);
         defer checkpoint.deinit();
         try executor.state.addBalance(.fromAddress(address), 9);
         checkpoint.commit();
@@ -2622,13 +2977,13 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
     try call.prepare();
     try call.pushRootCall(&root_message, bytecode.view());
 
-    const parent_checkpoint = executor.state.checkpoint();
+    const parent_checkpoint = executor.openScope();
     try executor.state.addBalance(.fromAddress(parent_write), 7);
     var parent_message = root_message;
     parent_message.depth = 1;
     try call.pushChildCall(&parent_message, bytecode.view(), parent_checkpoint, null);
 
-    const child_checkpoint = executor.state.checkpoint();
+    const child_checkpoint = executor.openScope();
     try executor.state.addBalance(.fromAddress(child_write), 9);
     var child_message = root_message;
     child_message.depth = 2;

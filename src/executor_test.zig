@@ -3486,30 +3486,21 @@ test "execution finalization phase covers native dispatch and restores after err
         pub fn active(address: Address) bool {
             return Address.eql(address, evmz.addr(0x1234));
         }
-    };
-    const Latest = evmz.t.CustomVm(.latest, .{ .reentrant_native_contract = Native }).?;
-    const Runtime = struct {
-        fn execute(_: *anyopaque, call: execution_values.ReentrantNativeContractCall) !evmz.precompile.Result {
-            const executor: *Latest.Executor = @ptrCast(@alignCast(call.host.ptr));
-            try std.testing.expectEqual(.running, executor.execution_phase);
-            _ = try call.host.call(.{
-                .depth = 1,
+        pub fn execute(_: *@This(), ctx: anytype, call: execution_values.NativeContractCall) !execution_values.NativeContractStep {
+            try std.testing.expectEqual(.running, ctx.executor.execution_phase);
+            if (call.child != null) return error.NativeProbeFailed;
+            return .{ .call = .{
                 .kind = .call,
-                .gas = call.message.gas,
-                .sender = call.message.recipient,
                 .recipient = evmz.addr(0xbbbb),
                 .code_address = evmz.addr(0xbbbb),
-                .input_data = &.{},
-                .value = 0,
-            });
-            try std.testing.expectEqual(.running, executor.execution_phase);
-            return error.NativeProbeFailed;
+                .sender = call.message.recipient,
+                .gas = call.ledger.gas_left,
+            } };
         }
     };
-    var marker: u8 = 0;
-    var executor = Latest.Executor.init(std.testing.allocator, .{
-        .reentrant_native_contract_runtime = .{ .ptr = &marker, .vtable = &.{ .execute = Runtime.execute } },
-    });
+    const Latest = evmz.t.CustomVm(.latest, .{ .native_contract = Native }).?;
+    var native: Native = .{};
+    var executor = Latest.Executor.init(std.testing.allocator, .{ .native_contract = &native });
     defer executor.deinit();
     const sender = evmz.addr(0xaaaa);
     const target = evmz.addr(0x1234);

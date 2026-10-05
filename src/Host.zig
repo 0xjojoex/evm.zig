@@ -4,8 +4,8 @@
 //! priced state access, logs, destruction, sub-computation, and the
 //! block-hash capability. Data known before a frame runs (environment,
 //! message, create targets) is not Host's business — it enters at frame
-//! creation. The executor supplies the concrete implementation; the
-//! interpreter is the only consumer, and entries are shaped for it.
+//! creation. The executor supplies the concrete implementation for bytecode
+//! instruction handlers and host-capable native contracts.
 //!
 //! Borrow contract: slices returned by or passed into a callback are valid
 //! until the next call into the same Host, unless an entry documents
@@ -233,6 +233,7 @@ comptime {
 pub fn accountExists(self: *Self, address: AddressWord) !bool {
     return self.vtable.accountExists(self.ptr, address);
 }
+
 pub fn getBlockHash(self: *Self, number: u256) !u256 {
     return self.vtable.getBlockHash(self.ptr, number);
 }

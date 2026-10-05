@@ -14,7 +14,7 @@
 //! Specifications are values. A `type` appears only as a dispatch leaf —
 //! code the engine must call with comptime specialization: custom
 //! instruction handlers (`instruction.Target.custom`), custom precompiles
-//! (`precompile.Spec.custom`), reentrant native contracts, and a program's
+//! (`precompile.Spec.custom`), native contracts, and a program's
 //! transaction family.
 
 const std = @import("std");
@@ -367,9 +367,10 @@ pub const Spec = struct {
     /// Precompile set: catalog configuration plus an optional custom
     /// dispatch leaf.
     precompile: precompile.Spec,
-    /// Host-capable native-contract address set. This capability is separate
-    /// because Ethereum precompiles are terminal and cannot reenter the EVM.
-    reentrant_native_contract: type,
+    /// Native-contract type: its compile-time address set and code, executed
+    /// on an embedding-bound instance (`execution/native_contract.zig`). Separate
+    /// from precompiles, which are terminal and cannot reenter the EVM.
+    native_contract: type,
 
     pub const Patch = struct {
         transaction: TransactionSpec.Patch = .{},
@@ -384,7 +385,7 @@ pub const Spec = struct {
         valueTransferLog: ?@FieldType(Spec, "valueTransferLog") = null,
         instruction: ?instruction_table.Spec = null,
         precompile: ?precompile.Spec = null,
-        reentrant_native_contract: ?type = null,
+        native_contract: ?type = null,
     };
 
     /// Derive a complete specification from this one; unpatched fields
@@ -403,7 +404,7 @@ pub const Spec = struct {
             .valueTransferLog = patch.valueTransferLog orelse self.valueTransferLog,
             .instruction = patch.instruction orelse self.instruction,
             .precompile = patch.precompile orelse self.precompile,
-            .reentrant_native_contract = patch.reentrant_native_contract orelse self.reentrant_native_contract,
+            .native_contract = patch.native_contract orelse self.native_contract,
         };
     }
 };

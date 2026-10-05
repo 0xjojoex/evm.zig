@@ -202,7 +202,6 @@ pub fn executeWithConfig(
 
 pub const Error = std.mem.Allocator.Error || error{
     NotImplemented,
-    OutputBufferTooSmall,
 };
 
 pub const Status = enum(u8) {
@@ -213,16 +212,15 @@ pub const Status = enum(u8) {
 
 pub const Result = struct {
     status: Status,
+    /// Caller-owned when nonempty; allocated from `Call.allocator`.
     output_data: []u8,
     gas_left: i64,
-    output_owned: bool = true,
 };
 
 pub const Call = struct {
     allocator: std.mem.Allocator,
     input_data: []const u8,
     gas: i64,
-    output_buffer: ?[]u8 = null,
 };
 
 pub fn executeContract(
@@ -384,15 +382,10 @@ fn emptyResult(status: Status) Result {
         .status = status,
         .output_data = &.{},
         .gas_left = 0,
-        .output_owned = false,
     };
 }
 
 fn allocOutput(call: Call, len: usize) Error![]u8 {
-    if (call.output_buffer) |buffer| {
-        if (len > buffer.len) return error.OutputBufferTooSmall;
-        return buffer[0..len];
-    }
     return call.allocator.alloc(u8, len);
 }
 
@@ -402,20 +395,15 @@ fn dupeOutput(call: Call, bytes: []const u8) Error![]u8 {
     return output;
 }
 
-fn outputOwned(call: Call) bool {
-    return call.output_buffer == null;
-}
-
 fn freeOutput(call: Call, output: []u8) void {
-    if (outputOwned(call)) call.allocator.free(output);
+    call.allocator.free(output);
 }
 
-fn successOutput(call: Call, output: []u8, gas_left: i64) Result {
+fn successOutput(output: []u8, gas_left: i64) Result {
     return .{
         .status = .success,
         .output_data = output,
         .gas_left = gas_left,
-        .output_owned = outputOwned(call),
     };
 }
 
@@ -448,7 +436,7 @@ fn ecrecover(call: Call, comptime gas: GasSchedule) Error!Result {
     const output = try allocOutput(call, 32);
     @memset(output[0..12], 0);
     @memcpy(output[12..32], recovered.asBytes());
-    return successOutput(call, output, gas_left);
+    return successOutput(output, gas_left);
 }
 
 fn sha256(call: Call, comptime gas: GasSchedule) Error!Result {
@@ -456,7 +444,7 @@ fn sha256(call: Call, comptime gas: GasSchedule) Error!Result {
     const gas_left = charge(call, cost) orelse return emptyResult(.out_of_gas);
 
     const digest = crypto.sha256(call.input_data);
-    return successOutput(call, try dupeOutput(call, &digest), gas_left);
+    return successOutput(try dupeOutput(call, &digest), gas_left);
 }
 
 fn ripemd160(call: Call, comptime gas: GasSchedule) Error!Result {
@@ -474,7 +462,6 @@ fn identity(call: Call, comptime gas: GasSchedule) Error!Result {
         .status = .success,
         .output_data = try dupeOutput(call, call.input_data),
         .gas_left = gas_left,
-        .output_owned = outputOwned(call),
     };
 }
 
@@ -526,11 +513,11 @@ fn modexp(call: Call, comptime config: Config) Error!Result {
     errdefer freeOutput(call, output);
     @memset(output, 0);
     if (std.mem.allEqual(u8, modulus_bytes, 0)) {
-        return successOutput(call, output, gas_left);
+        return successOutput(output, gas_left);
     }
 
     switch (try precompile_backend.modexp(call.allocator, output, base_bytes, exponent_bytes, modulus_bytes)) {
-        .ok => return successOutput(call, output, gas_left),
+        .ok => return successOutput(output, gas_left),
         .invalid => {
             freeOutput(call, output);
             return emptyResult(.failure);
@@ -668,7 +655,7 @@ fn bn254Add(call: Call, comptime gas: GasSchedule) Error!Result {
         return emptyResult(.failure);
     }
 
-    return successOutput(call, output, gas_left);
+    return successOutput(output, gas_left);
 }
 
 fn bn254Mul(call: Call, comptime gas: GasSchedule) Error!Result {
@@ -680,7 +667,7 @@ fn bn254Mul(call: Call, comptime gas: GasSchedule) Error!Result {
         return emptyResult(.failure);
     }
 
-    return successOutput(call, output, gas_left);
+    return successOutput(output, gas_left);
 }
 
 fn bn254Pairing(call: Call, comptime gas: GasSchedule) Error!Result {
@@ -695,7 +682,7 @@ fn bn254Pairing(call: Call, comptime gas: GasSchedule) Error!Result {
         return emptyResult(.failure);
     }
 
-    return successOutput(call, output, gas_left);
+    return successOutput(output, gas_left);
 }
 
 const bn254_pair_size = 192;
@@ -744,7 +731,7 @@ fn kzgPointEvaluation(call: Call, comptime gas: GasSchedule) Error!Result {
     const output = try allocOutput(call, 64);
     std.mem.writeInt(u256, output[0..32], kzg_field_elements_per_blob, .big);
     std.mem.writeInt(u256, output[32..64], kzg_bls_modulus, .big);
-    return successOutput(call, output, gas_left);
+    return successOutput(output, gas_left);
 }
 
 fn bls12G1Add(call: Call, comptime gas: GasSchedule) Error!Result {
@@ -812,7 +799,6 @@ fn backendResult(call: Call, gas_left: i64, status: precompile_backend.Status, o
             .status = .success,
             .output_data = try dupeOutput(call, output),
             .gas_left = gas_left,
-            .output_owned = outputOwned(call),
         },
         .invalid => emptyResult(.failure),
         .oom => error.OutOfMemory,
@@ -879,7 +865,7 @@ fn p256Verify(call: Call, comptime gas: GasSchedule) Error!Result {
     const output = try allocOutput(call, 32);
     @memset(output, 0);
     output[31] = 1;
-    return successOutput(call, output, gas_left);
+    return successOutput(output, gas_left);
 }
 
 fn recoverAddress(input: []const u8) ?Address {
@@ -1155,7 +1141,7 @@ test "input size limit fails oversized calls before dispatch" {
         .input_data = &at,
         .gas = 1_000_000,
     });
-    defer if (at_result.output_owned) std.testing.allocator.free(at_result.output_data);
+    defer std.testing.allocator.free(at_result.output_data);
     try std.testing.expectEqual(Status.success, at_result.status);
 }
 
