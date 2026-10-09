@@ -425,7 +425,6 @@ test "sealed storage wipe removes stale point writes" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -478,7 +477,6 @@ test "sealed discard preserves prior accepted storage projection" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -549,7 +547,6 @@ test "storage wipe projections deduplicate scope reverts" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -702,7 +699,6 @@ fn expectDenseCommitMatchesIndependentRoot(case: DenseCommitCase) !void {
             errdefer state.revertToCheckpoint(destruction);
             _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
                 .clear_balance = false,
-                .reset_nonce = false,
                 .mark_selfdestructed = true,
             }, false);
             state.commitCheckpoint(destruction);
@@ -726,7 +722,6 @@ fn expectDenseCommitMatchesIndependentRoot(case: DenseCommitCase) !void {
                 errdefer state.revertToCheckpoint(destruction);
                 _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
                     .clear_balance = false,
-                    .reset_nonce = false,
                     .mark_selfdestructed = true,
                 }, false);
                 state.commitCheckpoint(destruction);
@@ -876,7 +871,6 @@ test "closed branch snapshot restores compacted storage changes and commit value
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(.fromAddress(address.addr(1)), .fromAddress(address.addr(1)), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);

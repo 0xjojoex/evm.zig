@@ -1622,7 +1622,8 @@ pub fn WorldState(comptime World: type) type {
 
         /// Apply immediate SELFDESTRUCT effects under Executor's selected policy.
         /// Asserts an active session and an enclosing checkpoint, which owns cleanup
-        /// after partial failure. Storage/account removal belongs to finalization.
+        /// after partial failure. Nonce/code/storage reset and account removal belong
+        /// to finalization.
         /// Executor owns gas, capture, and any transfer log for the returned amount.
         pub fn applySelfDestruct(
             self: *State,
@@ -1643,7 +1644,6 @@ pub fn WorldState(comptime World: type) type {
             } else if (!same_address and touch_zero_beneficiary) {
                 try self.touchAccount(beneficiary);
             }
-            if (policy.reset_nonce) try self.setNonce(source, 0);
             if (policy.mark_selfdestructed) try self.markSelfdestructed(source);
             return .{
                 .transferred_value = transferred_value,

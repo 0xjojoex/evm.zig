@@ -485,13 +485,12 @@ const semantics = struct {
     }
 
     fn legacySelfDestructPolicy(_: execution.SelfDestructPolicyInput) execution.SelfDestructPolicy {
-        return .{ .clear_balance = true, .reset_nonce = false, .mark_selfdestructed = true };
+        return .{ .clear_balance = true, .mark_selfdestructed = true };
     }
 
     fn cancunSelfDestructPolicy(input: execution.SelfDestructPolicyInput) execution.SelfDestructPolicy {
         return .{
             .clear_balance = !input.same_address or input.created_in_transaction,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         };
     }
@@ -499,7 +498,6 @@ const semantics = struct {
     fn amsterdamSelfDestructPolicy(input: execution.SelfDestructPolicyInput) execution.SelfDestructPolicy {
         return .{
             .clear_balance = !input.same_address,
-            .reset_nonce = input.same_address and input.created_in_transaction,
             .mark_selfdestructed = !input.same_address or input.created_in_transaction,
         };
     }

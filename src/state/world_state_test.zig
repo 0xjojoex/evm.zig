@@ -618,7 +618,6 @@ test "selfdestruct finalization deletes account and masks accepted storage" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -669,7 +668,6 @@ test "slot first materialized after an accepted wipe starts from zero" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -709,7 +707,6 @@ test "Cancun existing-account selfdestruct only clears lifecycle marker" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -744,7 +741,6 @@ test "created-account finalization removes an empty reset account" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(2), word(2), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -793,7 +789,6 @@ test "created-account finalization preserves a balance-only account" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(2), word(2), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -825,7 +820,6 @@ test "finalization allocation failure preserves enclosing transaction" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -860,7 +854,6 @@ test "storage records keep the written value through a lifecycle wipe" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -894,7 +887,6 @@ test "lifecycle listing is per transaction" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -911,7 +903,6 @@ test "lifecycle listing is per transaction" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -934,7 +925,6 @@ test "sparse lifecycle candidates are compact and survive marker rollback" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -953,8 +943,6 @@ test "sparse lifecycle candidates are compact and survive marker rollback" {
 
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-
-            .reset_nonce = false,
 
             .mark_selfdestructed = true,
         }, false);
@@ -1124,7 +1112,6 @@ test "accepted branch snapshot restores cumulative state and drops later rows" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -1379,7 +1366,6 @@ test "open state transaction cleans every allocation failure" {
                 errdefer state.revertToCheckpoint(destruction);
                 _ = try state.applySelfDestruct(word(3), word(3), .{
                     .clear_balance = false,
-                    .reset_nonce = false,
                     .mark_selfdestructed = true,
                 }, false);
                 state.commitCheckpoint(destruction);
@@ -1453,7 +1439,6 @@ test "accepted branch snapshot restores compacted storage change ids" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(word(1), word(1), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
@@ -1735,7 +1720,6 @@ test "contract initialization after accepted deletion observes the current incar
             errdefer state.revertToCheckpoint(destruction);
             _ = try state.applySelfDestruct(word(1), word(1), .{
                 .clear_balance = false,
-                .reset_nonce = false,
                 .mark_selfdestructed = true,
             }, false);
             state.commitCheckpoint(destruction);

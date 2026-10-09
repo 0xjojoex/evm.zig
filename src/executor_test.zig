@@ -2656,7 +2656,6 @@ test "exact spec drives selfdestruct host policy" {
             _ = input;
             return .{
                 .clear_balance = false,
-                .reset_nonce = false,
                 .mark_selfdestructed = false,
             };
         }
@@ -3446,6 +3445,73 @@ test "execution finalization permits settlement and outer rollback without reope
     try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(target));
 }
 
+test "reinvoked SELFDESTRUCT preserves CREATE nonce until finalization" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const sender = evmz.addr(0xaaaa);
+    const victim = evmz.address.create(sender, 0);
+    const initial_nonce = Latest.spec.create.initial_nonce;
+    const first_child = evmz.address.create(victim, initial_nonce);
+    const second_child = evmz.address.create(victim, initial_nonce + 1);
+    // Pass each call's value to an empty child, then revert on nonempty calldata
+    // or SELFDESTRUCT to self. The reverting frame must undo its CREATE nonce bump.
+    const runtime = comptime evmz.t.bytecode(.{
+        .PUSH0,        .PUSH0,    .CALLVALUE, .CREATE, .POP,
+        .CALLDATASIZE, .PUSH1,    11,         .JUMPI,  .ADDRESS,
+        .SELFDESTRUCT, .JUMPDEST, .PUSH0,     .PUSH0,  .REVERT,
+    });
+    const init_code = comptime evmz.t.bytecode(.{.PUSH15}) ++ runtime ++ evmz.t.bytecode(.{
+        .PUSH0, .MSTORE, .PUSH1, runtime.len, .PUSH1, 32 - runtime.len, .RETURN,
+    });
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
+
+    const request = try beginCreateScope(&executor, testExecutionContext(sender, 1_000_000), .{
+        .sender = sender,
+        .recipient = victim,
+        .init_code = &init_code,
+        .value = 7,
+    }, .legacy(1_000_000));
+    defer executor.discardStateTransition();
+    try std.testing.expectEqual(
+        Interpreter.Status.success,
+        (try executor.executeMessage(request.message, request.gas)).status(),
+    );
+
+    var checkpoint = executor.checkpoint();
+    defer checkpoint.deinit();
+    const first = try executor.executeCallTransaction(sender, victim, &.{}, .legacy(1_000_000), 1);
+    checkpoint.commit();
+    try std.testing.expectEqual(Interpreter.Status.success, first.status());
+    try std.testing.expectEqual(initial_nonce + 1, executor.cachedAccount(victim).?.nonce);
+    try std.testing.expectEqual(@as(u256, 1), try executor.getBalance(first_child));
+
+    checkpoint = executor.checkpoint();
+    const reverted = try executor.executeCallTransaction(sender, victim, &.{1}, .legacy(1_000_000), 2);
+    checkpoint.restore();
+    try std.testing.expectEqual(Interpreter.Status.revert, reverted.status());
+    try std.testing.expectEqual(initial_nonce + 1, executor.cachedAccount(victim).?.nonce);
+    try std.testing.expect(executor.cachedAccount(second_child) == null);
+
+    checkpoint = executor.checkpoint();
+    const last = try executor.executeCallTransaction(sender, victim, &.{}, .legacy(1_000_000), 3);
+    checkpoint.commit();
+    try std.testing.expectEqual(Interpreter.Status.success, last.status());
+    try std.testing.expectEqual(initial_nonce + 2, executor.cachedAccount(victim).?.nonce);
+    try std.testing.expectEqualSlices(u8, &runtime, try executor.getCode(victim));
+    try std.testing.expect(executor.cachedAccount(evmz.address.create(victim, 0)) == null);
+    try std.testing.expect(executor.cachedAccount(evmz.address.create(victim, initial_nonce + 2)) == null);
+
+    try executor.commitTransaction();
+    try std.testing.expectEqual(@as(u64, 0), executor.cachedAccount(victim).?.nonce);
+    try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(victim));
+    try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(victim)).len);
+    try std.testing.expectEqual(initial_nonce, executor.cachedAccount(first_child).?.nonce);
+    try std.testing.expectEqual(initial_nonce, executor.cachedAccount(second_child).?.nonce);
+    try std.testing.expectEqual(@as(u256, 1), try executor.getBalance(first_child));
+    try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(second_child));
+}
+
 test "execution finalization failure preserves the session and lifecycle changes" {
     const Latest = evmz.t.Vm(.latest).?;
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -3463,7 +3529,6 @@ test "execution finalization failure preserves the session and lifecycle changes
         errdefer executor.state.revertToCheckpoint(destruction);
         _ = try executor.state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         executor.state.commitCheckpoint(destruction);

@@ -109,7 +109,6 @@ pub const SelfDestructPolicyInput = struct {
 
 pub const SelfDestructPolicy = struct {
     clear_balance: bool,
-    reset_nonce: bool,
     mark_selfdestructed: bool,
 };
 
