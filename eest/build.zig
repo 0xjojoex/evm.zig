@@ -123,7 +123,7 @@ fn hasFixturePath(args: ?[]const []const u8) bool {
     return false;
 }
 
-const default_execution_input = "tests@v21.0.0";
+const default_execution_input = "tests@v21.0.1";
 const default_zkevm_input = "tests-zkevm@v21.0.5";
 
 const direct_selection =

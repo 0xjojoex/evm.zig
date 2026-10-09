@@ -515,7 +515,6 @@ test "memory store consumes cumulative wipe then write from a detached delta" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(.fromAddress(address), .fromAddress(address), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);

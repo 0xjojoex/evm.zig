@@ -1356,7 +1356,6 @@ test "selfdestruct finalization projects post-transaction BAL state" {
         errdefer state.revertToCheckpoint(destruction);
         _ = try state.applySelfDestruct(.fromAddress(target), .fromAddress(target), .{
             .clear_balance = false,
-            .reset_nonce = false,
             .mark_selfdestructed = true,
         }, false);
         state.commitCheckpoint(destruction);
