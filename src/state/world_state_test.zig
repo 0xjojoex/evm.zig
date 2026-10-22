@@ -504,6 +504,39 @@ test "code checkpoint rollback restores the hash and reclaims the introduction" 
     state.discardAttempt(attempt);
 }
 
+test "rolled back code cannot satisfy another account in a later transaction" {
+    // Preserve our provenance invariant while EEST #3820 remains skipped
+    // upstream pending a decision on mandatory guest rejection.
+    const eip7702 = @import("../code/eip7702.zig");
+    var code: [eip7702.delegation_code_len]u8 = undefined;
+    eip7702.writeDelegationCode(&code, addr(3));
+    var backing = TestReader{ .account = .{ .code_hash = crypto.keccak256(&code) } };
+    var state = initState(std.testing.allocator, backing.reader());
+    defer state.deinit();
+    defer abandon(&state);
+
+    const first = state.beginAttempt();
+    state.openSession();
+    const checkpoint = state.checkpoint();
+    try state.setCode(word(2), &code);
+    // Bind the other account while the introduced bytes are still available.
+    try std.testing.expectEqualSlices(u8, &code, try state.getCode(word(1)));
+    state.revertToCheckpoint(checkpoint);
+    state.closeSession();
+    state.sealAttempt(first);
+    state.retainAttempt(first);
+
+    const second = state.beginAttempt();
+    state.openSession();
+    try std.testing.expectError(error.CodeUnavailable, state.getCode(word(1)));
+    // Supplying the parent code makes the same read valid again.
+    backing.code = &code;
+    try std.testing.expectEqualSlices(u8, &code, try state.getCode(word(1)));
+    state.closeSession();
+    state.sealAttempt(second);
+    state.discardAttempt(second);
+}
+
 test "discarded code is reintroduced by a retained branch and then cleared" {
     const replacement_code = [_]u8{ 0x60, 0x02, 0x00 };
     const replacement_hash = crypto.keccak256(&replacement_code);
