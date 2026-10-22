@@ -585,6 +585,86 @@ test "BlockSTF coalesces withdrawal balance changes at the post-transaction BAL 
     try std.testing.expectEqual(Status.valid, result.status);
 }
 
+test "BlockSTF credits withdrawals before request contracts forward their balances" {
+    const Latest = t.BlockStf(.latest).?;
+    // EEST #3835 makes the phase order observable using request contracts that
+    // forward either all or half of the balance credited by withdrawals.
+    const sink = address.addr(0x7777);
+    const calls = eth_spec.latest.block.finalizeBlock(.{
+        .number = 1,
+        .timestamp = 1,
+        .transaction_count = 0,
+        .gas_used = 0,
+        .block_gas = 0,
+        .state_gas = 0,
+    });
+    try std.testing.expect(calls.len > 0);
+    for ([_]u8{ 0, 1 }) |shift| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        var store = state.MemoryStore.init(scratch);
+        defer store.deinit();
+        var expected = state.MemoryStore.init(scratch);
+        defer expected.deinit();
+        // PUSH0 x4; SELFBALANCE; PUSH1 shift; SHR; PUSH20 sink; GAS; CALL; POP; STOP.
+        var code = [_]u8{ 0x5f, 0x5f, 0x5f, 0x5f, 0x47, 0x60, 0, 0x1c, 0x73 } ++
+            sink.bytes ++ [_]u8{ 0x5a, 0xf1, 0x50, 0x00 };
+        code[6] = shift;
+        const credit: u256 = 2 * withdrawal_gwei_in_wei;
+        const forwarded = credit >> @as(u8, shift);
+        const withdrawals = try scratch.alloc(Withdrawal, calls.len);
+        for (calls.slice(), withdrawals, 0..) |call, *withdrawal, index| {
+            const recipient = call.call.recipient;
+            try (try store.getOrCreateAccount(recipient)).setCode(&code);
+            const post = try expected.getOrCreateAccount(recipient);
+            try post.setCode(&code);
+            post.account.balance = credit - forwarded;
+            withdrawal.* = .{
+                .index = @intCast(index),
+                .validator_index = @intCast(index),
+                .address = recipient,
+                .amount = 2,
+            };
+        }
+        (try store.getOrCreateAccount(sink)).account.balance = 1;
+        const sink_balance = 1 + forwarded * calls.len;
+        (try expected.getOrCreateAccount(sink)).account.balance = sink_balance;
+        const expected_root = try expected.stateRoot(scratch);
+        const parent_hash = [_]u8{0x11} ** 32;
+        const result = try Latest.applyAssumeDecoded(scratch, .{
+            .env = .{ .number = 1, .timestamp = 1, .gas_limit = 30_000_000 },
+            .block_header = .{
+                .number = 1,
+                .timestamp = 1,
+                .parent_hash = parent_hash,
+                .parent_beacon_block_root = @splat(0),
+            },
+            .parent_header = .{
+                .hash = parent_hash,
+                .number = 0,
+                .timestamp = 0,
+                .gas_limit = 30_000_000,
+                .gas_used = 0,
+                .base_fee_per_gas = 0,
+            },
+            .state_backend = .fromMemoryStore(&store),
+            .transactions = &.{},
+            .withdrawals = withdrawals,
+            .root_checks = testRootChecksWithWithdrawals(
+                expected_root,
+                trie.empty_root_hash,
+                trie.empty_root_hash,
+                try trie.withdrawalsRoot(scratch, withdrawals),
+            ),
+            .header_claims = .{ .requests_hash = empty_requests_hash },
+        });
+        try std.testing.expectEqual(Status.valid, result.status);
+        try std.testing.expectEqual(expected_root, result.state_root);
+        try std.testing.expectEqual(sink_balance, store.getAccount(sink).?.account.balance);
+    }
+}
+
 test "BlockSTF applies Cancun block-start system contract" {
     const StfCancun = t.BlockStf(.cancun) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

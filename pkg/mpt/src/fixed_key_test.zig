@@ -179,6 +179,87 @@ test "catalog fixed batch rejects branch values" {
     );
 }
 
+test "fixed delete collapse requires leaf extension and branch sibling witnesses" {
+    // EEST #3789: guessing that an opaque sibling is a branch can produce the
+    // right root despite an incomplete witness. Check rejection independently.
+    const Sibling = enum { leaf, extension, branch };
+    const trie = mpt.init(std.testing.allocator);
+    for ([_]Sibling{ .leaf, .extension, .branch }) |kind| {
+        const deleted = try encodeZeroLeaf(63, 1);
+        defer std.testing.allocator.free(deleted);
+        const leaf = try encodeZeroLeaf(63, 2);
+        defer std.testing.allocator.free(leaf);
+        const child0 = try encodeZeroLeaf(if (kind == .extension) 61 else 62, 2);
+        defer std.testing.allocator.free(child0);
+        const child1 = try encodeZeroLeaf(if (kind == .extension) 61 else 62, 3);
+        defer std.testing.allocator.free(child1);
+        const branch = try encodeBranch01(child0, child1);
+        defer std.testing.allocator.free(branch);
+        const extension = try encodeZeroExtension(1, branch);
+        defer std.testing.allocator.free(extension);
+        const sibling = switch (kind) {
+            .leaf => leaf,
+            .extension => extension,
+            .branch => branch,
+        };
+        try std.testing.expect(sibling.len >= 32);
+        const root_node = try encodeBranch01(deleted, sibling);
+        defer std.testing.allocator.free(root_node);
+        const root_hash = mpt.StdKeccak256Context.keccak256(.{}, root_node);
+
+        const deleted_key: mpt.FixedKey = @splat(0);
+        var key0: mpt.FixedKey = @splat(0);
+        key0[0] = 0x10;
+        var key1 = key0;
+        if (kind == .extension) key1[1] = 0x10 else key1[0] = 0x11;
+        const survivors = [_]mpt.Entry{
+            .{ .key = &key0, .value = &.{2} },
+            .{ .key = &key1, .value = &.{3} },
+        };
+        const expected = try trie.rootSorted(survivors[0..if (kind == .leaf) 1 else 2]);
+        const updates = [_]mpt.FixedUpdate{.{ .key = deleted_key, .value = null }};
+
+        for ([_]bool{ true, false }) |complete| {
+            // Incomplete proofs still authenticate the root and deleted leaf.
+            // Include descendants only when their sibling ancestor is present.
+            const nodes = [_][]const u8{ root_node, deleted, sibling, child0, child1, branch };
+            var indexed = try trie.indexWitness(nodes[0..if (complete) nodes.len else 2]);
+            defer indexed.deinit();
+            var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
+            defer builder.deinit();
+            const root = try builder.authenticateRoot(root_hash);
+            var catalog = try builder.finishAssumeCollisionResistant();
+            defer catalog.deinit();
+            var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+
+            if (complete) {
+                try std.testing.expectEqual(expected, try trie.updateFixedSorted(
+                    &arena,
+                    mpt.witnessSource(indexed, root_hash),
+                    &updates,
+                ));
+                try std.testing.expectEqual(expected, try trie.updateFixedSorted(
+                    &arena,
+                    mpt.catalogSource(&catalog, root),
+                    &updates,
+                ));
+            } else {
+                try std.testing.expectError(error.MissingNode, trie.updateFixedSorted(
+                    &arena,
+                    mpt.witnessSource(indexed, root_hash),
+                    &updates,
+                ));
+                try std.testing.expectError(error.MissingNode, trie.updateFixedSorted(
+                    &arena,
+                    mpt.catalogSource(&catalog, root),
+                    &updates,
+                ));
+            }
+        }
+    }
+}
+
 fn expectAbsence(expected: mpt.FixedAbsence, actual: mpt.FixedLookup) !void {
     switch (actual) {
         .present => return error.ExpectedAbsent,

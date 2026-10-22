@@ -30,7 +30,7 @@ spells the last LLVM feature `unaligned_scalar_mem`, while Rust spells it
 `unaligned-scalar-mem`. ZisK's A and custom DMA extensions remain properties
 of its linked runtime rather than of evmz Zig code.
 
-ZisK is pinned to `v1.3.1-alpha` and the `zisk-4.0.0` Rust toolchain.
+ZisK is pinned to `v1.3.2-alpha` and the `zisk-4.0.0` Rust toolchain.
 Install that SDK and run `cargo-zisk toolchain install --toolchain-version zisk-4.0.0`
 before building the provider. `zig build zisk-config` emits the exact source pin.
 
@@ -52,7 +52,7 @@ an existing checkout of the pinned commit. The provider is built with
 The pinned CI build uses this target policy. A provider built without it produces
 a different guest ELF and verification key.
 
-SP1 uses the repo-owned ERE v0.19.0 platform provider. Install the matching
+SP1 uses the repo-owned ERE v0.19.2 platform provider. Install the matching
 SP1 v6.6.0 toolchain once:
 
 ```sh
@@ -90,7 +90,7 @@ zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dstateless-schema=0x1501
 ```
 
-The build links OpenVM's official startup and ERE v0.19.0's
+The build links OpenVM's official startup and ERE v0.19.2's
 `ere-platform-openvm` implementation of the accelerator ABI. The repo-owned
 Rust crate only bridges Zig input and output to that platform. Its build checks
 the startup, I/O, and accelerator symbols before linking.
@@ -160,10 +160,11 @@ separate reporting script or stored release baseline.
 `Guest release` qualifies and signs one selected backend against the strict
 corpus. ZisK, SP1, and OpenVM runs may execute in parallel; only their short
 draft updates are serialized. Each run verifies its tested ELF, generates the
-VK with its digest-pinned ERE v0.19.0 server image, and signs the ELF, VK, and
+VK with its digest-pinned ERE server image, and signs the ELF, VK, and
 backend manifest. The manifest records the source, qualification run, keygen
 image, compatibility identity, and hashes of the ELF, VK, evidence, and report.
-Its signature is the completed-slot marker.
+Its signature is the completed-slot marker. Signing requires the ERE image's
+backend version to match the qualified guest.
 
 The first completed run uses the requested Git tag, creating it if absent, and
 creates the draft. Rerunning a backend replaces only that backend's draft slot
@@ -193,11 +194,9 @@ or key-generation state, while this path only needs repeated execution and
 backend-native counters. Release key generation still uses the matching ERE
 server image.
 
-ERE v0.19.0 uses Blake3 for ZisK proofs and verification keys. Rebuild the
-provider and ELF, rerun strict corpus qualification, and regenerate the VK
-before promoting a guest release. Previous qualification evidence and VKs do
-not qualify the upgraded backend. The release workflow pins the v0.19.0
-images by digest.
+ERE uses Blake3 for ZisK proofs and verification keys. Backend upgrades require
+rebuilding the provider and ELF, rerunning strict corpus qualification, and
+regenerating the VK with the matching ERE image.
 
 ERE downloads ZisK proving keys on first proof setup. Key generation computes
 the program VK without that setup, so the release keygen step needs no proving
