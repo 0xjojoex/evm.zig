@@ -52,17 +52,17 @@ an existing checkout of the pinned commit. The provider is built with
 The pinned CI build uses this target policy. A provider built without it produces
 a different guest ELF and verification key.
 
-SP1 uses the repo-owned ERE v0.19.2 platform provider. Install the matching
-SP1 v6.6.0 toolchain once:
+SP1 uses the repo-owned ERE v0.19.5 platform provider. Install the matching
+SP1 v6.9.0 toolchain (`succinct-1.96.0-64bit-v3`) once:
 
 ```sh
 curl -L https://sp1up.succinct.xyz | bash
-~/.sp1/bin/sp1up -v v6.6.0
+~/.sp1/bin/sp1up -v v6.9.0
 ```
 
 The guest build compiles ERE's SP1 platform and its `libzkevm` accelerator ABI
-into a static archive before linking Zig. It follows ERE's current SP1 guest
-patch for the unreleased standards-conformance fixes in SP1 #2865.
+into a static archive before linking Zig. SP1 v6.9.0 includes the
+standards-conformance fixes in SP1 #2865, so no fork patch is needed.
 
 ```sh
 zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast
@@ -73,7 +73,7 @@ zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
 ```
 
 `-Dsp1-staticlib=/path/to/provider.a` remains available as an explicit archive
-override. The SP1 host driver is locked to `sp1-core-executor` 6.6.0. It
+override. The SP1 host driver is locked to `sp1-core-executor` 6.9.0. It
 reports deterministic execute-only instruction cycles — not proof cycles or
 proving time.
 
@@ -90,9 +90,9 @@ zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
   -Dstateless-schema=0x1501
 ```
 
-The build links OpenVM's official startup and ERE v0.19.2's
-`ere-platform-openvm` implementation of the accelerator ABI. The repo-owned
-Rust crate only bridges Zig input and output to that platform. Its build checks
+The build links OpenVM's official startup and ERE v0.19.5's
+`ere-platform-openvm`, which uses `openvm-accelerators` for the accelerator ABI.
+The repo-owned Rust crate only bridges Zig input and output to that platform. Its build checks
 the startup, I/O, and accelerator symbols before linking.
 
 OpenVM's startup calls a void `main`. Guest validation failures therefore

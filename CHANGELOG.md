@@ -30,10 +30,13 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   stage, and made guest releases promote one explicit strict-run artifact.
   Fixture roots travel in the resolved corpus manifest, and the `rev8` scan
   joined `check-guest-elf`.
-- Updated ERE platform providers and SP1/OpenVM release images to `v0.19.2`,
+- Updated ERE platform providers and all release images to `v0.19.5`,
   including SP1 verifier exit-code validation and verifier archive linking fixes.
+  SP1 now uses upstream `v6.9.0`, which includes the standards-conformance fixes,
+  replacing the temporary fork patch. OpenVM retains `v2.1.0-preview` and adopts
+  ERE's `openvm-accelerators` provider and matching host revision.
   Updated the ZisK guest and execute-only host to `v1.3.2-alpha` at its exact
-  source commit with the `zisk-4.0.0` toolchain and the ERE `v0.19.3` release image.
+  source commit with the `zisk-4.0.0` toolchain.
   ZisK releases require fresh guest qualification and Blake3 key generation.
   The provider retains unaligned scalar-memory lowering; nonzero guest returns
   propagate through the host protocol.

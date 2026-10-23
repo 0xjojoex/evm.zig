@@ -22,10 +22,10 @@ evmz-guest-host-protocol = { path = "host-protocol" }
 
 # ERE's OpenVM fork moves the stable Plonky3 crates to a Git source so they
 # can coexist with SP1's 0.4.3-succinct crates in one Cargo workspace.
-openvm-sdk = { git = "https://github.com/han0110/openvm.git", rev = "a391b22ebb5305fa52d3394abfd0810df4baff90", default-features = false }
-openvm-sdk-config = { git = "https://github.com/han0110/openvm.git", rev = "a391b22ebb5305fa52d3394abfd0810df4baff90" }
+openvm-sdk = { git = "https://github.com/han0110/openvm.git", rev = "f73d411c192153cc5f4dc0f4794944605ec6dc9e", default-features = false }
+openvm-sdk-config = { git = "https://github.com/han0110/openvm.git", rev = "f73d411c192153cc5f4dc0f4794944605ec6dc9e" }
 
-sp1-core-executor = { git = "https://github.com/succinctlabs/sp1", tag = "v6.6.0" }
+sp1-core-executor = { git = "https://github.com/succinctlabs/sp1", tag = "v6.9.0" }
 
 zisk-core = { git = "https://github.com/0xPolygonHermez/zisk", rev = "1e22630bb7e143c30705a1603ed87cfd3da8c6ec" }
 zisk-transpiler-riscv = { git = "https://github.com/0xPolygonHermez/zisk", rev = "1e22630bb7e143c30705a1603ed87cfd3da8c6ec" }
