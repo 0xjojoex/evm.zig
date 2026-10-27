@@ -7,14 +7,14 @@ evmz-specific execution seams.
 
 ## Direct conformance
 
-Released `state_test` and `blockchain_test` conformance runs through `consume
-direct`:
+Released `state_test`, `blockchain_test`, and `transaction_test` conformance
+runs through `consume direct`:
 
 ```sh
 zig build -Doptimize=ReleaseFast eest-consume -- --no-html -n 4
 ```
 
-The default source is pinned in `eest/build.zig` . Pass another
+The default source is `tests@v21.0.2`, pinned in `eest/build.zig`. Pass another
 upstream release selector or a local fixture directory with `--input`:
 
 ```sh
@@ -33,6 +33,7 @@ pytest plugins:
 ```sh
 evmz-eest statetest [--run EXACT_ID] fixture.json
 evmz-eest blocktest [--run EXACT_ID] fixture.json
+evmz-eest transactiontest [--run EXACT_ID] fixture.json
 evmz-eest zkevmtest [--run EXACT_ID] fixture.json
 ```
 
@@ -46,9 +47,19 @@ no comparable post-state assertion fails. A regular block transaction carrying
 transaction rejection. Invalid-block exceptions require an equally precise
 block-level mapping. Upstream pytest output exposes any remaining adapter gaps.
 
-The default marker expression covers all state fixtures plus post-Merge
-blockchain fixtures through Amsterdam. Pre-Merge reward, ommer, and PoW rules
-do not belong in BlockSTF. Transition-fork fixtures require a block-by-block
+Transaction fixtures decode the signed bytes through the production raw
+decoder, then apply admission policy separately from block execution's EIP-7702
+tuple-skipping rules. Rejections must match the named exception; successful
+fixtures compare transaction hash, recovered sender, and intrinsic gas. These
+fixtures have no account allocation or block environment, so validation uses
+neutral account inputs and the default chain ID. The evmz plugin extends
+upstream's direct-consumer format collection only when its consumer is active.
+
+The default marker expression covers all state and transaction fixtures plus
+post-Merge blockchain fixtures through Amsterdam, including BPO1, BPO2, and the
+Amsterdam BPO increase/decrease scenarios. These use their parent execution
+rules with the fixture's named blob schedule. Pre-Merge reward, ommer, and PoW
+rules do not belong in BlockSTF. Transition-fork fixtures require a block-by-block
 revision adapter. Both are excluded at the upstream selection boundary.
 
 Direct conformance has no repository-owned execution-fixture downloader,
@@ -171,6 +182,7 @@ worktree needs it.
 | ------------------- | --------------------------------- | ----------------------------------- |
 | State fixtures      | execution-specs `consume direct`  | fixture-to-TransactionSTF adapter   |
 | Blockchain fixtures | execution-specs `consume direct`  | fixture-to-BlockSTF adapter         |
+| Transaction fixtures | execution-specs `consume direct` | raw decoding and admission checks  |
 | zkEVM native corpus | execution-specs `consume direct`  | stateless block adapter and oracle  |
 | zkVM guest corpus   | execution-specs resolver manifest | persistent guest executor/evidence  |
 | Witness mutations   | execution-specs resolver manifest | bounded semantic mutations          |

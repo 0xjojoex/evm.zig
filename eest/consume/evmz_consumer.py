@@ -14,14 +14,15 @@ from execution_testing.fixtures import (
     BlockchainFixture,
     FixtureFormat,
     StateFixture,
+    TransactionFixture,
 )
 
 
 class EvmzFixtureConsumer(
     FixtureConsumerTool,
-    fixture_formats=[StateFixture, BlockchainFixture],
+    fixture_formats=[StateFixture, BlockchainFixture, TransactionFixture],
 ):
-    """Consume state and blockchain fixtures through evmz-eest."""
+    """Consume state, blockchain, and transaction fixtures through evmz-eest."""
 
     default_binary = Path("evmz-eest")
     detect_binary_pattern = re.compile(r"^evmz-eest\b")
@@ -49,6 +50,8 @@ class EvmzFixtureConsumer(
             subcommand = "statetest"
         elif fixture_format is BlockchainFixture:
             subcommand = "blocktest"
+        elif fixture_format is TransactionFixture:
+            subcommand = "transactiontest"
         else:
             raise ValueError(
                 f"unsupported evmz fixture format: {fixture_format.format_name}"
@@ -62,6 +65,18 @@ class EvmzFixtureConsumer(
             debug_output_path=debug_output_path,
             cache=self.cache,
         )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Extend consume-direct's collection only for an active evmz consumer."""
+    consumers = getattr(config, "fixture_consumers", [])
+    formats = getattr(config, "supported_fixture_formats", [])
+    if (
+        any(isinstance(consumer, EvmzFixtureConsumer) for consumer in consumers)
+        and TransactionFixture not in formats
+    ):
+        formats.append(TransactionFixture)
 
 
 @pytest.hookimpl(tryfirst=True)

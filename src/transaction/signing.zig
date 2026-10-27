@@ -179,6 +179,7 @@ fn legacySignature(v: u256) SenderRecoveryError!LegacySignature {
     if (v < 35) return error.UnsupportedLegacyV;
 
     const protected_v = v - 35;
+    if (protected_v / 2 > std.math.maxInt(u64)) return error.UnsupportedLegacyV;
     return .{
         .y_parity = @intCast(protected_v & 1),
         .chain_id = protected_v / 2,
@@ -341,6 +342,31 @@ test "sender recovery rejects high-s signatures" {
     defer allocator.free(signed);
 
     try std.testing.expectError(error.InvalidSignature, recoverSender(allocator, signed));
+}
+
+test "sender recovery bounds the chain ID encoded in legacy v" {
+    const allocator = std.testing.allocator;
+    const signer = try TestSigner.init();
+    const max_chain_id: u256 = std.math.maxInt(u64);
+    const valid = try signedLegacyTransactionForTest(allocator, signer, max_chain_id);
+    defer allocator.free(valid);
+    try expectRecoveredSender(allocator, valid, signer.sender);
+
+    for (0..2) |parity| {
+        const decoded = try legacySignature(35 + 2 * max_chain_id + parity);
+        try std.testing.expectEqual(max_chain_id, decoded.chain_id.?);
+        try std.testing.expectEqual(parity, decoded.y_parity);
+        try std.testing.expectError(
+            error.UnsupportedLegacyV,
+            legacySignature(35 + 2 * (max_chain_id + 1) + parity),
+        );
+    }
+    for ([_]u256{ max_chain_id + 1, max_chain_id + 2 }) |chain_id| {
+        const invalid = try signedLegacyTransactionForTest(allocator, signer, chain_id);
+        defer allocator.free(invalid);
+        try std.testing.expectError(error.UnsupportedLegacyV, recoverSender(allocator, invalid));
+        try std.testing.expectError(error.UnsupportedLegacyV, signingHash(allocator, invalid));
+    }
 }
 
 const TestSigner = struct {

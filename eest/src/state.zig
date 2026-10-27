@@ -417,7 +417,9 @@ test "EEST fixture config selects Amsterdam blob params" {
         \\      "Osaka": {"target": "0x09", "max": "0x0c", "baseFeeUpdateFraction": "0x03"},
         \\      "Amsterdam": {"target": "0x0c", "max": "0x0f", "baseFeeUpdateFraction": "0x04"},
         \\      "BPO1": {"target": "0x0f", "max": "0x12", "baseFeeUpdateFraction": "0x05"},
-        \\      "BPO2": {"target": "0x12", "max": "0x15", "baseFeeUpdateFraction": "0x06"}
+        \\      "BPO2": {"target": "0x12", "max": "0x15", "baseFeeUpdateFraction": "0x06"},
+        \\      "AmsterdamBPOIncrease": {"target": "0x15", "max": "0x20", "baseFeeUpdateFraction": "0x07"},
+        \\      "AmsterdamBPODecrease": {"target": "0x09", "max": "0x0e", "baseFeeUpdateFraction": "0x08"}
         \\    }
         \\  }
         \\}
@@ -447,14 +449,29 @@ test "EEST fixture config selects Amsterdam blob params" {
     try std.testing.expectEqual(@as(u64, 15), bpo1.blob_params.?.target);
     try std.testing.expectEqual(@as(u256, 5), bpo1.blob_params.?.base_fee_update_fraction);
 
+    // Amsterdam scenarios share an execution revision but must retain their
+    // own schedule, including the decreased maximum.
+    const increase = try parseFixtureConfig(&obj, .amsterdam, "AmsterdamBPOIncrease");
+    try std.testing.expectEqual(@as(u64, 21), increase.blob_params.?.target);
+    try std.testing.expectEqual(@as(u64, 32), increase.blob_params.?.max);
+    try std.testing.expectEqual(@as(u256, 7), increase.blob_params.?.base_fee_update_fraction);
+
+    const decrease = try parseFixtureConfig(&obj, .amsterdam, "AmsterdamBPODecrease");
+    try std.testing.expectEqual(@as(u64, 9), decrease.blob_params.?.target);
+    try std.testing.expectEqual(@as(u64, 14), decrease.blob_params.?.max);
+    try std.testing.expectEqual(@as(u256, 8), decrease.blob_params.?.base_fee_update_fraction);
+
     // An unknown name (transition network) falls back, never fails.
     const transition = try parseFixtureConfig(&obj, .osaka, "OsakaToBPO1AtTime15k");
     try std.testing.expectEqual(@as(u64, 9), transition.blob_params.?.target);
 }
 
-test "EEST fork parser maps BPO names onto Osaka execution" {
+test "EEST fork parser maps BPO names onto their parent execution rules" {
     try std.testing.expectEqual(evmz.eth.Revision.osaka, fixture_common.parseStateFork("BPO1"));
     try std.testing.expectEqual(evmz.eth.Revision.osaka, fixture_common.parseStateFork("BPO2"));
+    try std.testing.expectEqual(evmz.eth.Revision.amsterdam, fixture_common.parseStateFork("AmsterdamBPOIncrease"));
+    try std.testing.expectEqual(evmz.eth.Revision.amsterdam, fixture_common.parseStateFork("AmsterdamBPODecrease"));
+    try std.testing.expectEqual(null, fixture_common.parseStateFork("AmsterdamToBPODecreaseAtTime15k"));
 }
 
 test "EEST env parser reads Amsterdam slotNumber" {

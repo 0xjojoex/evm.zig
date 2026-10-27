@@ -108,7 +108,10 @@ pub fn parseFixtureConfig(
     };
     const schedule_value = config.get("blobSchedule") orelse return result;
     const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&schedules, &.{ "Cancun", "Prague", "Osaka", "Amsterdam", "BPO1", "BPO2" });
+    try rejectUnknownKeys(&schedules, &.{
+        "Cancun",               "Prague",               "Osaka", "Amsterdam", "BPO1", "BPO2",
+        "AmsterdamBPOIncrease", "AmsterdamBPODecrease",
+    });
     if (blobScheduleEntry(schedules, revision, fork_name)) |value| {
         result.blob_params = try parseBlobParams(value);
     }
@@ -403,12 +406,12 @@ pub fn parseStateFork(name: []const u8) ?evmz.eth.Revision {
     if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
     if (std.ascii.eqlIgnoreCase(name, "Osaka")) return .osaka;
     if (std.ascii.eqlIgnoreCase(name, "Amsterdam")) return .amsterdam;
-    // EIP-7892 BPO forks carry no execution change; EEST derives every one of
-    // them from Osaka, so they run Osaka rules and differ only in the blob
-    // schedule entry chosen by name. Revisit if a BPO is ever based on a later
-    // fork, which would make this mapping wrong rather than merely coarse.
+    // BPO scenarios retain their parent fork's execution rules; the fixture's
+    // named blob schedule entry supplies the changed parameters.
     if (std.ascii.eqlIgnoreCase(name, "BPO1")) return .osaka;
     if (std.ascii.eqlIgnoreCase(name, "BPO2")) return .osaka;
+    if (std.ascii.eqlIgnoreCase(name, "AmsterdamBPOIncrease")) return .amsterdam;
+    if (std.ascii.eqlIgnoreCase(name, "AmsterdamBPODecrease")) return .amsterdam;
     return null;
 }
 
