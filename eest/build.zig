@@ -123,16 +123,17 @@ fn hasFixturePath(args: ?[]const []const u8) bool {
     return false;
 }
 
-const default_execution_input = "tests@v21.0.1";
+const default_execution_input = "tests@v21.0.2";
 const default_zkevm_input = "tests-zkevm@v21.0.6";
 
 const direct_selection =
-    "state_test or (blockchain_test and " ++
-    "(Paris or Shanghai or Cancun or Prague or Osaka or Amsterdam) and not " ++
+    "state_test or transaction_test or (blockchain_test and " ++
+    "(Paris or Shanghai or Cancun or Prague or Osaka or Amsterdam or " ++
+    "BPO1 or BPO2 or AmsterdamBPOIncrease or AmsterdamBPODecrease) and not " ++
     "(ParisToShanghaiAtTime15k or ShanghaiToCancunAtTime15k or " ++
     "CancunToPragueAtTime15k or PragueToOsakaAtTime15k or " ++
     "OsakaToBPO1AtTime15k or BPO1ToBPO2AtTime15k or " ++
-    "BPO2ToBPO3AtTime15k or BPO3ToBPO4AtTime15k or " ++
+    "AmsterdamToBPOIncreaseAtTime15k or AmsterdamToBPODecreaseAtTime15k or " ++
     "BPO2ToAmsterdamAtTime15k))";
 
 fn addConsumeStep(

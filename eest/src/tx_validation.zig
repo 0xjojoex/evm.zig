@@ -36,9 +36,7 @@ pub fn eestExceptionName(error_value: ValidationError) []const u8 {
 }
 
 pub fn validationErrorMatchesEest(error_value: ValidationError, expected: []const u8) bool {
-    const name = eestExceptionName(error_value);
-    if (error_value == .intrinsic_gas_below_floor_gas_cost and exceptionNameMatches("TransactionException.INTRINSIC_GAS_TOO_LOW", expected)) return true;
-    return exceptionNameMatches(name, expected);
+    return exceptionNameMatches(eestExceptionName(error_value), expected);
 }
 
 pub fn rawEestExceptionName(error_value: transaction_envelope.RawValidationError) []const u8 {
@@ -92,10 +90,6 @@ test "EEST tx validation matches pipe-separated expected exceptions" {
         "TransactionException.TYPE_4_INVALID_AUTHORITY_SIGNATURE|TransactionException.TYPE_4_INVALID_AUTHORITY_SIGNATURE_S_TOO_HIGH",
     ));
     try std.testing.expect(validationErrorMatchesEest(
-        .intrinsic_gas_below_floor_gas_cost,
-        "TransactionException.INTRINSIC_GAS_TOO_LOW",
-    ));
-    try std.testing.expect(validationErrorMatchesEest(
         .nonce_too_low,
         "TransactionException.NONCE_MISMATCH_TOO_LOW",
     ));
@@ -103,6 +97,23 @@ test "EEST tx validation matches pipe-separated expected exceptions" {
         .nonce_too_high,
         "TransactionException.NONCE_MISMATCH_TOO_HIGH",
     ));
+}
+
+test "EEST intrinsic gas exceptions distinguish standard cost from calldata floor" {
+    try std.testing.expect(!validationErrorMatchesEest(
+        .intrinsic_gas_below_floor_gas_cost,
+        "TransactionException.INTRINSIC_GAS_TOO_LOW",
+    ));
+    try std.testing.expect(!validationErrorMatchesEest(
+        .intrinsic_gas_too_low,
+        "TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST",
+    ));
+    inline for (.{ .intrinsic_gas_too_low, .intrinsic_gas_below_floor_gas_cost }) |err| {
+        try std.testing.expect(validationErrorMatchesEest(
+            err,
+            "TransactionException.INTRINSIC_GAS_TOO_LOW|TransactionException.INTRINSIC_GAS_BELOW_FLOOR_GAS_COST",
+        ));
+    }
 }
 
 test "EEST serialized signature validation matches invalid VRS" {

@@ -4,6 +4,7 @@ test {
     _ = @import("guest_fixture_runner.zig");
     _ = @import("guest_evidence.zig");
     _ = @import("state.zig");
+    _ = @import("transaction.zig");
     _ = @import("stateless.zig");
     _ = @import("stateless_mutation.zig");
     _ = @import("stateless_executor.zig");

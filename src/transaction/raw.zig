@@ -410,7 +410,7 @@ const Fill = struct {
             const chain_id = try tuple.nextInt(u256);
             const target = Address.fromBytes((try tuple.nextBytesExact(20))[0..20].*);
             const nonce = try tuple.nextInt(u64);
-            const y_parity = try tuple.nextInt(u256);
+            const y_parity = try tuple.nextInt(u8);
             const r = try tuple.nextInt(u256);
             const s = try tuple.nextInt(u256);
             try tuple.expectDone();
@@ -556,33 +556,39 @@ test "raw stateless tx decoder preserves oversized nonce for validation" {
     try std.testing.expectEqual(@as(u256, 1) << 64, tx.nonce.?);
 }
 
-test "raw stateless tx decoder counts but skips unrecoverable authorization tuples" {
+test "raw authorization decoding bounds parity before skipping invalid signatures" {
     const allocator = std.testing.allocator;
-    var tuple_fields = rlp.Writer.alloc(allocator);
-    defer tuple_fields.deinit();
-    var tuple = rlp.Writer.alloc(allocator);
-    defer tuple.deinit();
-    var list = rlp.Writer.alloc(allocator);
-    defer list.deinit();
+    for ([_]u256{ 0, 1, 2, 255, 256, @as(u256, 1) << 255 }) |parity| {
+        var tuple_fields = rlp.Writer.alloc(allocator);
+        defer tuple_fields.deinit();
+        var tuple = rlp.Writer.alloc(allocator);
+        defer tuple.deinit();
+        var list = rlp.Writer.alloc(allocator);
+        defer list.deinit();
 
-    try tuple_fields.int(u8, 1);
-    try tuple_fields.bytes(&([_]u8{0x11} ** 20));
-    try tuple_fields.int(u64, 0);
-    try tuple_fields.int(u8, 0);
-    try tuple_fields.int(u8, 0);
-    try tuple_fields.int(u8, 1);
-    try tuple.listPayload(tuple_fields.written());
-    try list.listPayload(tuple.written());
+        try tuple_fields.int(u8, 1);
+        try tuple_fields.bytes(&([_]u8{0x11} ** 20));
+        try tuple_fields.int(u64, 0);
+        try tuple_fields.int(u256, parity);
+        try tuple_fields.int(u8, 0);
+        try tuple_fields.int(u8, 1);
+        try tuple.listPayload(tuple_fields.written());
+        try list.listPayload(tuple.written());
 
-    var storage = try Storage.init(allocator, 0, .{ .authorizations = 1 });
-    defer storage.deinit(allocator);
-    var fill = Fill.init(&storage);
-    var cursor = rlp.Cursor.init(list.written());
-    const parsed = try fill.nextAuthorizationList(&cursor);
-    try cursor.expectDone();
+        var storage = try Storage.init(allocator, 0, .{ .authorizations = 1 });
+        defer storage.deinit(allocator);
+        var fill = Fill.init(&storage);
+        var cursor = rlp.Cursor.init(list.written());
+        if (parity > std.math.maxInt(u8)) {
+            try std.testing.expectError(error.IntTooLarge, fill.nextAuthorizationList(&cursor));
+            continue;
+        }
+        const parsed = try fill.nextAuthorizationList(&cursor);
+        try cursor.expectDone();
 
-    try std.testing.expectEqual(@as(usize, 1), parsed.count);
-    try std.testing.expectEqual(@as(usize, 0), parsed.entries.len);
+        try std.testing.expectEqual(@as(usize, 1), parsed.count);
+        try std.testing.expectEqual(@as(usize, 0), parsed.entries.len);
+    }
 }
 
 test "raw stateless tx decoder releases flat nested storage" {

@@ -598,7 +598,7 @@ wheels = [
 [[package]]
 name = "ethereum-execution"
 version = "2.19.0"
-source = { git = "https://github.com/ethereum/execution-specs?rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2#8ca2f4ceefd83100a4d21d0c33747114278a0bc2" }
+source = { git = "https://github.com/ethereum/execution-specs?rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e#e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" }
 dependencies = [
     { name = "cryptography" },
     { name = "ethereum-rlp" },
@@ -614,7 +614,7 @@ dependencies = [
 [[package]]
 name = "ethereum-execution-testing"
 version = "1.0.0"
-source = { git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2#8ca2f4ceefd83100a4d21d0c33747114278a0bc2" }
+source = { git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e#e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" }
 dependencies = [
     { name = "ckzg" },
     { name = "click" },
@@ -704,8 +704,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ethereum-execution", git = "https://github.com/ethereum/execution-specs?rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2" },
-    { name = "ethereum-execution-testing", git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=8ca2f4ceefd83100a4d21d0c33747114278a0bc2" },
+    { name = "ethereum-execution", git = "https://github.com/ethereum/execution-specs?rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" },
+    { name = "ethereum-execution-testing", git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" },
 ]
 
 [[package]]

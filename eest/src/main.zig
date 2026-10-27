@@ -10,6 +10,7 @@ const std = @import("std");
 const commands = struct {
     pub const statetest = @import("cmd/statetest.zig");
     pub const blocktest = @import("cmd/blocktest.zig");
+    pub const transactiontest = @import("cmd/transactiontest.zig");
     pub const zkevmtest = @import("cmd/zkevmtest.zig");
     pub const zkevm = @import("cmd/zkevm.zig");
     pub const @"zkevm-mutations" = @import("cmd/zkevm_mutations.zig");
