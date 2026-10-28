@@ -185,6 +185,7 @@ jobs:
         env:
           PROVIDER: ${{ steps.zisk.outputs.provider }}
           RELEASE_GATE: ${{ inputs.release_gate }}
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-cache
         run: |
           zig build guest-zisk \
             -Dguest-payload=stateless-ere \
@@ -192,7 +193,6 @@ jobs:
             -Doptimize=fast \
             "-Dziskos-staticlib=${PROVIDER}" \
             --prefix "${RUNNER_TEMP}/guest" \
-            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf"
           candidate="${GITHUB_WORKSPACE}/stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
@@ -208,7 +208,6 @@ jobs:
               -Doptimize=fast \
               "-Dziskos-staticlib=${PROVIDER}" \
               --prefix "${RUNNER_TEMP}/failure-probe" \
-              --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
               --summary all
             zig build check-zisk-failure-status -- \
               "${{ steps.zisk.outputs.host }}" \
@@ -357,6 +356,8 @@ jobs:
             --manifest="${RESOLVED_MANIFEST}"
 
       - name: Build OpenVM host and guest
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-cache
         run: |
           cargo build \
             --quiet \
@@ -370,7 +371,6 @@ jobs:
             "-Dstateless-schema=${STATELESS_SCHEMA}" \
             -Doptimize=fast \
             --prefix "${RUNNER_TEMP}/guest" \
-            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/openvm/evmz-guest-openvm.elf"
           zig build check-guest-elf -- --require-rv64im "${elf}"
@@ -514,6 +514,8 @@ jobs:
             --manifest="${RESOLVED_MANIFEST}"
 
       - name: Build SP1 host and guest
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-cache
         run: |
           cargo build \
             --quiet \
@@ -527,7 +529,6 @@ jobs:
             "-Dstateless-schema=${STATELESS_SCHEMA}" \
             -Doptimize=fast \
             --prefix "${RUNNER_TEMP}/guest" \
-            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/sp1/evmz-guest-sp1.elf"
           zig build check-guest-elf -- --require-rv64im "${elf}"

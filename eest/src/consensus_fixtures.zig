@@ -64,13 +64,13 @@ fn preparePackage(
             }, .{}, &manifest.writer);
             try staging.writeFile(io, .{ .sub_path = "build.zig.zon", .data = manifest.written() });
 
+            var environ_map = try init.environ_map.clone(allocator);
+            defer environ_map.deinit();
+            if (global_cache) |path| try environ_map.put("ZIG_GLOBAL_CACHE_DIR", path);
             const result = try std.process.run(allocator, io, .{
-                .argv = if (global_cache) |path|
-                    &.{ zig_exe, "build", "--fetch=all", "--global-cache-dir", path }
-                else
-                    &.{ zig_exe, "build", "--fetch=all" },
+                .argv = &.{ zig_exe, "build", "--fetch=all" },
                 .cwd = .{ .path = try staging.realPathFileAlloc(io, ".", allocator) },
-                .environ_map = init.environ_map,
+                .environ_map = &environ_map,
             });
             if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
             switch (result.term) {
