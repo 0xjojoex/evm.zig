@@ -47,7 +47,7 @@ const ReentrantInstruction = struct {
 
 const reentrant_cancun = blk: {
     var instruction = evmz.eth.cancun.instruction;
-    const entry = &instruction.table[@intFromEnum(evmz.Opcode.ADD)];
+    const entry = &instruction.table[@backingInt(evmz.Opcode.ADD)];
     entry.info.stack_in = 1;
     entry.target = .{ .custom = ReentrantInstruction.Handler };
     break :blk evmz.eth.cancun.extend(.{ .instruction = instruction });
@@ -143,10 +143,10 @@ test "custom instruction host reentry refreshes the parent stack after arena gro
         try std.testing.expect(step.frame_id < expected_frames);
         try std.testing.expectEqual(evmz.trace.TraceStepOutcome.success, step.outcome);
         const frame_index: usize = @intCast(step.frame_id);
-        if (step.opcode == @intFromEnum(evmz.Opcode.ADD)) opcode_counts[frame_index][0] += 1;
-        if (step.opcode == @intFromEnum(evmz.Opcode.EQ)) opcode_counts[frame_index][1] += 1;
-        if (step.opcode == @intFromEnum(evmz.Opcode.SSTORE)) opcode_counts[frame_index][2] += 1;
-        if (step.opcode == @intFromEnum(evmz.Opcode.STOP)) opcode_counts[frame_index][3] += 1;
+        if (step.opcode == @backingInt(evmz.Opcode.ADD)) opcode_counts[frame_index][0] += 1;
+        if (step.opcode == @backingInt(evmz.Opcode.EQ)) opcode_counts[frame_index][1] += 1;
+        if (step.opcode == @backingInt(evmz.Opcode.SSTORE)) opcode_counts[frame_index][2] += 1;
+        if (step.opcode == @backingInt(evmz.Opcode.STOP)) opcode_counts[frame_index][3] += 1;
     }
     for (opcode_counts) |counts| {
         try std.testing.expectEqual([4]usize{ 1, 1, 1, 1 }, counts);

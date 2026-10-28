@@ -41,6 +41,6 @@ inline fn call(comptime tag: @EnumLiteral(), comptime command: Command) void {
         \\addi x0, x0, %[command]
         :
         : [name] "r" (&descriptor),
-          [command] "i" (@intFromEnum(command)),
+          [command] "i" (@backingInt(command)),
         : .{ .memory = true });
 }

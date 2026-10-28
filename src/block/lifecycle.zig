@@ -135,10 +135,10 @@ pub const FinalizeSystemCalls = struct {
 };
 
 test "block hook collections preserve insertion order" {
-    const first_sender = Address.fromBytes([_]u8{0x11} ** 20);
-    const first_recipient = Address.fromBytes([_]u8{0x22} ** 20);
-    const second_sender = Address.fromBytes([_]u8{0x33} ** 20);
-    const second_recipient = Address.fromBytes([_]u8{0x44} ** 20);
+    const first_sender = Address.fromBytes(@as([20]u8, @splat(0x11)));
+    const first_recipient = Address.fromBytes(@as([20]u8, @splat(0x22)));
+    const second_sender = Address.fromBytes(@as([20]u8, @splat(0x33)));
+    const second_recipient = Address.fromBytes(@as([20]u8, @splat(0x44)));
     var calls = BlockSystemCalls{};
     calls.append(.{ .sender = first_sender, .recipient = first_recipient, .gas = 7, .validation = .unchecked });
     calls.append(.{ .sender = second_sender, .recipient = second_recipient, .gas = 11, .validation = .checked });

@@ -339,7 +339,7 @@ test "transient state and owned logs follow checkpoint rollback" {
     try state.setTransientStorage(word(1), 4, 12);
     const topics = [_]u256{ 1, 2 };
     try state.emitLog(.{ .address = addr(1), .topics = &topics, .data = "abc" });
-    const large_data = [_]u8{0xbb} ** 1024;
+    const large_data: [1024]u8 = @splat(0xbb);
     try state.emitLog(.{ .address = addr(2), .topics = &.{3}, .data = &large_data });
 
     const first_log = state.logs.rows.items[0];
@@ -456,7 +456,7 @@ test "parent code cache keeps borrowed views stable across growth" {
 
     for (0..32) |index| {
         var seeded = MemoryAccount.init(std.testing.allocator);
-        var code = [_]u8{0xaa} ** 200;
+        var code: [200]u8 = @splat(0xaa);
         code[0] = @intCast(index);
         try seeded.setCode(&code);
         try state.seedAccount(addr(@as(u64, @intCast(index + 2))), seeded);

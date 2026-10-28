@@ -62,7 +62,7 @@ test "call capture distinguishes STATICCALL from inherited-static CALL" {
     defer executor.deinit();
     try seedCode(&executor, root, &root_code, 0);
     try seedCode(&executor, child, &child_code, 0);
-    try seedCode(&executor, grandchild, &.{@intFromEnum(evmz.Opcode.STOP)}, 0);
+    try seedCode(&executor, grandchild, &.{@backingInt(evmz.Opcode.STOP)}, 0);
 
     var capture: CaptureHarness = undefined;
     capture.init();
@@ -134,7 +134,7 @@ test "root insufficient-balance capture preserves unspent gas" {
     for ([_]evmz.Address{ code_recipient, precompile_recipient }) |recipient| {
         var executor = Default.init(std.testing.allocator, .{});
         defer executor.deinit();
-        try seedCode(&executor, code_recipient, &.{@intFromEnum(evmz.Opcode.STOP)}, 0);
+        try seedCode(&executor, code_recipient, &.{@backingInt(evmz.Opcode.STOP)}, 0);
 
         var capture: CaptureHarness = undefined;
         capture.init();
@@ -503,7 +503,7 @@ test "call capture retains pinned Geth v1.17.4 frame error categories" {
         .PUSH0,          .PUSH0,
         .RETURNDATACOPY,
     });
-    const stack_overflow = [_]u8{evmz.Opcode.PUSH0.toByte()} ** 1025;
+    const stack_overflow: [1025]u8 = @splat(evmz.Opcode.PUSH0.toByte());
 
     const Case = struct {
         name: []const u8,

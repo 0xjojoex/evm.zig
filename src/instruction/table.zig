@@ -67,23 +67,23 @@ pub const Spec = struct {
     // equally index it directly.
 
     pub fn activate(self: *Spec, comptime opcodes: []const Opcode) void {
-        inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].active = true;
+        inline for (opcodes) |opcode| self.table[@backingInt(opcode)].active = true;
     }
 
     pub fn deactivate(self: *Spec, comptime opcodes: []const Opcode) void {
-        inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].active = false;
+        inline for (opcodes) |opcode| self.table[@backingInt(opcode)].active = false;
     }
 
     /// Activate every byte in the inclusive `[first, last]` range.
     pub fn activateRange(self: *Spec, comptime first: Opcode, comptime last: Opcode) void {
-        for (@intFromEnum(first)..@as(usize, @intFromEnum(last)) + 1) |opcode_byte| {
+        for (@backingInt(first)..@as(usize, @backingInt(last)) + 1) |opcode_byte| {
             self.table[opcode_byte].active = true;
         }
     }
 
     /// Reprice opcodes without touching their semantics.
     pub fn setStaticGas(self: *Spec, comptime opcodes: []const Opcode, gas: i64) void {
-        inline for (opcodes) |opcode| self.table[@intFromEnum(opcode)].info.static_gas = gas;
+        inline for (opcodes) |opcode| self.table[@backingInt(opcode)].info.static_gas = gas;
     }
 
     /// Change dispatch for one byte while keeping its activation and metadata.
@@ -136,7 +136,7 @@ fn Formatter(comptime spec: Spec) type {
                     if (comptime spec.table[opcode_byte].name) |name| {
                         return writer.writeAll(@tagName(name));
                     }
-                    return @as(Opcode, @enumFromInt(opcode_byte)).format(writer);
+                    return @as(Opcode, @fromBackingInt(@intCast(opcode_byte))).format(writer);
                 },
             };
         }
@@ -146,7 +146,7 @@ fn Formatter(comptime spec: Spec) type {
 fn assertNameAvailable(comptime spec: Spec, comptime name: @EnumLiteral(), comptime opcode_byte: u8) void {
     @setEvalBranchQuota(10_000);
     if (std.meta.stringToEnum(Opcode, @tagName(name))) |opcode| {
-        if (@intFromEnum(opcode) != opcode_byte) {
+        if (@backingInt(opcode) != opcode_byte) {
             @compileError("instruction name already belongs to opcode byte: " ++ @tagName(name));
         }
     }

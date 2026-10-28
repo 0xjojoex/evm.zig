@@ -426,7 +426,7 @@ fn benchContract() Address {
 /// Storage rows all belong to one account row, as they would after one
 /// contract's slots were admitted.
 fn initStorageKeys(keys: []StorageKey, offset: u64) void {
-    const account: AccountId = @enumFromInt(0);
+    const account: AccountId = @fromBackingInt(@intCast(0));
     for (keys, 0..) |*key, index| {
         key.* = .{
             .account = account,
@@ -437,7 +437,7 @@ fn initStorageKeys(keys: []StorageKey, offset: u64) void {
 
 fn initAddresses(addresses: []Address, offset: u64) void {
     for (addresses, 0..) |*address, index| {
-        var bytes = [_]u8{0} ** Address.len;
+        var bytes: [Address.len]u8 = @splat(0);
         bytes[0] = 0x20;
         std.mem.writeInt(u64, bytes[12..20], offset + @as(u64, @intCast(index)) + 1, .big);
         address.* = .fromBytes(bytes);

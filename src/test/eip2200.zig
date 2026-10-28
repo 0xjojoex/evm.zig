@@ -142,7 +142,7 @@ fn runSstoreVector(hex_code: []const u8, original: u256, comptime revision: evmz
 }
 
 fn testingFrame() !evmz.Evm.Interpreter.OwnedCallFrame {
-    const code = [_]u8{@intFromEnum(Opcode.STOP)};
+    const code = [_]u8{@backingInt(Opcode.STOP)};
     var host: Host = undefined;
     const msg = Host.Message{
         .depth = 0,

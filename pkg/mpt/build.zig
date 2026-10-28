@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const test_filters = b.option([]const []const u8, "test-filter", "Compile only matching tests (repeatable)") orelse &.{};
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const rlp_dep = b.dependency("rlp", .{ .target = target, .optimize = optimize });
@@ -26,10 +27,21 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("mpt", mpt_mod);
     const tests = b.addTest(.{
         .root_module = test_mod,
-        .filters = b.args orelse &.{},
+        .filters = test_filters,
     });
     const test_step = b.step("test", "Run the standalone MPT package tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    const key_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/proof.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "rlp", .module = rlp_dep.module("rlp") }, .{ .name = "stdx", .module = stdx_mod } },
+        }),
+        .filters = test_filters,
+    });
+    test_step.dependOn(&b.addRunArtifact(key_tests).step);
 
     const fuzz_mod = b.createModule(.{
         .root_source_file = b.path("src/fuzz.zig"),

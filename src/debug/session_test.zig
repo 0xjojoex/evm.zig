@@ -300,7 +300,7 @@ test "debug session matches call, create, precompile, and terminal outcomes" {
     const out_of_gas = evmz.t.bytecode(.{ .PUSH1, 0x2a });
     const invalid_jump = evmz.t.bytecode(.{ .PUSH0, .JUMP });
     const stack_underflow = evmz.t.bytecode(.{.ADD});
-    const stack_overflow = [_]u8{evmz.Opcode.PUSH0.toByte()} ** 1025;
+    const stack_overflow: [1025]u8 = @splat(evmz.Opcode.PUSH0.toByte());
     const static_violation = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .SSTORE });
 
     try expectCallParity(Exact, "empty code", &empty, 100, false, .success, .none);
@@ -326,7 +326,7 @@ test "debug stepping respects finalized specialized builtin admission" {
             .{ evmz.Opcode.SSTORE, 3 },
             .{ evmz.Opcode.JUMPDEST, 1 },
         }) |entry| {
-            const info = &exact.table[@intFromEnum(entry[0])].info;
+            const info = &exact.table[@backingInt(entry[0])].info;
             info.static_gas = 7;
             info.stack_in = entry[1];
         }
@@ -342,12 +342,12 @@ test "debug stepping respects finalized specialized builtin admission" {
         evmz.Opcode.SSTORE,
         evmz.Opcode.JUMPDEST,
     }) |opcode| {
-        const code = [_]u8{@intFromEnum(opcode)};
+        const code = [_]u8{@backingInt(opcode)};
         try expectCallParity(Exact, @tagName(opcode) ++ " static OOG", &code, 6, false, .out_of_gas, .out_of_gas);
         try expectCallParity(Exact, @tagName(opcode) ++ " final stack minimum", &code, 7, false, .invalid, .stack_underflow);
     }
 
-    const sstore = [_]u8{@intFromEnum(evmz.Opcode.SSTORE)};
+    const sstore = [_]u8{@backingInt(evmz.Opcode.SSTORE)};
     try expectCallParity(Exact, "SSTORE static OOG order", &sstore, 6, true, .out_of_gas, .out_of_gas);
     try expectCallParity(Exact, "SSTORE write protection order", &sstore, 7, true, .invalid, .write_protection);
 }

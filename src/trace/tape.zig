@@ -899,7 +899,7 @@ test "trace tape appends patches and exposes one stable replay span" {
         .return_data = frame.initial_return_data,
     });
     const final_return_data = try tape.storeReturnData(&.{ 1, 2, 3, 4, 5 });
-    var final_memory = [_]u8{0} ** 64;
+    var final_memory: [64]u8 = @splat(0);
     try tape.finishStep(step, .{
         .pc_next = 4,
         .gas_after = 97,

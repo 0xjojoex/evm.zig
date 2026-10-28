@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var roots: [root_count]Root = undefined;
-    roots[0] = [_]u8{0} ** @sizeOf(Root);
+    roots[0] = @as([@sizeOf(Root)]u8, @splat(0));
     for (roots[1..], 1..) |*root, index| {
         const previous = roots[index - 1];
         var input: [64]u8 = undefined;

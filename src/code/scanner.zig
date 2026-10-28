@@ -148,7 +148,7 @@ pub fn markJumpDestWords(masks: []usize, bytes: []const u8) void {
 fn referenceMark(map: *BitSet, bytes: []const u8) void {
     var pc: usize = 0;
     while (pc < bytes.len) {
-        const opcode: Opcode = @enumFromInt(bytes[pc]);
+        const opcode: Opcode = @fromBackingInt(@intCast(bytes[pc]));
         if (opcode == .JUMPDEST) map.set(pc);
 
         pc = @min(bytes.len, pc + 1 + opcode.pushImmediateLen());
@@ -162,7 +162,7 @@ test "jumpdest scans match instruction oracle" {
     else
         .{markJumpDestWords};
     inline for (scans) |mark| {
-        var bytecode = [_]u8{Opcode.STOP.toByte()} ** 200;
+        var bytecode: [200]u8 = @splat(Opcode.STOP.toByte());
         var map = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
         defer map.deinit(std.testing.allocator);
         var expected = try BitSet.initEmpty(std.testing.allocator, bytecode.len);
@@ -217,7 +217,7 @@ test "scanner marks jumpdests while ignoring PUSH payload noise" {
 }
 
 test "scanner skips a complete PUSH payload" {
-    var bytecode = [_]u8{0} ** 48;
+    var bytecode: [48]u8 = @splat(0);
     bytecode[0] = Opcode.PUSH32.toByte();
     bytecode[1] = Opcode.JUMPDEST.toByte();
     bytecode[31] = Opcode.JUMPDEST.toByte();

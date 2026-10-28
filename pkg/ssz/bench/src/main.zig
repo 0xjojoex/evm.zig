@@ -410,7 +410,7 @@ pub fn main(init: std.process.Init) !void {
     for (std.enums.values(Case)) |case| {
         const info = caseInfo(case);
         if (!matchesFilter(info, options.filter)) continue;
-        const index = @intFromEnum(case);
+        const index = @backingInt(case);
         contexts[index] = .{ .case = case, .batch_ops = info.batch_ops, .fixtures = &fixtures };
         const context: *const CaseContext = &contexts[index];
         try bench.addParam(info.name, context, .{});
@@ -687,9 +687,9 @@ fn headerValue() Header {
     return .{
         .slot = 123_456,
         .proposer_index = 42,
-        .parent_root = [_]u8{0x11} ** 32,
-        .state_root = [_]u8{0x22} ** 32,
-        .body_root = [_]u8{0x33} ** 32,
+        .parent_root = @as([32]u8, @splat(0x11)),
+        .state_root = @as([32]u8, @splat(0x22)),
+        .body_root = @as([32]u8, @splat(0x33)),
     };
 }
 

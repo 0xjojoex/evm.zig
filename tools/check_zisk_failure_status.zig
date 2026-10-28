@@ -134,8 +134,8 @@ fn termOk(term: std.process.Child.Term) bool {
 fn formatTerm(term: std.process.Child.Term, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (term) {
         .exited => |code| try writer.print("exit code {d}", .{code}),
-        .signal => |signal| try writer.print("signal {d}", .{@intFromEnum(signal)}),
-        .stopped => |signal| try writer.print("stopped signal {d}", .{@intFromEnum(signal)}),
+        .signal => |signal| try writer.print("signal {d}", .{@backingInt(signal)}),
+        .stopped => |signal| try writer.print("stopped signal {d}", .{@backingInt(signal)}),
         .unknown => |status| try writer.print("unknown status {d}", .{status}),
     }
 }
@@ -197,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn responseHeader(status: u8, payload_size: u64) [response_header_bytes]u8 {
-    var header = [_]u8{0} ** response_header_bytes;
+    var header: [response_header_bytes]u8 = @splat(0);
     header[0] = status;
     std.mem.writeInt(u64, header[32..40], payload_size, .little);
     return header;
@@ -211,7 +211,7 @@ test "accepts unified guest host handshake" {
 
 test "reads payload length from unified response header" {
     var checker: Checker = .{ .allocator = std.testing.allocator };
-    var header = [_]u8{0} ** response_header_bytes;
+    var header: [response_header_bytes]u8 = @splat(0);
     std.mem.writeInt(u64, header[24..32], 99, .little);
     std.mem.writeInt(u64, header[32..40], 4, .little);
     try std.testing.expectEqual(4, try checker.payloadSize(&header));

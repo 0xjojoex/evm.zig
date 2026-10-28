@@ -21,7 +21,7 @@ pub fn Alloc(comptime Codec: type) type {
 test "SSZ Alloc gives fixed vectors allocator-backed storage" {
     const Inline = ssz.ByteVector(64);
     const Owned = ssz.Alloc(Inline);
-    const bytes = [_]u8{0x5a} ** 64;
+    const bytes: [64]u8 = @splat(0x5a);
     var encoded: [64]u8 = undefined;
 
     try std.testing.expect(Owned.requires_allocator);

@@ -54,9 +54,9 @@ pub fn Iterator(comptime spec: instruction_table.Spec) type {
     const peek_kinds = comptime blk: {
         var kinds: [256]PeekKind = @splat(.none);
         for ([_]Opcode{ .DUPN, .SWAPN, .EXCHANGE }) |op| {
-            switch (spec.table[@intFromEnum(op)].dispatchTarget()) {
+            switch (spec.table[@backingInt(op)].dispatchTarget()) {
                 .builtin => {
-                    kinds[@intFromEnum(op)] = if (op == .EXCHANGE) .exchange else .depth;
+                    kinds[@backingInt(op)] = if (op == .EXCHANGE) .exchange else .depth;
                 },
                 else => {},
             }
@@ -72,7 +72,7 @@ pub fn Iterator(comptime spec: instruction_table.Spec) type {
             if (self.pc >= self.code.len) return null;
             const pc = self.pc;
             const opcode = self.code[pc];
-            const width = @as(Opcode, @enumFromInt(opcode)).pushImmediateLen();
+            const width = @as(Opcode, @fromBackingInt(@intCast(opcode))).pushImmediateLen();
             const start = pc + 1;
             self.pc = start + width;
             return .{

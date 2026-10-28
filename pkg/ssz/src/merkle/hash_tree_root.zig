@@ -279,7 +279,7 @@ fn hashContainer(
     value: Codec.Value,
 ) Walker.WalkError!Root {
     const source = ContainerSource(Walker, Codec){ .walker = walker, .value = &value };
-    return walker.merkleizeSource(source, @typeInfo(Codec.Value).@"struct".fields.len, path);
+    return walker.merkleizeSource(source, @typeInfo(Codec.Value).@"struct".field_names.len, path);
 }
 
 fn hashProgressiveContainer(
@@ -305,14 +305,15 @@ fn ProgressiveContainerSource(comptime Walker: type, comptime Codec: type) type 
         }
 
         pub fn leaf(self: @This(), index: usize, path: *const TreePath) Walker.WalkError!Root {
-            const fields = @typeInfo(Codec.Value).@"struct".fields;
+            const fields = @typeInfo(Codec.Value).@"struct";
             comptime var field_index: usize = 0;
             inline for (Codec.active_fields, 0..) |active, position| {
                 if (index == position) {
                     if (!active) return self.walker.leaf(path, merkle.zero);
-                    const field = fields[field_index];
-                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field.name, field.type);
-                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field.name));
+                    const field_name = fields.field_names[field_index];
+                    const FieldType = fields.field_types[field_index];
+                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field_name, FieldType);
+                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field_name));
                 }
                 if (active) field_index += 1;
             }
@@ -332,17 +333,17 @@ fn hashUnion(
         return hashOptionalUnion(Walker, walker, path, Codec, value);
     }
 
-    const fields = @typeInfo(Codec.Value).@"union".fields;
+    const fields = @typeInfo(Codec.Value).@"union";
     const Tag = @typeInfo(Codec.Value).@"union".tag_type.?;
     const active = std.meta.activeTag(value);
-    inline for (fields, 0..) |field, selector| {
-        if (active == @field(Tag, field.name)) {
-            const OptionCodec = Codec.OptionCodec(field.name, field.type);
+    inline for (fields.field_names, fields.field_types, 0..) |field_name, FieldType, selector| {
+        if (active == @field(Tag, field_name)) {
+            const OptionCodec = Codec.OptionCodec(field_name, FieldType);
             var value_path = path.child(.left);
             const root = if (OptionCodec == union_codec.None)
                 try walker.leaf(&value_path, merkle.zero)
             else
-                try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field.name));
+                try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field_name));
             return walker.mixInSelector(path, root, @intCast(selector));
         }
     }
@@ -371,15 +372,15 @@ fn hashCompatibleUnion(
     comptime Codec: type,
     value: Codec.Value,
 ) Walker.WalkError!Root {
-    const fields = @typeInfo(Codec.Value).@"union".fields;
+    const fields = @typeInfo(Codec.Value).@"union";
     const Tag = @typeInfo(Codec.Value).@"union".tag_type.?;
     const active = std.meta.activeTag(value);
-    inline for (fields) |field| {
-        if (active == @field(Tag, field.name)) {
-            const OptionCodec = Codec.OptionCodec(field.name, field.type);
-            const selector: u8 = @intCast(@field(Codec.union_options, field.name).selector);
+    inline for (fields.field_names, fields.field_types) |field_name, FieldType| {
+        if (active == @field(Tag, field_name)) {
+            const OptionCodec = Codec.OptionCodec(field_name, FieldType);
+            const selector: u8 = @intCast(@field(Codec.union_options, field_name).selector);
             var value_path = path.child(.left);
-            const root = try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field.name));
+            const root = try hashTreeRootWalk(Walker, walker, &value_path, OptionCodec, @field(value, field_name));
             return walker.mixInSelector(path, root, selector);
         }
     }
@@ -498,14 +499,14 @@ fn ContainerSource(comptime Walker: type, comptime Codec: type) type {
         value: *const Codec.Value,
 
         pub fn count(_: @This()) Walker.WalkError!usize {
-            return @typeInfo(Codec.Value).@"struct".fields.len;
+            return @typeInfo(Codec.Value).@"struct".field_names.len;
         }
 
         pub fn leaf(self: @This(), index: usize, path: *const TreePath) Walker.WalkError!Root {
-            inline for (@typeInfo(Codec.Value).@"struct".fields, 0..) |field, field_index| {
+            inline for (@typeInfo(Codec.Value).@"struct".field_names, @typeInfo(Codec.Value).@"struct".field_types, 0..) |field_name, FieldType, field_index| {
                 if (index == field_index) {
-                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field.name, field.type);
-                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field.name));
+                    const FieldCodec = schema_meta.containerFieldCodec(Codec, field_name, FieldType);
+                    return hashTreeRootWalk(Walker, self.walker, path, FieldCodec, @field(self.value.*, field_name));
                 }
             }
             unreachable;
@@ -580,8 +581,8 @@ test "SSZ byte-valued custom codecs retain their encoding during Merkleization" 
         }
     };
     const InvertedByte = ssz.Mapped(u8, ssz.Fixed(u8), Invert);
-    const input = [_]u8{0x35} ** 33;
-    const encoded = [_]u8{0xca} ** 33;
+    const input: [33]u8 = @splat(0x35);
+    const encoded: [33]u8 = @splat(0xca);
     try std.testing.expectEqual(
         try ssz.hashTreeRoot(ssz.ByteList(64), &encoded),
         try ssz.hashTreeRoot(ssz.ListOf(InvertedByte, 64), &input),
@@ -646,11 +647,11 @@ test "SSZ ByteList HTR preserves an abstract schema capacity" {
 test "SSZ packed bitfield HTR matches boolean codecs across chunk boundaries" {
     const BoolVector = ssz.Bitvector(257);
     const PackedVector = ssz.PackedBitvector(257);
-    var vector_bits = [_]bool{false} ** 257;
+    var vector_bits: [257]bool = @splat(false);
     vector_bits[0] = true;
     vector_bits[255] = true;
     vector_bits[256] = true;
-    var vector_bytes = [_]u8{0} ** 33;
+    var vector_bytes: [33]u8 = @splat(0);
     vector_bytes[0] = 0x01;
     vector_bytes[31] = 0x80;
     vector_bytes[32] = 0x01;
@@ -663,10 +664,10 @@ test "SSZ packed bitfield HTR matches boolean codecs across chunk boundaries" {
 
     const BoolList = ssz.Bitlist(512);
     const PackedList = ssz.PackedBitlist(512);
-    var list_bits = [_]bool{false} ** 256;
+    var list_bits: [256]bool = @splat(false);
     list_bits[0] = true;
     list_bits[255] = true;
-    var list_bytes = [_]u8{0} ** 33;
+    var list_bytes: [33]u8 = @splat(0);
     list_bytes[0] = 0x01;
     list_bytes[31] = 0x80;
     list_bytes[32] = 0x01;
@@ -787,7 +788,7 @@ test "SSZ hashTreeRoot mixes ordinary union selectors" {
     };
     const ChoiceSsz = ssz.Union(Choice, .{ .none = ssz.None });
 
-    var input = [_]u8{0} ** 64;
+    var input: [64]u8 = @splat(0);
     var expected_none: ssz.Root = undefined;
     std.crypto.hash.sha2.Sha256.hash(&input, &expected_none, .{});
     try std.testing.expectEqual(

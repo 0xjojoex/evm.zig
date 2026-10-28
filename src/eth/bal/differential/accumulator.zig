@@ -29,7 +29,7 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
         transaction_count: usize = 0,
         encoded_receipts: std.ArrayList([]const u8) = .empty,
         deposit_request_data: std.ArrayList(u8) = .empty,
-        block_logs_bloom: [256]u8 = [_]u8{0} ** 256,
+        block_logs_bloom: [256]u8 = @splat(0),
 
         pub const BlobGasAdmission = struct {
             next: u64,

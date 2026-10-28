@@ -2,6 +2,37 @@
 
 This sidecar is for measurement harnesses that are not EEST fixtures.
 
+## Zig 0.17 migration screen
+
+Local Apple M1 Max / macOS ARM64 screen on 2026-10-05, comparing unchanged `3de034b3` under
+Zig 0.16.0 with this migration under Zig 0.17.0. Both use release-fast mode,
+omit frame pointers, compile the full fork range, and execute the same fixed
+Osaka fixtures through `Interpreter.execute`. Each row is the median of six
+batch medians, with 100 calls per batch and a 200 ms warmup; compiler order
+alternates between batches. Lower is better.
+
+| Fixture | Zig 0.16 ms | Zig 0.17 ms | Change |
+| ------- | -----------: | -----------: | -----: |
+| Arithmetic loop | 0.10775 | 0.11200 | +3.9% |
+| Memory MSTORE loop | 0.12600 | 0.27350 | +117.1% |
+| Storage SSTORE loop | 0.16225 | 0.16350 | +0.8% |
+| ERC20 transfer | 5.01050 | 5.62400 | +12.2% |
+
+The MSTORE slowdown also reproduces with `EVMZ_BENCH_ALLOCATOR=smp`. Its cause is
+the 0.17 lowering of array/int `@bitCast`, which `std.mem.readInt` and
+`std.mem.writeInt` use: for every integer width other than 8, 16, 32, and 64
+bits it expands into byte extraction and vector assembly. In the engine that
+covers u256 word conversion, PUSH5-PUSH32 immediates, and u160 address
+conversion. The engine now avoids that shape, which returns MSTORE,
+Snailtracer, and the ERC20 fixtures to within about 2% of Zig 0.16; a 6-9% code
+placement effect remains on the arithmetic and ten-thousand-hashes fixtures.
+The table above predates the conversion change.
+
+On eight small `tests-zkevm@v21.0.5` fixtures, ZisK guest steps under stock
+0.17 are within -3.0% to +2.2% of 0.16, and 2.3-6.9% below it with the
+conversion change. Live-block guest steps were not
+measured: the pinned live corpus predates the v21 stateless input format.
+
 ## Overall Comparison
 
 `zig build compare` is the VM-core scoreboard lane for the VM-loop fixtures. It
@@ -64,7 +95,7 @@ the table takes the median `median_ms` for each fixture/engine row from those
 five `summary.csv` files:
 
 ```sh
-zig build bench-compare -Dbench-optimize=ReleaseFast \
+zig build bench-compare -Dbench-optimize=fast \
   -Dbench-support-min=osaka -Dbench-support-max=osaka \
   -Dnative-keccak=xkcp \
   -- --spec osaka --num-runs 100 --warmup-ms 100
@@ -125,7 +156,7 @@ zig build micro -Dmicro-filter=overlay/cold-storage-load
 ```
 
 Micro benchmarks default to `ReleaseFast` even when the sidecar build default is
-debug. Use `-Dmicro-optimize=ReleaseSafe` when a checked timing run is useful.
+debug. Use `-Dmicro-optimize=safe` when a checked timing run is useful.
 Arithmetic rows batch 256 helper calls. State-map lookup/hash rows batch 1,024
 operations, while clear rows batch eight independently prefilled maps. Keep tests
 split by function or feature so `-Dmicro-filter` stays precise.

@@ -1,6 +1,7 @@
 //! EIP-6110 deposit request constants and log decoding.
 
 const std = @import("std");
+const uint256 = @import("../../uint256.zig");
 
 const address = @import("../../address.zig");
 const Host = @import("../../Host.zig");
@@ -51,11 +52,11 @@ pub fn appendRequestData(allocator: std.mem.Allocator, out: *std.ArrayList(u8), 
 }
 
 fn wordEquals(data: []const u8, offset: usize, expected: u256) bool {
-    return std.mem.readInt(u256, data[offset..][0..32], .big) == expected;
+    return uint256.fromBytes32(data[offset..][0..32]) == expected;
 }
 
 test "EIP-6110 derives deposit request bytes from logs" {
-    var event_data = [_]u8{0} ** event_data_len;
+    var event_data: [event_data_len]u8 = @splat(0);
     writeWord(&event_data, 0, pubkey_offset);
     writeWord(&event_data, 32, withdrawal_credentials_offset);
     writeWord(&event_data, 64, amount_offset);
@@ -111,5 +112,5 @@ test "EIP-6110 derives deposit request bytes from logs" {
 }
 
 fn writeWord(event_data: *[event_data_len]u8, offset: usize, value: u256) void {
-    std.mem.writeInt(u256, event_data[offset..][0..32], value, .big);
+    uint256.writeBytes32(event_data[offset..][0..32], value);
 }

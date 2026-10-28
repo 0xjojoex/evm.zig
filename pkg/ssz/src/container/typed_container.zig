@@ -38,13 +38,13 @@ pub fn Container(comptime T: type, comptime overrides: anytype) type {
 
         pub fn encodedLen(value: T) Error!usize {
             var total = fixed_section_size;
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const FieldSsz = fieldCodec(overrides, field.name, field.type);
+            inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| {
+                const FieldSsz = fieldCodec(overrides, field_name, FieldType);
                 if (FieldSsz.is_variable_size) {
-                    total = std.math.add(usize, total, try FieldSsz.encodedLen(@field(value, field.name))) catch
+                    total = std.math.add(usize, total, try FieldSsz.encodedLen(@field(value, field_name))) catch
                         return error.EncodedLengthOverflow;
                 } else {
-                    _ = try FieldSsz.encodedLen(@field(value, field.name));
+                    _ = try FieldSsz.encodedLen(@field(value, field_name));
                 }
             }
             try sequence.validateSerializedLength(total);
@@ -57,19 +57,19 @@ pub fn Container(comptime T: type, comptime overrides: anytype) type {
 
             var fixed_offset: usize = 0;
             var variable_offset = fixed_section_size;
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const FieldSsz = fieldCodec(overrides, field.name, field.type);
+            inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| {
+                const FieldSsz = fieldCodec(overrides, field_name, FieldType);
                 if (FieldSsz.is_variable_size) {
                     sequence.writeOffset(out[fixed_offset..][0..sequence.bytes_per_offset], variable_offset);
                     fixed_offset += sequence.bytes_per_offset;
                     const encoded = try FieldSsz.encode(
                         out[variable_offset..len],
-                        @field(value, field.name),
+                        @field(value, field_name),
                     );
                     variable_offset += encoded.len;
                 } else {
                     const field_size = FieldSsz.fixed_size.?;
-                    _ = try FieldSsz.encode(out[fixed_offset..][0..field_size], @field(value, field.name));
+                    _ = try FieldSsz.encode(out[fixed_offset..][0..field_size], @field(value, field_name));
                     fixed_offset += field_size;
                 }
             }
@@ -111,8 +111,8 @@ pub fn Container(comptime T: type, comptime overrides: anytype) type {
         pub fn validate(bytes: []const u8) Error!void {
             try validateLayout(T, overrides, bytes);
 
-            inline for (@typeInfo(T).@"struct".fields, 0..) |field, index| {
-                const FieldSsz = fieldCodec(overrides, field.name, field.type);
+            inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types, 0..) |field_name, FieldType, index| {
+                const FieldSsz = fieldCodec(overrides, field_name, FieldType);
                 if (FieldSsz.is_variable_size) {
                     try FieldSsz.validate(try variableFieldBytes(T, overrides, bytes, index));
                 } else {
@@ -123,9 +123,9 @@ pub fn Container(comptime T: type, comptime overrides: anytype) type {
         }
 
         pub fn deinit(allocator: std.mem.Allocator, value: *T) void {
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const FieldSsz = fieldCodec(overrides, field.name, field.type);
-                codec.deinitOwned(FieldSsz, allocator, &@field(value, field.name));
+            inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| {
+                const FieldSsz = fieldCodec(overrides, field_name, FieldType);
+                codec.deinitOwned(FieldSsz, allocator, &@field(value, field_name));
             }
         }
 
@@ -238,19 +238,19 @@ fn validateSchema(comptime T: type, comptime overrides: anytype) void {
         else => @compileError("SSZ Container requires a Zig struct"),
     };
     if (structure.is_tuple) @compileError("SSZ Container does not support tuples");
-    if (structure.fields.len == 0) @compileError("SSZ containers cannot be empty");
+    if (structure.field_names.len == 0) @compileError("SSZ containers cannot be empty");
 
-    inline for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |override| {
-        if (!@hasField(T, override.name)) @compileError("unknown SSZ container override field: " ++ override.name);
-        if (override.type != type) @compileError("SSZ container overrides must be codec types");
+    inline for (@typeInfo(@TypeOf(overrides)).@"struct".field_names, @typeInfo(@TypeOf(overrides)).@"struct".field_types) |override_name, OverrideType| {
+        if (!@hasField(T, override_name)) @compileError("unknown SSZ container override field: " ++ override_name);
+        if (OverrideType != type) @compileError("SSZ container overrides must be codec types");
     }
 
-    inline for (structure.fields) |field| {
-        if (field.is_comptime) @compileError("SSZ containers cannot contain comptime fields");
-        const FieldCodec = fieldCodec(overrides, field.name, field.type);
+    inline for (structure.field_names, structure.field_types, structure.field_attrs) |field_name, FieldType, field_attrs| {
+        if (field_attrs.@"comptime") @compileError("SSZ containers cannot contain comptime fields");
+        const FieldCodec = fieldCodec(overrides, field_name, FieldType);
         codec.assertCodec(FieldCodec);
-        if (FieldCodec.Value != field.type) {
-            @compileError("SSZ field codec Value does not match field type: " ++ field.name);
+        if (FieldCodec.Value != FieldType) {
+            @compileError("SSZ field codec Value does not match field type: " ++ field_name);
         }
     }
 }
@@ -263,19 +263,20 @@ fn decodeFields(
     value: *T,
     comptime index: usize,
 ) (Error || std.mem.Allocator.Error)!void {
-    const fields = @typeInfo(T).@"struct".fields;
-    if (index == fields.len) return;
-    const field = fields[index];
+    const fields = @typeInfo(T).@"struct";
+    if (index == fields.field_names.len) return;
+    const field_name = fields.field_names[index];
+    const FieldType = fields.field_types[index];
 
-    const FieldCodec = fieldCodec(overrides, field.name, field.type);
+    const FieldCodec = fieldCodec(overrides, field_name, FieldType);
     const encoded = if (FieldCodec.is_variable_size)
         try variableFieldBytes(T, overrides, bytes, index)
     else blk: {
         const start = comptime fieldFixedOffset(T, overrides, index);
         break :blk bytes[start..][0..FieldCodec.fixed_size.?];
     };
-    @field(value, field.name) = try codec.decodeOwned(FieldCodec, allocator, encoded);
-    errdefer codec.deinitOwned(FieldCodec, allocator, &@field(value, field.name));
+    @field(value, field_name) = try codec.decodeOwned(FieldCodec, allocator, encoded);
+    errdefer codec.deinitOwned(FieldCodec, allocator, &@field(value, field_name));
     return decodeFields(T, overrides, allocator, bytes, value, index + 1);
 }
 
@@ -286,10 +287,11 @@ fn decodeFieldsNoAlloc(
     value: *T,
     comptime index: usize,
 ) Error!void {
-    const fields = @typeInfo(T).@"struct".fields;
-    if (index == fields.len) return;
-    const field = fields[index];
-    const FieldCodec = fieldCodec(overrides, field.name, field.type);
+    const fields = @typeInfo(T).@"struct";
+    if (index == fields.field_names.len) return;
+    const field_name = fields.field_names[index];
+    const FieldType = fields.field_types[index];
+    const FieldCodec = fieldCodec(overrides, field_name, FieldType);
     if (FieldCodec.requires_allocator) unreachable;
     const encoded = if (FieldCodec.is_variable_size)
         try variableFieldBytes(T, overrides, bytes, index)
@@ -297,7 +299,7 @@ fn decodeFieldsNoAlloc(
         const start = comptime fieldFixedOffset(T, overrides, index);
         break :blk bytes[start..][0..FieldCodec.fixed_size.?];
     };
-    @field(value, field.name) = try FieldCodec.decode(encoded);
+    @field(value, field_name) = try FieldCodec.decode(encoded);
     return decodeFieldsNoAlloc(T, overrides, bytes, value, index + 1);
 }
 
@@ -306,8 +308,8 @@ fn validateOffsets(comptime T: type, comptime overrides: anytype, bytes: []const
     var previous = expected_first;
     var saw_variable = false;
 
-    inline for (@typeInfo(T).@"struct".fields, 0..) |field, index| {
-        if (comptime fieldCodec(overrides, field.name, field.type).is_variable_size) {
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types, 0..) |field_name, FieldType, index| {
+        if (comptime fieldCodec(overrides, field_name, FieldType).is_variable_size) {
             const offset = sequence.readOffset(bytes, comptime fieldFixedOffset(T, overrides, index));
             if (!saw_variable and offset != expected_first) return error.InvalidFirstOffset;
             if (offset < previous) return error.OffsetsNotMonotonic;
@@ -324,11 +326,11 @@ fn variableFieldBytes(
     bytes: []const u8,
     comptime index: usize,
 ) Error![]const u8 {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct";
     const start = sequence.readOffset(bytes, comptime fieldFixedOffset(T, overrides, index));
     var end = bytes.len;
-    inline for (fields[index + 1 ..], index + 1..) |field, later_index| {
-        if (comptime fieldCodec(overrides, field.name, field.type).is_variable_size) {
+    inline for (fields.field_names[index + 1 ..], fields.field_types[index + 1 ..], index + 1..) |field_name, FieldType, later_index| {
+        if (comptime fieldCodec(overrides, field_name, FieldType).is_variable_size) {
             end = sequence.readOffset(bytes, comptime fieldFixedOffset(T, overrides, later_index));
             break;
         }
@@ -340,8 +342,8 @@ fn variableFieldBytes(
 
 fn fixedSectionSize(comptime T: type, comptime overrides: anytype) usize {
     comptime var total: usize = 0;
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        const FieldCodec = fieldCodec(overrides, field.name, field.type);
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| {
+        const FieldCodec = fieldCodec(overrides, field_name, FieldType);
         total += if (FieldCodec.is_variable_size) sequence.bytes_per_offset else FieldCodec.fixed_size.?;
     }
     return total;
@@ -350,24 +352,24 @@ fn fixedSectionSize(comptime T: type, comptime overrides: anytype) usize {
 fn fieldFixedOffset(comptime T: type, comptime overrides: anytype, comptime target: usize) usize {
     @setEvalBranchQuota(10_000);
     comptime var total: usize = 0;
-    inline for (@typeInfo(T).@"struct".fields, 0..) |field, index| {
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types, 0..) |field_name, FieldType, index| {
         if (index == target) return total;
-        const FieldCodec = fieldCodec(overrides, field.name, field.type);
+        const FieldCodec = fieldCodec(overrides, field_name, FieldType);
         total += if (FieldCodec.is_variable_size) sequence.bytes_per_offset else FieldCodec.fixed_size.?;
     }
     unreachable;
 }
 
 fn hasVariableFields(comptime T: type, comptime overrides: anytype) bool {
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (fieldCodec(overrides, field.name, field.type).is_variable_size) return true;
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| {
+        if (fieldCodec(overrides, field_name, FieldType).is_variable_size) return true;
     }
     return false;
 }
 
 fn hasAllocatingFields(comptime T: type, comptime overrides: anytype) bool {
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (fieldCodec(overrides, field.name, field.type).requires_allocator) return true;
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| {
+        if (fieldCodec(overrides, field_name, FieldType).requires_allocator) return true;
     }
     return false;
 }
@@ -422,9 +424,9 @@ fn canUseEagerFixed(comptime T: type) bool {
         .int => true,
         .array => |array| array.len != 0 and canUseEagerFixed(array.child),
         .@"struct" => |structure| blk: {
-            if (structure.is_tuple or structure.fields.len == 0) break :blk false;
-            inline for (structure.fields) |field| {
-                if (field.is_comptime or !canUseEagerFixed(field.type)) break :blk false;
+            if (structure.is_tuple or structure.field_names.len == 0) break :blk false;
+            inline for (structure.field_types, structure.field_attrs) |FieldType, field_attrs| {
+                if (field_attrs.@"comptime" or !canUseEagerFixed(FieldType)) break :blk false;
             }
             break :blk true;
         },

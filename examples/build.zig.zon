@@ -2,7 +2,7 @@
     .name = .evmz_examples,
     .version = "0.0.0",
     .fingerprint = 0x1eed393e5215d26d,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .evmz = .{
             .path = "..",

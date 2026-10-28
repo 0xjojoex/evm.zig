@@ -282,7 +282,7 @@ fn buildRootWithAllocator(
         }
 
         var branch: Node.Branch = .{
-            .children = [_]?NodeIndex{null} ** 16,
+            .children = @as([16]?NodeIndex, @splat(null)),
             .value = null,
         };
         var index = task.start;

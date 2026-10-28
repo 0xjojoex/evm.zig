@@ -40,33 +40,34 @@ fn basicSchemaType(comptime Codec: type) type {
 }
 
 fn containersCompatible(comptime A: type, comptime B: type) bool {
-    const a_fields = @typeInfo(A.Value).@"struct".fields;
-    const b_fields = @typeInfo(B.Value).@"struct".fields;
-    if (a_fields.len != b_fields.len) return false;
+    const a_fields = @typeInfo(A.Value).@"struct";
+    const b_fields = @typeInfo(B.Value).@"struct";
+    if (a_fields.field_names.len != b_fields.field_names.len) return false;
 
-    inline for (a_fields, 0..) |a_field, index| {
-        const b_field = b_fields[index];
-        if (!std.mem.eql(u8, a_field.name, b_field.name)) return false;
+    inline for (a_fields.field_names, a_fields.field_types, 0..) |a_field_name, AFieldType, index| {
+        const b_field_name = b_fields.field_names[index];
+        const BFieldType = b_fields.field_types[index];
+        if (!std.mem.eql(u8, a_field_name, b_field_name)) return false;
         if (!compatible(
-            schema_meta.containerFieldCodec(A, a_field.name, a_field.type),
-            schema_meta.containerFieldCodec(B, b_field.name, b_field.type),
+            schema_meta.containerFieldCodec(A, a_field_name, AFieldType),
+            schema_meta.containerFieldCodec(B, b_field_name, BFieldType),
         )) return false;
     }
     return true;
 }
 
 fn progressiveContainersCompatible(comptime A: type, comptime B: type) bool {
-    const a_fields = @typeInfo(A.Value).@"struct".fields;
-    const b_fields = @typeInfo(B.Value).@"struct".fields;
+    const a_fields = @typeInfo(A.Value).@"struct";
+    const b_fields = @typeInfo(B.Value).@"struct";
 
-    inline for (a_fields, 0..) |a_field, a_index| {
-        inline for (b_fields, 0..) |b_field, b_index| {
-            const same_name = std.mem.eql(u8, a_field.name, b_field.name);
+    inline for (a_fields.field_names, a_fields.field_types, 0..) |a_field_name, AFieldType, a_index| {
+        inline for (b_fields.field_names, b_fields.field_types, 0..) |b_field_name, BFieldType, b_index| {
+            const same_name = std.mem.eql(u8, a_field_name, b_field_name);
             const same_position = activePosition(A, a_index) == activePosition(B, b_index);
             if (same_name != same_position) return false;
             if (same_name and !compatible(
-                schema_meta.containerFieldCodec(A, a_field.name, a_field.type),
-                schema_meta.containerFieldCodec(B, b_field.name, b_field.type),
+                schema_meta.containerFieldCodec(A, a_field_name, AFieldType),
+                schema_meta.containerFieldCodec(B, b_field_name, BFieldType),
             )) return false;
         }
     }
@@ -85,13 +86,13 @@ fn activePosition(comptime Codec: type, comptime field_index: usize) usize {
 }
 
 fn compatibleUnionsCompatible(comptime A: type, comptime B: type) bool {
-    const a_fields = @typeInfo(A.Value).@"union".fields;
-    const b_fields = @typeInfo(B.Value).@"union".fields;
-    inline for (a_fields) |a_field| {
-        inline for (b_fields) |b_field| {
+    const a_fields = @typeInfo(A.Value).@"union";
+    const b_fields = @typeInfo(B.Value).@"union";
+    inline for (a_fields.field_names, a_fields.field_types) |a_field_name, AFieldType| {
+        inline for (b_fields.field_names, b_fields.field_types) |b_field_name, BFieldType| {
             if (!compatible(
-                A.OptionCodec(a_field.name, a_field.type),
-                B.OptionCodec(b_field.name, b_field.type),
+                A.OptionCodec(a_field_name, AFieldType),
+                B.OptionCodec(b_field_name, BFieldType),
             )) return false;
         }
     }

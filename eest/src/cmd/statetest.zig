@@ -56,11 +56,11 @@ fn resultFor(arena: std.mem.Allocator, name: []const u8, summary: state.Summary)
 }
 
 fn firstProblem(summary: state.Summary) []const u8 {
-    inline for (std.meta.fields(state.FailReason), 0..) |field, i| {
-        if (summary.fail_reasons[i] != 0) return field.name;
+    inline for (@typeInfo(state.FailReason).@"enum".field_names, 0..) |field_name, i| {
+        if (summary.fail_reasons[i] != 0) return field_name;
     }
-    inline for (std.meta.fields(state.UncheckedReason), 0..) |field, i| {
-        if (summary.unchecked_reasons[i] != 0) return field.name;
+    inline for (@typeInfo(state.UncheckedReason).@"enum".field_names, 0..) |field_name, i| {
+        if (summary.unchecked_reasons[i] != 0) return field_name;
     }
     if (summary.vectors == 0) return "no_vectors";
     if (summary.skipped != 0) return "skipped";
@@ -88,7 +88,7 @@ test "statetest requires every vector to be checked and passing" {
         .passed = 1,
         .unchecked = 1,
     };
-    unchecked_summary.unchecked_reasons[@intFromEnum(state.UncheckedReason.missing_post_state)] = 1;
+    unchecked_summary.unchecked_reasons[@backingInt(state.UncheckedReason.missing_post_state)] = 1;
     const unchecked = try resultFor(std.testing.allocator, "unchecked", unchecked_summary);
     defer std.testing.allocator.free(unchecked.@"error");
     try std.testing.expect(!unchecked.pass);

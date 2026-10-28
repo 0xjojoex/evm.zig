@@ -3,7 +3,7 @@ const basic = @import("guest_payload_basic");
 
 test "basic entry returns success after producing output" {
     try std.testing.expectEqual(@as(c_int, 0), basic.evmz_guest_entry());
-    try std.testing.expectEqual(basic.ProofStatus.success, @as(basic.ProofStatus, @enumFromInt(basic.evmz_guest_output[1])));
+    try std.testing.expectEqual(basic.ProofStatus.success, @as(basic.ProofStatus, @fromBackingInt(@intCast(basic.evmz_guest_output[1]))));
 }
 
 test "basic payload runs repo VM fixture" {

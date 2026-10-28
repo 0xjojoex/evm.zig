@@ -1,6 +1,7 @@
 //! 20-byte Ethereum address type, constructors, and hex parsing.
 
 const std = @import("std");
+const uint256 = @import("uint256.zig");
 const crypto = @import("crypto.zig");
 const rlp = @import("rlp");
 const ssz = @import("ssz");
@@ -32,18 +33,16 @@ pub const Address = extern struct {
     }
 
     pub inline fn fromU160(value: u160) Address {
-        var bytes: [len]u8 = undefined;
-        std.mem.writeInt(u160, &bytes, value, .big);
-        return fromBytes(bytes);
+        return fromU256(value);
     }
 
     pub inline fn toU256(self: Address) u256 {
-        return std.mem.readInt(u160, &self.bytes, .big);
+        return uint256.fromBytes(&self.bytes);
     }
 
     /// Truncates an EVM word to its low 20 bytes.
     pub inline fn fromU256(word: u256) Address {
-        return fromU160(@truncate(word));
+        return fromBytes(uint256.toBytes32(word)[32 - len ..].*);
     }
 
     pub fn fromHex(hex: []const u8) ParseError!Address {
@@ -211,7 +210,7 @@ pub const AddressWord = extern struct {
 
 pub const addr = Address.addr;
 
-inline fn fromPointer(comptime T: type, comptime pointer: std.builtin.Type.Pointer, value: T) Address {
+inline fn fromPointer(comptime T: type, comptime pointer: std.lang.Type.Pointer, value: T) Address {
     return switch (pointer.size) {
         .one => {
             if (pointer.child == Address) return value.*;
@@ -263,8 +262,7 @@ pub fn create(sender: Address, nonce: u64) Address {
 pub fn create2(sender: Address, salt: u256, init_code: []const u8) Address {
     const init_hash = crypto.keccak256(init_code);
 
-    var salt_bytes: [32]u8 = undefined;
-    std.mem.writeInt(u256, &salt_bytes, salt, .big);
+    const salt_bytes = uint256.toBytes32(salt);
 
     var data: [1 + 20 + 32 + 32]u8 = undefined;
     data[0] = 0xff;
@@ -285,7 +283,7 @@ fn fromHash(hash: [32]u8) Address {
 test addr {
     const address0 = addr(0);
     try std.testing.expectEqual(Address.zero, address0);
-    var a = [_]u8{0} ** 20;
+    var a: [20]u8 = @splat(0);
     const address1 = addr(1);
     a[19] = 1;
     try std.testing.expectEqual(Address.fromBytes(a), address1);
@@ -299,7 +297,7 @@ test addr {
 
 test "Address.fromU256" {
     const word = (@as(u256, 1) << 160) | 0x1234;
-    var expected = [_]u8{0} ** 20;
+    var expected: [20]u8 = @splat(0);
     expected[18] = 0x12;
     expected[19] = 0x34;
     try std.testing.expectEqual(Address.fromBytes(expected), Address.fromU256(word));
@@ -357,7 +355,7 @@ test "address conversion uses Ethereum byte order" {
     const address1 = addr(1);
     try std.testing.expectEqual(@as(u256, 1), address1.toU256());
 
-    var address1234 = [_]u8{0} ** 20;
+    var address1234: [20]u8 = @splat(0);
     address1234[18] = 0x12;
     address1234[19] = 0x34;
     const canonical = Address.fromBytes(address1234);
@@ -391,7 +389,7 @@ test "address SSZ preserves the canonical byte-vector schema" {
 }
 
 test "Address.fromHex" {
-    var expected = [_]u8{0} ** 20;
+    var expected: [20]u8 = @splat(0);
     expected[18] = 0x12;
     expected[19] = 0x34;
 

@@ -424,8 +424,8 @@ fn resolveOptions(io: std.Io, allocator: std.mem.Allocator, options: Options) !R
 }
 
 fn parseEngine(value: []const u8) ?Engine {
-    inline for (std.meta.fields(Engine)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(Engine).@"enum".field_names, @typeInfo(Engine).@"enum".field_values) |field_name, field_value| {
+        if (tagNameMatches(value, field_name)) return @fromBackingInt(@intCast(field_value));
     }
     return null;
 }
@@ -510,16 +510,16 @@ fn defaultGasLimit() u64 {
 }
 
 fn parseBuildSpec(comptime value: []const u8) evmz.eth.Revision {
-    inline for (std.meta.fields(evmz.eth.Revision)) |field| {
-        if (comptime tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(evmz.eth.Revision).@"enum".field_names, @typeInfo(evmz.eth.Revision).@"enum".field_values) |field_name, field_value| {
+        if (comptime tagNameMatches(value, field_name)) return @fromBackingInt(@intCast(field_value));
     }
     if (comptime std.mem.eql(u8, value, "latest")) return .latest;
     @compileError("invalid VM-loop support revision: " ++ value);
 }
 
 fn compiledSupportContains(revision: evmz.eth.Revision) bool {
-    return @intFromEnum(revision) >= @intFromEnum(support_min) and
-        @intFromEnum(revision) <= @intFromEnum(support_max);
+    return @backingInt(revision) >= @backingInt(support_min) and
+        @backingInt(revision) <= @backingInt(support_max);
 }
 
 fn deployRuntime(

@@ -103,7 +103,7 @@ const StdSecp256k1Reference = struct {
         const y = Secp256k1.recoverY(x, recovery_id == 1) catch return null;
         const r_point = Secp256k1.fromAffineCoordinates(.{ .x = x, .y = y }) catch return null;
 
-        var expanded_hash = [_]u8{0} ** 64;
+        var expanded_hash: [64]u8 = @splat(0);
         @memcpy(expanded_hash[32..64], &message_hash);
         const z = Scalar.fromBytes64(expanded_hash, .big);
         const r_inverse = r_scalar.invert();
@@ -228,7 +228,7 @@ test "libsecp256k1 recovery matches the std reference" {
     try std.testing.expect(expected != null);
     try std.testing.expectEqual(expected, ecrecoverPublicKey(message_hash, r, s, 1));
 
-    const zero = [_]u8{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     try std.testing.expectEqual(
         StdSecp256k1Reference.ecrecoverPublicKey(message_hash, zero, s, 1),
         ecrecoverPublicKey(message_hash, zero, s, 1),
@@ -237,7 +237,7 @@ test "libsecp256k1 recovery matches the std reference" {
         StdSecp256k1Reference.ecrecoverPublicKey(message_hash, r, zero, 1),
         ecrecoverPublicKey(message_hash, r, zero, 1),
     );
-    const out_of_range = [_]u8{0xff} ** 32;
+    const out_of_range: [32]u8 = @splat(0xff);
     try std.testing.expectEqual(
         StdSecp256k1Reference.ecrecoverPublicKey(message_hash, out_of_range, s, 1),
         ecrecoverPublicKey(message_hash, out_of_range, s, 1),

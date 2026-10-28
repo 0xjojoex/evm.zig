@@ -73,7 +73,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Record benchmark environment
         run: |
@@ -121,7 +121,7 @@ jobs:
           fi
 
           zig build bench-compare \
-            -Dbench-optimize=ReleaseFast \
+            -Dbench-optimize=fast \
             -Dbench-support-min="${BENCH_SUPPORT_MIN}" \
             -Dbench-support-max="${BENCH_SUPPORT_MAX}" \
             -- "${args[@]}" | tee "bench/${OUT_DIR}/compare.md"

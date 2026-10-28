@@ -272,9 +272,9 @@ pub fn restoreSnapshot(self: *OpenWorld, snapshot: *const RowSnapshot) void {
     std.debug.assert(snapshot.accounts.len <= self.accounts.count());
     std.debug.assert(snapshot.storage.len <= self.storage.count());
     for (snapshot.accounts, 0..) |row, index|
-        self.accounts.valuePtrById(@enumFromInt(index)).* = row;
+        self.accounts.valuePtrById(@fromBackingInt(@intCast(index))).* = row;
     for (snapshot.storage, 0..) |row, index|
-        self.storage.valuePtrById(@enumFromInt(index)).* = row;
+        self.storage.valuePtrById(@fromBackingInt(@intCast(index))).* = row;
     self.accounts.truncate(@intCast(snapshot.accounts.len));
     self.storage.truncate(@intCast(snapshot.storage.len));
 }

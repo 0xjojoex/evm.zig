@@ -629,10 +629,10 @@ fn signHash(secret_key: [32]u8, message_hash: [32]u8) !Signature {
     const nonce = deterministicNonce(secret_key, message_hash);
     const point = (Curve.basePoint.mul(nonce.toBytes(.big), .big) catch
         return error.InvalidInput).affineCoordinates();
-    var expanded_x = [_]u8{0} ** 48;
+    var expanded_x: [48]u8 = @splat(0);
     @memcpy(expanded_x[16..], &point.x.toBytes(.big));
     const r = Scalar.fromBytes48(expanded_x, .big);
-    var expanded_hash = [_]u8{0} ** 64;
+    var expanded_hash: [64]u8 = @splat(0);
     @memcpy(expanded_hash[32..], &message_hash);
     const z = Scalar.fromBytes64(expanded_hash, .big);
     const s = nonce.invert().mul(z.add(r.mul(secret)));
@@ -658,8 +658,8 @@ fn deterministicNonce(
 ) std.crypto.ecc.Secp256k1.scalar.Scalar {
     const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
     const Scalar = std.crypto.ecc.Secp256k1.scalar.Scalar;
-    var key = [_]u8{0} ** 32;
-    var value = [_]u8{1} ** 32;
+    var key: [32]u8 = @splat(0);
+    var value: [32]u8 = @splat(1);
     var seed: [97]u8 = undefined;
     @memcpy(seed[0..32], &value);
     seed[32] = 0;
@@ -1268,7 +1268,7 @@ fn receiptDocument(
     first_log_index: usize,
     blob_gas_used: u64,
 ) !Receipt {
-    const block_hash = [_]u8{ 0x13, 0x37 } ++ [_]u8{0} ** 30;
+    const block_hash = [_]u8{ 0x13, 0x37 } ++ @as([30]u8, @splat(0));
     const transaction_hash = evmz.crypto.keccak256(transaction.bytes);
     const logs = try allocator.alloc(Log, receipt.logs.len());
     for (logs, 0..) |*log, offset| {
@@ -1298,7 +1298,7 @@ fn receiptDocument(
         .logs = logs,
         .transactionHash = .{ .bytes = transaction_hash },
         .contractAddress = .{
-            .bytes = if (receipt.created_address) |created| created.bytes else [_]u8{0} ** 20,
+            .bytes = if (receipt.created_address) |created| created.bytes else @as([20]u8, @splat(0)),
         },
         .gasUsed = quantity(receipt.gas_used),
         .blockHash = .{ .bytes = block_hash },

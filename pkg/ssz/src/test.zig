@@ -185,7 +185,7 @@ test "SSZ Container stores fixed Bitvector fields inline" {
         count: u16,
     };
     const ValueSsz = ssz.Container(Value, .{ .flags = Flags });
-    var flags = [_]bool{false} ** 10;
+    var flags: [10]bool = @splat(false);
     flags[0] = true;
     flags[9] = true;
     const value = Value{ .flags = flags, .count = 0x1234 };

@@ -68,8 +68,8 @@ fn resultFor(arena: std.mem.Allocator, name: []const u8, summary: stateless.Summ
 }
 
 fn firstProblem(summary: stateless.Summary) []const u8 {
-    inline for (std.meta.fields(stateless.FailReason), 0..) |field, i| {
-        if (summary.fail_reasons[i] != 0) return field.name;
+    inline for (@typeInfo(stateless.FailReason).@"enum".field_names, 0..) |field_name, i| {
+        if (summary.fail_reasons[i] != 0) return field_name;
     }
     if (summary.fixtures == 0) return "no_stateless_blocks";
     return "inconsistent_summary";
@@ -102,7 +102,7 @@ test "zkevmtest accepts checked stateless blocks and ignores ordinary blocks" {
     try std.testing.expect(skipped.skip);
 
     var failed_summary = stateless.Summary{ .fixtures = 1, .failed = 1 };
-    failed_summary.fail_reasons[@intFromEnum(stateless.FailReason.output_mismatch)] = 1;
+    failed_summary.fail_reasons[@backingInt(stateless.FailReason.output_mismatch)] = 1;
     const failed = try resultFor(std.testing.allocator, "fail", failed_summary);
     defer std.testing.allocator.free(failed.@"error");
     try std.testing.expect(!failed.pass);

@@ -2,23 +2,19 @@
     .name = .evmz_eest,
     .version = "0.0.0",
     .fingerprint = 0x71c78220c019d8dc, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .evmz = .{
             .path = "..",
-        },
-        .snappy = .{
-            .url = "https://github.com/blockblaz/zig-snappy/archive/050f529bc5fa11242140312ecf550c186f05af1e.tar.gz",
-            .hash = "zig_snappy-0.0.5-bDFzXlh4AADPRkDi2swDMAf8shH39Fc1g5oYRAhFQfTt",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "consensus.zon",
-        "build",
         "README.md",
         "scripts",
         "src",
+        "vendor",
     },
 }

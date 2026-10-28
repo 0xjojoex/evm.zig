@@ -190,8 +190,8 @@ pub const Account = struct {
 const max_rlp_account: Account = .{
     .nonce = std.math.maxInt(u64),
     .balance = std.math.maxInt(u256),
-    .storage_root = [_]u8{0xff} ** 32,
-    .code_hash = [_]u8{0xff} ** 32,
+    .storage_root = @as([32]u8, @splat(0xff)),
+    .code_hash = @as([32]u8, @splat(0xff)),
 };
 
 pub const StorageValueBuffer = [fixedRlpEncodedLen(u256, std.math.maxInt(u256))]u8;
@@ -242,7 +242,7 @@ pub const WitnessCatalog = struct {
         };
         const S = struct {
             fn compareAccountNode(target: mpt.Catalog.NodeId, item: CatalogAccount) std.math.Order {
-                return std.math.order(@intFromEnum(target), @intFromEnum(item.node));
+                return std.math.order(@backingInt(target), @backingInt(item.node));
             }
         };
         const index = std.sort.binarySearch(
@@ -339,7 +339,7 @@ pub fn buildWitnessCatalog(
     defer storage_root_accounts.deinit(allocator);
 
     for (0..state_node_count) |raw_id| {
-        const id: mpt.Catalog.NodeId = @enumFromInt(raw_id);
+        const id: mpt.Catalog.NodeId = @fromBackingInt(@intCast(raw_id));
         const encoded = (try builder.leafValue(id)) orelse continue;
         const entry = try accounts.addOne(allocator);
         entry.node = id;

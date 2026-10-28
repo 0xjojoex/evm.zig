@@ -77,14 +77,14 @@ test "input zisk format stores one length-prefixed padded record" {
 }
 
 test "public raw format leaves canonical output unchanged" {
-    const output = [_]u8{0xab} ** 69;
+    const output: [69]u8 = @splat(0xab);
     const out = try outputBytes(std.testing.allocator, &output, .raw);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualSlices(u8, &output, out);
 }
 
 test "public zisk format pads canonical output to 256 bytes" {
-    const output = [_]u8{0xab} ** 69;
+    const output: [69]u8 = @splat(0xab);
     const out = try outputBytes(std.testing.allocator, &output, .zisk);
     defer std.testing.allocator.free(out);
 
@@ -94,6 +94,6 @@ test "public zisk format pads canonical output to 256 bytes" {
 }
 
 test "public zisk format rejects output larger than its public region" {
-    const output = [_]u8{0} ** 257;
+    const output: [257]u8 = @splat(0);
     try std.testing.expectError(error.OutputTooLong, outputBytes(std.testing.allocator, &output, .zisk));
 }

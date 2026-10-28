@@ -86,7 +86,16 @@ pub const LookupCache = struct {
 const NodeKey = [4]u64;
 
 fn nodeKey(digest: hash.Root) NodeKey {
-    return @bitCast(digest);
+    return std.mem.bytesToValue(NodeKey, &digest);
+}
+
+test "node keys retain native-endian words for unaligned witnesses" {
+    var storage: [33]u8 align(8) = undefined;
+    const digest: *align(1) hash.Root = @ptrCast(storage[1..].ptr);
+    for (digest, 0..) |*byte, i| byte.* = @intCast(i);
+    const words = nodeKey(digest.*);
+    try std.testing.expectEqualSlices(u8, digest, std.mem.asBytes(&words));
+    inline for (0..4) |i| try std.testing.expectEqual(words[i], borrowedKeyWord(digest, i));
 }
 
 fn keyEquals(lhs: NodeKey, rhs: NodeKey) bool {
@@ -99,7 +108,7 @@ fn keyEquals(lhs: NodeKey, rhs: NodeKey) bool {
 inline fn borrowedKeyWord(digest: *align(1) const hash.Root, comptime index: usize) u64 {
     const bytes: [*]align(1) const u8 = @ptrCast(digest);
     const word: *align(1) const [@sizeOf(u64)]u8 = @ptrCast(bytes + index * @sizeOf(u64));
-    return @bitCast(word.*);
+    return std.mem.readInt(u64, word, .native);
 }
 
 /// Keep align-1 tail assembly behind word-zero equality on RV64 guests.

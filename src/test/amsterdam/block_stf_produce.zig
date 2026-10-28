@@ -514,8 +514,8 @@ test "BlockSTF parallel lane ignores BLOCKHASH capability absent from canonical 
     var verifier_state = try producer_state.clone(std.testing.allocator);
     defer verifier_state.deinit();
 
-    const parent_hash = [_]u8{0x11} ** 32;
-    const parent_beacon_block_root = [_]u8{0x22} ** 32;
+    const parent_hash: [32]u8 = @splat(0x11);
+    const parent_beacon_block_root: [32]u8 = @splat(0x22);
     const env: evmz.Env = .{ .number = 1, .timestamp = 1, .gas_limit = 2_000_000 };
     const header: block_stf.BlockHeader = .{
         .number = env.number,
@@ -826,9 +826,9 @@ test "BlockSTF BAL differential reconstructs serial block-start system calls" {
     var verifier_state = try producer_state.clone(std.testing.allocator);
     defer verifier_state.deinit();
 
-    var parent_hash = [_]u8{0x11} ** 32;
+    var parent_hash: [32]u8 = @splat(0x11);
     parent_hash[31] = 0x22;
-    var beacon_root = [_]u8{0x33} ** 32;
+    var beacon_root: [32]u8 = @splat(0x33);
     beacon_root[31] = 0x44;
     const env: evmz.Env = .{
         .number = 1,

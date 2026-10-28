@@ -82,7 +82,7 @@ def main() -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zig-exe", default="zig")
-    parser.add_argument("--optimize", default="ReleaseFast")
+    parser.add_argument("--optimize", default="fast")
     parser.add_argument("--profile", choices=("native", "zkvm"), default="native")
     parser.add_argument("--native-keccak", choices=("std", "xkcp"), default="xkcp")
     parser.add_argument("--out-dir", default="../output/bench-report")
@@ -532,7 +532,7 @@ def render_report(
         lines.append(f"- baseline: `{display_path(baseline_path)}`")
     lines.append("")
     lines.append(
-        "Native release means Zig `ReleaseFast` for Zig/C++ runners and revm `cargo --release`; "
+        "Native release means Zig `fast` for Zig/C++ runners and revm `cargo --release`; "
         "all compared engines explicitly omit frame pointers, and revm uses `target-cpu=native`."
     )
     lines.append("")

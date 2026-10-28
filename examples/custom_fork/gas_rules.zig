@@ -24,7 +24,7 @@ const CancunVm = evmz.Vm(evmz.eth.cancun);
 const sender = evmz.addr(0xaaaa);
 const recipient = evmz.addr(0xbbbb);
 /// 256 nonzero bytes: 16 gas each under stock Cancun, free under the fork.
-const calldata = [_]u8{0xff} ** 256;
+const calldata: [256]u8 = @splat(0xff);
 
 fn send(comptime VmType: type, allocator: std.mem.Allocator) !harness.Result {
     return harness.transact(VmType, allocator, .{

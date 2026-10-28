@@ -50,8 +50,8 @@ pub const Summary = struct {
     failed: usize = 0,
     skipped: usize = 0,
     unchecked: usize = 0,
-    fail_reasons: [std.meta.fields(FailReason).len]usize = [_]usize{0} ** std.meta.fields(FailReason).len,
-    unchecked_reasons: [std.meta.fields(UncheckedReason).len]usize = [_]usize{0} ** std.meta.fields(UncheckedReason).len,
+    fail_reasons: [@typeInfo(FailReason).@"enum".field_names.len]usize = @splat(0),
+    unchecked_reasons: [@typeInfo(UncheckedReason).@"enum".field_names.len]usize = @splat(0),
 
     pub fn add(self: *Summary, other: Summary) void {
         self.fixtures += other.fixtures;
@@ -70,12 +70,12 @@ pub const Summary = struct {
 
     fn countFail(self: *Summary, reason: FailReason) void {
         self.failed += 1;
-        self.fail_reasons[@intFromEnum(reason)] += 1;
+        self.fail_reasons[@backingInt(reason)] += 1;
     }
 
     fn countUnchecked(self: *Summary, reason: UncheckedReason) void {
         self.unchecked += 1;
-        self.unchecked_reasons[@intFromEnum(reason)] += 1;
+        self.unchecked_reasons[@backingInt(reason)] += 1;
     }
 };
 
@@ -740,7 +740,7 @@ test "EEST transaction nonce mismatch fails" {
         "\"storage\":{\"0x00\":\"0x2a\"}",
     );
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.transaction_nonce_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.transaction_nonce_mismatch)]);
 }
 
 test "EEST oversized transaction nonce reaches exact-spec validation" {
@@ -759,11 +759,11 @@ test "EEST oversized transaction nonce reaches exact-spec validation" {
 test "EEST post balance and nonce mismatches fail" {
     const balance = try runMinimalStateFixture("", "0x0186a0", "0x", "", "\"balance\":\"0x01\"");
     try std.testing.expectEqual(@as(usize, 1), balance.failed);
-    try std.testing.expectEqual(@as(usize, 1), balance.fail_reasons[@intFromEnum(FailReason.balance_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), balance.fail_reasons[@backingInt(FailReason.balance_mismatch)]);
 
     const nonce = try runMinimalStateFixture("", "0x0186a0", "0x", "", "\"nonce\":\"0x01\"");
     try std.testing.expectEqual(@as(usize, 1), nonce.failed);
-    try std.testing.expectEqual(@as(usize, 1), nonce.fail_reasons[@intFromEnum(FailReason.nonce_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), nonce.fail_reasons[@backingInt(FailReason.nonce_mismatch)]);
 }
 
 test "EEST unsupported assertion fields do not block comparable post state" {
@@ -861,13 +861,13 @@ test "EEST unsupported-only assertion fields are unchecked" {
     try std.testing.expectEqual(@as(usize, 0), summary.passed);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 1), summary.unchecked);
-    try std.testing.expectEqual(@as(usize, 1), summary.unchecked_reasons[@intFromEnum(UncheckedReason.unsupported_assertion_fields)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.unchecked_reasons[@backingInt(UncheckedReason.unsupported_assertion_fields)]);
 }
 
 test "EEST unknown post account key fails" {
     const summary = try runMinimalStateFixture("", "0x0186a0", "0x", "", "\"storage\":{},\"mystery\":\"0x00\"");
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.unsupported_fixture_key)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.unsupported_fixture_key)]);
 }
 
 test "EEST expected exception still compares post state" {
@@ -879,7 +879,7 @@ test "EEST expected exception still compares post state" {
         "\"balance\":\"0x01\"",
     );
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.balance_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.balance_mismatch)]);
 }
 
 test "EEST child revert rolls back transient storage" {
@@ -1125,5 +1125,5 @@ test "EEST still checks output when using tool-owned execution" {
     ;
     const summary = try runSlice(std.testing.allocator, fixture, .{});
     try std.testing.expectEqual(@as(usize, 1), summary.failed);
-    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@intFromEnum(FailReason.output_mismatch)]);
+    try std.testing.expectEqual(@as(usize, 1), summary.fail_reasons[@backingInt(FailReason.output_mismatch)]);
 }

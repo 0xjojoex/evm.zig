@@ -11,8 +11,22 @@ inline fn wireLimbIndex(comptime wire_index: usize) usize {
     return if (native_endian == .little) 3 - wire_index else wire_index;
 }
 
+// Zig 0.17 array/int `@bitCast` expands wide byte conversions into per-byte shifts.
+// Use memory-representation copies with explicit endian conversion here.
+// Related scalarization regression: https://codeberg.org/ziglang/zig/issues/36256
+// On Zig upgrades, compare `readInt`/`writeInt` codegen and native/RV64 performance
+// before simplifying these helpers.
+
 pub inline fn fromBytes32(bytes: *const [32]u8) u256 {
-    return std.mem.readInt(u256, bytes, .big);
+    return std.mem.bigToNative(u256, std.mem.bytesToValue(u256, bytes));
+}
+
+/// Reads a big-endian integer of `bytes.len <= 32` bytes, zero-extended.
+pub inline fn fromBytes(bytes: anytype) u256 {
+    const len = @typeInfo(@TypeOf(bytes.*)).array.len;
+    var wire: [32]u8 = @splat(0);
+    wire[32 - len ..].* = bytes.*;
+    return fromBytes32(&wire);
 }
 
 pub inline fn toBytes32(value: u256) [32]u8 {
@@ -22,7 +36,7 @@ pub inline fn toBytes32(value: u256) [32]u8 {
 }
 
 pub inline fn writeBytes32(bytes: *[32]u8, value: u256) void {
-    std.mem.writeInt(u256, bytes, value, .big);
+    bytes.* = std.mem.toBytes(std.mem.nativeToBig(u256, value));
 }
 
 pub inline fn readBytes32Into(bytes: *const [32]u8, destination: *u256) void {
@@ -902,7 +916,7 @@ test "limb div and mod cover branch edge vectors" {
 }
 
 test "bytes32 conversion uses Ethereum byte order" {
-    var bytes = [_]u8{0} ** 32;
+    var bytes: [32]u8 = @splat(0);
     bytes[31] = 1;
     try std.testing.expectEqual(@as(u256, 1), fromBytes32(&bytes));
 
@@ -1020,13 +1034,13 @@ test "mulMod large modulus matches full-width division" {
 
 test "modular arithmetic fuzzes optimized reducers against full-width oracle" {
     const Fuzz = struct {
-        const zero_mod_seed = [_]u8{0x00} ++ [_]u8{0x11} ** 127;
-        const tiny_mod_seed = [_]u8{0x01} ++ [_]u8{0x22} ** 127;
-        const medium_mod_seed = [_]u8{0x02} ++ [_]u8{0x33} ** 127;
-        const large_mod_seed = [_]u8{0x03} ++ [_]u8{0x44} ** 127;
-        const near_mod_seed = [_]u8{0x04} ++ [_]u8{0xff} ** 127;
-        const signed_min_seed = [_]u8{0x05} ++ [_]u8{0x80} ++ [_]u8{0x00} ** 126;
-        const signed_neg_seed = [_]u8{0x06} ++ [_]u8{0xff} ** 127;
+        const zero_mod_seed = [_]u8{0x00} ++ @as([127]u8, @splat(0x11));
+        const tiny_mod_seed = [_]u8{0x01} ++ @as([127]u8, @splat(0x22));
+        const medium_mod_seed = [_]u8{0x02} ++ @as([127]u8, @splat(0x33));
+        const large_mod_seed = [_]u8{0x03} ++ @as([127]u8, @splat(0x44));
+        const near_mod_seed = [_]u8{0x04} ++ @as([127]u8, @splat(0xff));
+        const signed_min_seed = [_]u8{0x05} ++ [_]u8{0x80} ++ @as([126]u8, @splat(0x00));
+        const signed_neg_seed = [_]u8{0x06} ++ @as([127]u8, @splat(0xff));
 
         const corpus = [_][]const u8{
             &zero_mod_seed,

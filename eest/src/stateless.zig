@@ -62,7 +62,7 @@ pub const Summary = struct {
     failed: usize = 0,
     skipped: usize = 0,
     oracle_compared: usize = 0,
-    fail_reasons: [std.meta.fields(FailReason).len]usize = [_]usize{0} ** std.meta.fields(FailReason).len,
+    fail_reasons: [@typeInfo(FailReason).@"enum".field_names.len]usize = @splat(0),
 
     pub fn add(self: *Summary, other: Summary) void {
         self.files += other.files;
@@ -76,7 +76,7 @@ pub const Summary = struct {
 
     fn countFail(self: *Summary, reason: FailReason) void {
         self.failed += 1;
-        self.fail_reasons[@intFromEnum(reason)] += 1;
+        self.fail_reasons[@backingInt(reason)] += 1;
     }
 };
 

@@ -43,7 +43,7 @@ fn baseSpec() Spec {
 
 fn defaultTarget(comptime opcode_byte: u8, comptime defined: bool) instruction_table.Target {
     if (!defined) return .invalid;
-    const opcode: Opcode = @enumFromInt(opcode_byte);
+    const opcode: Opcode = @fromBackingInt(@intCast(opcode_byte));
     return switch (opcode) {
         .INVALID => .invalid,
         else => .builtin,
@@ -165,18 +165,18 @@ const amsterdam_spec: Spec = spec: {
 pub const amsterdam = amsterdam_spec;
 
 test "exact instruction specs extend activation and gas values" {
-    try std.testing.expect(!frontier.table[@intFromEnum(Opcode.DELEGATECALL)].active);
-    try std.testing.expect(homestead.table[@intFromEnum(Opcode.DELEGATECALL)].active);
-    try std.testing.expect(!shanghai.table[@intFromEnum(Opcode.BLOBHASH)].active);
-    try std.testing.expect(cancun.table[@intFromEnum(Opcode.BLOBHASH)].active);
-    try std.testing.expect(!osaka.table[@intFromEnum(Opcode.SLOTNUM)].active);
-    try std.testing.expect(amsterdam.table[@intFromEnum(Opcode.SLOTNUM)].active);
+    try std.testing.expect(!frontier.table[@backingInt(Opcode.DELEGATECALL)].active);
+    try std.testing.expect(homestead.table[@backingInt(Opcode.DELEGATECALL)].active);
+    try std.testing.expect(!shanghai.table[@backingInt(Opcode.BLOBHASH)].active);
+    try std.testing.expect(cancun.table[@backingInt(Opcode.BLOBHASH)].active);
+    try std.testing.expect(!osaka.table[@backingInt(Opcode.SLOTNUM)].active);
+    try std.testing.expect(amsterdam.table[@backingInt(Opcode.SLOTNUM)].active);
 
-    try std.testing.expectEqual(@as(i64, 20), frontier.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
-    try std.testing.expectEqual(@as(i64, 400), tangerine_whistle.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
-    try std.testing.expectEqual(@as(i64, 700), istanbul.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
-    try std.testing.expectEqual(@as(i64, 100), berlin.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
-    try std.testing.expectEqual(@as(i64, eip8038.create_access_cost), amsterdam.table[@intFromEnum(Opcode.CREATE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, 20), frontier.table[@backingInt(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, 400), tangerine_whistle.table[@backingInt(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, 700), istanbul.table[@backingInt(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, 100), berlin.table[@backingInt(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expectEqual(@as(i64, eip8038.create_access_cost), amsterdam.table[@backingInt(Opcode.CREATE)].info.static_gas);
 }
 
 test "instruction spec mutation helpers derive one table value from another" {
@@ -194,7 +194,7 @@ test "instruction spec mutation helpers derive one table value from another" {
         }, .{ .custom = Noop });
         result.deactivate(&.{.SELFDESTRUCT});
         result.setStaticGas(&.{.BALANCE}, 1_000);
-        result.setTarget(@intFromEnum(Opcode.ADD), .invalid);
+        result.setTarget(@backingInt(Opcode.ADD), .invalid);
         break :spec result;
     };
 
@@ -204,17 +204,17 @@ test "instruction spec mutation helpers derive one table value from another" {
     try std.testing.expectEqual(@as(u8, 1), derived.table[unassigned_byte].info.stack_in);
     try std.testing.expect(derived.table[unassigned_byte].target == .custom);
     try std.testing.expectEqualStrings("NOOP", @tagName(derived.table[unassigned_byte].name.?));
-    try std.testing.expect(!derived.table[@intFromEnum(Opcode.SELFDESTRUCT)].active);
-    try std.testing.expectEqual(@as(i64, 1_000), derived.table[@intFromEnum(Opcode.BALANCE)].info.static_gas);
-    try std.testing.expect(derived.table[@intFromEnum(Opcode.ADD)].target == .invalid);
+    try std.testing.expect(!derived.table[@backingInt(Opcode.SELFDESTRUCT)].active);
+    try std.testing.expectEqual(@as(i64, 1_000), derived.table[@backingInt(Opcode.BALANCE)].info.static_gas);
+    try std.testing.expect(derived.table[@backingInt(Opcode.ADD)].target == .invalid);
     // The base value stays untouched.
     try std.testing.expect(!cancun.table[unassigned_byte].active);
-    try std.testing.expect(cancun.table[@intFromEnum(Opcode.SELFDESTRUCT)].active);
+    try std.testing.expect(cancun.table[@backingInt(Opcode.SELFDESTRUCT)].active);
 
     var buffer: [32]u8 = undefined;
     const custom = try std.fmt.bufPrint(&buffer, "{f}", .{derived.fmt(unassigned_byte)});
     try std.testing.expectEqualStrings("NOOP", custom);
-    const builtin = try std.fmt.bufPrint(&buffer, "{f}", .{derived.fmt(@intFromEnum(Opcode.ADD))});
+    const builtin = try std.fmt.bufPrint(&buffer, "{f}", .{derived.fmt(@backingInt(Opcode.ADD))});
     try std.testing.expectEqualStrings("ADD", builtin);
     const unnamed = try std.fmt.bufPrint(&buffer, "{f}", .{cancun.fmt(unassigned_byte)});
     try std.testing.expectEqualStrings("0xb0", unnamed);

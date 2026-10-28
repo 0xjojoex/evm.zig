@@ -51,13 +51,25 @@ back to Zig's `std` on other architectures. Use `-Dnative-keccak=std` (or
 `.@"native-keccak" = .std` in dependency options) to select `std` explicitly.
 The zkVM profile ignores this option and keeps its accelerator provider.
 
-This follows `main`; pin a commit for reproducible builds. Each release
+This migration branch follows `main`; pin a commit for reproducible builds. Each release
 supports one Zig minor, and every module ships at the package version — see
 [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
 
-| evmz   | Zig      |
-| ------ | -------- |
-| `main` | `0.16.x` |
+| evmz branch | Zig |
+| ----------- | --- |
+| `main` | `0.16.0` |
+| `zig-0.17` | `0.17.0` |
+
+This branch pins Zig through mise. Its functional checks pass, but the native
+MSTORE benchmark regresses against 0.16; see the [migration screen](bench/README.md#zig-017-migration-screen).
+
+Use the pinned compiler:
+
+```sh
+mise trust
+mise install
+mise exec -- zig build test
+```
 
 ## Quick start
 
