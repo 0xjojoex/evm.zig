@@ -100,7 +100,7 @@ test "Amsterdam prepare reads sender code only after nonce and funds checks" {
         .summary = .{
             .nonce = 0,
             .balance = 30_000,
-            .code_hash = [_]u8{0xaa} ** 32,
+            .code_hash = @as([32]u8, @splat(0xaa)),
         },
         .fail_code = true,
     };

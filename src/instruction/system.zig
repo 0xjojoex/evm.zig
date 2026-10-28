@@ -32,7 +32,7 @@ pub fn Handlers(comptime spec: Spec) type {
                 return;
             }
 
-            const static_gas = spec.instruction.entry(@intFromEnum(op)).info.static_gas;
+            const static_gas = spec.instruction.entry(@backingInt(op)).info.static_gas;
             if (!frame.trackGas(spec.call.base_gas - static_gas)) return;
 
             if (spec.call.cold_account_access_gas) |cold_account_access_gas| {

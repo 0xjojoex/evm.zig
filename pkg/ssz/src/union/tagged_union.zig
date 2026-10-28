@@ -12,7 +12,7 @@ pub const None = struct {};
 /// Zig union field declaration order defines the serialized selector values.
 pub fn Union(comptime T: type, comptime overrides: anytype) type {
     comptime validateSchema(T, overrides);
-    const fields = @typeInfo(T).@"union".fields;
+    const fields = @typeInfo(T).@"union";
     const Tag = @typeInfo(T).@"union".tag_type.?;
 
     const Common = struct {
@@ -25,11 +25,11 @@ pub fn Union(comptime T: type, comptime overrides: anytype) type {
 
         pub fn encodedLen(value: T) Error!usize {
             const active = std.meta.activeTag(value);
-            inline for (fields) |field| {
-                if (active == @field(Tag, field.name)) {
-                    const Codec = fieldCodec(overrides, field.name, field.type);
+            inline for (fields.field_names, fields.field_types) |field_name, FieldType| {
+                if (active == @field(Tag, field_name)) {
+                    const Codec = fieldCodec(overrides, field_name, FieldType);
                     if (comptime isNone(Codec)) return 1;
-                    return std.math.add(usize, 1, try Codec.encodedLen(@field(value, field.name))) catch
+                    return std.math.add(usize, 1, try Codec.encodedLen(@field(value, field_name))) catch
                         error.EncodedLengthOverflow;
                 }
             }
@@ -41,12 +41,12 @@ pub fn Union(comptime T: type, comptime overrides: anytype) type {
             if (out.len < len) return error.BufferTooSmall;
 
             const active = std.meta.activeTag(value);
-            inline for (fields, 0..) |field, selector| {
-                if (active == @field(Tag, field.name)) {
+            inline for (fields.field_names, fields.field_types, 0..) |field_name, FieldType, selector| {
+                if (active == @field(Tag, field_name)) {
                     out[0] = @intCast(selector);
-                    const Codec = fieldCodec(overrides, field.name, field.type);
+                    const Codec = fieldCodec(overrides, field_name, FieldType);
                     if (comptime !isNone(Codec)) {
-                        _ = try Codec.encode(out[1..len], @field(value, field.name));
+                        _ = try Codec.encode(out[1..len], @field(value, field_name));
                     }
                     return out[0..len];
                 }
@@ -56,16 +56,16 @@ pub fn Union(comptime T: type, comptime overrides: anytype) type {
 
         pub fn decodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) (Error || std.mem.Allocator.Error)!T {
             const selector = try validateSelector(bytes);
-            inline for (fields, 0..) |field, index| {
+            inline for (fields.field_names, fields.field_types, 0..) |field_name, FieldType, index| {
                 if (selector == index) {
-                    const Codec = fieldCodec(overrides, field.name, field.type);
+                    const Codec = fieldCodec(overrides, field_name, FieldType);
                     if (comptime isNone(Codec)) {
                         if (bytes.len != 1) return error.InvalidByteLength;
-                        return @unionInit(T, field.name, {});
+                        return @unionInit(T, field_name, {});
                     }
                     return @unionInit(
                         T,
-                        field.name,
+                        field_name,
                         try codec.decodeOwned(Codec, allocator, bytes[1..]),
                     );
                 }
@@ -75,14 +75,14 @@ pub fn Union(comptime T: type, comptime overrides: anytype) type {
 
         pub fn decode(bytes: []const u8) Error!T {
             const selector = try validateSelector(bytes);
-            inline for (fields, 0..) |field, index| {
+            inline for (fields.field_names, fields.field_types, 0..) |field_name, FieldType, index| {
                 if (selector == index) {
-                    const Codec = fieldCodec(overrides, field.name, field.type);
+                    const Codec = fieldCodec(overrides, field_name, FieldType);
                     if (comptime isNone(Codec)) {
                         if (bytes.len != 1) return error.InvalidByteLength;
-                        return @unionInit(T, field.name, {});
+                        return @unionInit(T, field_name, {});
                     }
-                    return @unionInit(T, field.name, try Codec.decode(bytes[1..]));
+                    return @unionInit(T, field_name, try Codec.decode(bytes[1..]));
                 }
             }
             unreachable;
@@ -91,9 +91,9 @@ pub fn Union(comptime T: type, comptime overrides: anytype) type {
         pub fn validate(bytes: []const u8) Error!void {
             const selector = try validateSelector(bytes);
 
-            inline for (fields, 0..) |field, index| {
+            inline for (fields.field_names, fields.field_types, 0..) |field_name, FieldType, index| {
                 if (selector == index) {
-                    const Codec = fieldCodec(overrides, field.name, field.type);
+                    const Codec = fieldCodec(overrides, field_name, FieldType);
                     if (comptime isNone(Codec)) {
                         if (bytes.len != 1) return error.InvalidByteLength;
                     } else {
@@ -107,11 +107,11 @@ pub fn Union(comptime T: type, comptime overrides: anytype) type {
 
         pub fn deinit(allocator: std.mem.Allocator, value: *T) void {
             const active = std.meta.activeTag(value.*);
-            inline for (fields) |field| {
-                if (active == @field(Tag, field.name)) {
-                    const Codec = fieldCodec(overrides, field.name, field.type);
+            inline for (fields.field_names, fields.field_types) |field_name, FieldType| {
+                if (active == @field(Tag, field_name)) {
+                    const Codec = fieldCodec(overrides, field_name, FieldType);
                     if (comptime !isNone(Codec)) {
-                        codec.deinitOwned(Codec, allocator, &@field(value, field.name));
+                        codec.deinitOwned(Codec, allocator, &@field(value, field_name));
                     }
                     return;
                 }
@@ -126,7 +126,7 @@ pub fn Union(comptime T: type, comptime overrides: anytype) type {
         fn validateSelector(bytes: []const u8) Error!u8 {
             if (bytes.len == 0) return error.InvalidByteLength;
             const selector = bytes[0];
-            if (selector >= fields.len) return error.InvalidUnionSelector;
+            if (selector >= fields.field_names.len) return error.InvalidUnionSelector;
             return selector;
         }
     };
@@ -168,28 +168,28 @@ fn validateSchema(comptime T: type, comptime overrides: anytype) void {
         else => @compileError("SSZ Union requires a Zig union(enum)"),
     };
     if (union_info.tag_type == null) @compileError("SSZ Union requires a tagged Zig union");
-    if (union_info.fields.len == 0) @compileError("SSZ unions require at least one option");
-    if (union_info.fields.len > 128) @compileError("SSZ unions support selectors 0 through 127");
+    if (union_info.field_names.len == 0) @compileError("SSZ unions require at least one option");
+    if (union_info.field_names.len > 128) @compileError("SSZ unions support selectors 0 through 127");
 
     const override_fields = switch (@typeInfo(@TypeOf(overrides))) {
-        .@"struct" => |value| value.fields,
+        .@"struct" => |value| value,
         else => @compileError("SSZ Union overrides must be a struct of codec types"),
     };
 
-    inline for (override_fields) |override| {
-        if (!@hasField(T, override.name)) @compileError("unknown SSZ Union override: " ++ override.name);
-        if (override.type != type) @compileError("SSZ Union overrides must be codec types");
+    inline for (override_fields.field_names, override_fields.field_types) |override_name, OverrideType| {
+        if (!@hasField(T, override_name)) @compileError("unknown SSZ Union override: " ++ override_name);
+        if (OverrideType != type) @compileError("SSZ Union overrides must be codec types");
     }
-    inline for (union_info.fields, 0..) |field, index| {
-        const Codec = fieldCodec(overrides, field.name, field.type);
+    inline for (union_info.field_names, union_info.field_types, 0..) |field_name, FieldType, index| {
+        const Codec = fieldCodec(overrides, field_name, FieldType);
         if (comptime isNone(Codec)) {
             if (index != 0) @compileError("SSZ None is legal only as the first Union option");
-            if (union_info.fields.len < 2) @compileError("SSZ Union with None requires another option");
-            if (field.type != void) @compileError("SSZ None option must use a void union field");
+            if (union_info.field_names.len < 2) @compileError("SSZ Union with None requires another option");
+            if (FieldType != void) @compileError("SSZ None option must use a void union field");
         } else {
             codec.assertCodec(Codec);
-            if (Codec.Value != field.type) {
-                @compileError("SSZ Union codec Value does not match option field: " ++ field.name);
+            if (Codec.Value != FieldType) {
+                @compileError("SSZ Union codec Value does not match option field: " ++ field_name);
             }
         }
     }
@@ -200,8 +200,8 @@ fn isNone(comptime Codec: type) bool {
 }
 
 fn hasAllocatingOptions(comptime fields: anytype, comptime overrides: anytype) bool {
-    inline for (fields) |field| {
-        const Codec = fieldCodec(overrides, field.name, field.type);
+    inline for (fields.field_names, fields.field_types) |field_name, FieldType| {
+        const Codec = fieldCodec(overrides, field_name, FieldType);
         if (!isNone(Codec) and Codec.requires_allocator) return true;
     }
     return false;

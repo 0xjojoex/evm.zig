@@ -419,7 +419,7 @@ pub fn OptionalPatch(comptime T: type) type {
         inherit,
         replace: ?T,
 
-        fn apply(self: @This(), inherited: ?T) ?T {
+        pub fn apply(self: @This(), inherited: ?T) ?T {
             return switch (self) {
                 .inherit => inherited,
                 .replace => |value| value,
@@ -430,14 +430,14 @@ pub fn OptionalPatch(comptime T: type) type {
 
 fn merge(comptime base: anytype, comptime patch: anytype) @TypeOf(base) {
     var result = base;
-    inline for (std.meta.fields(@TypeOf(patch))) |field| {
-        switch (@typeInfo(field.type)) {
+    inline for (@typeInfo(@TypeOf(patch)).@"struct".field_names, @typeInfo(@TypeOf(patch)).@"struct".field_types) |field_name, FieldType| {
+        switch (@typeInfo(FieldType)) {
             .@"union" => {
-                if (!@hasDecl(field.type, "apply")) @compileError("unsupported patch union");
-                @field(result, field.name) = @field(patch, field.name).apply(@field(base, field.name));
+                if (!@hasDecl(FieldType, "apply")) @compileError("unsupported patch union");
+                @field(result, field_name) = @field(patch, field_name).apply(@field(base, field_name));
             },
-            .optional => if (@field(patch, field.name)) |value| {
-                @field(result, field.name) = value;
+            .optional => if (@field(patch, field_name)) |value| {
+                @field(result, field_name) = value;
             },
             else => @compileError("patch fields must be optional or OptionalPatch"),
         }

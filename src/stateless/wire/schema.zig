@@ -44,7 +44,7 @@ pub const ProtocolFork = enum(u8) {
 };
 
 pub fn id(fork: ProtocolFork, revision: u8) u16 {
-    return (@as(u16, @intFromEnum(fork)) << 8) | revision;
+    return (@as(u16, @backingInt(fork)) << 8) | revision;
 }
 
 pub fn readId(bytes: []const u8) Error!u16 {
@@ -59,7 +59,7 @@ pub fn body(bytes: []const u8, comptime expected: u16) Error![]const u8 {
     const actual = try readId(bytes);
     if (actual == expected) return bytes[id_size..];
     const fork = try ProtocolFork.fromInt(@intCast(actual >> 8));
-    return if (@intFromEnum(fork) == comptime expected >> 8)
+    return if (@backingInt(fork) == comptime expected >> 8)
         error.UnsupportedSchemaId
     else
         error.UnsupportedFork;

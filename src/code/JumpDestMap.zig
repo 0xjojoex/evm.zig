@@ -27,7 +27,7 @@ pub fn deinit(self: *JumpDestMap, allocator: std.mem.Allocator) void {
 pub fn isValidPrepared(self: *const JumpDestMap, bytes: []const u8, target: usize) bool {
     std.debug.assert(self.analyzed);
     if (target >= bytes.len) return false;
-    if (bytes[target] != @intFromEnum(Opcode.JUMPDEST)) return false;
+    if (bytes[target] != @backingInt(Opcode.JUMPDEST)) return false;
     return self.bits.isSet(target);
 }
 
@@ -82,7 +82,7 @@ test "jumpdest map handles sparse long bytecode" {
     var map = JumpDestMap.empty;
     defer map.deinit(std.testing.allocator);
 
-    var bytecode = [_]u8{0} ** 128;
+    var bytecode: [128]u8 = @splat(0);
     bytecode[0] = Opcode.PUSH2.toByte();
     bytecode[1] = 0;
     bytecode[2] = 127;
@@ -122,7 +122,7 @@ test "jumpdest map leaves EIP-8024 immediate bytes as instruction boundaries" {
 }
 
 test "jumpdest map carries PUSH payload across chunks" {
-    var bytecode = [_]u8{0} ** 48;
+    var bytecode: [48]u8 = @splat(0);
     bytecode[0] = Opcode.PUSH32.toByte();
     bytecode[1] = Opcode.JUMPDEST.toByte();
     bytecode[16] = Opcode.PUSH1.toByte();
@@ -140,7 +140,7 @@ test "jumpdest map carries PUSH payload across chunks" {
 fn markLinear(bits: *std.DynamicBitSetUnmanaged, bytes: []const u8) void {
     var pc: usize = 0;
     while (pc < bytes.len) {
-        const opcode: Opcode = @enumFromInt(bytes[pc]);
+        const opcode: Opcode = @fromBackingInt(@intCast(bytes[pc]));
         if (opcode == .JUMPDEST) bits.set(pc);
 
         pc = @min(bytes.len, pc + 1 + opcode.pushImmediateLen());

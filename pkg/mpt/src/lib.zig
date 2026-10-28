@@ -252,12 +252,12 @@ pub fn Trie(comptime KeccakContext: type) type {
         pub fn Keyed(comptime Key: type, comptime KeyContext: type) type {
             const valid = if (std.meta.hasFn(KeyContext, "trieKey")) blk: {
                 const info = @typeInfo(@TypeOf(KeyContext.trieKey)).@"fn";
-                break :blk !info.is_var_args and
-                    info.params.len == 2 and
-                    info.params[0].type != null and
-                    info.params[0].type.? == KeyContext and
-                    info.params[1].type != null and
-                    info.params[1].type.? == Key and
+                break :blk !info.attrs.varargs and
+                    info.param_types.len == 2 and
+                    info.param_types[0] != null and
+                    info.param_types[0].? == KeyContext and
+                    info.param_types[1] != null and
+                    info.param_types[1].? == Key and
                     info.return_type != null and
                     info.return_type.? == FixedKey;
             } else false;

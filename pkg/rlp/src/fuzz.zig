@@ -7,7 +7,7 @@ const max_list_depth = 64;
 const RawProperty = struct {
     const empty_input = [_]u8{ 0, 0, 0, 0 };
     const nested_list = [_]u8{ 4, 0, 0, 0, 0xc3, 0xc2, 0xc1, 0x80 };
-    const bytes_56 = [_]u8{ 58, 0, 0, 0, 0xb8, 0x38 } ++ [_]u8{0xbb} ** 56;
+    const bytes_56 = [_]u8{ 58, 0, 0, 0, 0xb8, 0x38 } ++ @as([56]u8, @splat(0xbb));
     const noncanonical_single = [_]u8{ 2, 0, 0, 0, 0x81, 0x00 };
 
     fn check(smith: *std.testing.Smith) anyerror!void {
@@ -59,7 +59,7 @@ const Value = struct {
 const ValueInput = struct {
     const long_boundary_seed = [_]u8{ 4, 4, 4, 0x02, 4, 4, 0, 0 };
     const arbitrary_seed = [_]u8{ 6, 6, 7, 0x02, 6, 6, 0, 0 } ++
-        [_]u8{0xa5} ** 168;
+        @as([168]u8, @splat(0xa5));
 
     fn generate(smith: *std.testing.Smith, data_storage: *[64]u8) Value {
         var controls: [8]u8 = undefined;
@@ -283,9 +283,9 @@ const OwnedValue = struct {
 
 const OwnedInput = struct {
     const full_seed = [_]u8{ 4, 3, 3, 3, 3, 4, 4, 4, 4, 0xff, 0xff, 0 } ++
-        [_]u8{0xa5} ** 96;
+        @as([96]u8, @splat(0xa5));
     const arbitrary_seed = [_]u8{ 4, 5, 6, 7, 8, 5, 6, 7, 8, 0x42, 0x00, 0 } ++
-        [_]u8{0x5a} ** 96;
+        @as([96]u8, @splat(0x5a));
 
     fn generate(
         smith: *std.testing.Smith,
@@ -398,11 +398,11 @@ fn checkAllocationProperty(smith: *std.testing.Smith) anyerror!void {
 }
 
 const CombinedProperty = struct {
-    const value_zero_seed = [_]u8{0} ** 176;
-    const mutation_zero_seed = [_]u8{0} ** 184;
-    const owned_zero_seed = [_]u8{0} ** 84;
-    const value_boundary_seed = ValueInput.long_boundary_seed ++ [_]u8{0} ** 168;
-    const mutation_boundary_seed = MutationProperty.boundary_seed ++ [_]u8{0} ** 168;
+    const value_zero_seed: [176]u8 = @splat(0);
+    const mutation_zero_seed: [184]u8 = @splat(0);
+    const owned_zero_seed: [84]u8 = @splat(0);
+    const value_boundary_seed = ValueInput.long_boundary_seed ++ @as([168]u8, @splat(0));
+    const mutation_boundary_seed = MutationProperty.boundary_seed ++ @as([168]u8, @splat(0));
 
     const zero_seed = RawProperty.empty_input ++
         value_zero_seed ++ value_zero_seed ++ mutation_zero_seed ++ owned_zero_seed;

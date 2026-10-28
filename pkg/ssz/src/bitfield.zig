@@ -323,7 +323,7 @@ fn bitlistDecodedLength(
 
 test "SSZ Bitvector packs bits least-significant first" {
     const Flags = ssz.Bitvector(10);
-    var value = [_]bool{false} ** 10;
+    var value: [10]bool = @splat(false);
     value[0] = true;
     value[3] = true;
     value[8] = true;
@@ -396,7 +396,7 @@ test "SSZ Bitlist uses a delimiter bit at its actual length" {
 test "SSZ Bitlist empty and byte-aligned values remain self-delimiting" {
     const Bits = ssz.Bitlist(8);
     const empty = [_]bool{};
-    const full_byte = [_]bool{false} ** 8;
+    const full_byte: [8]bool = @splat(false);
     var storage: [2]u8 = undefined;
 
     try std.testing.expectEqualSlices(u8, &.{0x01}, try Bits.encode(&storage, &empty));
@@ -422,7 +422,7 @@ test "SSZ zero-limit Bitlist accepts only the empty value" {
 }
 
 test "SSZ ProgressiveBitlist preserves delimiter serialization without a schema limit" {
-    const value = [_]bool{false} ** 10;
+    const value: [10]bool = @splat(false);
     var storage: [2]u8 = undefined;
 
     const encoded = try ssz.ProgressiveBitlist.encode(&storage, &value);

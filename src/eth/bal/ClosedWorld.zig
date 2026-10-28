@@ -161,11 +161,11 @@ pub fn accountCount(self: *const ClosedWorld) u32 {
 }
 
 pub inline fn accountRow(self: *const ClosedWorld, id: AccountId) *AccountRow {
-    return &self.accounts[@intFromEnum(id)];
+    return &self.accounts[@backingInt(id)];
 }
 
 pub inline fn storageRow(self: *const ClosedWorld, id: StorageId) *StorageRow {
-    return &self.storage[@intFromEnum(id)];
+    return &self.storage[@backingInt(id)];
 }
 
 pub fn accountAddress(self: *const ClosedWorld, id: AccountId) Address {
@@ -290,7 +290,7 @@ pub fn storageTrieKey(self: *const ClosedWorld, id: StorageId) [32]u8 {
 }
 
 pub fn parentAccount(self: *const ClosedWorld, id: AccountId) *const ParentState.AccountRecord {
-    return &self.parent_state.accounts[@intFromEnum(id)];
+    return &self.parent_state.accounts[@backingInt(id)];
 }
 
 /// The value execution sees for a parent account record. Dropping `storage_root` is the

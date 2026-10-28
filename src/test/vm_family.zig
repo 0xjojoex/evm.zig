@@ -249,11 +249,11 @@ test "exact VM closes the complete spec without revision state" {
     const Latest = evmz.t.Vm(.latest).?;
 
     comptime {
-        for (std.meta.fields(Latest.Executor.Init)) |field| {
-            std.debug.assert(field.type != evmz.eth.Revision);
+        for (@typeInfo(Latest.Executor.Init).@"struct".field_types) |FieldType| {
+            std.debug.assert(FieldType != evmz.eth.Revision);
         }
-        for (std.meta.fields(Latest.Executor)) |field| {
-            std.debug.assert(field.type != evmz.eth.Revision);
+        for (@typeInfo(Latest.Executor).@"struct".field_types) |FieldType| {
+            std.debug.assert(FieldType != evmz.eth.Revision);
         }
         std.debug.assert(Latest.Executor == evmz.Executor(
             Latest.spec,

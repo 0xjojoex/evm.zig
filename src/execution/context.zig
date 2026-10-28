@@ -24,7 +24,7 @@ pub const TransactionExtension = struct {
         };
         if (info.size != .one)
             @compileError("transaction extension requires a single-item pointer");
-        if (info.is_const)
+        if (info.attrs.@"const")
             @compileError("transaction extension requires mutable transaction state");
         return .{
             .ptr = @ptrCast(runtime),
@@ -128,16 +128,16 @@ test "every borrowed execution context field is compared by value" {
     // field left to it makes two value-identical contexts unequal, and the
     // executor rejects a reopened scope with ExecutionContextMismatch.
     inline for (.{ ChainEnvironment, BlockEnvironment, TransactionEnvironment }) |Environment| {
-        inline for (std.meta.fields(Environment)) |field| {
-            const info = @typeInfo(field.type);
+        inline for (@typeInfo(Environment).@"struct".field_names, @typeInfo(Environment).@"struct".field_types) |field_name, FieldType| {
+            const info = @typeInfo(FieldType);
             if (info != .pointer or info.pointer.size != .slice) continue;
             comptime var handled = false;
             inline for (ExecutionContext.value_compared_slices) |name| {
-                if (comptime std.mem.eql(u8, name, field.name)) handled = true;
+                if (comptime std.mem.eql(u8, name, field_name)) handled = true;
             }
             if (!handled) @compileError(
                 "ExecutionContext.eql would compare " ++ @typeName(Environment) ++ "." ++
-                    field.name ++ " by pointer identity; compare it by value in eql",
+                    field_name ++ " by pointer identity; compare it by value in eql",
             );
         }
     }
@@ -148,7 +148,7 @@ test "execution context equality compares borrowed blob values" {
     var b_hashes = [_]u256{ 41, 43 };
     const a: ExecutionContext = .{
         .chain = .{ .chain_id = 7 },
-        .transaction = .{ .origin = Address.fromBytes([_]u8{0x11} ** 20), .blob_hashes = &a_hashes },
+        .transaction = .{ .origin = Address.fromBytes(@as([20]u8, @splat(0x11))), .blob_hashes = &a_hashes },
     };
     var b = a;
     b.transaction.blob_hashes = &b_hashes;
@@ -177,10 +177,10 @@ test "transaction extension preserves type and identity" {
 test "multi-root context may only rebind origin" {
     const first: ExecutionContext = .{
         .chain = .{ .chain_id = 1 },
-        .transaction = .{ .origin = Address.fromBytes([_]u8{1} ** 20) },
+        .transaction = .{ .origin = Address.fromBytes(@as([20]u8, @splat(1))) },
     };
     var second = first;
-    second.transaction.origin = Address.fromBytes([_]u8{2} ** 20);
+    second.transaction.origin = Address.fromBytes(@as([20]u8, @splat(2)));
     try std.testing.expect(first.sameRootSession(second));
     second.transaction.gas_price = 1;
     try std.testing.expect(!first.sameRootSession(second));

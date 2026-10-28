@@ -99,7 +99,7 @@ pub const CodeStore = struct {
         if (std.mem.eql(u8, &hash, &crypto.keccak256_empty)) return .empty;
         if (self.parentIndex(hash)) |index| return .fromIndex(index);
         if (self.introduced.getEntryId(hash)) |id|
-            return .fromIndex(self.parent.items.len + @intFromEnum(id));
+            return .fromIndex(self.parent.items.len + @backingInt(id));
         return .missing;
     }
 
@@ -120,7 +120,7 @@ pub const CodeStore = struct {
             .ref = .empty,
         };
         if (ref == .missing) return null;
-        const index: usize = @intFromEnum(ref);
+        const index: usize = @backingInt(ref);
         const entry = if (index < self.parent.items.len)
             self.parent.items[index]
         else blk: {
@@ -160,9 +160,9 @@ pub const CodeStore = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ResourceLimitExceeded,
         };
-        const id: IntroducedCodeId = @enumFromInt(self.introduced.count());
+        const id: IntroducedCodeId = @fromBackingInt(@intCast(self.introduced.count()));
         self.introduced.putAssumeCapacityNoClobber(hash, owned);
-        const ref: CodeRef = .fromIndex(self.parent.items.len + @intFromEnum(id));
+        const ref: CodeRef = .fromIndex(self.parent.items.len + @backingInt(id));
         return .{
             .view = .{ .code_hash = hash, .bytes = owned, .ref = ref },
             .ref = ref,
@@ -171,11 +171,11 @@ pub const CodeStore = struct {
     }
 
     pub fn introducedView(self: *const CodeStore, id: IntroducedCodeId) CodeView {
-        const entry = self.introduced.entryAt(@intFromEnum(id));
+        const entry = self.introduced.entryAt(@backingInt(id));
         return .{
             .code_hash = entry.key_ptr.*,
             .bytes = entry.value_ptr.*,
-            .ref = .fromIndex(self.parent.items.len + @intFromEnum(id)),
+            .ref = .fromIndex(self.parent.items.len + @backingInt(id)),
         };
     }
 
@@ -216,7 +216,7 @@ test "code store authenticates borrowed codes and owns introduced code" {
     try std.testing.expect(parent_ref != .empty);
     try std.testing.expect(parent_ref != .missing);
     try std.testing.expectEqualSlices(u8, &parent_code, store.view(parent_ref).?.bytes);
-    try std.testing.expect(store.bind([_]u8{0x99} ** 32) == .missing);
+    try std.testing.expect(store.bind(@as([32]u8, @splat(0x99))) == .missing);
     try std.testing.expect(store.bind(crypto.keccak256_empty) == .empty);
 
     const empty = try store.cacheIntroduced(std.testing.allocator, &.{});

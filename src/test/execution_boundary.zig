@@ -445,8 +445,8 @@ test "captured CALL publishes return data and parent memory output after resume"
     var stop_index: ?usize = null;
     for (span.steps, 0..) |row, index| {
         if (row.frame_id != 0) continue;
-        if (row.opcode == @intFromEnum(evmz.Opcode.CALL)) call_index = index;
-        if (row.opcode == @intFromEnum(evmz.Opcode.STOP)) stop_index = index;
+        if (row.opcode == @backingInt(evmz.Opcode.CALL)) call_index = index;
+        if (row.opcode == @backingInt(evmz.Opcode.STOP)) stop_index = index;
     }
 
     const root = span.frames[0];

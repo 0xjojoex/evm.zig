@@ -29,7 +29,7 @@ test "BlockSTF BAL differential contains hostile claims without output divergenc
     const baseline = try block_stf.Exact(.amsterdam).applyAssumeDecoded(scratch, blockInput(
         &pre_state,
         null,
-        roots([_]u8{0xff} ** 32, tx_root, [_]u8{0xff} ** 32),
+        roots(@as([32]u8, @splat(0xff)), tx_root, @as([32]u8, @splat(0xff))),
         null,
     ));
     try std.testing.expectEqual(block_stf.Status.state_root_mismatch, baseline.status);

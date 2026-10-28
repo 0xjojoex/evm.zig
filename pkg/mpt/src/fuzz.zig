@@ -17,9 +17,9 @@ const raw_key_offset = raw_key_len_offset + @sizeOf(u32);
 const corpus_bytes = raw_key_offset + raw_key_capacity;
 
 const Properties = struct {
-    const zero_seed = [_]u8{0} ** corpus_bytes;
+    const zero_seed: [corpus_bytes]u8 = @splat(0);
     const wide_seed = seed: {
-        var bytes = [_]u8{0} ** corpus_bytes;
+        var bytes: [corpus_bytes]u8 = @splat(0);
         bytes[0] = max_entries;
         bytes[8] = 2;
         bytes[16] = max_key_bytes;

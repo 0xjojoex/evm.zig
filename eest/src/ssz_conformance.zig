@@ -164,16 +164,16 @@ fn runStaticFixture(
     serialized: []const u8,
     expectation: Expectation,
 ) !Result {
-    inline for (std.meta.fields(static_schemas.Preset)) |preset_field| {
-        const preset: static_schemas.Preset = @enumFromInt(preset_field.value);
+    inline for (@typeInfo(static_schemas.Preset).@"enum".field_names, @typeInfo(static_schemas.Preset).@"enum".field_values) |preset_field_name, preset_field_value| {
+        const preset: static_schemas.Preset = @fromBackingInt(@intCast(preset_field_value));
         if (fixture.preset == preset) {
-            const PresetSchemas = @field(static_schemas, preset_field.name);
-            inline for (std.meta.fields(static_schemas.Fork)) |fork_field| {
-                const fork: static_schemas.Fork = @enumFromInt(fork_field.value);
+            const PresetSchemas = @field(static_schemas, preset_field_name);
+            inline for (@typeInfo(static_schemas.Fork).@"enum".field_names, @typeInfo(static_schemas.Fork).@"enum".field_values) |fork_field_name, fork_field_value| {
+                const fork: static_schemas.Fork = @fromBackingInt(@intCast(fork_field_value));
                 if (fixture.fork == fork) {
                     return runStaticModule(
                         allocator,
-                        @field(PresetSchemas, fork_field.name),
+                        @field(PresetSchemas, fork_field_name),
                         fixture.handler,
                         serialized,
                         expectation,

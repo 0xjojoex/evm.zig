@@ -2,7 +2,7 @@
     .name = .ssz_bench,
     .version = "0.0.0",
     .fingerprint = 0x18c25cb240364b46,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .evmz = .{
             .path = "../../..",

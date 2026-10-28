@@ -77,8 +77,8 @@ pub fn isBlockRejection(err: anyerror) bool {
     return switch (err) {
         error.ParentHashMismatch, error.BlockNumberMismatch, error.BlobGasOverflow, error.ExtraDataTooLong, error.HeaderSurfaceMismatch, error.InvalidBlockEncoding, error.BlockRlpTooLarge, error.InvalidSignature, error.UnsupportedLegacyV, error.EmptyTransaction, error.InvalidTransactionEnvelope, error.InvalidTransactionFormat, error.UnsupportedTransactionType, error.Overflow => true,
         else => blk: {
-            inline for (@typeInfo(evmz.rlp.ParseError).error_set.?) |field| {
-                if (err == @field(anyerror, field.name)) break :blk true;
+            inline for (@typeInfo(evmz.rlp.ParseError).error_set.error_names.?) |name| {
+                if (err == @field(anyerror, name)) break :blk true;
             }
             break :blk false;
         },
@@ -699,25 +699,25 @@ fn bloomField(allocator: std.mem.Allocator, object: *const JsonObject, key: []co
 
 test "regular block header parser round trips the Amsterdam RLP surface" {
     const header = evmz.eth.ExecutionHeader{
-        .parent_hash = [_]u8{0x11} ** 32,
+        .parent_hash = @as([32]u8, @splat(0x11)),
         .coinbase = .zero,
-        .state_root = [_]u8{0x22} ** 32,
-        .transactions_root = [_]u8{0x33} ** 32,
-        .receipts_root = [_]u8{0x44} ** 32,
-        .logs_bloom = [_]u8{0x55} ** 256,
+        .state_root = @as([32]u8, @splat(0x22)),
+        .transactions_root = @as([32]u8, @splat(0x33)),
+        .receipts_root = @as([32]u8, @splat(0x44)),
+        .logs_bloom = @as([256]u8, @splat(0x55)),
         .number = 1,
         .gas_limit = 30_000_000,
         .gas_used = 21_000,
         .timestamp = 1_000,
         .extra_data = &.{0xaa},
-        .prev_randao = [_]u8{0x66} ** 32,
+        .prev_randao = @as([32]u8, @splat(0x66)),
         .base_fee_per_gas = 7,
-        .withdrawals_root = [_]u8{0x77} ** 32,
+        .withdrawals_root = @as([32]u8, @splat(0x77)),
         .blob_gas_used = 0,
         .excess_blob_gas = 0,
-        .parent_beacon_block_root = [_]u8{0x88} ** 32,
-        .requests_hash = [_]u8{0x99} ** 32,
-        .block_access_list_hash = [_]u8{0xaa} ** 32,
+        .parent_beacon_block_root = @as([32]u8, @splat(0x88)),
+        .requests_hash = @as([32]u8, @splat(0x99)),
+        .block_access_list_hash = @as([32]u8, @splat(0xaa)),
         .slot_number = 3,
     };
     const encoded = try header.encodeAlloc(std.testing.allocator, .amsterdam);

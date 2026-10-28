@@ -40,9 +40,9 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    inline for (@typeInfo(commands).@"struct".decls) |decl| {
-        if (std.mem.eql(u8, decl.name, name)) {
-            return @field(commands, decl.name).run(init, &args);
+    inline for (@typeInfo(commands).@"struct".decl_names) |decl| {
+        if (std.mem.eql(u8, decl, name)) {
+            return @field(commands, decl).run(init, &args);
         }
     }
 
@@ -53,14 +53,14 @@ pub fn main(init: std.process.Init) !void {
 
 fn printUsage() void {
     std.debug.print("usage: evmz-eest <command> [options] [path ...]\n\ncommands:\n", .{});
-    inline for (@typeInfo(commands).@"struct".decls) |decl| {
-        std.debug.print("  {s:<22} {s}\n", .{ decl.name, @field(commands, decl.name).about });
+    inline for (@typeInfo(commands).@"struct".decl_names) |decl| {
+        std.debug.print("  {s:<22} {s}\n", .{ decl, @field(commands, decl).about });
     }
     std.debug.print("\nRun `evmz-eest <command> --help` for command options.\n", .{});
 }
 
 test {
-    inline for (@typeInfo(commands).@"struct".decls) |decl| {
-        _ = @field(commands, decl.name);
+    inline for (@typeInfo(commands).@"struct".decl_names) |decl| {
+        _ = @field(commands, decl);
     }
 }

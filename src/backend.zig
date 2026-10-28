@@ -107,7 +107,7 @@ pub const Backend = union(enum) {
 };
 
 test "witness backend authenticates its root during construction" {
-    const missing_root = [_]u8{0xab} ** 32;
+    const missing_root: [32]u8 = @splat(0xab);
     try std.testing.expectError(
         error.InvalidNode,
         Backend.fromWitness(std.testing.allocator, missing_root, &.{}, &.{}),

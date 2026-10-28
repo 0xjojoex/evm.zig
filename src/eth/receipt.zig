@@ -17,7 +17,7 @@ const Log = vm.Log;
 const TxStatus = vm.TxStatus;
 const TxReceiptView = vm.TxReceiptView;
 
-pub const empty_logs_bloom = [_]u8{0} ** 256;
+pub const empty_logs_bloom: [256]u8 = @splat(0);
 
 const TopicRlp = rlp.Mapped(u256, rlp.FixedBytes(32), struct {
     pub fn toWire(topic: u256) [32]u8 {
@@ -99,7 +99,7 @@ fn transactionType(kind: transaction.TxKind) ?u8 {
 /// Keep this outlined: after callers reuse the result there is only one hot
 /// call site, which Zig otherwise inlines back into the block loop.
 pub noinline fn logsBloom(logs: state.LogBuffer.View) [256]u8 {
-    var bloom = [_]u8{0} ** 256;
+    var bloom: [256]u8 = @splat(0);
     for (0..logs.len()) |index| {
         const event_log = logs.get(index);
         addBloomEntry(&bloom, event_log.address.asBytes());

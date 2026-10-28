@@ -24,7 +24,7 @@ test "SLOAD cold storage access gas comes from the exact spec" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(evmz.Opcode.SLOAD)};
+    const code = [_]u8{@backingInt(evmz.Opcode.SLOAD)};
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
@@ -74,7 +74,7 @@ test "SSTORE gas and state gas come from the exact spec" {
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
     msg.gas_reservoir = 5;
-    const code = [_]u8{@intFromEnum(evmz.Opcode.SSTORE)};
+    const code = [_]u8{@backingInt(evmz.Opcode.SSTORE)};
 
     var frame = try Interpreter.Interpreter(spec).OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,

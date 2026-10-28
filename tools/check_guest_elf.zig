@@ -441,7 +441,7 @@ fn writeTestInt(comptime T: type, bytes: []u8, offset: usize, value: T) void {
 }
 
 fn testHeader(flags: u32) [64]u8 {
-    var bytes = [_]u8{0} ** 64;
+    var bytes: [64]u8 = @splat(0);
     @memcpy(bytes[0..4], "\x7fELF");
     bytes[4] = 2;
     bytes[5] = 1;

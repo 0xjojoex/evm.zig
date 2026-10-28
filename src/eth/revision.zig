@@ -32,7 +32,7 @@ pub const Revision = enum(u8) {
     const Self = @This();
 
     pub fn order(self: Self, other: Self) std.math.Order {
-        return std.math.order(@intFromEnum(self), @intFromEnum(other));
+        return std.math.order(@backingInt(self), @backingInt(other));
     }
 
     pub fn isImpl(self: Self, revision: Self) bool {

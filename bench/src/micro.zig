@@ -307,12 +307,12 @@ fn benchAddmodWide(_: std.mem.Allocator) void {
 
 fn initJumpDestInput(bytes: []u8) void {
     for (bytes, 0..) |*byte, index| {
-        byte.* = @intFromEnum(evmz.Opcode.ADD);
-        if (index % 16 == 0) byte.* = @intFromEnum(evmz.Opcode.PUSH1);
-        if (index % 16 == 1) byte.* = @intFromEnum(evmz.Opcode.JUMPDEST);
-        if (index % 11 == 0) byte.* = @intFromEnum(evmz.Opcode.JUMPDEST);
+        byte.* = @backingInt(evmz.Opcode.ADD);
+        if (index % 16 == 0) byte.* = @backingInt(evmz.Opcode.PUSH1);
+        if (index % 16 == 1) byte.* = @backingInt(evmz.Opcode.JUMPDEST);
+        if (index % 11 == 0) byte.* = @backingInt(evmz.Opcode.JUMPDEST);
     }
-    bytes[bytes.len - 1] = @intFromEnum(evmz.Opcode.JUMPDEST);
+    bytes[bytes.len - 1] = @backingInt(evmz.Opcode.JUMPDEST);
     std.mem.doNotOptimizeAway(bytes[0]);
 }
 

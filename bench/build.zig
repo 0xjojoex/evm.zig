@@ -1,4 +1,5 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 // `b.option` validates these and lists them in `zig build --help`. The values
 // are forwarded verbatim to the evmz dependency, which resolves the accelerated
@@ -7,14 +8,15 @@ const Profile = enum { native, zkvm };
 const KeccakBackend = enum { std, xkcp };
 
 pub fn build(b: *std.Build) void {
+    const test_filters = b.option([]const []const u8, "test-filter", "Compile only matching tests (repeatable)") orelse &.{};
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const micro_optimize = b.option(
-        std.builtin.OptimizeMode,
+        std.lang.Optimize,
         "micro-optimize",
         "Optimization mode for micro benchmark tests",
-    ) orelse if (optimize == .Debug) .ReleaseFast else optimize;
-    const compare_optimize = if (optimize == .Debug) .ReleaseFast else optimize;
+    ) orelse if (optimize == .debug) .fast else optimize;
+    const compare_optimize = if (optimize == .debug) .fast else optimize;
     const micro_filter = b.option(
         []const u8,
         "micro-filter",
@@ -40,9 +42,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    evmc_bindings_mod.addIncludePath(b.path("src"));
-    evmc_bindings_mod.addIncludePath(evmcCHeaders(b, evmone_dep));
-    evmc_bindings_mod.addIncludePath(evmone_dep.path("evmc/include"));
+    const translator = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = "evmc",
+        .c_source_file = b.path("src/evmc_bindings.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translator.addIncludePath(evmcCHeaders(b, evmone_dep));
+    translator.addIncludePath(evmone_dep.path("evmc/include"));
+    evmc_bindings_mod.addImport("evmc_c", translator.mod);
     const vm_loop_support_min = b.option(
         []const u8,
         "bench-support-min",
@@ -68,7 +76,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(vm_loop);
 
         const run_vm_loop = b.addRunArtifact(vm_loop);
-        if (b.args) |args| run_vm_loop.addArgs(args);
+        run_vm_loop.addPassthruArgs();
         b.step("vm-loop", "Run evmz VM-loop fixture runner").dependOn(&run_vm_loop.step);
     }
 
@@ -81,7 +89,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(block_lifecycle);
 
         const run_block_lifecycle = b.addRunArtifact(block_lifecycle);
-        if (b.args) |args| run_block_lifecycle.addArgs(args);
+        run_block_lifecycle.addPassthruArgs();
         b.step("block-lifecycle", "Run VM block lifecycle benchmark").dependOn(&run_block_lifecycle.step);
     }
 
@@ -96,7 +104,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(kernel);
 
         const run_kernel = b.addRunArtifact(kernel);
-        if (b.args) |args| run_kernel.addArgs(args);
+        run_kernel.addPassthruArgs();
         b.step("kernel", "Run pure opcode kernel benchmark").dependOn(&run_kernel.step);
     }
 
@@ -109,7 +117,7 @@ pub fn build(b: *std.Build) void {
         run.setEnvironmentVariable("EVM2_DISPATCH_BACKEND", "packed");
         run.setEnvironmentVariable("CARGO_TARGET_DIR", "evm2/target");
         addNativeRustFlags(run);
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         b.step("evm2-kernel", "Run EVM2 opcode kernel benchmark").dependOn(&run.step);
     }
 
@@ -126,7 +134,7 @@ pub fn build(b: *std.Build) void {
         addNativeRustFlags(run);
         run.setEnvironmentVariable("EVM2_DISPATCH_BACKEND", variant.dispatch);
         run.setEnvironmentVariable("CARGO_TARGET_DIR", variant.target_dir);
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         b.step(variant.step, "Run EVM2 VM-loop fixtures with the selected compiler and dispatch").dependOn(&run.step);
     }
 
@@ -157,7 +165,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(evmone_vm_loop);
 
         const run_evmone_vm_loop = b.addRunArtifact(evmone_vm_loop);
-        if (b.args) |args| run_evmone_vm_loop.addArgs(args);
+        run_evmone_vm_loop.addPassthruArgs();
         b.step("evmone-vm-loop", "Run standalone evmone VM-loop fixture runner").dependOn(&run_evmone_vm_loop.step);
     }
 
@@ -189,7 +197,7 @@ pub fn build(b: *std.Build) void {
             "--support-max",
             vm_loop_support_max,
         });
-        if (b.args) |args| run_compare.addArgs(args);
+        run_compare.addPassthruArgs();
         b.step("compare", "Run VM-core comparison").dependOn(&run_compare.step);
     }
 
@@ -205,7 +213,7 @@ pub fn build(b: *std.Build) void {
             @tagName(native_keccak),
         });
         run_report.setCwd(b.path("."));
-        if (b.args) |args| run_report.addArgs(args);
+        run_report.addPassthruArgs();
         b.step("report", "Run all benchmark layers and write a comparison report").dependOn(&run_report.step);
     }
 
@@ -247,7 +255,8 @@ pub fn build(b: *std.Build) void {
         const bench_tests = b.addTest(.{
             .name = "evmz-bench-tests",
             .root_module = bench_tests_mod,
-            .filters = b.args orelse &.{},
+            .filters = test_filters,
+            .test_runner = .{ .path = evmz_dep.path("tools/test_runner.zig"), .mode = .simple },
         });
         const kernel_tests = b.addTest(.{
             .name = "evmone-kernel-tests",
@@ -257,7 +266,8 @@ pub fn build(b: *std.Build) void {
                 addEvmoneVm(kernel_test_mod, evmone_dep, intx_dep, evmone_libgcc);
                 break :blk kernel_test_mod;
             },
-            .filters = b.args orelse &.{},
+            .filters = test_filters,
+            .test_runner = .{ .path = evmz_dep.path("tools/test_runner.zig"), .mode = .simple },
         });
         const compare_tests = b.addTest(.{
             .name = "compare-tests",
@@ -266,12 +276,19 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
-            .filters = b.args orelse &.{},
+            .filters = test_filters,
+            .test_runner = .{ .path = evmz_dep.path("tools/test_runner.zig"), .mode = .simple },
         });
         const test_step = b.step("test", "Run benchmark sidecar tests");
-        test_step.dependOn(&b.addRunArtifact(bench_tests).step);
-        test_step.dependOn(&b.addRunArtifact(kernel_tests).step);
-        test_step.dependOn(&b.addRunArtifact(compare_tests).step);
+        const run_bench_tests = b.addRunArtifact(bench_tests);
+        run_bench_tests.addPassthruArgs();
+        test_step.dependOn(&run_bench_tests.step);
+        const run_kernel_tests = b.addRunArtifact(kernel_tests);
+        run_kernel_tests.addPassthruArgs();
+        test_step.dependOn(&run_kernel_tests.step);
+        const run_compare_tests = b.addRunArtifact(compare_tests);
+        run_compare_tests.addPassthruArgs();
+        test_step.dependOn(&run_compare_tests.step);
     }
 }
 
@@ -282,7 +299,9 @@ fn addNativeRustFlags(run: *std.Build.Step.Run) void {
 }
 
 fn evmcCHeaders(b: *std.Build, evmone_dep: *std.Build.Dependency) std.Build.LazyPath {
-    const path = evmone_dep.path("evmc/include/evmc/evmc.h").getPath(b);
+    b.graph.poisonCache();
+    const path = evmone_dep.builder.root.joinString(b.allocator, "evmc/include/evmc/evmc.h") catch
+        @panic("OOM");
     var header = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(128 * 1024)) catch
         @panic("cannot read evmone EVMC header");
     // EVMC 19's C header has C++ member initializers. Drop them for @cImport;
@@ -368,7 +387,7 @@ fn benchModule(
     b: *std.Build,
     root: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     evmz_mod: *std.Build.Module,
 ) *std.Build.Module {
     return b.createModule(.{

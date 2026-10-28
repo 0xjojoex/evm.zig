@@ -44,6 +44,7 @@ const pruned_dirs = [_][]const u8{
     "node_modules",
     "fixtures",
     "patches",
+    "vendor",
     "target",
     "output",
 };
@@ -77,7 +78,7 @@ const reflective_markers = [_][]const u8{
     "refAllDecls",
     "@hasDecl",
     "@field(",
-    ".decls",
+    ".decl_names",
     "usingnamespace",
 };
 
@@ -379,7 +380,7 @@ fn scanDeclarations(
         if (std.mem.indexOf(u8, file.text, marker) != null) return;
     }
 
-    var tree = try Ast.parse(arena, file.text, .zig);
+    var tree = try Ast.parse(arena, file.text, .{});
     defer tree.deinit(arena);
     // Syntax errors are the compiler's business, and the AST is unusable here.
     if (tree.errors.len != 0) return;

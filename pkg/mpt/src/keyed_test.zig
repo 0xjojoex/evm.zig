@@ -10,7 +10,7 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
         namespace: u8,
 
         pub inline fn trieKey(self: @This(), key: DomainKey) mpt.FixedKey {
-            const input = [_]u8{ self.namespace, @intFromEnum(key) };
+            const input = [_]u8{ self.namespace, @backingInt(key) };
             return mpt.StdKeccak256Context.keccak256(.{}, &input);
         }
     };
@@ -56,7 +56,7 @@ test "typed key facade delegates root, proof, and fixed update to structural MPT
 test "typed key facade detects collisions after projection" {
     const KeyContext = struct {
         pub fn trieKey(_: @This(), _: u8) mpt.FixedKey {
-            return [_]u8{0x11} ** 32;
+            return @as([32]u8, @splat(0x11));
         }
     };
     const Structural = mpt.Trie(mpt.StdKeccak256Context);
