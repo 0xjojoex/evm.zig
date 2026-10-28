@@ -24,10 +24,10 @@
             .hash = "N-V-__8AAFwQbQAc-L8ZUw4rqyk_OWdYX4-V8crqiWlJ1dhl",
             .lazy = true,
         },
+        // Imported by build.zig before lazy dependencies can be requested.
         .translate_c = .{
             .url = "git+https://codeberg.org/ziglang/translate-c.git#02ff0c523fb92a38939b04d0145c4a9602a74d56",
             .hash = "translate_c-2.0.0-Q_BUWltOBwBYABF84EUL208pIFeUIwbBs29FmVBaafN5",
-            .lazy = true,
         },
     },
     .paths = .{
