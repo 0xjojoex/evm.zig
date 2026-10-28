@@ -58,6 +58,7 @@ on:
         default: zisk
         type: choice
         options:
+          - all
           - zisk
           - sp1
           - openvm
