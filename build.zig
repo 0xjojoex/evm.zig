@@ -1355,7 +1355,10 @@ fn buildOpenVmProvider(b: *std.Build) std.Build.LazyPath {
     const target_dir = std.Build.LazyPath.cache_root.path(b, "openvm-provider");
     const build_provider = b.addSystemCommand(&.{"sh"});
     build_provider.addFileArg(b.path("guest/runtime/openvm/provider/build.sh"));
-    const archive = build_provider.addOutputFileArg("libevmz_openvm_crypto_provider.a");
+    // The provider script changes directory before writing the archive.
+    const archive = build_provider.addOutputFileArg2("libevmz_openvm_crypto_provider.a", .{
+        .make_absolute = true,
+    });
     build_provider.addFileArg(manifest);
     build_provider.addDirectoryArg2(target_dir, .{ .make_absolute = true });
     for ([_][]const u8{
@@ -2010,7 +2013,8 @@ fn buildBlstLibrary(
         .aarch64, .x86_64 => {
             const blst_flags = &[_][]const u8{ "-O2", "-ffreestanding", "-D__BLST_PORTABLE__" };
             module.addCSourceFile(.{ .file = blst_dep.path("src/server.c"), .flags = blst_flags });
-            module.addAssemblyFile(blst_dep.path("build/assembly.S"));
+            // Match the C feature selection even when the target enables ADX.
+            module.addCSourceFile(.{ .file = blst_dep.path("build/assembly.S"), .flags = blst_flags });
         },
         else => {
             const blst_flags = &[_][]const u8{ "-O2", "-ffreestanding", "-D__BLST_PORTABLE__", "-D__BLST_NO_ASM__" };
