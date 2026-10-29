@@ -1562,11 +1562,16 @@ fn nativePrecompileDeps(
     const translate_c = b.lazyDependency("translate_c", .{}) orelse return null;
     const translator: Translator = .init(translate_c, .{
         .name = "precompile",
-        .c_source_file = b.addWriteFiles().add("precompile.h", "#include <bn254.h>\n#include <bls12.h>\n#include <kzg.h>\n"),
+        .c_source_file = b.addWriteFiles().add(
+            "precompile.h",
+            "#include <bn254.h>\n#include <bls12.h>\n#include <kzg.h>\n#include <blst.h>\n",
+        ),
         .target = target,
         .optimize = optimize,
     });
     translator.addIncludePath(b.path("src/precompile"));
+    // `crypto.bls` calls blst directly.
+    translator.addIncludePath(blst_dep.path("bindings"));
     return .{
         .bindings = translator.mod,
         .object = buildNativePrecompileObject(b, target, optimize, blst_dep, mcl_dep, pic),

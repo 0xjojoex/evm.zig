@@ -52,6 +52,10 @@ Added
   raw-x ECDH over libsecp256k1 behind a seeded, allocator-backed `Context`,
   so a node built on evmz shares one curve implementation with the EVM
   instead of linking its own. Native profile only.
+- `crypto.bls`: consensus-layer BLS verification over blst (validated
+  `PublicKey`, an `Aggregate` of keys, and `verify` with the
+  proof-of-possession ciphersuite), which together make `FastAggregateVerify`
+  for light clients. Native profile only.
 - `CompileOptions.transaction_journal`: an embedding-owned journal whose
   checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
   with it. See `examples/transaction_journal.zig`.

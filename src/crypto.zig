@@ -1,10 +1,11 @@
 //! Hashing and signature primitives (keccak256, sha256, ecrecover) plus the
-//! secp256k1 key, signing, and ECDH surface in `secp256k1`.
+//! secp256k1 key, signing, and ECDH surface in `secp256k1`, and the
+//! consensus layer's BLS signature verification in `bls`.
 //!
 //! The backing provider is selected at build time by the crypto profile
 //! (`native` or `zkvm`). Native builds can select the `std` or `xkcp` Keccak
-//! backend; secp256k1 is always libsecp256k1 there. zkVM builds stay on their
-//! custom accelerator provider and only recover.
+//! backend; secp256k1 is always libsecp256k1 there, and BLS is blst. zkVM
+//! builds stay on their custom accelerator provider and only recover.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -14,6 +15,12 @@ const zkvm = @import("./crypto/zkvm_accelerators.zig");
 pub const secp256k1 = switch (build_options.profile) {
     .native => @import("./crypto/secp256k1.zig"),
     .zkvm => @compileError("crypto.secp256k1 needs the native profile; the zkVM profile only recovers"),
+};
+
+/// BLS signature verification as the consensus layer uses it. Native profile only.
+pub const bls = switch (build_options.profile) {
+    .native => @import("./crypto/bls.zig"),
+    .zkvm => @compileError("crypto.bls needs the native profile"),
 };
 
 pub const provider_name = @tagName(build_options.profile);
@@ -253,5 +260,8 @@ test "libsecp256k1 recovery matches the std reference" {
 }
 
 test {
-    if (build_options.profile == .native) _ = secp256k1;
+    if (build_options.profile == .native) {
+        _ = secp256k1;
+        _ = bls;
+    }
 }
