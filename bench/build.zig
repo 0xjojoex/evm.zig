@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
         "Only run micro benchmark tests whose names contain this filter",
     );
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
-    const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
+    const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .xkcp;
 
     const evmz_dep = b.dependency("evmz", .{
         .target = target,

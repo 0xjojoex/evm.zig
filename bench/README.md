@@ -18,6 +18,9 @@ zig build compare -- --fixture fixtures/vm-loop/erc20-transfer
 
 From the repo root, use `zig build bench-compare`. Raw stdout/stderr plus
 `summary.csv` and `summary.json` are written under ignored `zig-out/compare/`.
+Native builds default to XKCP Keccak on supported architectures, matching the
+root build. Pass `-Dnative-keccak=std` to select Zig's implementation; standalone
+`evmz-compare` and `scripts/report.py` accept `--native-keccak std` instead.
 The compare lane defaults all engines to `--spec osaka`; pass `--spec` only
 when intentionally testing another shared fork.
 For the fair scoreboard, all compared engines explicitly omit frame pointers:
@@ -54,7 +57,7 @@ as earlier x86-64 context.
 
 ### Apple M1 Max / macOS arm64 — 2026-08-13
 
-This snapshot enables evmz's optional XKCP Keccak provider for its
+This snapshot explicitly selects evmz's XKCP Keccak provider for its
 maximum-performance configuration. It uses a 100 ms discarded warmup and five complete repeats; each cell is the median of
 five 100-run medians per deployed-runtime call. Run the command five times with a distinct `--out-dir`;
 the table takes the median `median_ms` for each fixture/engine row from those

@@ -89,8 +89,8 @@ pub fn build(b: *std.Build) void {
     const requested_native_keccak = b.option(
         KeccakBackend,
         "native-keccak",
-        "Native Keccak backend (ignored by profile=zkvm)",
-    ) orelse .std;
+        "Native Keccak backend (default xkcp where supported; ignored by profile=zkvm)",
+    ) orelse .xkcp;
     const native_keccak = resolveNativeKeccak(profile, target, requested_native_keccak);
     const pic = b.option(bool, "pic", "Build the public evmz module as position-independent code") orelse false;
     const evmz_build = EvmzBuildConfig{

@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zig-exe", default="zig")
     parser.add_argument("--optimize", default="ReleaseFast")
     parser.add_argument("--profile", choices=("native", "zkvm"), default="native")
-    parser.add_argument("--native-keccak", choices=("std", "xkcp"), default="std")
+    parser.add_argument("--native-keccak", choices=("std", "xkcp"), default="xkcp")
     parser.add_argument("--out-dir", default="../output/bench-report")
     parser.add_argument("--report")
     parser.add_argument("--checkpoint")

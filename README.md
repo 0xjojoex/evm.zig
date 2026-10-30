@@ -46,6 +46,11 @@ exe.root_module.addImport("rlp", evmz.module("rlp")); // also: mpt, ssz
 configuring the EVM core — and without fetching any C dependency — pass
 `.core = false` to `b.dependency`. For a zkVM guest, pass `.profile = .zkvm`.
 
+Native Keccak defaults to XKCP on `x86_64`, `aarch64`, and `riscv64`, falling
+back to Zig's `std` on other architectures. Use `-Dnative-keccak=std` (or
+`.@"native-keccak" = .std` in dependency options) to select `std` explicitly.
+The zkVM profile ignores this option and keeps its accelerator provider.
+
 This follows `main`; pin a commit for reproducible builds. Each release
 supports one Zig minor, and every module ships at the package version — see
 [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
