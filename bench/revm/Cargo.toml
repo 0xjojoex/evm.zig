@@ -1,8 +1,0 @@
-[package]
-name = "evmz-revm-kernel"
-version = "0.1.0"
-edition = "2021"
-publish = false
-
-[dependencies]
-revm = "=43.0.2"

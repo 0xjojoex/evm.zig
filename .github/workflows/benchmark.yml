@@ -28,7 +28,7 @@ on:
         required: false
         default: ""
       engines:
-        description: "Engine set: all, evmz, evmone, revm, or comma-separated engine names"
+        description: "Engine set: all, evmz, evmone, evm2, or comma-separated engine names"
         required: true
         default: "all"
 
@@ -65,10 +65,12 @@ jobs:
           sudo apt-get install -y build-essential pkg-config
 
       - name: Install Rust
-        if: ${{ inputs.engines == 'all' || contains(inputs.engines, 'revm') }}
+        if: ${{ inputs.engines == 'all' || contains(inputs.engines, 'evm2') }}
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.96.0 --profile minimal
+          if [[ "$ENGINES" == *nightly* || "$ENGINES" == *evm2-tail* ]]; then
+            rustup toolchain install nightly-2026-06-01 --profile minimal
+          fi
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -91,8 +93,13 @@ jobs:
             zig version
             zig env
             echo
-            rustc -Vv
-            cargo -V
+            if [[ "$ENGINES" == "all" || "$ENGINES" == *evm2* ]]; then
+              rustc +1.96.0 -Vv
+              cargo +1.96.0 -V
+            fi
+            if [[ "$ENGINES" == *nightly* || "$ENGINES" == *evm2-tail* ]]; then
+              rustc +nightly-2026-06-01 -Vv
+            fi
           } | tee "bench/${OUT_DIR}/environment.txt"
 
       - name: Run selected-fork comparison

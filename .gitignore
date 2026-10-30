@@ -5,7 +5,7 @@ zig-pkg/
 __pycache__/
 .venv/
 *.egg-info/
-bench/revm/target/
+bench/evm2/target/
 output/
 .kraft/
 guest/runtime/**/target/

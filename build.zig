@@ -473,12 +473,12 @@ pub fn build(b: *std.Build) void {
         addBenchDelegate(b, "bench-test", "Run benchmark sidecar tests", "test", null, evmz_build, null);
         addBenchRevisionDelegate(b, "bench-vm-loop", "Run evmz VM-loop fixture runner", "vm-loop", bench_optimize_name, bench_support_min, bench_support_max, evmz_build);
         addBenchDelegate(b, "bench-evmone-vm-loop", "Run standalone evmone VM-loop fixture runner", "evmone-vm-loop", bench_optimize_name, evmz_build, null);
-        addBenchDelegate(b, "bench-revm-vm-loop", "Run revm VM-loop fixture runner", "revm-vm-loop", null, evmz_build, null);
+        addBenchDelegate(b, "bench-evm2-vm-loop", "Run EVM2 VM-loop fixture runner", "evm2-vm-loop", null, evmz_build, null);
         addBenchRevisionDelegate(b, "bench-compare", "Run VM-core comparison", "compare", bench_optimize_name, bench_support_min, bench_support_max, evmz_build);
         addBenchDelegate(b, "bench-block-lifecycle", "Run VM block lifecycle benchmark", "block-lifecycle", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name, evmz_build, null);
-        addBenchDelegate(b, "bench-revm-kernel", "Run revm opcode kernel benchmark", "revm-kernel", null, evmz_build, null);
+        addBenchDelegate(b, "bench-evm2-kernel", "Run EVM2 opcode kernel benchmark", "evm2-kernel", null, evmz_build, null);
         addBenchDelegate(b, "bench-report", "Run all benchmark layers and write a comparison report", "report", bench_optimize_name, evmz_build, null);
         addBenchMicroDelegate(b, bench_optimize_name, bench_micro_filter, evmz_build);
     }

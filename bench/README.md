@@ -7,8 +7,8 @@ This sidecar is for measurement harnesses that are not EEST fixtures.
 `zig build compare` is the VM-core scoreboard lane for the VM-loop fixtures. It
 runs each engine through an interpreter-level path: evmz through direct
 bound-interpreter `execute()`, evmone baseline and advanced through a
-standalone C++ runner with analysis prepared once, and revm through the Rust
-sidecar with analyzed `Bytecode`:
+standalone C++ runner with analysis prepared once, and EVM2 through a Rust
+sidecar with prepared bytecode:
 
 ```sh
 cd bench
@@ -25,10 +25,13 @@ The compare lane defaults all engines to `--spec osaka`; pass `--spec` only
 when intentionally testing another shared fork.
 For the fair scoreboard, all compared engines explicitly omit frame pointers:
 Zig/C++ modules use the corresponding compiler setting (and evmone C++ uses
-`-fomit-frame-pointer`), while revm uses `-C force-frame-pointers=no`.
+`-fomit-frame-pointer`), while all Rust variants use `-C force-frame-pointers=no`.
+The stable Rust rows use the pinned `1.96.0` toolchain, native CPU tuning, fat LTO,
+and one codegen unit. Install it with `rustup toolchain install 1.96.0 --profile minimal`.
 Use repeated `--engine` filters for narrower runs. `--engine evmz` runs only
-evmz, while `--engine evmone` expands to both evmone baseline and advanced, and
-`--engine revm` expands to `revm-interpreter`.
+evmz, while `--engine evmone` expands to both evmone baseline and advanced.
+`--engine evm2` selects
+`evm2-interpreter`.
 
 The executor/transaction comparison is intentionally a later lane. For now
 `evmz-executor` remains available as a diagnostic target, but it is not mixed
@@ -41,55 +44,96 @@ Current VM-core rows:
 | `evmz`             | exact-spec tail interpreter   | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | bound-interpreter `execute()`                   | no                       |
 | `evmone-baseline`  | analyzed baseline interpreter | fixture loading, init-code deployment through EVMC, `baseline::analyze`                           | `baseline::execute` over `CodeAnalysis`         | no                       |
 | `evmone-advanced`  | analyzed advanced interpreter | fixture loading, init-code deployment through EVMC, `advanced::analyze`                           | `advanced::execute` over `AdvancedCodeAnalysis` | no                       |
-| `revm-interpreter` | raw interpreter loop          | fixture loading, init-code deployment, `Bytecode` legacy analysis; per-run interpreter/host setup | `Interpreter::run_plain`                        | no                       |
+| `evm2-interpreter` | packed interpreter loop       | fixture loading, init-code deployment, forced jump analysis; per-run interpreter/host setup | `Interpreter::run` | no |
+
+EVM2 is pinned to `f93318f120f6300599b21170d6c7bef81ed63d87`, the revision used
+by Reth v2.9.0. The default build explicitly selects `EVM2_DISPATCH_BACKEND=packed`.
+Only the standard library, map hasher, and assembly Keccak features are enabled: this lane never
+executes precompiles or nested CALL/CREATE frames. LOG rows include each
+interpreter's own log construction costs; the mock hosts discard logs.
+
+All EVM2 interpreter variants emit an untimed reference call's gas used, deployed-code
+hash, and return-output hash. `compare` rejects a mismatch between selected EVM2
+interpreter rows. These fields, plus EVM2's dispatch, compiler version, and revision,
+are retained in summary JSON/CSV and raw stderr. This is a bounded fixture check, not an EEST or full-block result.
+
+```sh
+zig build compare -- --engine evmz --engine evm2 --num-runs 100 --warmup-ms 100
+zig build evm2-vm-loop -- --fixture fixtures/vm-loop/erc20-transfer --summary
+cargo +1.96.0 test --locked --manifest-path evm2/Cargo.toml
+```
+
+Nightly EVM2 rows are opt-in. `evm2-tail` selects `EVM2_DISPATCH_BACKEND=tco`;
+`evm2-packed-nightly` runs packed dispatch on the same `nightly-2026-06-01`
+compiler, isolating dispatch changes from stable/nightly compiler differences.
+Both keep the same dependency revision, feature set, and optimization flags.
+Each variant has its own Cargo target directory to preserve its compiled binary
+when switching backends. Summaries identify the compiled variant; the comparison
+rejects a runner whose engine label differs from the requested row. JIT is separate.
+
+```sh
+rustup toolchain install nightly-2026-06-01 --profile minimal
+zig build compare -- --engine evmz --engine evm2 \
+  --engine evm2-packed-nightly --engine evm2-tail
+zig build evm2-tail-vm-loop -- --fixture fixtures/vm-loop/arithmetic-loop --summary
+zig build report -- --evm2-nightly
+```
 
 Future transaction/integration rows should stay separate, for example
-`evmz-executor`, `revm-transact`, or an evmone transaction shim. Keep the
+`evmz-executor`, `evm2-transact`, or an evmone transaction shim. Keep the
 `scope` column visible whenever VM-core rows are compared.
 
 ## Published snapshots
 
-The native snapshots the root README excerpts. Both are fixed-Osaka, native
-`ReleaseFast`, with frame pointers omitted for every engine. Lower is better.
-`base/evmz` and `revm/evmz` above `1.00×` mean evmz is faster. The M1 snapshot
-is refreshed from the current tail-dispatch tree; the AMD snapshot is retained
-as earlier x86-64 context.
+The current Apple M1 Max snapshot uses EVM2 stable packed dispatch. The AMD
+snapshot retains its historical revm baseline. Both are fixed-Osaka, native
+`ReleaseFast`, with frame pointers omitted for every engine. Lower is better;
+ratios above `1.00×` mean evmz is faster than the named baseline.
 
-### Apple M1 Max / macOS arm64 — 2026-08-13
+### Apple M1 Max / macOS arm64 — 2026-10-30
 
-This snapshot explicitly selects evmz's XKCP Keccak provider for its
-maximum-performance configuration. It uses a 100 ms discarded warmup and five complete repeats; each cell is the median of
-five 100-run medians per deployed-runtime call. Run the command five times with a distinct `--out-dir`;
-the table takes the median `median_ms` for each fixture/engine row from those
-five `summary.csv` files:
+Evmz explicitly selects the XKCP Keccak provider. EVM2 uses Rust 1.96.0, packed
+dispatch and revision `f93318f120f6300599b21170d6c7bef81ed63d87`, pinned to
+Reth v2.9.0. Rust uses native CPU tuning, fat LTO and one codegen unit.
+
+Each cell is the median of five 100-call medians per deployed-runtime fixture,
+with a 100 ms discarded warmup before each fixture/engine run. Engine order
+rotates between rounds. These are interpreter-level measurements with the
+fixture's null or mock host; deployment, bytecode preparation and per-call
+interpreter/host setup are outside timing.
+
+From the repository root, run this command five times with a distinct
+`--out-dir`; rotate engine order with repeated `--engine` filters. Aggregate each fixture/engine's `median_ms`
+from the five `summary.csv` files:
 
 ```sh
 zig build bench-compare -Dbench-optimize=ReleaseFast \
   -Dbench-support-min=osaka -Dbench-support-max=osaka \
   -Dnative-keccak=xkcp \
-  -- --spec osaka --num-runs 100 --warmup-ms 100
+  -- --spec osaka --num-runs 100 --warmup-ms 100 \
+  --out-dir ../output/readme-evm2-20261030/round-1
 ```
 
-| VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
-| ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
-| Arithmetic loop         |  0.104 ms |    0.109 ms |   0.325 ms |  0.501 ms |     1.05× |     4.82× |
-| Memory MSTORE loop      |  0.125 ms |    0.084 ms |   0.252 ms |  0.400 ms |     0.67× |     3.20× |
-| Keccak loop             |  2.657 ms |    3.508 ms |   3.592 ms |  2.705 ms |     1.32× |     1.02× |
-| Ten-thousand hashes     |  0.865 ms |    0.741 ms |   1.630 ms |  2.057 ms |     0.86× |     2.38× |
-| Storage SLOAD loop      |  0.150 ms |    0.595 ms |   0.642 ms |  0.351 ms |     3.97× |     2.34× |
-| Storage SSTORE loop     |  0.162 ms |    0.854 ms |   0.882 ms |  0.875 ms |     5.27× |     5.40× |
-| LOG0 / 0-byte data      |  0.043 ms |    0.030 ms |   0.082 ms |  0.126 ms |     0.69× |     2.94× |
-| LOG0 / 32-byte data     |  0.057 ms |    0.033 ms |   0.083 ms |  0.308 ms |     0.58× |     5.40× |
-| LOG4 / 0-byte data      |  0.090 ms |    0.072 ms |   0.148 ms |  0.265 ms |     0.80× |     2.94× |
-| LOG4 / 32-byte data     |  0.084 ms |    0.082 ms |   0.148 ms |  0.408 ms |     0.98× |     4.86× |
-| ERC20 mint              |  1.770 ms |    3.847 ms |   4.709 ms |  3.641 ms |     2.17× |     2.06× |
-| ERC20 transfer          |  3.761 ms |    6.247 ms |   7.415 ms |  6.084 ms |     1.66× |     1.62× |
-| ERC20 approval+transfer |  3.453 ms |    4.957 ms |   5.961 ms |  4.682 ms |     1.44× |     1.36× |
-| Snailtracer             | 19.965 ms |   59.804 ms |  79.322 ms | 37.990 ms |     3.00× |     1.90× |
+| VM-loop fixture | evmz | evmone-base | evmone-adv | EVM2 packed | base/evmz | EVM2/evmz |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Arithmetic loop | 0.092 ms | 0.110 ms | 0.328 ms | 0.238 ms | 1.19× | 2.59× |
+| Memory MSTORE loop | 0.094 ms | 0.085 ms | 0.264 ms | 0.178 ms | 0.90× | 1.90× |
+| Keccak loop | 2.740 ms | 3.602 ms | 3.723 ms | 2.580 ms | 1.31× | 0.94× |
+| Ten-thousand hashes | 0.830 ms | 0.763 ms | 1.672 ms | 1.775 ms | 0.92× | 2.14× |
+| Storage SLOAD loop | 0.149 ms | 0.592 ms | 0.665 ms | 0.450 ms | 3.97× | 3.02× |
+| Storage SSTORE loop | 0.163 ms | 1.039 ms | 1.013 ms | 0.933 ms | 6.38× | 5.73× |
+| LOG0 / 0-byte data | 0.044 ms | 0.030 ms | 0.082 ms | 0.090 ms | 0.68× | 2.04× |
+| LOG0 / 32-byte data | 0.060 ms | 0.034 ms | 0.085 ms | 0.090 ms | 0.56× | 1.49× |
+| LOG4 / 0-byte data | 0.089 ms | 0.070 ms | 0.152 ms | 0.115 ms | 0.78× | 1.29× |
+| LOG4 / 32-byte data | 0.080 ms | 0.083 ms | 0.148 ms | 0.110 ms | 1.03× | 1.37× |
+| ERC20 mint | 1.744 ms | 4.029 ms | 4.946 ms | 3.731 ms | 2.31× | 2.14× |
+| ERC20 transfer | 3.704 ms | 6.435 ms | 7.841 ms | 5.889 ms | 1.74× | 1.59× |
+| ERC20 approval+transfer | 3.409 ms | 5.063 ms | 6.120 ms | 4.491 ms | 1.49× | 1.32× |
+| Snailtracer | 20.666 ms | 60.723 ms | 80.553 ms | 35.627 ms | 2.94× | 1.72× |
 
 ### AMD EPYC Genoa / Linux x86-64
 
-A KVM guest pinned to one CPU.
+Historical revm snapshot from a KVM guest pinned to one CPU.
 
 | VM-loop fixture         |      evmz | evmone-base | evmone-adv |  revm-int | base/evmz | revm/evmz |
 | ----------------------- | --------: | ----------: | ---------: | --------: | --------: | --------: |
@@ -147,14 +191,14 @@ scoreboard rows.
 
 `zig build vm-loop` implements the simple evm-bench fixture protocol for evmz.
 `zig build evmone-vm-loop` is the standalone C++ analyzed evmone runner used by
-compare/report. `zig build revm-vm-loop` runs the same fixtures through revm's
-low-level interpreter path:
+compare/report. `zig build evm2-vm-loop` runs the same fixtures through
+EVM2’s low-level interpreter path:
 
 ```sh
 cd bench
 zig build vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes
 zig build evmone-vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes --mode baseline
-zig build revm-vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes
+zig build evm2-vm-loop -- --fixture fixtures/vm-loop/ten-thousand-hashes
 zig build vm-loop -- --fixture fixtures/vm-loop/erc20-mint --summary
 zig build vm-loop -- --engine evmz --fixture fixtures/vm-loop/erc20-mint --summary
 zig build vm-loop -- \
@@ -198,15 +242,15 @@ Host profiles:
 Every runtime call receives fresh transaction-scoped mock-host state. Storage
 slots track value and warmth independently, so the first access to a slot is
 cold and later accesses in that call are warm even when the stored value is
-zero. Evmz and evmone expose separate access plus get/set callbacks; revm's
+zero. Evmz and evmone expose separate access plus get/set callbacks; EVM2’s
 low-level host combines those operations, so callback counts remain visible.
 
 Precompiles and real state execution should stay in dedicated kernel or
 integration lanes. This layer is intentionally about deployed runtime bytecode
-calls. The standalone evmone runner and revm sidecar use small in-memory hosts
-for the fixture protocol. The revm VM-loop runner analyzes bytecode and times
-`Interpreter::run_plain()`; it does not include revm transaction validation,
-finalization, or journal/database setup.
+calls. The standalone evmone runner and EVM2 sidecar use small in-memory hosts
+for the fixture protocol. The EVM2 runner prepares jump analysis and times
+`Interpreter::run()`; transaction validation, finalization and database setup
+are outside this lane.
 
 ## Block lifecycle runner
 
@@ -245,12 +289,12 @@ bound-interpreter `execute()` after bytecode generation and interpreter
 initialization. It uses the null host and fails if a case touches host callbacks.
 The default comparison mode is native release for the Rust sidecar: Zig uses
 `ReleaseFast`, evmone is compiled into the Zig benchmark binary with the same
-optimization mode. Revm uses Cargo `--release` with
+optimization mode. EVM2 uses Cargo `--release` with
 `RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=no"`, fat LTO, and one
 codegen unit.
 
 Kernel case bytecode lives in `fixtures/kernel/*.hex`. Both the Zig runner and
-the revm sidecar read the same fixture files, then repeat or cycle non-empty
+the EVM2 sidecar read the same fixture files, then repeat or cycle non-empty
 lines to build the requested iteration count. Branch fixtures use repeatable
 relative `PC + offset` targets so the same fixture line can be reused at any
 bytecode offset.
@@ -260,14 +304,14 @@ cd bench
 zig build kernel -- --case mulmod --case addmod --repeats 5 --warmups 1
 zig build kernel -- --case push-pop --iterations 1000000 --repeats 3
 zig build kernel -- --engine evmz --engine evmone-baseline --engine evmone --case add
-zig build revm-kernel -- --case add --case mulmod
+zig build evm2-kernel -- --case add --case mulmod
 zig build kernel -- --engine evmz --engine evmone-baseline --engine evmone --tier edge --tier branch --iterations 10000
 ```
 
 CSV columns:
 
 ```text
-suite,engine,case,repeat,iterations,bytecode_bytes,elapsed_ns,ns_per_iter,gas_used,host_calls
+suite,engine,case,repeat,iterations,bytecode_bytes,capture_bytes,bytes_per_iter,elapsed_ns,ns_per_iter,gas_used,host_calls
 ```
 
 The Zig kernel runner supports `evmz`, `evmone-baseline`, and
@@ -275,10 +319,13 @@ The Zig kernel runner supports `evmz`, `evmone-baseline`, and
 times only bound-interpreter `execute()` after bytecode generation and interpreter
 initialization. evmone rows time the EVMC `execute` call.
 
-The revm runner is a small Rust sidecar under `bench/revm`. It emits the same
-CSV columns, but runs through revm's transaction API and reports execution gas
-with the 21,000 intrinsic transaction gas subtracted. Treat it as a second
-baseline, not a perfectly identical interpreter-only measurement.
+The EVM2 runner shares `bench/evm2` with the VM-loop runner. It emits the same
+CSV columns with engine `evm2-interpreter`, times only `Interpreter::run()` and
+reports execution gas directly. Bytecode construction, jump analysis and
+interpreter/host initialization are excluded. Cases use the null host and fail
+on host callbacks. Stable packed dispatch is the kernel comparison default.
+The report rejects kernel bytecode-size or gas mismatches across engines and
+any host callbacks before rendering the comparison.
 
 Case tiers:
 
@@ -290,7 +337,7 @@ Case tiers:
 ## Comparison report
 
 `zig build report` runs the VM-loop fixtures and opcode kernels across
-evmz/evmone/revm. It
+evmz/evmone/EVM2. It
 writes raw CSVs, a Markdown report, and a compact evmz checkpoint JSON:
 
 ```sh
@@ -308,7 +355,7 @@ zig build bench-report -- --out-dir ../output/bench-report
 ```
 
 The default lane is native release for the Rust sidecar: Zig/C++ runners use
-`ReleaseFast`, and revm uses `cargo --release` with `target-cpu=native`,
+`ReleaseFast`, and all Rust variants use `cargo +1.96.0 --release` with `target-cpu=native`,
 `force-frame-pointers=no`, fat LTO, and one codegen unit.
 Reports and checkpoints should stay under ignored `output/`; they are local
 measurement artifacts, not source fixtures. Use `--checkpoint <path>` to write
