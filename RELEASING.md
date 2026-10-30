@@ -19,7 +19,7 @@ a compatibility break exactly like renaming a function.
 
 | Fetch | Options | Modules | Native dependencies fetched |
 | --- | --- | --- | --- |
-| root | *(none)* | `evmz`, `rlp`, `mpt`, `ssz` | ckzg, blst, mcl — lazy, on demand |
+| root | *(none)* | `evmz`, `rlp`, `mpt`, `ssz` | blst, mcl, libsecp256k1, XKCP (on supported architectures) — lazy, on demand |
 | root | `-Dcore=false` | `rlp`, `mpt`, `ssz` | none |
 | root | `-Dprofile=zkvm` | `evmz` (guest) | none |
 

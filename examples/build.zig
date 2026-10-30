@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const profile = b.option(Profile, "profile", "Build profile") orelse .native;
-    const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .std;
+    const native_keccak = b.option(KeccakBackend, "native-keccak", "Native Keccak backend") orelse .xkcp;
     const selected_path = b.option(
         []const u8,
         "example-name",
