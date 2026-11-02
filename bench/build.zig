@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     evmc_bindings_mod.addIncludePath(b.path("src"));
+    evmc_bindings_mod.addIncludePath(evmcCHeaders(b, evmone_dep));
     evmc_bindings_mod.addIncludePath(evmone_dep.path("evmc/include"));
     const vm_loop_support_min = b.option(
         []const u8,
@@ -280,6 +281,23 @@ fn addNativeRustFlags(run: *std.Build.Step.Run) void {
     run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1");
 }
 
+fn evmcCHeaders(b: *std.Build, evmone_dep: *std.Build.Dependency) std.Build.LazyPath {
+    const path = evmone_dep.path("evmc/include/evmc/evmc.h").getPath(b);
+    var header = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(128 * 1024)) catch
+        @panic("cannot read evmone EVMC header");
+    // EVMC 19's C header has C++ member initializers. Drop them for @cImport;
+    // the field types and ABI remain unchanged.
+    for ([_][]const u8{ "left", "spilled" }) |field| {
+        const before = b.fmt("int64_t {s} = 0;", .{field});
+        std.debug.assert(std.mem.count(u8, header, before) == 1);
+        header = std.mem.replaceOwned(u8, b.allocator, header, before, b.fmt("int64_t {s};", .{field})) catch
+            @panic("OOM");
+    }
+    const files = b.addWriteFiles();
+    _ = files.add("evmc/evmc.h", header);
+    return files.getDirectory();
+}
+
 fn addEvmoneVm(
     module: *std.Build.Module,
     evmone_dep: *std.Build.Dependency,
@@ -304,7 +322,7 @@ fn addEvmoneVm(
         "-fomit-frame-pointer",
         "-fno-exceptions",
         "-fno-rtti",
-        "-DPROJECT_VERSION=\"0.23.0\"",
+        "-DPROJECT_VERSION=\"0.25.0\"",
     };
     const c_flags = &[_][]const u8{
         "-Wall",

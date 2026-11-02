@@ -204,16 +204,16 @@ sizing, schema pinning, and proof-readiness checks.
 ## Performance
 
 VM-loop snapshot on Apple M1 Max / macOS arm64, measured 2026-10-30 with fixed
-Osaka, native `ReleaseFast` and evmz's XKCP Keccak provider. EVM2 uses stable packed dispatch
-on Rust 1.96.0. Each cell is the median of five 100-call medians, with 100 ms
-discarded warmup per fixture/engine. Lower is better:
+Osaka, native `ReleaseFast` and evmz's XKCP Keccak provider. Evmone is v0.25.0;
+EVM2 uses stable packed dispatch on Rust 1.96.0. Each cell is the median of five
+100-call medians, with 100 ms discarded warmup per fixture/engine. Lower is better:
 
 | Fixture | evmz | evmone-base | EVM2 packed |
 | --- | ---: | ---: | ---: |
-| Arithmetic loop | **0.092 ms** | 0.110 ms | 0.238 ms |
-| Storage SSTORE loop | **0.163 ms** | 1.039 ms | 0.933 ms |
-| ERC20 transfer | **3.704 ms** | 6.435 ms | 5.889 ms |
-| Snailtracer | **20.666 ms** | 60.723 ms | 35.627 ms |
+| Arithmetic loop | **0.092 ms** | 0.102 ms | 0.232 ms |
+| Storage SSTORE loop | **0.162 ms** | 0.870 ms | 0.923 ms |
+| ERC20 transfer | **3.694 ms** | 6.219 ms | 5.837 ms |
+| Snailtracer | **19.898 ms** | 59.461 ms | 34.356 ms |
 
 The full snapshot, host scope and reproduction commands are in
 [the benchmark lab](bench/README.md#published-snapshots).

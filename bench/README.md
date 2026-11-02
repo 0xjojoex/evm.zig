@@ -92,15 +92,16 @@ ratios above `1.00×` mean evmz is faster than the named baseline.
 
 ### Apple M1 Max / macOS arm64 — 2026-10-30
 
-Evmz explicitly selects the XKCP Keccak provider. EVM2 uses Rust 1.96.0, packed
-dispatch and revision `f93318f120f6300599b21170d6c7bef81ed63d87`, pinned to
+Evmz explicitly selects the XKCP Keccak provider. Evmone is v0.25.0 (EVMC 19),
+with intx v0.15.0. EVM2 uses Rust 1.96.0, packed dispatch and revision `f93318f120f6300599b21170d6c7bef81ed63d87`, pinned to
 Reth v2.9.0. Rust uses native CPU tuning, fat LTO and one codegen unit.
 
 Each cell is the median of five 100-call medians per deployed-runtime fixture,
 with a 100 ms discarded warmup before each fixture/engine run. Engine order
 rotates between rounds. These are interpreter-level measurements with the
-fixture's null or mock host; deployment, bytecode preparation and per-call
-interpreter/host setup are outside timing.
+fixture's null or mock host. Deployment, bytecode preparation and runner-owned
+per-call setup are outside timing. Evmone baseline's analyzed-execute entry
+includes its internal execution-state reset.
 
 From the repository root, run this command five times with a distinct
 `--out-dir`; rotate engine order with repeated `--engine` filters. Aggregate each fixture/engine's `median_ms`
@@ -111,25 +112,25 @@ zig build bench-compare -Dbench-optimize=ReleaseFast \
   -Dbench-support-min=osaka -Dbench-support-max=osaka \
   -Dnative-keccak=xkcp \
   -- --spec osaka --num-runs 100 --warmup-ms 100 \
-  --out-dir ../output/readme-evm2-20261030/round-1
+  --out-dir ../output/readme-evmone-v0.25.0-rerun-20261030-202401/round-1
 ```
 
 | VM-loop fixture | evmz | evmone-base | evmone-adv | EVM2 packed | base/evmz | EVM2/evmz |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Arithmetic loop | 0.092 ms | 0.110 ms | 0.328 ms | 0.238 ms | 1.19× | 2.59× |
-| Memory MSTORE loop | 0.094 ms | 0.085 ms | 0.264 ms | 0.178 ms | 0.90× | 1.90× |
-| Keccak loop | 2.740 ms | 3.602 ms | 3.723 ms | 2.580 ms | 1.31× | 0.94× |
-| Ten-thousand hashes | 0.830 ms | 0.763 ms | 1.672 ms | 1.775 ms | 0.92× | 2.14× |
-| Storage SLOAD loop | 0.149 ms | 0.592 ms | 0.665 ms | 0.450 ms | 3.97× | 3.02× |
-| Storage SSTORE loop | 0.163 ms | 1.039 ms | 1.013 ms | 0.933 ms | 6.38× | 5.73× |
-| LOG0 / 0-byte data | 0.044 ms | 0.030 ms | 0.082 ms | 0.090 ms | 0.68× | 2.04× |
-| LOG0 / 32-byte data | 0.060 ms | 0.034 ms | 0.085 ms | 0.090 ms | 0.56× | 1.49× |
-| LOG4 / 0-byte data | 0.089 ms | 0.070 ms | 0.152 ms | 0.115 ms | 0.78× | 1.29× |
-| LOG4 / 32-byte data | 0.080 ms | 0.083 ms | 0.148 ms | 0.110 ms | 1.03× | 1.37× |
-| ERC20 mint | 1.744 ms | 4.029 ms | 4.946 ms | 3.731 ms | 2.31× | 2.14× |
-| ERC20 transfer | 3.704 ms | 6.435 ms | 7.841 ms | 5.889 ms | 1.74× | 1.59× |
-| ERC20 approval+transfer | 3.409 ms | 5.063 ms | 6.120 ms | 4.491 ms | 1.49× | 1.32× |
-| Snailtracer | 20.666 ms | 60.723 ms | 80.553 ms | 35.627 ms | 2.94× | 1.72× |
+| Arithmetic loop | 0.092 ms | 0.102 ms | 0.335 ms | 0.232 ms | 1.11× | 2.52× |
+| Memory MSTORE loop | 0.096 ms | 0.084 ms | 0.254 ms | 0.175 ms | 0.87× | 1.82× |
+| Keccak loop | 2.656 ms | 3.530 ms | 3.635 ms | 2.594 ms | 1.33× | 0.98× |
+| Ten-thousand hashes | 0.840 ms | 0.772 ms | 1.705 ms | 1.711 ms | 0.92× | 2.04× |
+| Storage SLOAD loop | 0.153 ms | 0.592 ms | 0.642 ms | 0.454 ms | 3.87× | 2.97× |
+| Storage SSTORE loop | 0.162 ms | 0.870 ms | 0.879 ms | 0.923 ms | 5.37× | 5.70× |
+| LOG0 / 0-byte data | 0.042 ms | 0.030 ms | 0.085 ms | 0.086 ms | 0.71× | 2.05× |
+| LOG0 / 32-byte data | 0.061 ms | 0.034 ms | 0.080 ms | 0.087 ms | 0.55× | 1.43× |
+| LOG4 / 0-byte data | 0.087 ms | 0.068 ms | 0.147 ms | 0.110 ms | 0.78× | 1.27× |
+| LOG4 / 32-byte data | 0.081 ms | 0.083 ms | 0.148 ms | 0.110 ms | 1.03× | 1.35× |
+| ERC20 mint | 1.722 ms | 3.818 ms | 4.710 ms | 3.689 ms | 2.22× | 2.14× |
+| ERC20 transfer | 3.694 ms | 6.219 ms | 7.439 ms | 5.837 ms | 1.68× | 1.58× |
+| ERC20 approval+transfer | 3.398 ms | 4.959 ms | 5.980 ms | 4.445 ms | 1.46× | 1.31× |
+| Snailtracer | 19.898 ms | 59.461 ms | 79.433 ms | 34.356 ms | 2.99× | 1.73× |
 
 ### AMD EPYC Genoa / Linux x86-64
 

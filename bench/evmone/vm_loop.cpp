@@ -883,6 +883,8 @@ int main(int argc, char** argv)
             std::cerr
                 << "fixture=" << options.fixture_dir.value_or("")
                 << " engine=" << engine_name(options.mode)
+                << " evmone_version=" << vm.ptr->version
+                << " evmc_abi=" << vm.ptr->abi_version
                 << " scope=" << (options.mode == Mode::advanced ? "advanced-analyzed-execute" : "baseline-analyzed-execute")
                 << " host_profile=" << host_profile_name(options.host_profile)
                 << " spec=" << spec_name(options.spec)
