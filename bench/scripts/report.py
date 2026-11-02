@@ -39,7 +39,7 @@ VM_LOOP_FIXTURES = (
 )
 
 VM_LOOP_BASELINE_ENGINE = "evmz"
-VM_LOOP_ENGINES = (VM_LOOP_BASELINE_ENGINE, "evmone-baseline", "evmone", "revm")
+VM_LOOP_ENGINES = (VM_LOOP_BASELINE_ENGINE, "evmone-baseline", "evmone", "evm2")
 
 
 def main() -> int:
@@ -81,6 +81,7 @@ def main() -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--evm2-nightly", action="store_true", help="include pinned nightly packed and tail-call EVM2 rows")
     parser.add_argument("--zig-exe", default="zig")
     parser.add_argument("--optimize", default="ReleaseFast")
     parser.add_argument("--profile", choices=("native", "zkvm"), default="native")
@@ -114,8 +115,9 @@ def collect_environment(args: argparse.Namespace) -> dict[str, Any]:
         "native_keccak": args.native_keccak,
         "keccak_provider": args.native_keccak if args.profile == "native" else "zkvm",
         "secp256k1_provider": "libsecp256k1" if args.profile == "native" else "zkvm",
-        "rustc": tool_major_version(command_version(["rustc", "--version"])),
-        "cargo": tool_major_version(command_version(["cargo", "--version"])),
+        "rustc": tool_major_version(command_version(["rustc", "+1.96.0", "--version"])),
+        "cargo": tool_major_version(command_version(["cargo", "+1.96.0", "--version"])),
+        "evm2_nightly_rustc": command_version(["rustc", "+nightly-2026-06-01", "--version"]) if args.evm2_nightly else None,
         "solc": solc_version(),
         "lane": "rust-native-release",
         "rustflags": "-C target-cpu=native -C force-frame-pointers=no",
@@ -150,9 +152,10 @@ def tool_major_version(output: str) -> str:
 
 def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    engines = VM_LOOP_ENGINES + (("evm2-packed-nightly", "evm2-tail") if args.evm2_nightly else ())
     for fixture in VM_LOOP_FIXTURES:
         name = Path(fixture).name
-        for engine in VM_LOOP_ENGINES:
+        for engine in engines:
             stdout, stderr = run_vm_loop_engine(args, raw_dir, fixture, name, engine)
             times = [float(line.strip()) for line in stdout.splitlines() if line.strip()]
             summary = parse_key_values(first_line(stderr))
@@ -165,6 +168,8 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
                     "fixture": name,
                     "engine": summary.get("engine", engine_name(engine)),
                     "scope": summary.get("scope") or vm_loop_scope(engine),
+                    "dispatch": summary.get("dispatch"),
+                    "rustc": summary.get("rustc"),
                     "host_profile": summary.get("host_profile", ""),
                     "spec": summary.get("spec", ""),
                     "runs": len(times),
@@ -191,6 +196,8 @@ def run_vm_loop(args: argparse.Namespace, raw_dir: Path) -> list[dict[str, Any]]
             "fixture",
             "engine",
             "scope",
+            "dispatch",
+            "rustc",
             "host_profile",
             "spec",
             "runs",
@@ -217,14 +224,14 @@ def run_vm_loop_engine(
     fixture_name: str,
     engine: str,
 ) -> tuple[str, str]:
-    if engine == "revm":
+    if engine in ("evm2", "evm2-packed-nightly", "evm2-tail"):
         return run_command(
-            f"vm-loop-{fixture_name}-revm",
+            f"vm-loop-{fixture_name}-{engine}",
             [
                 args.zig_exe,
                 "build",
                 *build_profile_args(args),
-                "revm-vm-loop",
+                f"{engine}-vm-loop",
                 "--",
                 "--fixture",
                 fixture,
@@ -292,7 +299,7 @@ def vm_loop_scope(engine: str) -> str:
         return "advanced-analyzed-execute"
     if engine == "evmone-baseline":
         return "baseline-analyzed-execute"
-    if engine == "revm":
+    if engine in ("evm2", "evm2-packed-nightly", "evm2-tail"):
         return "raw-interpreter"
     return ""
 
@@ -320,6 +327,8 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
             "evmone-baseline",
             "--engine",
             "evmone",
+            "--spec",
+            "osaka",
             "--tier",
             "all",
             "--iterations",
@@ -332,14 +341,16 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
         BENCH_DIR,
         raw_dir,
     )
-    revm_stdout, _ = run_command(
-        "kernel-revm",
+    evm2_stdout, _ = run_command(
+        "kernel-evm2",
         [
             args.zig_exe,
             "build",
             *build_profile_args(args),
-            "revm-kernel",
+            "evm2-kernel",
             "--",
+            "--spec",
+            "osaka",
             "--tier",
             "all",
             "--iterations",
@@ -353,8 +364,17 @@ def run_kernel(args: argparse.Namespace, raw_dir: Path, out_dir: Path) -> list[d
         raw_dir,
     )
     path = out_dir / "kernel_summary.csv"
-    path.write_text(combine_csv_text((zig_stdout, revm_stdout)))
-    return read_csv_rows(path)
+    path.write_text(combine_csv_text((zig_stdout, evm2_stdout)))
+    rows = read_csv_rows(path)
+    references: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in rows:
+        key = (row["case"], row["iterations"])
+        result = (row["bytecode_bytes"], row["gas_used"])
+        if references.setdefault(key, result) != result:
+            raise ValueError(f"kernel bytecode/gas mismatch: {key}, {row['engine']}")
+        if int(row["host_calls"]) != 0:
+            raise ValueError(f"kernel touched host: {key}, {row['engine']}")
+    return rows
 
 
 def run_command(name: str, argv: list[str], cwd: Path, raw_dir: Path) -> tuple[str, str]:
@@ -378,7 +398,7 @@ def run_command(name: str, argv: list[str], cwd: Path, raw_dir: Path) -> tuple[s
 
 
 def command_env(argv: list[str]) -> dict[str, str] | None:
-    if "revm-vm-loop" not in argv and "revm-kernel" not in argv:
+    if not any(step in argv for step in ("evm2-kernel", "evm2-vm-loop", "evm2-packed-nightly-vm-loop", "evm2-tail-vm-loop")):
         return None
     env = os.environ.copy()
     env["RUSTFLAGS"] = "-C target-cpu=native -C force-frame-pointers=no"
@@ -532,8 +552,8 @@ def render_report(
         lines.append(f"- baseline: `{display_path(baseline_path)}`")
     lines.append("")
     lines.append(
-        "Native release means Zig `ReleaseFast` for Zig/C++ runners and revm `cargo --release`; "
-        "all compared engines explicitly omit frame pointers, and revm uses `target-cpu=native`."
+        "Native release means Zig `ReleaseFast` for Zig/C++ runners and Cargo release for Rust runners; stable Rust rows use 1.96.0 and opt-in nightly rows use nightly-2026-06-01. "
+        "all compared engines explicitly omit frame pointers, and all Rust variants use `target-cpu=native`."
     )
     lines.append("")
 
@@ -570,7 +590,7 @@ def render_vm_loop(rows: list[dict[str, Any]]) -> list[str]:
     return [
         "## VM-loop comparison",
         "",
-        "VM-core comparison over the same deployed-runtime fixture protocol. Deploy/runtime setup is outside the timed call. evmz times direct `Interpreter.execute` with prepared metadata, evmone baseline/advanced use analyzed-code execution from the standalone C++ runner, and revm times its low-level interpreter loop with analyzed `Bytecode`. The executor/transaction lane is intentionally left out of this default report until it has matching revm/evmone transaction-level adapters.",
+        "VM-core comparison over the same deployed-runtime fixture protocol. Deploy/runtime setup is outside the timed call. evmz times direct `Interpreter.execute` with prepared metadata, evmone baseline/advanced use analyzed-code execution from the standalone C++ runner, and EVM2 times its low-level interpreter loop with prepared bytecode. EVM2 uses stable packed dispatch with Rust 1.96.0; opt-in nightly rows use nightly-2026-06-01 and identify packed versus tail-call dispatch separately. The executor/transaction lane is intentionally left out of this default report until it has matching EVM2/evmone transaction-level adapters.",
         "",
         *markdown_table(table),
         "",
@@ -586,14 +606,14 @@ def render_kernel(rows: list[dict[str, Any]]) -> list[str]:
         candidates = [
             medians.get(("evmone-baseline", case)),
             medians.get(("evmone-advanced", case)),
-            medians.get(("revm", case)),
+            medians.get(("evm2-interpreter", case)),
         ]
         best_other = min((value for value in candidates if value), default=None)
         if evmz and best_other:
             ranked.append((evmz / best_other, case))
     ranked.sort(reverse=True)
 
-    table = [["case", "evmz", "evmone base", "evmone adv", "revm", "evmz/best"]]
+    table = [["case", "evmz", "evmone base", "evmone adv", "EVM2 packed", "evmz/best"]]
     for ratio, case in ranked[:14]:
         table.append(
             [
@@ -601,14 +621,14 @@ def render_kernel(rows: list[dict[str, Any]]) -> list[str]:
                 fmt_float(medians.get(("evmz", case)), 2),
                 fmt_float(medians.get(("evmone-baseline", case)), 2),
                 fmt_float(medians.get(("evmone-advanced", case)), 2),
-                fmt_float(medians.get(("revm", case)), 2),
+                fmt_float(medians.get(("evm2-interpreter", case)), 2),
                 fmt_ratio(ratio),
             ]
         )
     return [
         "## Opcode kernel comparison",
         "",
-        "Median ns/iteration. Zig and evmone kernel rows are direct execution paths; the revm kernel sidecar currently uses its transaction API, so treat that row as a diagnostic baseline rather than a perfectly identical interpreter-only kernel.",
+        "Median ns/iteration. All kernel rows time direct interpreter execution; bytecode generation, analysis, and interpreter setup are excluded. EVM2 uses stable packed dispatch and reports execution gas without transaction overhead.",
         "",
         *markdown_table(table),
         "",

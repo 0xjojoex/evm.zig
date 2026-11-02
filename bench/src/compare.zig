@@ -29,14 +29,16 @@ const engine_order = [_]Engine{
     .evmz,
     .evmone_baseline,
     .evmone_advanced,
-    .revm_interpreter,
+    .evm2_interpreter,
 };
 
 const Engine = enum {
     evmz,
     evmone_baseline,
     evmone_advanced,
-    revm_interpreter,
+    evm2_interpreter,
+    evm2_packed_nightly,
+    evm2_tail,
 };
 
 const Options = struct {
@@ -77,6 +79,12 @@ const Row = struct {
     warmup_calls: ?u64,
     warmup_elapsed_ms: ?f64,
     samples_ms: []const f64,
+    gas_used: ?u64,
+    runtime_hash: ?[]const u8,
+    output_hash: ?[]const u8,
+    dispatch: ?[]const u8,
+    revision: ?[]const u8,
+    rustc: ?[]const u8,
 };
 
 const RawCommand = struct {
@@ -112,6 +120,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    try validateInterpreterResults(rows.items);
     try writeArtifacts(init.io, allocator, rows.items, out_dir);
 
     const output = if (options.json)
@@ -224,7 +233,7 @@ fn printUsage() void {
         \\  --native-keccak <name> native Keccak backend forwarded to evmz builds
         \\  --support-min <name>   minimum evmz fork compiled into the VM-loop runner
         \\  --support-max <name>   maximum evmz fork compiled into the VM-loop runner
-        \\  --engine <name>        engine filter, repeatable; all, evmz, evmone, revm, evmone-baseline, evmone-advanced, revm-interpreter
+        \\  --engine <name>        engine filter, repeatable; all, evmz, evmone, evmone-baseline, evmone-advanced, evm2, evm2-packed-nightly, evm2-tail
         \\  --fixture <dir>        VM-loop fixture directory, repeatable
         \\  --num-runs, -n <n>     override fixture num-runs.txt for every engine
         \\  --warmup-ms <n>        discarded warmup duration for every engine, default 100; 0 disables
@@ -249,8 +258,8 @@ fn appendEngineFilter(allocator: std.mem.Allocator, engines: *std.ArrayList(Engi
             try appendEngineUnique(allocator, engines, .evmone_baseline);
             try appendEngineUnique(allocator, engines, .evmone_advanced);
             appended = true;
-        } else if (std.mem.eql(u8, part, "revm")) {
-            try appendEngineUnique(allocator, engines, .revm_interpreter);
+        } else if (std.mem.eql(u8, part, "evm2")) {
+            try appendEngineUnique(allocator, engines, .evm2_interpreter);
             appended = true;
         } else if (parseEngine(part)) |engine| {
             try appendEngineUnique(allocator, engines, engine);
@@ -275,7 +284,9 @@ fn parseEngine(value: []const u8) ?Engine {
     if (std.mem.eql(u8, value, "evmz")) return .evmz;
     if (std.mem.eql(u8, value, "evmone-baseline") or std.mem.eql(u8, value, "evmone-base")) return .evmone_baseline;
     if (std.mem.eql(u8, value, "evmone-advanced") or std.mem.eql(u8, value, "evmone-adv")) return .evmone_advanced;
-    if (std.mem.eql(u8, value, "revm-interpreter")) return .revm_interpreter;
+    if (std.mem.eql(u8, value, "evm2-interpreter")) return .evm2_interpreter;
+    if (std.mem.eql(u8, value, "evm2-packed-nightly")) return .evm2_packed_nightly;
+    if (std.mem.eql(u8, value, "evm2-tail")) return .evm2_tail;
     return null;
 }
 
@@ -293,7 +304,7 @@ fn engineCommand(
         .evmz, .evmone_baseline, .evmone_advanced => {
             try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Doptimize={s}", .{options.optimize}));
         },
-        .revm_interpreter => {},
+        .evm2_interpreter, .evm2_packed_nightly, .evm2_tail => {},
     }
     if (engine == .evmz) {
         try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dprofile={s}", .{options.profile}));
@@ -309,7 +320,9 @@ fn engineCommand(
     try argv.append(allocator, switch (engine) {
         .evmz => "vm-loop",
         .evmone_baseline, .evmone_advanced => "evmone-vm-loop",
-        .revm_interpreter => "revm-vm-loop",
+        .evm2_interpreter => "evm2-vm-loop",
+        .evm2_packed_nightly => "evm2-packed-nightly-vm-loop",
+        .evm2_tail => "evm2-tail-vm-loop",
     });
     try argv.append(allocator, "--");
 
@@ -430,6 +443,9 @@ fn parseMeasurement(
     if (times_ms.len == 0) return error.NoTimingRows;
 
     const summary = firstSummaryLine(raw.stderr);
+    if (keyValue(summary, "engine")) |actual| {
+        if (!std.mem.eql(u8, engineName(engine), actual)) return error.UnexpectedEngine;
+    }
     const median = try medianMs(allocator, times_ms);
     const mean = meanMs(times_ms);
     const min = minMs(times_ms);
@@ -458,7 +474,35 @@ fn parseMeasurement(
         .warmup_calls = try optionalU64(keyValue(summary, "warmup_calls")),
         .warmup_elapsed_ms = try optionalF64(keyValue(summary, "warmup_elapsed_ms")),
         .samples_ms = times_ms,
+        .gas_used = try optionalU64(keyValue(summary, "gas_used")),
+        .runtime_hash = keyValue(summary, "runtime_hash"),
+        .output_hash = keyValue(summary, "output_hash"),
+        .dispatch = keyValue(summary, "dispatch"),
+        .revision = keyValue(summary, "revision"),
+        .rustc = keyValue(summary, "rustc"),
     };
+}
+
+fn validateInterpreterResults(rows: []const Row) !void {
+    for (rows) |row| {
+        if (!std.mem.startsWith(u8, row.engine, "evm2-")) continue;
+        const gas = row.gas_used orelse return error.MissingInterpreterResult;
+        const runtime = row.runtime_hash orelse return error.MissingInterpreterResult;
+        const output = row.output_hash orelse return error.MissingInterpreterResult;
+        for (rows) |reference| {
+            if (std.mem.eql(u8, row.engine, reference.engine) or
+                !std.mem.startsWith(u8, reference.engine, "evm2-") or
+                !std.mem.eql(u8, row.fixture_path, reference.fixture_path)) continue;
+            if (gas != (reference.gas_used orelse return error.MissingInterpreterResult) or
+                !std.mem.eql(u8, runtime, reference.runtime_hash orelse return error.MissingInterpreterResult) or
+                !std.mem.eql(u8, output, reference.output_hash orelse return error.MissingInterpreterResult))
+            {
+                if (!@import("builtin").is_test)
+                    std.debug.print("Rust interpreter runtime, gas, or output mismatch: {s} ({s}, {s})\n", .{ row.fixture_path, row.engine, reference.engine });
+                return error.InterpreterResultMismatch;
+            }
+        }
+    }
 }
 
 fn parseTimesMs(allocator: std.mem.Allocator, stdout: []const u8) ![]f64 {
@@ -555,7 +599,7 @@ fn renderCsv(allocator: std.mem.Allocator, rows: []const Row) ![]u8 {
     defer out.deinit();
     const writer = &out.writer;
 
-    try writer.writeAll("fixture,engine,runner,scope,runs,median_ms,mean_ms,min_ms,max_ms,host_profile,spec,runtime_bytes,deploy_host_calls,timed_host_calls,timed_host_calls_per_run,logs,warmup_ms,warmup_calls,warmup_elapsed_ms\n");
+    try writer.writeAll("fixture,engine,runner,scope,runs,median_ms,mean_ms,min_ms,max_ms,host_profile,spec,runtime_bytes,deploy_host_calls,timed_host_calls,timed_host_calls_per_run,logs,warmup_ms,warmup_calls,warmup_elapsed_ms,gas_used,runtime_hash,output_hash,dispatch,revision,rustc\n");
     for (rows) |row| {
         try writer.print(
             "{s},{s},{s},{s},{d},{d:.6},{d:.6},{d:.6},{d:.6},{s},{s},",
@@ -588,6 +632,13 @@ fn renderCsv(allocator: std.mem.Allocator, rows: []const Row) ![]u8 {
         try writeOptionalU64(writer, row.warmup_calls);
         try writer.writeByte(',');
         try writeOptionalF64(writer, row.warmup_elapsed_ms);
+        try writer.writeByte(',');
+        try writeOptionalU64(writer, row.gas_used);
+        try writer.print(",{s},{s},{s},{s},{s}", .{
+            row.runtime_hash orelse "", row.output_hash orelse "",
+            row.dispatch orelse "",     row.revision orelse "",
+            row.rustc orelse "",
+        });
         try writer.writeByte('\n');
     }
 
@@ -618,7 +669,7 @@ fn renderMarkdown(allocator: std.mem.Allocator, rows: []const Row, out_dir: []co
     try writer.writeAll(
         \\# VM-core comparison
         \\
-        \\Scope: deployed runtime call through each engine's interpreter-level path. Fixture loading, init-code deployment, bytecode/cache preparation, frame/interpreter setup, and per-run transaction setup live outside the timed window where the runner has that shape. Before recording samples, each runner repeats that same per-run path for the requested duration with fresh/reset host state; warmup samples and counters are discarded. Rows use evmz direct `Interpreter.execute`, standalone evmone baseline/advanced analyzed-code execution, and revm analyzed `Bytecode` raw interpreter path.
+        \\Scope: deployed runtime call through each engine's interpreter-level path. Fixture loading, init-code deployment, bytecode/cache preparation, frame/interpreter setup, and per-run transaction setup live outside the timed window where the runner has that shape. Before recording samples, each runner repeats that same per-run path for the requested duration with fresh/reset host state; warmup samples and counters are discarded. Rows use evmz direct `Interpreter.execute`, standalone evmone baseline/advanced analyzed-code execution, and EVM2 prepared-bytecode raw interpreter paths. EVM2 rows identify stable packed, nightly packed, and nightly tail-call dispatch separately.
         \\
     );
     try writer.print("\nArtifacts: `{s}`\n\n", .{out_dir});
@@ -665,7 +716,9 @@ fn engineName(engine: Engine) []const u8 {
         .evmz => "evmz",
         .evmone_baseline => "evmone-baseline",
         .evmone_advanced => "evmone-advanced",
-        .revm_interpreter => "revm-interpreter",
+        .evm2_interpreter => "evm2-interpreter",
+        .evm2_packed_nightly => "evm2-packed-nightly",
+        .evm2_tail => "evm2-tail",
     };
 }
 
@@ -673,7 +726,7 @@ fn runnerName(engine: Engine) []const u8 {
     return switch (engine) {
         .evmz => "zig",
         .evmone_baseline, .evmone_advanced => "c++",
-        .revm_interpreter => "rust-native",
+        .evm2_interpreter, .evm2_packed_nightly, .evm2_tail => "rust-native",
     };
 }
 
@@ -682,7 +735,7 @@ fn defaultScope(engine: Engine) []const u8 {
         .evmz => "interpreter-prepared-execute",
         .evmone_baseline => "baseline-analyzed-execute",
         .evmone_advanced => "advanced-analyzed-execute",
-        .revm_interpreter => "raw-interpreter",
+        .evm2_interpreter, .evm2_packed_nightly, .evm2_tail => "raw-interpreter",
     };
 }
 
@@ -729,4 +782,72 @@ test "host calls per run normalizes total counters" {
     try std.testing.expectEqual(@as(?f64, 2.5), hostCallsPerRun(10, 4));
     try std.testing.expect(hostCallsPerRun(null, 4) == null);
     try std.testing.expect(hostCallsPerRun(10, 0) == null);
+}
+
+test "EVM2 comparison rejects mismatched execution results" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var rows = [_]Row{
+        try parseMeasurement(allocator, "fixture", .evm2_packed_nightly, .{
+            .stdout = "1.0\n",
+            .stderr = "fixture=fixture engine=evm2-packed-nightly runtime_hash=0x01 gas_used=42 output_hash=0x02\n",
+        }),
+        try parseMeasurement(allocator, "fixture", .evm2_interpreter, .{
+            .stdout = "1.0\n",
+            .stderr = "fixture=fixture engine=evm2-interpreter runtime_hash=0x01 gas_used=42 output_hash=0x02 dispatch=packed revision=pinned\n",
+        }),
+    };
+    try validateInterpreterResults(rows[0..1]);
+    try validateInterpreterResults(&rows);
+    rows[1].gas_used = 43;
+    try std.testing.expectError(error.InterpreterResultMismatch, validateInterpreterResults(&rows));
+    rows[1].gas_used = 42;
+    rows[1].output_hash = "0x03";
+    try std.testing.expectError(error.InterpreterResultMismatch, validateInterpreterResults(&rows));
+    rows[1].output_hash = "0x02";
+    rows[1].runtime_hash = null;
+    try std.testing.expectError(error.MissingInterpreterResult, validateInterpreterResults(&rows));
+    try std.testing.expectError(error.MissingInterpreterResult, validateInterpreterResults(rows[1..]));
+}
+
+test "EVM2 engine filters select the dedicated interpreter runner" {
+    var engines: std.ArrayList(Engine) = .empty;
+    defer engines.deinit(std.testing.allocator);
+    try appendEngineFilter(std.testing.allocator, &engines, "evm2,evm2-interpreter,evm2-tail");
+    try std.testing.expectEqualSlices(Engine, &.{ .evm2_interpreter, .evm2_tail }, engines.items);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try engineCommand(arena.allocator(), .{}, "fixture", .evm2_interpreter);
+    var found = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "evm2-vm-loop")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "nightly tail and packed results are checked against each other" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var rows = [_]Row{
+        try parseMeasurement(allocator, "fixture", .evm2_tail, .{
+            .stdout = "1.0\n",
+            .stderr = "fixture=fixture engine=evm2-tail runtime_hash=0x01 gas_used=42 output_hash=0x02 dispatch=tco rustc=1.98.0-nightly\n",
+        }),
+        try parseMeasurement(allocator, "fixture", .evm2_packed_nightly, .{
+            .stdout = "1.0\n",
+            .stderr = "fixture=fixture engine=evm2-packed-nightly runtime_hash=0x01 gas_used=42 output_hash=0x02 dispatch=packed rustc=1.98.0-nightly\n",
+        }),
+    };
+    try validateInterpreterResults(&rows);
+    try std.testing.expectEqualStrings("1.98.0-nightly", rows[0].rustc.?);
+    rows[0].gas_used = 43;
+    try std.testing.expectError(error.InterpreterResultMismatch, validateInterpreterResults(&rows));
+    try std.testing.expectError(error.UnexpectedEngine, parseMeasurement(allocator, "fixture", .evm2_tail, .{
+        .stdout = "1.0\n",
+        .stderr = "fixture=fixture engine=evm2-interpreter dispatch=packed\n",
+    }));
+    try std.testing.expectEqual(Engine.evm2_tail, parseEngine("evm2-tail").?);
+    try std.testing.expectEqual(Engine.evm2_packed_nightly, parseEngine("evm2-packed-nightly").?);
 }

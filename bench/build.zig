@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     evmc_bindings_mod.addIncludePath(b.path("src"));
+    evmc_bindings_mod.addIncludePath(evmcCHeaders(b, evmone_dep));
     evmc_bindings_mod.addIncludePath(evmone_dep.path("evmc/include"));
     const vm_loop_support_min = b.option(
         []const u8,
@@ -100,36 +101,33 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const run_revm_kernel = b.addSystemCommand(&.{
-            "cargo",
-            "run",
-            "--quiet",
-            "--release",
-            "--manifest-path",
-            "revm/Cargo.toml",
-            "--",
+        const run = b.addSystemCommand(&.{
+            "cargo",           "+1.96.0",         "run", "--quiet", "--release", "--locked",
+            "--manifest-path", "evm2/Cargo.toml", "--",  "kernel",
         });
-        run_revm_kernel.setCwd(b.path("."));
-        addRevmNativeRustFlags(run_revm_kernel);
-        if (b.args) |args| run_revm_kernel.addArgs(args);
-        b.step("revm-kernel", "Run revm opcode kernel benchmark").dependOn(&run_revm_kernel.step);
+        run.setCwd(b.path("."));
+        run.setEnvironmentVariable("EVM2_DISPATCH_BACKEND", "packed");
+        run.setEnvironmentVariable("CARGO_TARGET_DIR", "evm2/target");
+        addNativeRustFlags(run);
+        if (b.args) |args| run.addArgs(args);
+        b.step("evm2-kernel", "Run EVM2 opcode kernel benchmark").dependOn(&run.step);
     }
 
-    {
-        const run_revm_vm_loop = b.addSystemCommand(&.{
-            "cargo",
-            "run",
-            "--quiet",
-            "--release",
-            "--manifest-path",
-            "revm/Cargo.toml",
-            "--",
-            "vm-loop",
+    for ([_]struct { step: []const u8, toolchain: []const u8, dispatch: []const u8, target_dir: []const u8 }{
+        .{ .step = "evm2-vm-loop", .toolchain = "+1.96.0", .dispatch = "packed", .target_dir = "evm2/target" },
+        .{ .step = "evm2-packed-nightly-vm-loop", .toolchain = "+nightly-2026-06-01", .dispatch = "packed", .target_dir = "evm2/target/packed-nightly" },
+        .{ .step = "evm2-tail-vm-loop", .toolchain = "+nightly-2026-06-01", .dispatch = "tco", .target_dir = "evm2/target/tail" },
+    }) |variant| {
+        const run = b.addSystemCommand(&.{
+            "cargo",           variant.toolchain, "run", "--quiet", "--release", "--locked",
+            "--manifest-path", "evm2/Cargo.toml", "--",
         });
-        run_revm_vm_loop.setCwd(b.path("."));
-        addRevmNativeRustFlags(run_revm_vm_loop);
-        if (b.args) |args| run_revm_vm_loop.addArgs(args);
-        b.step("revm-vm-loop", "Run revm VM-loop fixture runner").dependOn(&run_revm_vm_loop.step);
+        run.setCwd(b.path("."));
+        addNativeRustFlags(run);
+        run.setEnvironmentVariable("EVM2_DISPATCH_BACKEND", variant.dispatch);
+        run.setEnvironmentVariable("CARGO_TARGET_DIR", variant.target_dir);
+        if (b.args) |args| run.addArgs(args);
+        b.step(variant.step, "Run EVM2 VM-loop fixtures with the selected compiler and dispatch").dependOn(&run.step);
     }
 
     {
@@ -277,10 +275,27 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-fn addRevmNativeRustFlags(run: *std.Build.Step.Run) void {
+fn addNativeRustFlags(run: *std.Build.Step.Run) void {
     run.setEnvironmentVariable("RUSTFLAGS", "-C target-cpu=native -C force-frame-pointers=no");
     run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_LTO", "fat");
     run.setEnvironmentVariable("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1");
+}
+
+fn evmcCHeaders(b: *std.Build, evmone_dep: *std.Build.Dependency) std.Build.LazyPath {
+    const path = evmone_dep.path("evmc/include/evmc/evmc.h").getPath(b);
+    var header = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(128 * 1024)) catch
+        @panic("cannot read evmone EVMC header");
+    // EVMC 19's C header has C++ member initializers. Drop them for @cImport;
+    // the field types and ABI remain unchanged.
+    for ([_][]const u8{ "left", "spilled" }) |field| {
+        const before = b.fmt("int64_t {s} = 0;", .{field});
+        std.debug.assert(std.mem.count(u8, header, before) == 1);
+        header = std.mem.replaceOwned(u8, b.allocator, header, before, b.fmt("int64_t {s};", .{field})) catch
+            @panic("OOM");
+    }
+    const files = b.addWriteFiles();
+    _ = files.add("evmc/evmc.h", header);
+    return files.getDirectory();
 }
 
 fn addEvmoneVm(
@@ -307,7 +322,7 @@ fn addEvmoneVm(
         "-fomit-frame-pointer",
         "-fno-exceptions",
         "-fno-rtti",
-        "-DPROJECT_VERSION=\"0.23.0\"",
+        "-DPROJECT_VERSION=\"0.25.0\"",
     };
     const c_flags = &[_][]const u8{
         "-Wall",
