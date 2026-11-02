@@ -56,6 +56,11 @@ Added
   `PublicKey`, an `Aggregate` of keys, and `verify` with the
   proof-of-possession ciphersuite), which together make `FastAggregateVerify`
   for light clients. Native profile only.
+- `state.OverrideReader`: a `state.Reader` that answers some accounts from
+  caller overrides and the rest from a parent reader, for simulations with
+  `eth_call`-style state overrides: balance, nonce and code by field, storage
+  replaced (`state`) or patched (`stateDiff`). Overrides are parent values, so
+  the state machine treats them as where execution started.
 - `CompileOptions.transaction_journal`: an embedding-owned journal whose
   checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
   with it. See `examples/transaction_journal.zig`.

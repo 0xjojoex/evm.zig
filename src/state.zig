@@ -4,6 +4,8 @@
 //!   observation/effect flags: vocabulary shared by both execution state lanes
 //!   at the executor boundary.
 //! - `Reader`: client/database read interface (root alias `evmz.StateReader`).
+//! - `OverrideReader`: a `Reader` with caller overrides over a parent one, for
+//!   simulations with state overrides.
 //! - `WorldState(World)`: the one execution-state machine; `OpenWorld` is the
 //!   world for block building, discovery, and forks without a block access
 //!   list, and `OpenState` its instantiation.
@@ -32,6 +34,7 @@ pub const storage = @import("./state/storage.zig");
 pub const LogBuffer = @import("./state/LogBuffer.zig");
 pub const Reader = @import("./state/Reader.zig");
 pub const ConcurrentReader = @import("./state/ConcurrentReader.zig");
+pub const OverrideReader = @import("./state/OverrideReader.zig");
 pub const StateDelta = @import("./state/StateDelta.zig");
 pub const Committer = @import("./state/Committer.zig");
 pub const RootProvider = @import("./state/RootProvider.zig");
