@@ -1860,10 +1860,7 @@ fn buildXkcpObject(
             });
             module.addCSourceFile(.{
                 .file = b.path("src/crypto/xkcp_aarch64.S"),
-                .flags = &.{
-                    "-D__ARM_FEATURE_SHA3=1",
-                    "-Wa,-march=armv8.4-a+sha3",
-                },
+                .flags = &.{"-D__ARM_FEATURE_SHA3=1"},
             });
         },
         .generic64 => module.addIncludePath(dep.path("lib/low/KeccakP-1600/plain-64bits/SnP")),

@@ -117,7 +117,7 @@ Future transaction/integration rows should stay separate, for example
 ## Published snapshots
 
 The current Apple M1 Max snapshot uses EVM2 stable packed dispatch. The AMD
-snapshot retains its historical revm baseline. Both are fixed-Osaka, native
+snapshot retains its historical revm baseline. Both are fixed Osaka, native
 `ReleaseFast`, with frame pointers omitted for every engine. Lower is better;
 ratios above `1.00×` mean evmz is faster than the named baseline.
 
@@ -200,7 +200,7 @@ zig build micro -Dmicro-filter=sparse-hash-map/storage-slot-contains
 zig build micro -Dmicro-filter=overlay/cold-storage-load
 ```
 
-Micro benchmarks default to `ReleaseFast` even when the sidecar build default is
+Micro benchmarks default to `fast` even when the sidecar build default is
 debug. Use `-Dmicro-optimize=safe` when a checked timing run is useful.
 Arithmetic rows batch 256 helper calls. State-map lookup/hash rows batch 1,024
 operations, while clear rows batch eight independently prefilled maps. Keep tests
@@ -320,7 +320,7 @@ suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys
 bound-interpreter `execute()` after bytecode generation and interpreter
 initialization. It uses the null host and fails if a case touches host callbacks.
 The default comparison mode is native release for the Rust sidecar: Zig uses
-`ReleaseFast`, evmone is compiled into the Zig benchmark binary with the same
+`fast`, evmone is compiled into the Zig benchmark binary with the same
 optimization mode. EVM2 uses Cargo `--release` with
 `RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=no"`, fat LTO, and one
 codegen unit.
@@ -387,7 +387,7 @@ zig build bench-report -- --out-dir ../output/bench-report
 ```
 
 The default lane is native release for the Rust sidecar: Zig/C++ runners use
-`ReleaseFast`, and all Rust variants use `cargo +1.96.0 --release` with `target-cpu=native`,
+`fast`, and all Rust variants use `cargo +1.96.0 --release` with `target-cpu=native`,
 `force-frame-pointers=no`, fat LTO, and one codegen unit.
 Reports and checkpoints should stay under ignored `output/`; they are local
 measurement artifacts, not source fixtures. Use `--checkpoint <path>` to write

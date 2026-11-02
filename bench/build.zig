@@ -304,7 +304,7 @@ fn evmcCHeaders(b: *std.Build, evmone_dep: *std.Build.Dependency) std.Build.Lazy
         @panic("OOM");
     var header = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(128 * 1024)) catch
         @panic("cannot read evmone EVMC header");
-    // EVMC 19's C header has C++ member initializers. Drop them for @cImport;
+    // EVMC 19's C header has C++ member initializers. Drop them for the C translator;
     // the field types and ABI remain unchanged.
     for ([_][]const u8{ "left", "spilled" }) |field| {
         const before = b.fmt("int64_t {s} = 0;", .{field});

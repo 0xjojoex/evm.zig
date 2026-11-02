@@ -21,9 +21,9 @@ test "MSTORE charges once across growth, unaligned growth, and an expanded overw
         });
         defer frame.deinit();
         const expansion_gas = frame.frame.memory.planExpansion(1, 32).?.cost;
-        const mstore_gas = Latest.spec.instruction.entry(@intFromEnum(Opcode.MSTORE)).info.static_gas;
-        const push_gas = Latest.spec.instruction.entry(@intFromEnum(Opcode.PUSH1)).info.static_gas;
-        const stop_gas = Latest.spec.instruction.entry(@intFromEnum(Opcode.STOP)).info.static_gas;
+        const mstore_gas = Latest.spec.instruction.entry(@backingInt(Opcode.MSTORE)).info.static_gas;
+        const push_gas = Latest.spec.instruction.entry(@backingInt(Opcode.PUSH1)).info.static_gas;
+        const stop_gas = Latest.spec.instruction.entry(@backingInt(Opcode.STOP)).info.static_gas;
         frame.frame.stack.push(0xaa);
         frame.frame.stack.push(0);
         var interpreter = frame.interpreter();

@@ -4,7 +4,6 @@
 //! standalone builtin-fuzzer target (`zig build fuzz`).
 
 const std = @import("std");
-const uint256 = @import("../uint256.zig");
 
 pub fn into(allocator: std.mem.Allocator, output: []u8, base_bytes: []const u8, exponent_bytes: []const u8, modulus_bytes: []const u8) std.mem.Allocator.Error!void {
     if (modexpSmallInto(output, base_bytes, exponent_bytes, modulus_bytes)) return;
@@ -77,8 +76,7 @@ fn modexpSmallInto(output: []u8, base_bytes: []const u8, exponent_bytes: []const
     else
         modexpWords(u256, readWordBytes(u256, sig_mod), base_word, exponent_bytes);
 
-    var word: [32]u8 = undefined;
-    uint256.writeBytes32(&word, result);
+    const word = std.mem.toBytes(std.mem.nativeToBig(u256, result));
     // Output is modulus-length and pre-zeroed by the caller; the result is
     // right-aligned and always fits its significant modulus bytes.
     const copy_len = @min(output.len, word.len);

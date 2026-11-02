@@ -39,7 +39,7 @@ before building the provider. `zig build zisk-config` emits the exact source pin
 
 ```sh
 provider=$(guest/runtime/zisk/build_provider.sh)
-zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=fast \
   -Dstateless-schema=0x1501 \
   -Dziskos-staticlib="$provider"
 ```
@@ -65,9 +65,9 @@ into a static archive before linking Zig. SP1 v6.9.0 includes the
 standards-conformance fixes in SP1 #2865, so no fork patch is needed.
 
 ```sh
-zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast
+zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=fast
 
-zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+zig build guest-sp1-run -Dguest-payload=stateless-ere -Doptimize=fast \
   -Dguest-input=/path/to/raw-stateless-input.bin \
   -Dguest-output=/path/to/public-values.bin
 ```
@@ -86,7 +86,7 @@ cargo install --locked \
   --tag v2.1.0-preview cargo-openvm
 cargo openvm toolchain install
 
-zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=fast \
   -Dstateless-schema=0x1501
 ```
 

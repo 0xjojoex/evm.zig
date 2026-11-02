@@ -11,7 +11,7 @@ Released `state_test`, `blockchain_test`, and `transaction_test` conformance
 runs through `consume direct`:
 
 ```sh
-zig build -Doptimize=ReleaseFast eest-consume -- --no-html -n 4
+zig build -Doptimize=fast eest-consume -- --no-html -n 4
 ```
 
 The default source is `tests@v21.0.2`, pinned in `eest/build.zig`. Pass another
@@ -70,7 +70,7 @@ general recursive runner, worker pool, classifier, or scope reporter.
 Native stateless conformance uses the same upstream machinery:
 
 ```sh
-zig build -Doptimize=ReleaseFast zkevm-consume -- --no-html -n 4
+zig build -Doptimize=fast zkevm-consume -- --no-html -n 4
 ```
 
 `zkevmtest` executes every selected block with `statelessInputBytes`, compares

@@ -1,6 +1,6 @@
 # rlp
 
-Standalone strict RLP Recursive Length Prefix encoding and decoding library for Zig 0.16
+Standalone strict RLP Recursive Length Prefix encoding and decoding library for Zig 0.17
 
 ## Install
 
