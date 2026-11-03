@@ -102,7 +102,7 @@ test "protocol artifacts are selected by their authenticated hashes" {
     }
     try std.testing.expectEqual(
         @as(?Bytecode.View, null),
-        try backend().lookup([_]u8{0xff} ** 32),
+        try backend().lookup(@as([32]u8, @splat(0xff))),
     );
 }
 

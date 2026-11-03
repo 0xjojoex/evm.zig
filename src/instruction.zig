@@ -82,5 +82,5 @@ test "fork-dependent static gas follows legacy schedules" {
 }
 
 fn staticGasAt(comptime revision: evmz.eth.Revision, comptime opcode: Opcode) i64 {
-    return evmz.eth.specAt(revision).instruction.entry(@intFromEnum(opcode)).info.static_gas;
+    return evmz.eth.specAt(revision).instruction.entry(@backingInt(opcode)).info.static_gas;
 }

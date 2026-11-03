@@ -28,7 +28,7 @@ returns 4096 zero bytes 256 times. Run it through the executor so the real
 frame lifecycle is included:
 
 ```sh
-zig build vm-loop -Doptimize=ReleaseFast -- \
+zig build vm-loop -Doptimize=fast -- \
   --engine evmz-executor \
   --fixture fixtures/vm-loop/child-return-4k-loop \
   --proxy-target-code-path fixtures/vm-loop/return-4k-target/init.hex \

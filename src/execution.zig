@@ -410,24 +410,24 @@ pub const ExecutionRequest = struct {
 };
 
 test "execution request and scope initialization contain no family policy" {
-    const request_fields = std.meta.fields(ExecutionRequest);
-    try std.testing.expectEqual(@as(usize, 3), request_fields.len);
-    try std.testing.expectEqualStrings("context", request_fields[0].name);
-    try std.testing.expect(request_fields[0].type == ExecutionContext);
-    try std.testing.expectEqualStrings("message", request_fields[1].name);
-    try std.testing.expect(request_fields[1].type == Message);
-    try std.testing.expectEqualStrings("gas", request_fields[2].name);
-    try std.testing.expect(request_fields[2].type == ExecutionGas);
+    const request_fields = @typeInfo(ExecutionRequest).@"struct";
+    try std.testing.expectEqual(@as(usize, 3), request_fields.field_names.len);
+    try std.testing.expectEqualStrings("context", request_fields.field_names[0]);
+    try std.testing.expect(request_fields.field_types[0] == ExecutionContext);
+    try std.testing.expectEqualStrings("message", request_fields.field_names[1]);
+    try std.testing.expect(request_fields.field_types[1] == Message);
+    try std.testing.expectEqualStrings("gas", request_fields.field_names[2]);
+    try std.testing.expect(request_fields.field_types[2] == ExecutionGas);
 
-    const scope_fields = std.meta.fields(ExecutionScopeInit);
-    try std.testing.expectEqual(@as(usize, 1), scope_fields.len);
-    try std.testing.expectEqualStrings("initial_warm_set", scope_fields[0].name);
-    try std.testing.expect(scope_fields[0].type == InitialWarmSet);
+    const scope_fields = @typeInfo(ExecutionScopeInit).@"struct";
+    try std.testing.expectEqual(@as(usize, 1), scope_fields.field_names.len);
+    try std.testing.expectEqualStrings("initial_warm_set", scope_fields.field_names[0]);
+    try std.testing.expect(scope_fields.field_types[0] == InitialWarmSet);
 }
 
 test "message identity preserves create2 salt" {
-    const sender = Address.fromBytes([_]u8{0x11} ** 20);
-    const recipient = Address.fromBytes([_]u8{0x22} ** 20);
+    const sender = Address.fromBytes(@as([20]u8, @splat(0x11)));
+    const recipient = Address.fromBytes(@as([20]u8, @splat(0x22)));
     const message = try Message.init(.{
         .sender = sender,
         .create_recipient = recipient,
@@ -445,6 +445,6 @@ test "message identity preserves create2 salt" {
 
 test "create message construction requires a family-resolved recipient" {
     try std.testing.expectError(error.MissingCreateRecipient, Message.init(.{
-        .sender = Address.fromBytes([_]u8{0x11} ** 20),
+        .sender = Address.fromBytes(@as([20]u8, @splat(0x11))),
     }));
 }

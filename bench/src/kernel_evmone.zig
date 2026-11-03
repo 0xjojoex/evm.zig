@@ -177,6 +177,7 @@ fn call(context: ?*evmc.evmc_host_context, message: [*c]const evmc.evmc_message)
         .status_code = evmc.EVMC_SUCCESS,
         .gas_left = 0,
         .gas_refund = 0,
+        .state_gas = .{ .left = 0, .spilled = 0 },
         .output_data = null,
         .output_size = 0,
         .release = null,

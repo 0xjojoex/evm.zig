@@ -1,10 +1,11 @@
 //! Hashing and signature primitives (keccak256, sha256, ecrecover) plus the
-//! secp256k1 key, signing, and ECDH surface in `secp256k1`.
+//! secp256k1 key, signing, and ECDH surface in `secp256k1`, and the
+//! consensus layer's BLS signature verification in `bls`.
 //!
 //! The backing provider is selected at build time by the crypto profile
 //! (`native` or `zkvm`). Native builds can select the `std` or `xkcp` Keccak
-//! backend; secp256k1 is always libsecp256k1 there. zkVM builds stay on their
-//! custom accelerator provider and only recover.
+//! backend; secp256k1 is always libsecp256k1 there, and BLS is blst. zkVM
+//! builds stay on their custom accelerator provider and only recover.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -14,6 +15,12 @@ const zkvm = @import("./crypto/zkvm_accelerators.zig");
 pub const secp256k1 = switch (build_options.profile) {
     .native => @import("./crypto/secp256k1.zig"),
     .zkvm => @compileError("crypto.secp256k1 needs the native profile; the zkVM profile only recovers"),
+};
+
+/// BLS signature verification as the consensus layer uses it. Native profile only.
+pub const bls = switch (build_options.profile) {
+    .native => @import("./crypto/bls.zig"),
+    .zkvm => @compileError("crypto.bls needs the native profile"),
 };
 
 pub const provider_name = @tagName(build_options.profile);
@@ -103,7 +110,7 @@ const StdSecp256k1Reference = struct {
         const y = Secp256k1.recoverY(x, recovery_id == 1) catch return null;
         const r_point = Secp256k1.fromAffineCoordinates(.{ .x = x, .y = y }) catch return null;
 
-        var expanded_hash = [_]u8{0} ** 64;
+        var expanded_hash: [64]u8 = @splat(0);
         @memcpy(expanded_hash[32..64], &message_hash);
         const z = Scalar.fromBytes64(expanded_hash, .big);
         const r_inverse = r_scalar.invert();
@@ -228,7 +235,7 @@ test "libsecp256k1 recovery matches the std reference" {
     try std.testing.expect(expected != null);
     try std.testing.expectEqual(expected, ecrecoverPublicKey(message_hash, r, s, 1));
 
-    const zero = [_]u8{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     try std.testing.expectEqual(
         StdSecp256k1Reference.ecrecoverPublicKey(message_hash, zero, s, 1),
         ecrecoverPublicKey(message_hash, zero, s, 1),
@@ -237,7 +244,7 @@ test "libsecp256k1 recovery matches the std reference" {
         StdSecp256k1Reference.ecrecoverPublicKey(message_hash, r, zero, 1),
         ecrecoverPublicKey(message_hash, r, zero, 1),
     );
-    const out_of_range = [_]u8{0xff} ** 32;
+    const out_of_range: [32]u8 = @splat(0xff);
     try std.testing.expectEqual(
         StdSecp256k1Reference.ecrecoverPublicKey(message_hash, out_of_range, s, 1),
         ecrecoverPublicKey(message_hash, out_of_range, s, 1),
@@ -253,5 +260,8 @@ test "libsecp256k1 recovery matches the std reference" {
 }
 
 test {
-    if (build_options.profile == .native) _ = secp256k1;
+    if (build_options.profile == .native) {
+        _ = secp256k1;
+        _ = bls;
+    }
 }

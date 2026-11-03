@@ -11,7 +11,7 @@ Released `state_test`, `blockchain_test`, and `transaction_test` conformance
 runs through `consume direct`:
 
 ```sh
-zig build -Doptimize=ReleaseFast eest-consume -- --no-html -n 4
+zig build -Doptimize=fast eest-consume -- --no-html -n 4
 ```
 
 The default source is `tests@v21.0.2`, pinned in `eest/build.zig`. Pass another
@@ -70,7 +70,7 @@ general recursive runner, worker pool, classifier, or scope reporter.
 Native stateless conformance uses the same upstream machinery:
 
 ```sh
-zig build -Doptimize=ReleaseFast zkevm-consume -- --no-html -n 4
+zig build -Doptimize=fast zkevm-consume -- --no-html -n 4
 ```
 
 `zkevmtest` executes every selected block with `statelessInputBytes`, compares
@@ -159,16 +159,14 @@ paths to the runner. New worktrees reuse the roughly 5 GB of extracted fixtures
 without setup commands, local copies, or symlinks. Explicit fixture paths after
 `--` bypass shared-cache preparation.
 
-These pins stay outside package dependencies because Zig 0.16 extracts cached
-lazy packages into each worktree while constructing the dependency graph.
-The Zig build reads the URLs and hashes directly from `consensus.zon`. A custom
-`std.Build.Step` in `build/ConsensusFixtures.zig` prepares missing packages when
-the conformance step runs. It asks Zig to fetch and verify them in a temporary
-directory, reusing Zig's global download cache, then publishes complete
-extractions atomically under their hashes. A file lock serializes preparation
-across worktrees and is released before tests run. The step exposes fixture
-directories as `LazyPath`s to the normal artifact runner. Different pins coexist
-automatically; the pinned corpus run requires no Python.
+These pins stay outside package dependencies so constructing the build graph
+never extracts the large archives into each worktree. The runner reads the URLs
+and hashes from `consensus.zon` and prepares missing packages only when the
+conformance command runs without explicit paths. It asks the pinned Zig compiler
+to fetch and verify them in a temporary directory, reuses Zig's global download
+cache, and publishes complete extractions atomically under their hashes. A file
+lock serializes preparation across worktrees and is released before tests run.
+Different pins coexist automatically; the pinned corpus run requires no Python.
 
 Treat shared fixtures as immutable. For fixture experiments, make a separate
 copy and pass its path after `--`. Existing worktree-local extractions are not

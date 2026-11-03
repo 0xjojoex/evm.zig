@@ -12,7 +12,7 @@ pub fn compressedLen(input: []const u8) u32 {
     const idx_limit: u32 = if (input.len < 13) 0 else @intCast(input.len - 13);
     var anchor: u32 = 0;
     var size: u32 = 0;
-    var htab = [_]u32{0} ** 8192;
+    var htab: [8192]u32 = @splat(0);
 
     while (idx < idx_limit) {
         var r: u32 = 0;
@@ -78,8 +78,8 @@ fn u24At(input: []const u8, idx: u32) u32 {
 
 test "compressedLen matches the op-revm reference vectors" {
     try std.testing.expectEqual(@as(u32, 0), compressedLen(&.{}));
-    try std.testing.expectEqual(@as(u32, 21), compressedLen(&[_]u8{0} ** 1000));
-    try std.testing.expectEqual(@as(u32, 21), compressedLen(&[_]u8{42} ** 1000));
+    try std.testing.expectEqual(@as(u32, 21), compressedLen(&@as([1000]u8, @splat(0))));
+    try std.testing.expectEqual(@as(u32, 21), compressedLen(&@as([1000]u8, @splat(42))));
     try std.testing.expectEqual(@as(u32, 4), compressedLen(&.{ 0xfa, 0xca, 0xde }));
 
     // Sample contract call from the op-revm test suite.

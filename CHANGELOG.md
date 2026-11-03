@@ -14,6 +14,10 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
 
 ### Package
 
+- Requires Zig 0.17.0, pinned through mise. Optimization modes use `debug`,
+  `safe`, `fast`, and `small`; update build commands from `ReleaseFast` to `fast`
+  (and the corresponding names for other modes).
+
 - evmz is released as one Zig package at the repository root. `rlp`, `mpt`, and
   `ssz` ship at the package version instead of being split into standalone
   package trees, and unreleased entries from their changelogs move here.
@@ -52,6 +56,10 @@ Added
   raw-x ECDH over libsecp256k1 behind a seeded, allocator-backed `Context`,
   so a node built on evmz shares one curve implementation with the EVM
   instead of linking its own. Native profile only.
+- `crypto.bls`: consensus-layer BLS verification over blst (validated
+  `PublicKey`, an `Aggregate` of keys, and `verify` with the
+  proof-of-possession ciphersuite), which together make `FastAggregateVerify`
+  for light clients. Native profile only.
 - `CompileOptions.transaction_journal`: an embedding-owned journal whose
   checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
   with it. See `examples/transaction_journal.zig`.

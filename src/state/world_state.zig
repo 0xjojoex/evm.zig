@@ -23,6 +23,7 @@
 //! sealed view.
 
 const std = @import("std");
+const uint256 = @import("../uint256.zig");
 
 const crypto = @import("../crypto.zig");
 const execution = @import("../execution.zig");
@@ -115,7 +116,7 @@ pub const Incarnation = enum(u32) {
     /// Return the successor. Requires a value below `maxInt(u32)`; overflow is
     /// safety-checked illegal behavior, with no wrap or reset policy here.
     pub inline fn next(self: Incarnation) Incarnation {
-        return @enumFromInt(@intFromEnum(self) + 1);
+        return @fromBackingInt(@intCast(@backingInt(self) + 1));
     }
 };
 
@@ -236,7 +237,7 @@ pub const TransientKey = extern struct {
     slot_words: [4]u64,
 
     pub fn init(address_word: AddressWord, slot: u256) TransientKey {
-        return .{ .address_word = address_word, .slot_words = @bitCast(slot) };
+        return .{ .address_word = address_word, .slot_words = std.mem.bytesToValue([4]u64, std.mem.asBytes(&slot)) };
     }
 
     pub const HashContext = struct {
@@ -925,19 +926,19 @@ pub fn WorldState(comptime World: type) type {
             fn appendTransient(self: *Journal, allocator: Allocator, undo: TransientUndo) !void {
                 try reserve(&self.entries, allocator, 1);
                 try reserve(&self.transient, allocator, 1);
-                const id: Id = @enumFromInt(self.transient.items.len);
+                const id: Id = @fromBackingInt(@intCast(self.transient.items.len));
                 self.transient.appendAssumeCapacity(undo);
                 self.entries.appendAssumeCapacity(.{ .transient_storage = id });
             }
 
             fn appendAccountAssumeCapacity(self: *Journal, undo: AccountUndo) void {
-                const id: Id = @enumFromInt(self.accounts.items.len);
+                const id: Id = @fromBackingInt(@intCast(self.accounts.items.len));
                 self.accounts.appendAssumeCapacity(undo);
                 self.entries.appendAssumeCapacity(.{ .account = id });
             }
 
             fn appendStorageAssumeCapacity(self: *Journal, undo: StorageUndo) void {
-                const id: Id = @enumFromInt(self.storage.items.len);
+                const id: Id = @fromBackingInt(@intCast(self.storage.items.len));
                 self.storage.appendAssumeCapacity(undo);
                 self.entries.appendAssumeCapacity(.{ .storage = id });
             }
@@ -1313,7 +1314,7 @@ pub fn WorldState(comptime World: type) type {
         pub fn getCodeHash(self: *State, address: AccountKey) !u256 {
             const account = (try self.readAccount(address, .{ .accessed = true, .value_read = true })) orelse
                 return 0;
-            return std.mem.readInt(u256, &account.code_hash, .big);
+            return uint256.fromBytes32(&account.code_hash);
         }
 
         pub fn accountHasCode(self: *State, address: AccountKey) !bool {
@@ -1961,7 +1962,7 @@ pub fn WorldState(comptime World: type) type {
                 const entry = self.journal.entries.pop().?;
                 switch (entry) {
                     .account => |undo_id| {
-                        std.debug.assert(@intFromEnum(undo_id) + 1 == self.journal.accounts.items.len);
+                        std.debug.assert(@backingInt(undo_id) + 1 == self.journal.accounts.items.len);
                         const undo = self.journal.accounts.pop().?;
                         const row = self.world.accountRow(undo.account);
                         row.current = undo.current;
@@ -1974,7 +1975,7 @@ pub fn WorldState(comptime World: type) type {
                         self.observed_accounts.items[row.observation.index].effect = undo.effect;
                     },
                     .storage => |undo_id| {
-                        std.debug.assert(@intFromEnum(undo_id) + 1 == self.journal.storage.items.len);
+                        std.debug.assert(@backingInt(undo_id) + 1 == self.journal.storage.items.len);
                         const undo = self.journal.storage.pop().?;
                         const row = self.world.storageRow(undo.storage);
                         row.current = undo.current;
@@ -2000,14 +2001,14 @@ pub fn WorldState(comptime World: type) type {
                             unreachable;
                     },
                     .transient_storage => |undo_id| {
-                        std.debug.assert(@intFromEnum(undo_id) + 1 == self.journal.transient.items.len);
+                        std.debug.assert(@backingInt(undo_id) + 1 == self.journal.transient.items.len);
                         const undo = self.journal.transient.pop().?;
                         self.transient_storage.putAssumeCapacity(undo.key, undo.previous);
                     },
                     .introduced_code => {
                         const block_id = self.block_introduced_codes.pop().?;
-                        std.debug.assert(@intFromEnum(block_id) + 1 == self.code.introducedLen());
-                        self.code.truncateIntroduced(self.allocator, @intFromEnum(block_id));
+                        std.debug.assert(@backingInt(block_id) + 1 == self.code.introducedLen());
+                        self.code.truncateIntroduced(self.allocator, @backingInt(block_id));
                     },
                 }
             }
@@ -2208,14 +2209,14 @@ pub fn WorldState(comptime World: type) type {
         /// clock is below `maxInt(u32)`; there is no wrap or reset policy here.
         fn tick(self: *State, comptime lifetime: Lifetime) Generation(lifetime) {
             self.clock += 1;
-            return @enumFromInt(self.clock);
+            return @fromBackingInt(@intCast(self.clock));
         }
 
         /// Open a scope that is also an execution root. One clock value serves
         /// both lifetimes; their types keep the stamps apart.
         fn openRoot(self: *State) void {
             self.lifetime.scope = self.tick(.scope);
-            self.lifetime.root = @enumFromInt(@intFromEnum(self.lifetime.scope));
+            self.lifetime.root = @fromBackingInt(@intCast(@backingInt(self.lifetime.scope)));
         }
 
         /// Drop slots whose incarnation a wipe left behind so the transaction delta

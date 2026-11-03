@@ -375,7 +375,7 @@ const TestSigner = struct {
 
     fn init() !TestSigner {
         const Scheme = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
-        const secret = try Scheme.SecretKey.fromBytes([_]u8{0x11} ** Scheme.SecretKey.encoded_length);
+        const secret = try Scheme.SecretKey.fromBytes(@as([Scheme.SecretKey.encoded_length]u8, @splat(0x11)));
         const key_pair = try Scheme.KeyPair.fromSecretKey(secret);
         const sec1 = key_pair.public_key.toUncompressedSec1();
         var public_key: [64]u8 = undefined;
@@ -396,8 +396,8 @@ const TestSignature = struct {
 fn signatureForHash(signer: TestSigner, message_hash: [32]u8) !TestSignature {
     const signature = try signer.key_pair.signPrehashed(message_hash, null);
     const bytes = signature.toBytes();
-    const r = std.mem.readInt(u256, bytes[0..32], .big);
-    var s = std.mem.readInt(u256, bytes[32..64], .big);
+    const r = uint256.fromBytes32(bytes[0..32]);
+    var s = uint256.fromBytes32(bytes[32..64]);
     if (s > secp256k1_half_n) s = secp256k1n - s;
 
     for (0..2) |candidate| {
@@ -481,7 +481,7 @@ fn unsignedTypedPayloadForTest(allocator: std.mem.Allocator, type_id: u8) ![]u8 
         try fields.int(u64, 3);
         var hashes = rlp.Writer.alloc(allocator);
         defer hashes.deinit();
-        try hashes.bytes(&([_]u8{0x01} ** 32));
+        try hashes.bytes(&(@as([32]u8, @splat(0x01))));
         try fields.listPayload(hashes.written());
     } else if (type_id == set_code_transaction_type) {
         try fields.listPayload("");

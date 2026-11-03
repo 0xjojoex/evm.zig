@@ -51,13 +51,21 @@ back to Zig's `std` on other architectures. Use `-Dnative-keccak=std` (or
 `.@"native-keccak" = .std` in dependency options) to select `std` explicitly.
 The zkVM profile ignores this option and keeps its accelerator provider.
 
-This follows `main`; pin a commit for reproducible builds. Each release
-supports one Zig minor, and every module ships at the package version — see
+Requires Zig **0.17.0**, pinned through mise. Each release supports one Zig minor,
+and every module ships at the package version — see
 [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
+Pin an evmz commit for reproducible builds.
 
-| evmz   | Zig      |
-| ------ | -------- |
-| `main` | `0.16.x` |
+The [migration screen](bench/README.md#zig-017-migration-screen) records the
+initial compiler regression and the byte-conversion changes that address it.
+
+Use the pinned compiler:
+
+```sh
+mise trust
+mise install
+mise exec -- zig build test
+```
 
 ## Quick start
 
@@ -184,12 +192,12 @@ ZisK requires its exact-commit provider archive. SP1 and OpenVM build their
 ERE-backed providers from the pinned repo manifests:
 
 ```sh
-zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=ReleaseFast \
+zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=fast \
     -Dziskos-staticlib=/path/to/libziskos_staticlib.a
 
-zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=ReleaseFast
+zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=fast
 
-zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=ReleaseFast
+zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=fast
 ```
 
 The matching `guest-zisk-run` and `guest-sp1-run` steps execute the built ELF
@@ -204,7 +212,7 @@ sizing, schema pinning, and proof-readiness checks.
 ## Performance
 
 VM-loop snapshot on Apple M1 Max / macOS arm64, measured 2026-10-30 with fixed
-Osaka, native `ReleaseFast` and evmz's XKCP Keccak provider. Evmone is v0.25.0;
+Osaka, Zig 0.16.0 native `ReleaseFast` and evmz's XKCP Keccak provider. Evmone is v0.25.0;
 EVM2 uses stable packed dispatch on Rust 1.96.0. Each cell is the median of five
 100-call medians, with 100 ms discarded warmup per fixture/engine. Lower is better:
 

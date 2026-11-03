@@ -265,7 +265,7 @@ fn storageKeysForEntry(total_keys: usize, entry_count: usize, index: usize) usiz
 }
 
 fn syntheticAccessListAddress(index: usize) evmz.Address {
-    var address = [_]u8{0} ** 20;
+    var address: [20]u8 = @splat(0);
     address[0] = 0xaa;
     var value: u64 = @intCast(index + 1);
     var i: usize = 0;
@@ -333,8 +333,8 @@ fn growableEnv(block_gas_limit: u64) evmz.Env {
 }
 
 fn parseCase(value: []const u8) ?Case {
-    inline for (std.meta.fields(Case)) |field| {
-        if (tagNameMatches(value, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(Case).@"enum".field_names, @typeInfo(Case).@"enum".field_values) |field_name, field_value| {
+        if (tagNameMatches(value, field_name)) return @fromBackingInt(@intCast(field_value));
     }
     return null;
 }

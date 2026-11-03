@@ -474,8 +474,8 @@ fn writePipeAll(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
 fn formatTerm(term: std.process.Child.Term, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (term) {
         .exited => |code| try writer.print("exit code {d}", .{code}),
-        .signal => |signal| try writer.print("signal {d}", .{@intFromEnum(signal)}),
-        .stopped => |signal| try writer.print("stopped signal {d}", .{@intFromEnum(signal)}),
+        .signal => |signal| try writer.print("signal {d}", .{@backingInt(signal)}),
+        .stopped => |signal| try writer.print("stopped signal {d}", .{@backingInt(signal)}),
         .unknown => |status| try writer.print("unknown status {d}", .{status}),
     }
 }
@@ -531,7 +531,7 @@ test "canonical outcome rejects non-zero padding" {
 }
 
 test "a guest public region shorter than the expected result is a crash" {
-    const short = [_]u8{1} ** 8;
+    const short: [8]u8 = @splat(1);
     var outcome = try canonicalOutcome(std.testing.allocator, &short, 69, 0, 0, 0);
     defer outcome.deinit(std.testing.allocator);
     try std.testing.expect(outcome == .crashed);

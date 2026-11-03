@@ -47,7 +47,7 @@ pub fn ProgressiveContainer(comptime T: type, comptime active_config: anytype, c
 
 fn validateActiveFields(comptime T: type, comptime active_fields: anytype) void {
     const fields = switch (@typeInfo(T)) {
-        .@"struct" => |value| value.fields,
+        .@"struct" => |value| value,
         else => @compileError("SSZ ProgressiveContainer requires a Zig struct"),
     };
     const active = switch (@typeInfo(@TypeOf(active_fields))) {
@@ -63,7 +63,7 @@ fn validateActiveFields(comptime T: type, comptime active_fields: anytype) void 
     inline for (active_fields) |is_active| {
         if (is_active) active_count += 1;
     }
-    if (active_count != fields.len) {
+    if (active_count != fields.field_names.len) {
         @compileError("SSZ ProgressiveContainer requires one active bit per field");
     }
 }

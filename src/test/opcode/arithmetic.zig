@@ -27,7 +27,7 @@ test "EXP byte gas comes from the exact spec" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    const code = [_]u8{@intFromEnum(evmz.Opcode.EXP)};
+    const code = [_]u8{@backingInt(evmz.Opcode.EXP)};
 
     var frame = try Exact.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
@@ -44,7 +44,7 @@ test "EXP byte gas comes from the exact spec" {
 
     try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
     try std.testing.expectEqual(
-        msg.gas - Exact.spec.instruction.entry(@intFromEnum(evmz.Opcode.EXP)).info.static_gas - 2,
+        msg.gas - Exact.spec.instruction.entry(@backingInt(evmz.Opcode.EXP)).info.static_gas - 2,
         frame.frame.gas_left,
     );
     try std.testing.expectEqual(@as(u256, 0), frame.frame.stack.pop());

@@ -43,7 +43,7 @@ const Engine = enum {
 
 const Options = struct {
     zig_exe: []const u8 = "zig",
-    optimize: []const u8 = "ReleaseFast",
+    optimize: []const u8 = "fast",
     profile: []const u8 = "native",
     native_keccak: []const u8 = "xkcp",
     support_min: ?[]const u8 = null,
@@ -228,7 +228,7 @@ fn printUsage() void {
         \\
         \\Options:
         \\  --zig-exe <path>       Zig executable used for child bench steps
-        \\  --optimize <mode>      Zig/C++ runner optimization mode, default ReleaseFast
+        \\  --optimize <mode>      Zig/C++ runner optimization mode, default fast
         \\  --profile <profile>    evmz build profile forwarded to child Zig builds
         \\  --native-keccak <name> native Keccak backend forwarded to evmz builds
         \\  --support-min <name>   minimum evmz fork compiled into the VM-loop runner

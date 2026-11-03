@@ -33,7 +33,7 @@ test "EIP-8024 DUPN duplicates a deep stack item" {
     code[18] = evmz.Opcode.DUPN.toByte();
     code[19] = 0x80;
 
-    var expected = [_]u256{0} ** 18;
+    var expected: [18]u256 = @splat(0);
     expected[0] = 1;
     expected[17] = 1;
     try evmz.t.expectStackByRevision(&code, .amsterdam, &expected);
@@ -49,7 +49,7 @@ test "EIP-8024 SWAPN swaps the top with a deep stack item" {
     code[20] = evmz.Opcode.SWAPN.toByte();
     code[21] = 0x80;
 
-    var expected = [_]u256{0} ** 18;
+    var expected: [18]u256 = @splat(0);
     expected[0] = 2;
     expected[17] = 1;
     try evmz.t.expectStackByRevision(&code, .amsterdam, &expected);
@@ -68,9 +68,9 @@ test "EIP-8024 immediates reject jumpdest and push ranges" {
 }
 
 test "EIP-8024 missing immediate byte is decoded as zero" {
-    var code = [_]u8{evmz.Opcode.PUSH0.toByte()} ** 146;
+    var code: [146]u8 = @splat(evmz.Opcode.PUSH0.toByte());
     code[145] = evmz.Opcode.DUPN.toByte();
 
-    const expected = [_]u256{0} ** 146;
+    const expected: [146]u256 = @splat(0);
     try evmz.t.expectStackByRevision(&code, .amsterdam, &expected);
 }

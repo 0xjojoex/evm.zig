@@ -5,6 +5,7 @@
 const std = @import("std");
 const conformance = @import("ssz_conformance.zig");
 const fixture_pool = @import("fixture_pool.zig");
+const consensus_fixtures = @import("consensus_fixtures.zig");
 
 const default_jobs = 4;
 const max_jobs = 64;
@@ -20,17 +21,30 @@ pub fn main(init: std.process.Init) !void {
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(allocator);
     var jobs: usize = default_jobs;
+    var pinned = false;
+    var zig_exe: []const u8 = "zig";
+    var zig_global_cache: ?[]const u8 = null;
     while (args.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
             return;
+        } else if (std.mem.eql(u8, arg, "--pinned-consensus-fixtures")) {
+            pinned = true;
+        } else if (std.mem.eql(u8, arg, "--zig-exe")) {
+            zig_exe = args.next() orelse return error.MissingZigExe;
+        } else if (std.mem.eql(u8, arg, "--zig-global-cache")) {
+            zig_global_cache = args.next() orelse return error.MissingZigGlobalCache;
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const value = args.next() orelse return error.MissingJobs;
             jobs = try fixture_pool.parseJobs(value, max_jobs);
         } else try paths.append(allocator, try arena.dupe(u8, arg));
     }
 
+    if (paths.items.len == 0 and pinned) {
+        const shared_paths = try consensus_fixtures.prepare(init, zig_exe, zig_global_cache);
+        try paths.appendSlice(allocator, &shared_paths);
+    }
     if (paths.items.len == 0) return error.MissingFixturePath;
 
     var total = Summary{};

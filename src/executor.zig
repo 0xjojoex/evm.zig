@@ -20,6 +20,7 @@
 //! Consumers cannot begin or finish the Executor's active transaction row.
 
 const std = @import("std");
+const uint256 = @import("uint256.zig");
 
 const evmz = @import("./evm.zig");
 const accounting = @import("./execution/accounting.zig");
@@ -1079,7 +1080,7 @@ pub fn ExecutorType(
                 input.to.toU256(),
             };
             var data: [32]u8 = undefined;
-            std.mem.writeInt(u256, &data, input.amount, .big);
+            uint256.writeBytes32(&data, input.amount);
 
             try self.state.emitLog(Host.Log{
                 .address = transfer_log.address,
@@ -1122,11 +1123,11 @@ pub fn ExecutorType(
             // The ref's bit pattern is the index; reserved values fall above
             // `max_index`, so no classification runs on the memo-hit path.
             comptime {
-                std.debug.assert(@intFromEnum(evmz.state.CodeRef.missing) > prepared_code.Execution.max_index);
-                std.debug.assert(@intFromEnum(evmz.state.CodeRef.empty) > prepared_code.Execution.max_index);
+                std.debug.assert(@backingInt(evmz.state.CodeRef.missing) > prepared_code.Execution.max_index);
+                std.debug.assert(@backingInt(evmz.state.CodeRef.empty) > prepared_code.Execution.max_index);
                 std.debug.assert(evmz.state.CodeRef.max_indexed - 1 <= prepared_code.Execution.max_index);
             }
-            return execution.resolve(code.code_hash, code.bytes, @intFromEnum(code.ref), .{
+            return execution.resolve(code.code_hash, code.bytes, @backingInt(code.ref), .{
                 .admit = true,
             });
         }

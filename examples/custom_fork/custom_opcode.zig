@@ -47,9 +47,9 @@ const CancunVm = evmz.Vm(evmz.eth.cancun);
 
 comptime {
     std.debug.assert(SquareVm.spec.instruction.entry(square_byte).active);
-    std.debug.assert(!SquareVm.spec.instruction.entry(@intFromEnum(evmz.Opcode.SELFDESTRUCT)).active);
-    std.debug.assert(SquareVm.spec.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 1_000);
-    std.debug.assert(CancunVm.spec.instruction.entry(@intFromEnum(evmz.Opcode.BALANCE)).info.static_gas == 100);
+    std.debug.assert(!SquareVm.spec.instruction.entry(@backingInt(evmz.Opcode.SELFDESTRUCT)).active);
+    std.debug.assert(SquareVm.spec.instruction.entry(@backingInt(evmz.Opcode.BALANCE)).info.static_gas == 1_000);
+    std.debug.assert(CancunVm.spec.instruction.entry(@backingInt(evmz.Opcode.BALANCE)).info.static_gas == 100);
 }
 
 const sender = evmz.addr(0xaaaa);

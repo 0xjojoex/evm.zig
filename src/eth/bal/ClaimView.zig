@@ -299,7 +299,7 @@ test "ClaimView resolves latest declared values and coverage" {
     try std.testing.expectEqual(crypto.keccak256(&code_bytes), code.hash);
     try std.testing.expectEqual(@as(?Address, null), code.delegationTarget());
     try std.testing.expectEqualSlices(u8, &code_bytes, view.codeByHash(code.hash).?.bytes);
-    try std.testing.expectEqual(@as(?Code, null), view.codeByHash([_]u8{0xff} ** 32));
+    try std.testing.expectEqual(@as(?Code, null), view.codeByHash(@as([32]u8, @splat(0xff))));
 }
 
 test "ClaimView imports EIP-7702 code strictly and caches its target" {
@@ -314,7 +314,7 @@ test "ClaimView imports EIP-7702 code strictly and caches its target" {
         ClaimView.initAssumeValidated(std.testing.allocator, &malformed_length_claim),
     );
 
-    var unsupported_version = [_]u8{0} ** delegation_code.delegation_code_len;
+    var unsupported_version: [delegation_code.delegation_code_len]u8 = @splat(0);
     unsupported_version[0] = 0xef;
     unsupported_version[1] = 0x01;
     unsupported_version[2] = 0x01;
@@ -329,7 +329,7 @@ test "ClaimView imports EIP-7702 code strictly and caches its target" {
     );
 
     const target = address.addr(0x1234);
-    var delegation = [_]u8{0} ** delegation_code.delegation_code_len;
+    var delegation: [delegation_code.delegation_code_len]u8 = @splat(0);
     delegation_code.writeDelegationCode(&delegation, target);
     const delegation_changes = [_]bal.CodeChange{.{ .block_access_index = 1, .new_code = &delegation }};
     const claim = [_]bal.AccountChanges{.{

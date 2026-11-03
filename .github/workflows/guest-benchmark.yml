@@ -58,6 +58,7 @@ on:
         default: zisk
         type: choice
         options:
+          - all
           - zisk
           - sp1
           - openvm
@@ -88,7 +89,7 @@ jobs:
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
-      ZIG_VERSION: 0.16.0
+      ZIG_VERSION: 0.17.0
 
     steps:
       - name: Checkout
@@ -184,14 +185,14 @@ jobs:
         env:
           PROVIDER: ${{ steps.zisk.outputs.provider }}
           RELEASE_GATE: ${{ inputs.release_gate }}
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-cache
         run: |
           zig build guest-zisk \
             -Dguest-payload=stateless-ere \
             "-Dstateless-schema=${STATELESS_SCHEMA}" \
-            -Doptimize=ReleaseFast \
+            -Doptimize=fast \
             "-Dziskos-staticlib=${PROVIDER}" \
             --prefix "${RUNNER_TEMP}/guest" \
-            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/zisk/evmz-guest-zisk.elf"
           candidate="${GITHUB_WORKSPACE}/stateless-validator-evmz-zisk-${ZISK_VERSION}.elf"
@@ -204,10 +205,9 @@ jobs:
           if [[ "${RELEASE_GATE}" == true ]]; then
             zig build guest-zisk \
               -Dguest-payload=exit-failure-probe \
-              -Doptimize=ReleaseFast \
+              -Doptimize=fast \
               "-Dziskos-staticlib=${PROVIDER}" \
               --prefix "${RUNNER_TEMP}/failure-probe" \
-              --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
               --summary all
             zig build check-zisk-failure-status -- \
               "${{ steps.zisk.outputs.host }}" \
@@ -249,7 +249,7 @@ jobs:
           if [[ "${RELEASE_GATE}" == true ]]; then
             args+=(--strict-evidence)
           fi
-          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}"
+          zig build -Doptimize=fast zkevm --summary all -- "${args[@]}"
 
       - name: Publish job summary
         if: always() && hashFiles('guest-evidence/report.md') != ''
@@ -305,7 +305,7 @@ jobs:
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
-      ZIG_VERSION: 0.16.0
+      ZIG_VERSION: 0.17.0
       OPENVM_VERSION: v2.1.0-preview
       OPENVM_COMMIT: 538c5488130da56c8442d33445efe3c1fe5ea8b8
       OPENVM_RUST_TOOLCHAIN: openvm-1.94.1
@@ -356,6 +356,8 @@ jobs:
             --manifest="${RESOLVED_MANIFEST}"
 
       - name: Build OpenVM host and guest
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-cache
         run: |
           cargo build \
             --quiet \
@@ -367,9 +369,8 @@ jobs:
           zig build guest-openvm \
             -Dguest-payload=stateless-ere \
             "-Dstateless-schema=${STATELESS_SCHEMA}" \
-            -Doptimize=ReleaseFast \
+            -Doptimize=fast \
             --prefix "${RUNNER_TEMP}/guest" \
-            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/openvm/evmz-guest-openvm.elf"
           zig build check-guest-elf -- --require-rv64im "${elf}"
@@ -402,7 +403,7 @@ jobs:
           if [[ "${RELEASE_GATE}" == true ]]; then
             args+=(--strict-evidence)
           fi
-          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}"
+          zig build -Doptimize=fast zkevm --summary all -- "${args[@]}"
 
       - name: Write runtime identity
         run: |
@@ -458,7 +459,7 @@ jobs:
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
-      ZIG_VERSION: 0.16.0
+      ZIG_VERSION: 0.17.0
       SP1_VERSION: v6.9.0
       SP1_COMMIT: b8387fa61e1361d90ee7de49f551863418ca0f08
       SP1_RUST_TOOLCHAIN: succinct
@@ -513,6 +514,8 @@ jobs:
             --manifest="${RESOLVED_MANIFEST}"
 
       - name: Build SP1 host and guest
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-cache
         run: |
           cargo build \
             --quiet \
@@ -524,9 +527,8 @@ jobs:
           zig build guest-sp1 \
             -Dguest-payload=stateless-ere \
             "-Dstateless-schema=${STATELESS_SCHEMA}" \
-            -Doptimize=ReleaseFast \
+            -Doptimize=fast \
             --prefix "${RUNNER_TEMP}/guest" \
-            --global-cache-dir "${RUNNER_TEMP}/zig-global-cache" \
             --summary all
           elf="${RUNNER_TEMP}/guest/guest/sp1/evmz-guest-sp1.elf"
           zig build check-guest-elf -- --require-rv64im "${elf}"
@@ -558,7 +560,7 @@ jobs:
           if [[ "${RELEASE_GATE}" == true ]]; then
             args+=(--strict-evidence)
           fi
-          zig build -Doptimize=ReleaseFast zkevm --summary all -- "${args[@]}"
+          zig build -Doptimize=fast zkevm --summary all -- "${args[@]}"
 
       - name: Write runtime identity
         run: |

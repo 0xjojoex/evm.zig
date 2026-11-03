@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     var leaked: usize = 0;
 
     for (builtin.test_functions) |test_fn| {
-        std.testing.allocator_instance = .{};
+        std.testing.allocator_instance = .init(std.heap.page_allocator, .{ .canary = 0xc3a701ba, .check_write_after_free = true });
         std.testing.io_instance = .init(std.testing.allocator, .{
             .argv0 = .init(init.args),
             .environ = init.environ,
@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         const result = test_fn.func();
 
         std.testing.io_instance.deinit();
-        if (std.testing.allocator_instance.deinit() == .leak) {
+        if (std.testing.allocator_instance.deinit() != 0) {
             leaked += 1;
         }
 

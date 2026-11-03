@@ -5,7 +5,7 @@ const schema_limit = @import("../schema_limit.zig");
 const precomputed_zero_roots = @import("zero_roots.zig");
 
 pub const Root = [32]u8;
-pub const zero = [_]u8{0} ** 32;
+pub const zero: [32]u8 = @splat(0);
 const root_word_alignment = @alignOf(u64);
 const DefaultContext = hash_context.StdSha256Context;
 pub const precomputed_zero_root_count = precomputed_zero_roots.count;
@@ -34,7 +34,7 @@ pub const TreePath = struct {
         if (self.depth >= 256) return null;
         const parent = self.parent orelse return 1;
         const parent_index = parent.generalizedIndex() orelse return null;
-        return (parent_index << 1) | @intFromEnum(self.direction.?);
+        return (parent_index << 1) | @backingInt(self.direction.?);
     }
 
     /// Iterate directions from the current node back toward the root.
@@ -80,7 +80,7 @@ pub fn visitorType(comptime VisitorPointer: type) type {
         .pointer => |value| value,
         else => @compileError("SSZ tree visitor must be passed by pointer"),
     };
-    if (pointer.size != .one or pointer.is_const) {
+    if (pointer.size != .one or pointer.attrs.@"const") {
         @compileError("SSZ tree visitor must be a mutable single-item pointer");
     }
     return pointer.child;
@@ -167,7 +167,7 @@ pub fn mixInLength(root: Root, length: usize) Root {
 
 pub fn mixInLengthWith(context: anytype, root: Root, length: usize) Root {
     var length_root = zero;
-    std.mem.writeInt(u256, &length_root, @intCast(length), .little);
+    std.mem.writeInt(u64, length_root[0..8], length, .little);
     return hashPairWith(context, root, length_root);
 }
 
@@ -397,7 +397,7 @@ pub fn TreeWalker(comptime Context: type, comptime Visitor: type) type {
 
         pub fn mixInLength(self: *Self, path: *const TreePath, left: Root, length: usize) WalkError!Root {
             var right = zero;
-            std.mem.writeInt(u256, &right, @intCast(length), .little);
+            std.mem.writeInt(u64, right[0..8], length, .little);
             return self.mixIn(path, left, right);
         }
 

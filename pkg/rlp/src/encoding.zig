@@ -79,10 +79,18 @@ pub fn assertUnsignedInt(comptime T: type) void {
 }
 
 pub fn intBytes(comptime T: type, value: T) [byteLen(T)]u8 {
-    const Wide = std.meta.Int(.unsigned, byteLen(T) * 8);
-    var bytes: [byteLen(T)]u8 = undefined;
-    std.mem.writeInt(Wide, &bytes, value, .big);
-    return bytes;
+    const len = comptime byteLen(T);
+    switch (len) {
+        1, 2, 4, 8 => {
+            var bytes: [len]u8 = undefined;
+            std.mem.writeInt(@Int(.unsigned, len * 8), &bytes, value, .big);
+            return bytes;
+        },
+        // Zig 0.17 scalarizes wide/non-native-width `std.mem.writeInt` conversions.
+        // Related regression: https://codeberg.org/ziglang/zig/issues/36256
+        // Recheck codegen and benchmarks on Zig upgrades before simplifying.
+        else => return std.mem.toBytes(std.mem.nativeToBig(u256, value))[32 - len ..].*,
+    }
 }
 
 pub fn byteLen(comptime T: type) usize {
