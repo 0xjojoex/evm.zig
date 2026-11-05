@@ -14,8 +14,8 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
 
 ### Package
 
-- Requires Zig 0.17.0, pinned through mise. Optimization modes use `debug`,
-  `safe`, `fast`, and `small`; update build commands from `ReleaseFast` to `fast`
+- Requires Zig 0.17.x. Mise and CI pin 0.17.1. Optimization modes use
+  `debug`, `safe`, `fast`, and `small`; update build commands from `ReleaseFast` to `fast`
   (and the corresponding names for other modes).
 
 - evmz is released as one Zig package at the repository root. `rlp`, `mpt`, and

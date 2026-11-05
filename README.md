@@ -51,8 +51,8 @@ back to Zig's `std` on other architectures. Use `-Dnative-keccak=std` (or
 `.@"native-keccak" = .std` in dependency options) to select `std` explicitly.
 The zkVM profile ignores this option and keeps its accelerator provider.
 
-Requires Zig **0.17.0**, pinned through mise. Each release supports one Zig minor,
-and every module ships at the package version — see
+Supports Zig **0.17.x**. Mise and CI pin **0.17.1**.
+Every module ships at the package version — see
 [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
 Pin an evmz commit for reproducible builds.
 
