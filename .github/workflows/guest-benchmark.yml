@@ -89,7 +89,7 @@ jobs:
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
-      ZIG_VERSION: 0.17.0
+      ZIG_VERSION: 0.17.1
 
     steps:
       - name: Checkout
@@ -305,7 +305,7 @@ jobs:
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
-      ZIG_VERSION: 0.17.0
+      ZIG_VERSION: 0.17.1
       OPENVM_VERSION: v2.1.0-preview
       OPENVM_COMMIT: 538c5488130da56c8442d33445efe3c1fe5ea8b8
       OPENVM_RUST_TOOLCHAIN: openvm-1.94.1
@@ -459,7 +459,7 @@ jobs:
       RESOLVED_MANIFEST: ${{ github.workspace }}/resolved-manifest.json
       SOURCE_COMMIT: ${{ github.sha }}
       STATELESS_SCHEMA: "0x1501"
-      ZIG_VERSION: 0.17.0
+      ZIG_VERSION: 0.17.1
       SP1_VERSION: v6.9.0
       SP1_COMMIT: b8387fa61e1361d90ee7de49f551863418ca0f08
       SP1_RUST_TOOLCHAIN: succinct
