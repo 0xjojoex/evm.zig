@@ -56,6 +56,10 @@ pub inline fn updateHashedSorted(
 }
 
 pub const NodeUpdates = mpt.NodeUpdates;
+/// `updateHashedSortedWithNodeUpdates`'s other argument types, so a caller
+/// outside evmz can name them.
+pub const FixedUpdate = mpt.FixedUpdate;
+pub const ScopedArenaAllocator = mpt.ScopedArenaAllocator;
 
 pub inline fn updateHashedSortedWithNodeUpdates(
     scratch_arena: *mpt.ScopedArenaAllocator,
