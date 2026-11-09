@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Install mise, then the tools pinned in mise.toml.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+mise_version=2026.11.5
+case "$(uname -m)" in
+  x86_64) mise_arch=x64 mise_sha=7a5b051d6f17d335c502f8047a5175cf3103f347d91942771c60da4e302ebcb0 ;;
+  aarch64) mise_arch=arm64 mise_sha=3cb907fc1d3f033afab40b4a8efca4fd71440bf91b63bfca3beb3302b0f3a6d5 ;;
+  *) echo "setup: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
+
+if [[ "$(mise --version 2>/dev/null || true)" != "$mise_version "* ]]; then
+  echo "setup: installing mise $mise_version"
+  work="$(mktemp -d)"
+  trap 'rm -rf -- "$work"' EXIT
+  curl -fsSL --retry 3 -o "$work/mise" \
+    "https://github.com/jdx/mise/releases/download/v$mise_version/mise-v$mise_version-linux-$mise_arch"
+  echo "$mise_sha  $work/mise" | sha256sum -c --quiet
+  sudo install -m 755 "$work/mise" /usr/local/bin/mise
+fi
+
+# Login shells and supervised services find mise-managed tools through its shims.
+sudo tee /etc/profile.d/mise.sh >/dev/null <<'EOF'
+case ":$PATH:" in
+  *":$HOME/.local/share/mise/shims:"*) ;;
+  *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;;
+esac
+EOF
+
+start=$SECONDS
+mise trust --quiet
+mise install
+echo "setup: mise install finished in $((SECONDS - start))s"
+mise exec -- zig version
