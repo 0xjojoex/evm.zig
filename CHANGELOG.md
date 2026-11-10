@@ -104,9 +104,17 @@ Added
   cap. `refunded` remains the unused gas returned to the payer.
 - `ResultGas.spent`: the gas spent before refunds and floor rules. When the
   calldata floor sets `used`, `used + execution_refund` is more than this.
+- `execution.RootExecutionInit`: per-root entry mode for multi-root sessions.
+  `.charge_call_target` charges the target's warm or cold access from the root's
+  gas instead of warming sender and recipient, and `is_static` runs the root
+  read-only. These are the frame-entry rules of EIP-8141.
 
 Changed
 
+- Program `Context.beginRootSession` takes an `ExecutionScopeInit`, so a
+  session's warm set is applied once. `Context.runRoot` takes a
+  `RootExecutionInit` in its place and returns the root's `log_range` alongside
+  its stage and result; `LogBuffer.View.slice` reads it.
 - `execution.FrameHalt.success` is split into `.stop`, `.returned`, and
   `.selfdestruct`. Replace a match on `.success` with all three, or compare
   `halt.status() == .success`.
