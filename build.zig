@@ -151,9 +151,18 @@ pub fn build(b: *std.Build) void {
         "micro-filter",
         "Only run benchmark micro tests whose names contain this filter",
     );
-    // Frame pointers cost ~3 instructions per tail-dispatch handler; bench
-    // builds already omit them, so keep shipped release artifacts identical.
-    const omit_frame_pointer = optimize != .debug;
+    const frame_pointers = b.option(
+        bool,
+        "frame-pointers",
+        "Keep frame pointers in native artifacts (default: debug and safe builds only)",
+    );
+    // Frame pointers cost ~3 instructions per tail-dispatch handler. A safe
+    // build exists to produce a readable crash, so it keeps them; fast and
+    // small builds omit them to match the benchmarked artifacts.
+    const omit_frame_pointer = !(frame_pointers orelse (optimize == .debug or optimize == .safe));
+    // Guest cycles are the cost on a zkVM, so every release guest omits them
+    // and `-Dframe-pointers` does not reach it.
+    const omit_guest_frame_pointer = optimize != .debug;
 
     const packages = createPackageModules(b, target, optimize, null, true);
     const native_evmz_mod = createEvmzModule(b, .{
@@ -172,7 +181,7 @@ pub fn build(b: *std.Build) void {
         .build_options = zkvm_build_options,
         .stateless_profile = stateless_profile_none_mod,
         .packages = packages,
-        .omit_frame_pointer = omit_frame_pointer,
+        .omit_frame_pointer = omit_guest_frame_pointer,
         .pic = if (pic) true else null,
         .exported = !is_native_profile,
     });
@@ -536,7 +545,7 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_zisk_strip,
-        omit_frame_pointer,
+        omit_guest_frame_pointer,
         guest_zisk_profile_tags,
         guest_heap_bytes,
         guest_zisk_ram_bytes,
@@ -551,7 +560,7 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_sp1_strip,
-        omit_frame_pointer,
+        omit_guest_frame_pointer,
         false,
         guest_heap_bytes,
         null,
@@ -566,7 +575,7 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_openvm_strip,
-        omit_frame_pointer,
+        omit_guest_frame_pointer,
         false,
         guest_heap_bytes,
         null,
