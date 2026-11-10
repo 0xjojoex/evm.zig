@@ -129,6 +129,7 @@ pub fn Callbacks(
                 .accessDelegatedAccount = accessDelegatedAccount,
                 .accessAccount = accessAccount,
                 .observeAccountAccess = observeAccountAccess,
+                .frameStorageStateGas = if (Executor.frames_active) frameStorageStateGas else null,
                 .getTransientStorage = getTransientStorage,
                 .setTransientStorage = setTransientStorage,
             } };
@@ -207,6 +208,16 @@ pub fn Callbacks(
             const self = fromHost(ptr);
             _ = depth;
             try self.state.observeAccountAccess(address);
+        }
+
+        fn frameStorageStateGas(
+            ptr: *anyopaque,
+            address: AddressWord,
+            key: u256,
+            gas: execution.StorageStateGas,
+        ) !bool {
+            const self = fromHost(ptr);
+            return self.frameStorageStateGas(address.address(), key, gas);
         }
 
         fn getBalance(ptr: *anyopaque, address: AddressWord) !u256 {

@@ -32,6 +32,11 @@ pub fn eestExceptionName(error_value: ValidationError) []const u8 {
         .type_4_empty_authorization_list => "TransactionException.TYPE_4_EMPTY_AUTHORIZATION_LIST",
         .type_4_tx_contract_creation => "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
         .invalid_chain_id => "TransactionException.INVALID_CHAINID",
+        // EEST has no TYPE_6_TX_PRE_FORK (tests-bogota-devnet@v2.0.0).
+        .type_6_tx_pre_fork => "TransactionException.TYPE_NOT_SUPPORTED",
+        .type_6_invalid_frame_format => "TransactionException.TYPE_6_INVALID_FRAME_FORMAT",
+        .type_6_invalid_signature => "TransactionException.TYPE_6_INVALID_SIGNATURE",
+        .type_6_invalid_frame_execution => "TransactionException.TYPE_6_INVALID_FRAME_EXECUTION",
     };
 }
 

@@ -93,6 +93,7 @@ fn transactionType(kind: transaction.TxKind) ?u8 {
         .dynamic_fee => 0x02,
         .blob => 0x03,
         .set_code => 0x04,
+        .frame => 0x06,
     };
 }
 

@@ -15,13 +15,15 @@ pub const Charge = struct {
     out_of_gas: bool = false,
 };
 
-/// Draw `amount` from the reservoir first, then from regular gas.
-pub fn charge(gas: *ExecutionGas, amount: i64) Charge {
+/// Draw `amount` from the reservoir first, then from regular gas unless
+/// `spills` is false (an EIP-8141 frame's pool).
+pub fn charge(gas: *ExecutionGas, amount: i64, spills: bool) Charge {
     if (amount <= 0) return .{};
 
     const total: u64 = @intCast(amount);
     const from_reservoir = @min(gas.reservoir, total);
     const from_regular = total - from_reservoir;
+    if (from_regular > 0 and !spills) return .{ .out_of_gas = true };
     if (from_regular > gas.regular_left) return .{ .out_of_gas = true };
 
     gas.reservoir -= from_reservoir;

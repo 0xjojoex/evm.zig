@@ -42,6 +42,17 @@ pub fn Handlers(comptime spec: ExactSpec) type {
 
             const state_gas = spec.storage.sstoreStateGas(status);
             if (!frame.trackStateGas(state_gas.charge)) return;
+            if (comptime spec.transaction.framesActive()) {
+                // EIP-8141: a frame owns the slots it charged; refilling
+                // another frame's charge returns it to that frame's receipt.
+                if (frame.execution_context.transaction.frame_index != null and
+                    (state_gas.charge > 0 or state_gas.refund > 0))
+                {
+                    if (try host.frameStorageStateGas(recipient, key, state_gas))
+                        frame.refillStateGas(state_gas.refund);
+                    return;
+                }
+            }
             frame.refillStateGas(state_gas.refund);
         }
 

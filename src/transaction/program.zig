@@ -385,6 +385,11 @@ pub fn ContextType(
             return self.activeExecutor().allocator;
         }
 
+        /// The EIP-8141 frame journal; only for specs that activate frames.
+        pub fn frameJournal(self: *Self) *Executor.FrameJournal {
+            return &self.activeExecutor().frame_journal;
+        }
+
         /// Open an inner rollback checkpoint without resolving the transaction.
         pub fn checkpoint(self: *Self) Executor.ExecutionCheckpoint {
             return self.activeExecutor().checkpoint();

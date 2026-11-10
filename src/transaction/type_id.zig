@@ -4,3 +4,4 @@ pub const access_list: u8 = 0x01;
 pub const dynamic_fee: u8 = 0x02;
 pub const blob: u8 = 0x03;
 pub const set_code: u8 = 0x04;
+pub const frame: u8 = 0x06;

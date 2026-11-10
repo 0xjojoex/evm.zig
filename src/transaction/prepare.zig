@@ -56,6 +56,8 @@ pub fn Runtime(comptime spec: ExactSpec) type {
 
             if (validation_planner.validateBeforeAccount(validation_input, gas_plan)) |err|
                 return .{ .rejected = err };
+            // An active frame kind is prepared by the transition's frame path.
+            std.debug.assert(view.kind != .frame);
 
             const sender_account = try input.state.accountSummary(view.sender);
             if (sender_account) |account| {

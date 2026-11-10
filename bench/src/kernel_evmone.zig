@@ -277,7 +277,10 @@ fn revFromSpec(revision: evmz.eth.Revision) !evmc.evmc_revision {
         .cancun => evmc.EVMC_CANCUN,
         .prague => evmc.EVMC_PRAGUE,
         .osaka => evmc.EVMC_OSAKA,
-        .amsterdam => evmc.EVMC_AMSTERDAM,
+        // evmone v0.25.0, the latest release, has no Bogotá revision, nor does
+        // its master. Bogotá's interpreter is Amsterdam's: frame transactions
+        // add no opcode in core yet.
+        .amsterdam, .bogota => evmc.EVMC_AMSTERDAM,
     };
 }
 

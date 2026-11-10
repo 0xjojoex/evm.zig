@@ -209,6 +209,10 @@ pub const VTable = struct {
     accessStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!AccessStatus,
     accessDelegatedAccount: *const fn (ptr: *anyopaque, address: AddressWord) anyerror!?AccessStatus,
     observeAccountAccess: ?*const fn (ptr: *anyopaque, address: AddressWord, depth: u16) anyerror!void = null,
+    /// EIP-8141 slot ownership of SSTORE state gas; present exactly when the
+    /// spec activates frame transactions. Returns whether a refill credits the
+    /// running frame's own pool.
+    frameStorageStateGas: ?*const fn (ptr: *anyopaque, address: AddressWord, key: u256, gas: execution.StorageStateGas) anyerror!bool = null,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: AddressWord, beneficiary: AddressWord) anyerror!bool,
     getTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!u256,
@@ -249,6 +253,9 @@ pub fn accessDelegatedAccount(self: *Self, address: AddressWord) !?AccessStatus 
 pub fn observeAccountAccess(self: *Self, address: AddressWord, depth: u16) !void {
     const callback = self.vtable.observeAccountAccess orelse return;
     return callback(self.ptr, address, depth);
+}
+pub fn frameStorageStateGas(self: *Self, address: AddressWord, key: u256, gas: execution.StorageStateGas) !bool {
+    return self.vtable.frameStorageStateGas.?(self.ptr, address, key, gas);
 }
 pub fn getCode(self: *Self, address: AddressWord) ![]const u8 {
     return self.vtable.getCode(self.ptr, address);

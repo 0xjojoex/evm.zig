@@ -124,6 +124,30 @@ Added
   block executes under the fork its timestamp selects, with that fork's blob
   schedule. `fixtures.Network` parses the name, and `fixtures.parseFork` keeps
   EEST's fork spelling.
+- `eth.bogota` (`Revision.bogota`): Hegotá in development, Amsterdam plus
+  EIP-8141 frame transactions. Not `latest` until EIP-8141 is complete. The
+  `dev` test preset includes it.
+- EIP-8141 frame transactions (type `0x06`, `TxKind.frame`) for specs whose
+  `TransactionSpec.active_kinds` contains `.frame` and whose
+  `TransactionSpec.frame` carries `transaction.frames.Params`; specs extended
+  from `bogota` inherit both. `transaction.frames` holds the frame and signature
+  shapes, the canonical signature hash (eliding empty-`msg` signature bytes to
+  their length), static validity, the `max_fee` budget and `max_cost`, GASPRICE,
+  SECP256K1 and P256 signature validation, and settlement. The raw decoder reads
+  type-`0x06` envelopes, and `Transaction` gains `frames`, `signatures`, and
+  `max_fee`.
+- The Ethereum transition runs frame transactions through its usual phases.
+  `prepare` returns a `Prepared` whose `frame.plan.max_cost` a rollup may widen
+  before `transactPrepared`; the completed result's `frame` carries the payer,
+  frame receipts, and the settled base fee, priority fee, and payer refund.
+  Frames run as roots of one session, with atomic batches, per-frame receipts
+  and log ranges, and the default code's VERIFY approval. The APPROVE and
+  introspection opcodes are not yet installed.
+- Frame specs compile an executor-owned frame journal into every state
+  checkpoint: approval context, frame receipts' state gas, and per-slot
+  state-gas ownership roll back with the call, frame, or batch that produced
+  them. A frame's state-gas pool is its reservoir and never spills into regular
+  gas, so exhausting it is an ordinary out-of-gas at any depth.
 
 Changed
 
@@ -150,6 +174,11 @@ Changed
   `Status.system_contract_empty` instead of `system_contract_failed`, which
   now means only a call that ran and failed. This matches EEST's
   `SYSTEM_CONTRACT_EMPTY` and `SYSTEM_CONTRACT_CALL_FAILED`.
+- `TransactionEnvironment.frame_index` names the executing EIP-8141 frame.
+  `NativeContractLedger.init` takes whether state gas may spill into regular
+  gas, and `ValidationError` gains `type_6_tx_pre_fork` and the EEST-named
+  `type_6_invalid_frame_format`, `type_6_invalid_signature` and
+  `type_6_invalid_frame_execution` rejections.
 - libsecp256k1 is the only native secp256k1 provider and is always fetched
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the

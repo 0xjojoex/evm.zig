@@ -412,6 +412,7 @@ const known_forks = [_]Fork{
     .{ .name = "Prague", .revision = .prague },
     .{ .name = "Osaka", .revision = .osaka },
     .{ .name = "Amsterdam", .revision = .amsterdam },
+    .{ .name = "Bogota", .revision = .bogota },
     // BPO scenarios retain their parent fork's execution rules; the fixture's
     // named blob schedule entry supplies the changed parameters.
     .{ .name = "BPO1", .revision = .osaka },
@@ -487,6 +488,7 @@ test "EEST state fork parser maps ConstantinopleFix to Petersburg" {
     try std.testing.expectEqual(evmz.eth.Revision.petersburg, parseStateFork("ConstantinopleFix"));
     try std.testing.expectEqual(evmz.eth.Revision.osaka, parseStateFork("Osaka"));
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseStateFork("Amsterdam"));
+    try std.testing.expectEqual(evmz.eth.Revision.bogota, parseStateFork("Bogota"));
 }
 
 test "authorization list drops bad signature shapes but still counts them" {

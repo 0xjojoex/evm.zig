@@ -441,6 +441,12 @@ pub const CallFrame = struct {
         return true;
     }
 
+    /// Whether state gas beyond the reservoir spills into `gas_left`; false
+    /// inside an EIP-8141 frame, whose reservoir is its state-gas pool.
+    pub fn stateGasSpills(self: *const CallFrame) bool {
+        return self.execution_context.transaction.frame_index == null;
+    }
+
     /// Charge EIP-8037 state gas from the reservoir first, spilling into
     /// `gas_left` only after the reservoir is empty. Returns whether execution
     /// may continue after the charge.
@@ -1148,6 +1154,7 @@ test "interpreter state gas charges reservoir before gas left and refills LIFO" 
     var frame: CallFrame = undefined;
     frame.state = .running;
     frame.gas_left = 10;
+    frame.execution_context = &test_execution_context;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
@@ -1209,6 +1216,7 @@ test "interpreter state gas charge is atomic on out of gas" {
     var frame: CallFrame = undefined;
     frame.state = .running;
     frame.gas_left = 2;
+    frame.execution_context = &test_execution_context;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
@@ -1225,6 +1233,7 @@ test "interpreter reverts frame-local state gas" {
     var frame: CallFrame = undefined;
     frame.state = .running;
     frame.gas_left = 10;
+    frame.execution_context = &test_execution_context;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
@@ -1245,6 +1254,7 @@ test "interpreter exceptional halt unwinds state gas without restoring regular g
     var frame: CallFrame = undefined;
     frame.state = .running;
     frame.gas_left = 10;
+    frame.execution_context = &test_execution_context;
     frame.gas_reservoir = 5;
     frame.state_gas_spent = 0;
     frame.state_gas_from_gas_left = 0;
