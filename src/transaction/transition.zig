@@ -7,6 +7,7 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
+const crypto = @import("../crypto.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const execution = @import("../execution.zig");
 const executor = @import("../executor.zig");
@@ -16,7 +17,6 @@ const transaction_result = @import("result.zig");
 const transaction_validation = @import("validation.zig");
 const tx_settlement = @import("settlement.zig");
 const frames = @import("frames.zig");
-const tx_validation = @import("validation.zig");
 
 const Address = address.Address;
 
@@ -216,17 +216,7 @@ pub fn ImplType(
                 .rejected => |reason| return .{ .rejected = reason },
                 .planned => |value| value,
             };
-            const sender_account = context.preparationState().accountSummary(tx_value.sender) catch |err|
-                return context.infrastructureError(err);
-            const sender_nonce = if (sender_account) |account| account.nonce else 0;
-            switch (tx_validation.classifyTransactionNonce(tx_value.nonce)) {
-                .valid => |nonce| {
-                    if (nonce < sender_nonce) return .{ .rejected = .nonce_too_low };
-                    if (nonce > sender_nonce) return .{ .rejected = .nonce_too_high };
-                },
-                .absent => if (sender_nonce != 0) return .{ .rejected = .nonce_too_low },
-                .at_or_above_limit => return .{ .rejected = .nonce_is_max },
-            }
+            if (try checkFrameNonce(context, tx_value)) |reason| return .{ .rejected = reason };
             return .{ .executable = .{
                 .scope = .{ .context = env.executionContext(.{
                     .origin = frame_params.entry_point,
@@ -247,6 +237,34 @@ pub fn ImplType(
             } };
         }
 
+        /// The transaction's nonce domain against state: the account nonce, or
+        /// with EIP-8250 keys every selected key's sequence. `plan` has
+        /// already bounded the encoded nonce.
+        fn checkFrameNonce(context: *Context, tx_value: transaction.Transaction) Error!?Rejection {
+            const keys = tx_value.nonce_keys orelse &.{};
+            if (keys.len == 0) {
+                const sender_account = context.preparationState().accountSummary(tx_value.sender) catch |err|
+                    return context.infrastructureError(err);
+                const sender_nonce = if (sender_account) |account| account.nonce else 0;
+                const nonce: u64 = @intCast(tx_value.nonce orelse 0);
+                if (nonce < sender_nonce) return .nonce_too_low;
+                if (nonce > sender_nonce) return .nonce_too_high;
+                return null;
+            }
+            const keyed = frame_params.keyed_nonces.?;
+            const nonce_seq: u64 = @intCast(tx_value.nonce orelse 0);
+            for (keys) |key| {
+                const current = try context.getStorage(keyed.nonce_manager, frames.nonceSlot(tx_value.sender, key));
+                if (nonce_seq == frames.max_nonce_seq) {
+                    if (current != 0) return .nonce_too_low;
+                } else {
+                    if (current > nonce_seq) return .nonce_too_low;
+                    if (current < nonce_seq) return .nonce_too_high;
+                }
+            }
+            return null;
+        }
+
         /// Validate signatures, run every frame as a root of one session, and
         /// settle against the frame receipts.
         fn completeFrames(
@@ -262,8 +280,7 @@ pub fn ImplType(
             const allocator = try context.allocator();
             const sig_hash = frames.signatureHash(allocator, tx_value) catch |err|
                 return context.infrastructureError(err);
-            if (!frames.signaturesValid(tx_value, sig_hash))
-                return .{ .rejected = .type_6_invalid_signature };
+            if (frames.signatureError(tx_value, sig_hash)) |reason| return .{ .rejected = reason };
 
             const journal = context.frameJournal();
             journal.reset(@intCast(tx_value.frames.len));
@@ -422,9 +439,10 @@ pub fn ImplType(
         const ApproveOutcome = enum { approved, reverted, out_of_gas };
 
         /// APPROVE's transaction effects for `target` approving `approval`:
-        /// set the approval context and, with payment, advance the sender
-        /// nonce and collect `max_cost` from the payer. `state_gas_left` is the
-        /// frame's pool, which pays for creating the sender account.
+        /// set the approval context and, with payment, consume the nonce set
+        /// and collect `max_cost` from the payer. `state_gas_left` is the
+        /// frame's pool, which pays for creating the sender account or, with
+        /// EIP-8250 keys, each first-used key slot.
         fn approve(
             context: *Context,
             prepared: frames.Prepared,
@@ -447,13 +465,38 @@ pub fn ImplType(
             const payer_balance = if (try context.accountSummary(target)) |account| account.balance else 0;
             if (payer_balance < max_cost) return .reverted;
 
-            const sender_account = try context.accountSummary(sender);
-            if (sender_account == null) {
-                if (state_gas_left.* < frame_params.sender_account_state_gas) return .out_of_gas;
-                state_gas_left.* -= frame_params.sender_account_state_gas;
+            const keys = prepared.transaction.nonce_keys orelse &.{};
+            if (keys.len == 0) {
+                const sender_account = try context.accountSummary(sender);
+                const nonce = if (sender_account) |account| account.nonce else 0;
+                if (nonce == std.math.maxInt(u64)) return .out_of_gas;
+                // EIP-8037's existence rule: an empty account is not alive,
+                // e.g. a sender an earlier frame emptied.
+                const sender_alive = if (sender_account) |account|
+                    account.nonce != 0 or account.balance != 0 or
+                        !std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty)
+                else
+                    false;
+                if (!sender_alive) {
+                    if (state_gas_left.* < frame_params.sender_account_state_gas) return .out_of_gas;
+                    state_gas_left.* -= frame_params.sender_account_state_gas;
+                }
+                try context.setNonce(sender, nonce + 1);
+            } else {
+                // Protocol bookkeeping: no warming and no SSTORE pricing; the
+                // intrinsic KEYED_NONCE_ACCESS_COST paid for both.
+                const keyed = frame_params.keyed_nonces.?;
+                var first_uses: u64 = 0;
+                for (keys) |key| {
+                    if (try context.getStorage(keyed.nonce_manager, frames.nonceSlot(sender, key)) == 0) first_uses += 1;
+                }
+                const state_gas = first_uses * keyed.first_use_state_gas;
+                if (state_gas_left.* < state_gas) return .out_of_gas;
+                state_gas_left.* -= state_gas;
+                const consumed = frames.consumedNonceSeq(@intCast(prepared.transaction.nonce orelse 0));
+                for (keys) |key|
+                    try context.setStorage(keyed.nonce_manager, frames.nonceSlot(sender, key), consumed);
             }
-            const nonce = if (sender_account) |account| account.nonce else 0;
-            try context.setNonce(sender, std.math.add(u64, nonce, 1) catch return .reverted);
             const debited = try context.subtractBalance(target, max_cost);
             std.debug.assert(debited);
             try journal.approve(try context.allocator(), target, true);

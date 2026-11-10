@@ -46,6 +46,7 @@ fn runResult(
     };
     defer decoded.deinit(allocator);
     const tx = decoded.tx;
+    if (tx.kind == .frame) return runFrameResult(revision, allocator, tx, bytes, expected, expected_exception);
     const validation = evmz.transaction.validation.Runtime(spec){};
     // Transaction fixtures have no allocation or block environment. Supply
     // sufficient funds and the encoded nonce to isolate envelope policy.
@@ -99,7 +100,47 @@ fn runResult(
     if (gas.intrinsic_gas != intrinsic) return error.IntrinsicGasMismatch;
 }
 
+/// Frame transactions have no per-gas fee policy: their static constraints,
+/// gas plan, and protocol signatures stand in for it. Without a block, the
+/// plan runs against a zero base fee and no block gas limit.
+fn runFrameResult(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    tx: evmz.transaction.Transaction,
+    bytes: []const u8,
+    expected: *const std.json.ObjectMap,
+    expected_exception: ?[]const u8,
+) !void {
+    const spec = evmz.eth.specAt(revision);
+    const frames = evmz.transaction.frames;
+    var intrinsic_gas: u64 = 0;
+    const actual_exception: ?[]const u8 = if (comptime !spec.transaction.framesActive())
+        "TransactionException.TYPE_NOT_SUPPORTED"
+    else switch (frames.plan(spec.transaction.frame.?, spec.transaction.blob_schedule, tx, .{}, .{})) {
+        .rejected => |reason| tx_validation.eestExceptionName(reason),
+        .planned => |gas_plan| blk: {
+            intrinsic_gas = gas_plan.intrinsic_gas;
+            const reason = frames.signatureError(tx, try frames.signatureHash(allocator, tx)) orelse break :blk null;
+            break :blk tx_validation.eestExceptionName(reason);
+        },
+    };
+    if (expected_exception) |exception| {
+        const actual = actual_exception orelse return error.ExpectedRejection;
+        if (!tx_validation.exceptionNameMatches(actual, exception)) return error.ExceptionMismatch;
+        return;
+    }
+    if (actual_exception != null) return error.UnexpectedValidationRejection;
+    const hash = try fixtures.parseBytesFromValue(allocator, expected.get("hash") orelse return error.MalformedFixture);
+    defer allocator.free(hash);
+    if (!std.mem.eql(u8, &evmz.crypto.keccak256(bytes), hash)) return error.HashMismatch;
+    const sender = try fixtures.parseAddressFromValue(expected.get("sender") orelse return error.MalformedFixture);
+    if (!std.meta.eql(sender, tx.sender)) return error.SenderMismatch;
+    const intrinsic = try fixtures.parseU64FromValue(expected.get("intrinsicGas") orelse return error.MalformedFixture);
+    if (intrinsic_gas != intrinsic) return error.IntrinsicGasMismatch;
+}
+
 fn decodeExceptionName(comptime revision: evmz.eth.Revision, bytes: []const u8, err: anyerror) ?[]const u8 {
+    if (bytes.len != 0 and bytes[0] == 0x06) return tx_validation.frameDecodeExceptionName(bytes);
     if (bytes.len != 0 and bytes[0] == 0x04) {
         // Signature recovery precedes authorization policy in the raw decoder.
         if (err == error.InvalidSignature or err == error.UnsupportedLegacyV)

@@ -469,6 +469,12 @@ pub fn ContextType(
                 return executor_errors.normalize(err);
         }
 
+        /// Write storage as protocol bookkeeping: no warming, no SSTORE pricing.
+        pub fn setStorage(self: *Self, account_address: Address, key: u256, value: u256) ContextError!void {
+            return self.activeExecutor().setStorage(account_address, key, value) catch |err|
+                return executor_errors.normalize(err);
+        }
+
         pub fn accountAccess(self: *Self, account_address: Address) ContextError!void {
             return self.activeExecutor().traceAccountAccess(account_address) catch |err|
                 return executor_errors.normalize(err);

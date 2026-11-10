@@ -20,7 +20,7 @@ const eip7825 = @import("eip/7825.zig");
 const eip7976 = @import("eip/7976.zig");
 const eip8037 = @import("eip/8037.zig");
 const eip8038 = @import("eip/8038.zig");
-const eip8141 = @import("eip/8141.zig");
+const eip8250 = @import("eip/8250.zig");
 const eip8282 = @import("eip/8282.zig");
 const eth_gas = @import("gas.zig");
 const eth_instruction = @import("instruction.zig");
@@ -882,11 +882,12 @@ pub const amsterdam = osaka.extend(.{
     .instruction = eth_instruction.amsterdam,
 });
 
-/// Hegotá, in development: Amsterdam plus EIP-8141 frame transactions.
+/// Hegotá, in development: Amsterdam plus EIP-8141 frame transactions with
+/// EIP-8250 keyed nonces, as bogota-devnet-2 runs them.
 pub const bogota = amsterdam.extend(.{
     .transaction = .{
         .active_kinds = std.EnumSet(tx.TxKind).initMany(&.{ .legacy, .access_list, .dynamic_fee, .blob, .set_code, .frame }),
-        .frame = .{ .replace = eip8141.params },
+        .frame = .{ .replace = eip8250.params },
     },
 });
 

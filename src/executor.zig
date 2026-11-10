@@ -1017,6 +1017,11 @@ pub fn ExecutorType(
             return self.state.getStorage(.fromAddress(address), key);
         }
 
+        /// Set storage as a direct family/STF state transition, without warming.
+        pub fn setStorage(self: *Executor, address: Address, key: u256, value: u256) !void {
+            _ = try self.state.setStorage(.fromAddress(address), key, value);
+        }
+
         /// Read an account balance through tracked state and its canonical reader.
         pub fn getBalance(self: *Executor, address: Address) !u256 {
             return self.state.getBalance(.fromAddress(address));
