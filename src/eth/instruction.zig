@@ -2,6 +2,7 @@ const std = @import("std");
 const opcode_info = @import("../opcode.zig");
 const eip2929 = @import("eip/2929.zig");
 const eip8038 = @import("eip/8038.zig");
+const frame_instruction = @import("../instruction/frame.zig");
 const instruction_table = @import("../instruction/table.zig");
 
 const Opcode = opcode_info.Opcode;
@@ -163,6 +164,14 @@ const amsterdam_spec: Spec = spec: {
     break :spec result;
 };
 pub const amsterdam = amsterdam_spec;
+
+/// Amsterdam plus the EIP-8141 frame opcodes.
+const bogota_spec: Spec = spec: {
+    var result = amsterdam;
+    frame_instruction.install(&result);
+    break :spec result;
+};
+pub const bogota = bogota_spec;
 
 test "exact instruction specs extend activation and gas values" {
     try std.testing.expect(!frontier.table[@backingInt(Opcode.DELEGATECALL)].active);

@@ -2250,6 +2250,75 @@ pub fn ExecutorType(
             }
         }
 
+        /// APPROVE of `approval` by frame `frame_index` of `context`, applied on
+        /// behalf of the frame's resolved target: set the approval context and,
+        /// with payment, consume the nonce set and collect `max_cost` from the
+        /// target. `state_gas_left` is the frame's pool, which pays for creating
+        /// the sender account or, with EIP-8250 keys, each first-used key slot;
+        /// an approval needing more applies nothing.
+        pub fn frameApprove(
+            self: *Executor,
+            context: *const evmz.transaction.frames.Context,
+            frame_index: u8,
+            approval: u256,
+            state_gas_left: u64,
+        ) !evmz.transaction.frames.Approval {
+            if (comptime !frames_active) unreachable else {
+                const frames = evmz.transaction.frames;
+                const params = spec.transaction.frame.?;
+                const transaction = context.transaction;
+                const sender = transaction.sender;
+                const frame = transaction.frames[frame_index];
+                const target = frame.resolvedTarget(sender);
+                if (approval == 0 or approval & ~@as(u256, frame.flags.allowedScope()) != 0) return .reverted;
+                const approves_execution = approval & frames.scope.execution != 0;
+                const approves_payment = approval & frames.scope.payment != 0;
+                const journal = &self.frame_journal;
+                if (approves_execution and (journal.sender_approved or !target.eql(sender))) return .reverted;
+                if (!approves_payment) {
+                    try journal.approve(self.allocator, journal.payer, true);
+                    return .{ .approved = 0 };
+                }
+                if (journal.payer != null) return .reverted;
+                if (!approves_execution and !journal.sender_approved) return .reverted;
+                if (try self.getBalance(target) < context.max_cost) return .reverted;
+
+                var state_gas: u64 = 0;
+                const keys = transaction.nonce_keys orelse &.{};
+                if (keys.len == 0) {
+                    const sender_account = try self.getAccount(sender);
+                    const nonce = if (sender_account) |account| account.nonce else 0;
+                    if (nonce == std.math.maxInt(u64)) return .out_of_gas;
+                    // EIP-8037's existence rule: an empty account is not
+                    // alive, e.g. a sender an earlier frame emptied.
+                    const sender_alive = if (sender_account) |account|
+                        account.nonce != 0 or account.balance != 0 or
+                            !std.mem.eql(u8, &account.code_hash, &evmz.crypto.keccak256_empty)
+                    else
+                        false;
+                    if (!sender_alive) state_gas = params.sender_account_state_gas;
+                    if (state_gas_left < state_gas) return .out_of_gas;
+                    try self.setNonce(sender, nonce + 1);
+                } else {
+                    // Protocol bookkeeping: no warming and no SSTORE pricing;
+                    // the intrinsic KEYED_NONCE_ACCESS_COST paid for both.
+                    const keyed = params.keyed_nonces.?;
+                    for (keys) |key| {
+                        if (try self.getStorage(keyed.nonce_manager, frames.nonceSlot(sender, key)) == 0)
+                            state_gas += keyed.first_use_state_gas;
+                    }
+                    if (state_gas_left < state_gas) return .out_of_gas;
+                    const consumed = frames.consumedNonceSeq(@intCast(transaction.nonce orelse 0));
+                    for (keys) |key|
+                        try self.setStorage(keyed.nonce_manager, frames.nonceSlot(sender, key), consumed);
+                }
+                const debited = try self.subtractBalance(target, context.max_cost);
+                std.debug.assert(debited);
+                try journal.approve(self.allocator, target, true);
+                return .{ .approved = state_gas };
+            }
+        }
+
         fn chargeTopFrameValueTransferStateGas(
             self: *Executor,
             sender: Address,

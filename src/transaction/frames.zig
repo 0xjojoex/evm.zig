@@ -207,6 +207,40 @@ pub const Plan = struct {
     gas_price: u256,
 };
 
+/// What frame opcodes read about the running frame transaction. The
+/// transition owns it for the whole transaction and hands it to every frame
+/// through `TransactionEnvironment.frame_transaction`.
+pub const Context = struct {
+    transaction: *const tx.Transaction,
+    signature_hash: [32]u8,
+    /// What payment approval collects from the payer.
+    max_cost: u256,
+    /// The sender's account nonce before any frame ran (EIP-8250 TXPARAM 0x0D).
+    legacy_nonce: u64,
+    /// The frames' receipts, live: a completed frame's state gas moves when a
+    /// later frame refills it.
+    receipts: []const Receipt,
+};
+
+/// The outcome of an APPROVE: refused (the calling frame reverts), out of
+/// state gas or nonce space (it halts exceptionally with no approval effect),
+/// or granted, charging `approved` state gas to the frame's pool.
+pub const Approval = union(enum) {
+    reverted,
+    out_of_gas,
+    approved: u64,
+};
+
+/// EIP-8250 `nonce_keys_hash`: `keccak256(be32(len) || be32(key)...)`.
+/// Asserts that there are at most `max_keys` keys, as planning ensured.
+pub fn nonceKeysHash(comptime max_keys: u8, keys: []const u256) [32]u8 {
+    std.debug.assert(keys.len <= max_keys);
+    var buffer: [32 * (@as(usize, max_keys) + 1)]u8 = undefined;
+    std.mem.writeInt(u256, buffer[0..32], keys.len, .big);
+    for (keys, 1..) |key, index| std.mem.writeInt(u256, buffer[index * 32 ..][0..32], key, .big);
+    return crypto.keccak256(buffer[0 .. (keys.len + 1) * 32]);
+}
+
 /// A planned frame transaction awaiting `transactPrepared`.
 pub const Prepared = struct {
     transaction: tx.Transaction,

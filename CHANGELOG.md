@@ -94,8 +94,16 @@ Added
   before `transactPrepared`; the completed result's `frame` carries the payer,
   frame receipts, and the settled base fee, priority fee, and payer refund.
   Frames run as roots of one session, with atomic batches, per-frame receipts
-  and log ranges, and the default code's VERIFY approval. The APPROVE and
-  introspection opcodes are not yet installed.
+  and log ranges, and the default code's VERIFY approval.
+- The EIP-8141 frame opcodes in `eth.bogota`'s instruction spec: APPROVE
+  (`0xaa`), TXPARAM (`0xb0`, with EIP-8250's keyed-nonce parameters),
+  FRAMEDATALOAD, FRAMEDATACOPY, FRAMEPARAM, SIGPARAM, and SIGDATACOPY
+  (`0xb1`–`0xb5`). `instruction.frame.install` adds them to any instruction
+  spec. They read the running frame transaction through
+  `TransactionEnvironment.frame_transaction` and halt exceptionally outside one.
+  APPROVE from contract code and from the default code share one approval path,
+  `Executor.frameApprove`, which hosts expose as the optional
+  `Host.VTable.frameApprove`.
 - Frame specs compile an executor-owned frame journal into every state
   checkpoint: approval context, frame receipts' state gas, and per-slot
   state-gas ownership roll back with the call, frame, or batch that produced
@@ -108,7 +116,9 @@ Changed
   session's warm set is applied once. `Context.runRoot` takes a
   `RootExecutionInit` in its place and returns the root's `log_range` alongside
   its stage and result; `LogBuffer.View.slice` reads it.
-- `TransactionEnvironment.frame_index` names the executing EIP-8141 frame.
+- `TransactionEnvironment.frame_index` names the executing EIP-8141 frame, and
+  `frame_transaction` points at the running frame transaction's
+  `transaction.frames.Context`.
   `NativeContractLedger.init` takes whether state gas may spill into regular
   gas, and `ValidationError` gains `type_6_tx_pre_fork` and the EEST-named
   `type_6_invalid_frame_format`, `type_6_invalid_signature` and

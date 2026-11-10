@@ -8,6 +8,7 @@
 const std = @import("std");
 
 const Address = @import("../address.zig").Address;
+const frames = @import("../transaction/frames.zig");
 
 /// Typed extension supplied by a custom transaction program and borrowed by
 /// instruction handlers through `ExecutionContext`. The pointed-to runtime is
@@ -84,6 +85,10 @@ pub const TransactionEnvironment = struct {
     /// charges state gas only from its own pool (the reservoir): a charge
     /// beyond it is out of gas rather than a spill into regular gas.
     frame_index: ?u8 = null,
+    /// The running frame transaction, for the EIP-8141 frame opcodes; null
+    /// outside one. Stable for the whole transaction, so every frame of one
+    /// session carries the same pointer.
+    frame_transaction: ?*const frames.Context = null,
     /// Optional custom-family extension. Core opcodes ignore it; externally
     /// installed instructions may request their exact runtime type.
     extension: TransactionExtension = .{},

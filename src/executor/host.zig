@@ -1,6 +1,7 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
 const eip7702 = @import("./eip7702.zig");
+const frames = @import("../transaction/frames.zig");
 
 const Address = evmz.Address;
 const AddressWord = evmz.AddressWord;
@@ -130,6 +131,7 @@ pub fn Callbacks(
                 .accessAccount = accessAccount,
                 .observeAccountAccess = observeAccountAccess,
                 .frameStorageStateGas = if (Executor.frames_active) frameStorageStateGas else null,
+                .frameApprove = if (Executor.frames_active) frameApprove else null,
                 .getTransientStorage = getTransientStorage,
                 .setTransientStorage = setTransientStorage,
             } };
@@ -218,6 +220,12 @@ pub fn Callbacks(
         ) !bool {
             const self = fromHost(ptr);
             return self.frameStorageStateGas(address.address(), key, gas);
+        }
+
+        fn frameApprove(ptr: *anyopaque, approval: u256, state_gas_left: u64) !frames.Approval {
+            const self = fromHost(ptr);
+            const transaction = self.execution_context.?.transaction;
+            return self.frameApprove(transaction.frame_transaction.?, transaction.frame_index.?, approval, state_gas_left);
         }
 
         fn getBalance(ptr: *anyopaque, address: AddressWord) !u256 {

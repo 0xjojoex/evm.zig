@@ -238,6 +238,73 @@ test "approval creates a missing sender only from the frame's state pool" {
     try std.testing.expectEqual(@as(u64, 1), (try h.executor.getAccount(h.sender)).?.nonce);
 }
 
+test "contract code approves payment and introspects the frame transaction" {
+    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    var h: Harness(Bogota) = undefined;
+    try h.init(1_000_000_000);
+    defer h.deinit();
+    const sponsor = addr(0x5905);
+    const introspector = addr(0x1d1d);
+    // APPROVE(offset 0, length 0, scope 0x01 = payment).
+    const sponsor_code = evmz.t.bytecode(.{ .PUSH1, 0x01, .PUSH0, .PUSH0, 0xaa });
+    // Store TXPARAM(current frame index), FRAMEPARAM(frame 1, status), and
+    // TXPARAM(max_fee) in slots 0, 1, and 2.
+    const introspector_code = evmz.t.bytecode(.{
+        .PUSH1, 0x0a,   0xb0,    .PUSH0,  .SSTORE,
+        .PUSH1, 0x05,   .PUSH1,  0x01,    0xb3,
+        .PUSH1, 0x01,   .SSTORE, .PUSH1,  0x04,
+        0xb0,   .PUSH1, 0x02,    .SSTORE, .STOP,
+    });
+    const sponsor_balance: u256 = 1_000_000_000_000_000;
+    try evmz.t.seedStoreAccount(&h.memory, sponsor, .{ .balance = sponsor_balance, .code = &sponsor_code });
+    try evmz.t.seedStoreAccount(&h.memory, introspector, .{ .code = &introspector_code });
+
+    var verify_sender = self_verify;
+    verify_sender.flags = .{ .approve_execution = true };
+    const frame_list = [_]frames.Frame{
+        verify_sender,
+        .{ .mode = .verify, .flags = .{ .approve_payment = true }, .target = sponsor, .limits = .{ .execution = 50_000 } },
+        senderFrame(introspector, &.{}, .{ .execution = 100_000, .state = 3 * eip8037.storage_set_state_gas }, false),
+    };
+    const transaction = frameTx(h.sender, &frame_list);
+    const result = try support.expectExecuted(try h.transact(transaction, env));
+    const frame = result.frame.?;
+    try std.testing.expect(frame.payer.eql(sponsor));
+    try std.testing.expectEqual(frames.Status.success, frame.receipts[2].status);
+    const paid = frame.settlement.base_fee_paid + frame.settlement.priority_fee_paid;
+    try std.testing.expectEqual(sponsor_balance - paid, try h.executor.getBalance(sponsor));
+    try std.testing.expectEqual(@as(u256, 1_000_000_000), try h.executor.getBalance(h.sender));
+    try std.testing.expectEqual(@as(u64, 1), (try h.executor.getAccount(h.sender)).?.nonce);
+    try std.testing.expectEqual(@as(u256, 2), try h.executor.getStorage(introspector, 0));
+    try std.testing.expectEqual(@as(u256, @backingInt(frames.Status.success)), try h.executor.getStorage(introspector, 1));
+    try std.testing.expectEqual(transaction.max_fee, try h.executor.getStorage(introspector, 2));
+}
+
+test "frame opcodes halt outside a frame transaction" {
+    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    var h: Harness(Bogota) = undefined;
+    try h.init(1_000_000_000);
+    defer h.deinit();
+    const reader = addr(0x7a);
+    // TXPARAM(0).
+    const reader_code = evmz.t.bytecode(.{ .PUSH0, 0xb0, .STOP });
+    try evmz.t.seedStoreAccount(&h.memory, reader, .{ .code = &reader_code });
+    const result = try support.expectExecuted(try support.transact(Bogota, &h.executor, .{
+        .env = env,
+        .tx = .{
+            .kind = .dynamic_fee,
+            .sender = h.sender,
+            .chain_id = 1,
+            .nonce = 0,
+            .gas_limit = 100_000,
+            .max_fee_per_gas = 10,
+            .max_priority_fee_per_gas = 1,
+            .to = reader,
+        },
+    }));
+    try std.testing.expectEqual(evmz.execution.Status.invalid, result.status);
+}
+
 test "frame transactions without approval are invalid" {
     const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
