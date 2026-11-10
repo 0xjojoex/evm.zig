@@ -68,8 +68,18 @@ Added
   gas instead of warming sender and recipient, and `is_static` runs the root
   read-only. These are the frame-entry rules of EIP-8141.
 - `eth.bogota` (`Revision.bogota`): Hegotá in development, Amsterdam plus
-  EIP-8141 frame transactions. Not `latest` until EIP-8141 is complete. The
-  `dev` test preset includes it.
+  EIP-8141 frame transactions with EIP-8250 keyed nonces, as bogota-devnet-2
+  runs them. Not `latest` until EIP-8141 is complete. The `dev` test preset
+  includes it.
+- EIP-8250 keyed nonces (`eth.eip8250`, `transaction.frames.KeyedNonces`): a
+  frame transaction carries `nonce_keys` and a `u64` `nonce_seq` in place of
+  its nonce. The keys' sequences live in `NONCE_MANAGER` storage; payment
+  approval consumes them as protocol bookkeeping, charging first-use state gas
+  from the approving frame's pool, and intrinsic gas prices the nonce calldata
+  and each key's slot access. `Transaction` gains `nonce_keys`.
+- EEST state and transaction fixtures for `Bogota` load: the fixture tools parse
+  `frames`, `signatures`, `maxFee`, and `nonceKeys`, and a frame envelope that
+  fails to decode maps to EEST's frame exception names.
 - EIP-8141 frame transactions (type `0x06`, `TxKind.frame`) for specs whose
   `TransactionSpec.active_kinds` contains `.frame` and whose
   `TransactionSpec.frame` carries `transaction.frames.Params`; specs extended

@@ -52,7 +52,43 @@ pub const Params = struct {
     expiry_verifier: Address,
     /// EXPIRY_DATA_LENGTH.
     expiry_data_len: usize,
+    /// EIP-8250 keyed nonces. Null keeps EIP-8141's single sender nonce.
+    keyed_nonces: ?KeyedNonces = null,
 };
+
+/// EIP-8250: a frame transaction selects `nonce_keys` sharing one `nonce_seq`.
+/// Each key is an independent sequence in `nonce_manager` storage; no keys
+/// select the sender's account nonce.
+pub const KeyedNonces = struct {
+    /// NONCE_MANAGER, an ordinary contract deployed by a keyless transaction.
+    nonce_manager: Address,
+    /// MAX_NONCE_KEYS.
+    max_keys: u8,
+    /// KEYED_NONCE_ACCESS_COST: intrinsic execution gas per key for the
+    /// protocol's cold read and write of its slot.
+    access_gas: u64,
+    /// KEYED_NONCE_FIRST_USE_STATE_GAS: state gas payment approval charges for
+    /// each key whose slot it creates.
+    first_use_state_gas: u64,
+};
+
+/// MAX_NONCE_SEQ: with keys, the single-use sequence that requires each key to
+/// be unused and exhausts it.
+pub const max_nonce_seq: u64 = std.math.maxInt(u64);
+
+/// The `nonce_manager` slot holding `sender`'s sequence for `key`:
+/// `keccak256(left_pad_32(sender) || be32(key))`.
+pub fn nonceSlot(sender: Address, key: u256) u256 {
+    var preimage: [64]u8 = @splat(0);
+    @memcpy(preimage[12..32], &sender.bytes);
+    std.mem.writeInt(u256, preimage[32..64], key, .big);
+    return std.mem.readInt(u256, &crypto.keccak256(&preimage), .big);
+}
+
+/// The value `consume_nonce_set` writes to every selected key's slot.
+pub fn consumedNonceSeq(nonce_seq: u64) u256 {
+    return if (nonce_seq == max_nonce_seq) max_nonce_seq else @as(u256, nonce_seq) + 1;
+}
 
 pub const Mode = enum(u8) {
     /// Execute as ENTRY_POINT.
@@ -203,8 +239,19 @@ fn planChecked(
     env: tx.Env,
     progress: tx.PreparationBlockProgress,
 ) error{Overflow}!PlanResult {
-    if (validation.classifyTransactionNonce(transaction.nonce) == .at_or_above_limit)
-        return .{ .rejected = .nonce_is_max };
+    if (params.keyed_nonces) |keyed| {
+        const keys = transaction.nonce_keys orelse return .{ .rejected = .type_6_invalid_frame_format };
+        const nonce_seq = std.math.cast(u64, transaction.nonce orelse 0) orelse return .{ .rejected = .nonce_is_max };
+        if (keys.len == 0 and nonce_seq == max_nonce_seq) return .{ .rejected = .nonce_is_max };
+        if (keys.len > keyed.max_keys) return .{ .rejected = .type_6_invalid_frame_format };
+        for (keys[0..keys.len -| 1], keys[@min(1, keys.len)..]) |previous, key| {
+            if (key <= previous) return .{ .rejected = .type_6_invalid_frame_format };
+        }
+    } else {
+        if (transaction.nonce_keys != null) return .{ .rejected = .type_6_invalid_frame_format };
+        if (validation.classifyTransactionNonce(transaction.nonce) == .at_or_above_limit)
+            return .{ .rejected = .nonce_is_max };
+    }
     if (transaction.frames.len == 0 or transaction.frames.len > params.max_frames)
         return .{ .rejected = .type_6_invalid_frame_format };
 
@@ -276,12 +323,12 @@ fn planFrames(
     var signature_gas: u64 = 0;
     for (transaction.signatures) |signature| {
         switch (signature.scheme) {
-            .arbitrary => if (signature.signer != null) return .{ .rejected = .type_6_invalid_signature },
+            .arbitrary => if (signature.signer != null) return .{ .rejected = .type_6_invalid_frame_format },
             .secp256k1, .p256 => {},
-            _ => return .{ .rejected = .type_6_invalid_signature },
+            _ => return .{ .rejected = .type_6_invalid_frame_format },
         }
         if (signature.msg) |digest| {
-            if (std.mem.allEqual(u8, &digest, 0)) return .{ .rejected = .type_6_invalid_signature };
+            if (std.mem.allEqual(u8, &digest, 0)) return .{ .rejected = .type_6_invalid_frame_format };
         }
         signature_gas = try add(u64, signature_gas, switch (signature.scheme) {
             .arbitrary => params.arbitrary_signature_gas,
@@ -305,8 +352,18 @@ fn planFrames(
         floor_tokens = try add(u64, floor_tokens, try floorTokens(signature.signature.len));
     }
 
+    var nonce_access_gas: u64 = 0;
+    if (params.keyed_nonces) |keyed| {
+        const keys = transaction.nonce_keys.?;
+        nonce_access_gas = try mul(u64, keys.len, keyed.access_gas);
+        var buffer: [nonce_calldata_capacity]u8 = undefined;
+        const nonce_data = nonceCalldata(&buffer, keys, @intCast(transaction.nonce orelse 0));
+        data_cost = try add(u64, data_cost, try standardCost(params, nonce_data));
+        floor_tokens = try add(u64, floor_tokens, try floorTokens(nonce_data.len));
+    }
+
     const base = try add(u64, params.intrinsic_gas, try mul(u64, frames.len, params.per_frame_gas));
-    const fixed = try add(u64, try add(u64, base, signature_gas), value_cost);
+    const fixed = try add(u64, try add(u64, try add(u64, base, signature_gas), value_cost), nonce_access_gas);
     const intrinsic_gas = try add(u64, fixed, data_cost);
     const calldata_floor_gas = try add(u64, fixed, try mul(u64, floor_tokens, params.floor_token_gas));
     const execution_reservation = @max(try add(u64, intrinsic_gas, total_execution), calldata_floor_gas);
@@ -357,6 +414,18 @@ fn standardCost(comptime params: Params, bytes: []const u8) error{Overflow}!u64 
         if (byte != 0) tokens += 3;
     }
     return std.math.mul(u64, tokens, params.standard_token_gas);
+}
+
+/// `rlp(nonce_keys)` for at most 255 keys, plus `rlp(nonce_seq)`.
+const nonce_calldata_capacity = 3 + 255 * 33 + 9;
+
+/// EIP-8250 `nonce_calldata`: `rlp(nonce_keys) || rlp(nonce_seq)`, without the
+/// sequence when keys select the single-use sequence.
+fn nonceCalldata(buffer: *[nonce_calldata_capacity]u8, keys: []const u256, nonce_seq: u64) []const u8 {
+    const keys_rlp = rlp.encode([]const u256, buffer, keys) catch unreachable;
+    if (keys.len != 0 and nonce_seq == max_nonce_seq) return keys_rlp;
+    const seq_rlp = rlp.encode(u64, buffer[keys_rlp.len..], nonce_seq) catch unreachable;
+    return buffer[0 .. keys_rlp.len + seq_rlp.len];
 }
 
 /// `floor_tokens_in`: every byte counts four tokens.
@@ -442,51 +511,59 @@ pub fn defaultCodeApproves(transaction: tx.Transaction, target: Address, allowed
         signature.resolvedSigner(transaction.sender).?.eql(target);
 }
 
-/// Validate every protocol signature against `sig_hash`. ARBITRARY entries
-/// are left to EVM code.
-pub fn signaturesValid(transaction: tx.Transaction, sig_hash: [32]u8) bool {
+/// Validate every protocol signature against `sig_hash`; ARBITRARY entries
+/// are left to EVM code. A malformed or unverifiable signature is
+/// `type_6_invalid_signature`; a valid one by another key than the resolved
+/// signer is `type_6_invalid_frame_format`, as EIP-8141's reference splits them.
+pub fn signatureError(transaction: tx.Transaction, sig_hash: [32]u8) ?ValidationError {
     for (transaction.signatures) |signature| {
         const digest = signature.msg orelse sig_hash;
         const signer = signature.resolvedSigner(transaction.sender);
-        const valid = switch (signature.scheme) {
-            .arbitrary => true,
-            .secp256k1 => secp256k1Valid(signature.signature, signer.?, digest),
-            .p256 => p256Valid(signature.signature, signer.?, digest),
-            _ => false,
+        const verdict: Verdict = switch (signature.scheme) {
+            .arbitrary => .valid,
+            .secp256k1 => secp256k1Verdict(signature.signature, signer.?, digest),
+            .p256 => p256Verdict(signature.signature, signer.?, digest),
+            _ => .invalid,
         };
-        if (!valid) return false;
+        switch (verdict) {
+            .valid => {},
+            .invalid => return .type_6_invalid_signature,
+            .wrong_signer => return .type_6_invalid_frame_format,
+        }
     }
-    return true;
+    return null;
 }
+
+const Verdict = enum { valid, invalid, wrong_signer };
 
 const secp256k1_n: u256 = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
 const secp256r1_n: u256 = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551;
 
-fn secp256k1Valid(bytes: []const u8, signer: Address, digest: [32]u8) bool {
-    if (bytes.len != 65) return false;
+fn secp256k1Verdict(bytes: []const u8, signer: Address, digest: [32]u8) Verdict {
+    if (bytes.len != 65) return .invalid;
     const v = bytes[0];
     const r = bytes[1..33].*;
     const s = bytes[33..65].*;
     const r_value = std.mem.readInt(u256, &r, .big);
     const s_value = std.mem.readInt(u256, &s, .big);
     if (v > 1 or r_value == 0 or r_value >= secp256k1_n or s_value == 0 or s_value > secp256k1_n / 2)
-        return false;
-    const public_key = crypto.ecrecoverPublicKey(digest, r, s, v) orelse return false;
-    return Address.fromPublicKey(public_key).eql(signer);
+        return .invalid;
+    const public_key = crypto.ecrecoverPublicKey(digest, r, s, v) orelse return .invalid;
+    return if (Address.fromPublicKey(public_key).eql(signer)) .valid else .wrong_signer;
 }
 
-fn p256Valid(bytes: []const u8, signer: Address, digest: [32]u8) bool {
-    if (bytes.len != 128) return false;
+fn p256Verdict(bytes: []const u8, signer: Address, digest: [32]u8) Verdict {
+    if (bytes.len != 128) return .invalid;
     const r_value = std.mem.readInt(u256, bytes[0..32], .big);
     const s_value = std.mem.readInt(u256, bytes[32..64], .big);
     if (r_value == 0 or r_value >= secp256r1_n or s_value == 0 or s_value > secp256r1_n / 2)
-        return false;
+        return .invalid;
     const key_hash = crypto.keccak256(bytes[64..128]);
-    if (!Address.fromBytes(key_hash[12..32].*).eql(signer)) return false;
+    if (!Address.fromBytes(key_hash[12..32].*).eql(signer)) return .wrong_signer;
     var input: [160]u8 = undefined;
     @memcpy(input[0..32], &digest);
     @memcpy(input[32..160], bytes);
-    return precompile_backend.p256Verify(&input);
+    return if (precompile_backend.p256Verify(&input)) .valid else .invalid;
 }
 
 /// Canonical signature hash: the type-0x06 envelope with every empty-`msg`
@@ -526,7 +603,12 @@ fn encodeEnvelope(
 fn emitTransaction(fields: anytype, value: Encoding) rlp.EncodeError!void {
     const transaction = value.transaction;
     try fields.encode(u256, transaction.chain_id orelse 0);
-    try fields.encode(u256, transaction.nonce orelse 0);
+    if (transaction.nonce_keys) |keys| {
+        try fields.encode([]const u256, keys);
+        try fields.encode(u64, @intCast(transaction.nonce orelse 0));
+    } else {
+        try fields.encode(u256, transaction.nonce orelse 0);
+    }
     try fields.encode(Address, transaction.sender);
     try fields.list(emitFrames, value);
     try fields.list(emitSignatures, value);
@@ -636,11 +718,13 @@ test "type-0x06 envelopes round-trip through the raw decoder" {
         .{ .scheme = .arbitrary, .msg = @splat(2), .signature = &.{ 3, 4 } },
     };
     const blob_hashes = [_]u256{(@as(u256, 1) << 248) | 7};
+    const nonce_keys = [_]u256{ 0, 1 << 255 };
     const transaction: tx.Transaction = .{
         .kind = .frame,
         .sender = sender,
         .chain_id = 0x1234,
         .nonce = 7,
+        .nonce_keys = &nonce_keys,
         .gas_limit = 0,
         .frames = &frame_list,
         .signatures = &signatures,
@@ -658,6 +742,7 @@ test "type-0x06 envelopes round-trip through the raw decoder" {
     try std.testing.expect(got.sender.eql(sender));
     try std.testing.expectEqual(transaction.chain_id, got.chain_id);
     try std.testing.expectEqual(transaction.nonce, got.nonce);
+    try std.testing.expectEqualSlices(u256, &nonce_keys, got.nonce_keys.?);
     try std.testing.expectEqual(transaction.max_fee, got.max_fee);
     try std.testing.expectEqual(transaction.max_priority_fee_per_gas, got.max_priority_fee_per_gas);
     try std.testing.expectEqualDeep(transaction.frames, got.frames);

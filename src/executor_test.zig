@@ -1920,6 +1920,7 @@ test "multi-root entry policy charges target access without warming the caller" 
     const target = evmz.addr(0x1111);
     const failed_target = evmz.addr(0x2222);
     const out_of_gas_target = evmz.addr(0x3333);
+    const delegated_target = evmz.addr(0x4444);
     const context = execution_values.ExecutionContext{
         .chain = .{ .chain_id = 1 },
         .transaction = .{ .origin = entry_point },
@@ -1933,6 +1934,8 @@ test "multi-root entry policy charges target access without warming the caller" 
     try evmz.t.seedExecutorAccount(&executor, target, .{});
     try evmz.t.seedExecutorAccount(&executor, failed_target, .{ .code = &revert_code });
     try evmz.t.seedExecutorAccount(&executor, out_of_gas_target, .{});
+    const delegation = [_]u8{ 0xef, 0x01, 0x00 } ++ evmz.addr(0x5555).bytes;
+    try evmz.t.seedExecutorAccount(&executor, delegated_target, .{ .code = &delegation });
 
     try transaction_runtime.begin(&executor, .normal);
     defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
@@ -1976,6 +1979,17 @@ test "multi-root entry policy charges target access without warming the caller" 
     try std.testing.expectEqual(TransactionExecutionStage.preparation, out_of_gas.stage);
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, out_of_gas.result.status());
     try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(out_of_gas_target)));
+
+    // Value the caller cannot fund fails before the delegated code's access
+    // is charged: only the target's access is paid.
+    const unfunded = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = delegated_target, .value = 1 } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(TransactionExecutionStage.preparation, unfunded.stage);
+    try std.testing.expectEqual(Interpreter.Status.invalid, unfunded.result.status());
+    try std.testing.expectEqual(@as(i64, @intCast(10_000 - cold_cost)), unfunded.result.gas_left);
 }
 
 test "multi-root static mode reaches nested frames" {

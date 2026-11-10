@@ -24,6 +24,7 @@ const Counts = struct {
     authorizations: usize = 0,
     frames: usize = 0,
     signatures: usize = 0,
+    nonce_keys: usize = 0,
 
     fn add(self: *Counts, other: Counts) Error!void {
         self.access_entries = try std.math.add(usize, self.access_entries, other.access_entries);
@@ -32,6 +33,7 @@ const Counts = struct {
         self.authorizations = try std.math.add(usize, self.authorizations, other.authorizations);
         self.frames = try std.math.add(usize, self.frames, other.frames);
         self.signatures = try std.math.add(usize, self.signatures, other.signatures);
+        self.nonce_keys = try std.math.add(usize, self.nonce_keys, other.nonce_keys);
     }
 };
 
@@ -44,6 +46,7 @@ const Storage = struct {
     authorizations: []transaction.AuthorizationTuple,
     frames: []frames.Frame,
     signatures: []frames.Signature,
+    nonce_keys: []u256,
 
     fn init(allocator: std.mem.Allocator, transaction_count: usize, counts: Counts) Error!Storage {
         var slab_len: usize = 0;
@@ -54,6 +57,7 @@ const Storage = struct {
         slab_len = try ExactSlab.reserve(transaction.AuthorizationTuple, slab_len, counts.authorizations);
         slab_len = try ExactSlab.reserve(frames.Frame, slab_len, counts.frames);
         slab_len = try ExactSlab.reserve(frames.Signature, slab_len, counts.signatures);
+        slab_len = try ExactSlab.reserve(u256, slab_len, counts.nonce_keys);
 
         var slab = try ExactSlab.init(allocator, slab_len);
         return .{
@@ -65,6 +69,7 @@ const Storage = struct {
             .authorizations = slab.take(transaction.AuthorizationTuple, counts.authorizations),
             .frames = slab.take(frames.Frame, counts.frames),
             .signatures = slab.take(frames.Signature, counts.signatures),
+            .nonce_keys = slab.take(u256, counts.nonce_keys),
         };
     }
 
@@ -352,7 +357,10 @@ fn decodeSetCode(fields: *rlp.Cursor, sender: Address, fill: *Fill) Error!transa
 
 fn decodeFrame(fields: *rlp.Cursor, fill: *Fill) Error!transaction.Transaction {
     const chain_id = try fields.nextInt(u256);
-    const nonce = try fields.nextInt(u256);
+    // EIP-8250 replaces `nonce` with the `nonce_keys` list and a `u64`
+    // `nonce_seq`; the spec decides which layout it accepts.
+    const nonce_keys = if ((try fields.peek()).kind() == .list) try fill.nextNonceKeys(fields) else null;
+    const nonce = if (nonce_keys != null) try fields.nextInt(u64) else try fields.nextInt(u256);
     const sender = Address.fromBytes((try fields.nextBytesExact(20))[0..20].*);
     const frame_list = try fill.nextFrames(fields);
     const signatures = try fill.nextSignatures(fields);
@@ -374,6 +382,7 @@ fn decodeFrame(fields: *rlp.Cursor, fill: *Fill) Error!transaction.Transaction {
         .frames = frame_list,
         .signatures = signatures,
         .max_fee = max_fee,
+        .nonce_keys = nonce_keys,
     };
 }
 
@@ -408,6 +417,7 @@ const Fill = struct {
     authorizations: usize = 0,
     frames: usize = 0,
     signatures: usize = 0,
+    nonce_keys: usize = 0,
 
     fn init(storage: *Storage) Fill {
         return .{ .storage = storage };
@@ -418,7 +428,8 @@ const Fill = struct {
             self.storage_keys != self.storage.storage_keys.len or
             self.blob_hashes != self.storage.blob_hashes.len or
             self.frames != self.storage.frames.len or
-            self.signatures != self.storage.signatures.len)
+            self.signatures != self.storage.signatures.len or
+            self.nonce_keys != self.storage.nonce_keys.len)
             return error.InvalidTransactionFormat;
         if (self.authorizations > self.storage.authorizations.len)
             return error.InvalidTransactionFormat;
@@ -463,6 +474,18 @@ const Fill = struct {
         }
         try list.expectDone();
         return self.storage.blob_hashes[start..self.blob_hashes];
+    }
+
+    fn nextNonceKeys(self: *Fill, fields: *rlp.Cursor) Error![]const u256 {
+        var list = try fields.nextList();
+        const start = self.nonce_keys;
+        while (!list.isDone()) {
+            if (self.nonce_keys >= self.storage.nonce_keys.len) return error.InvalidTransactionFormat;
+            self.storage.nonce_keys[self.nonce_keys] = try list.nextInt(u256);
+            self.nonce_keys += 1;
+        }
+        try list.expectDone();
+        return self.storage.nonce_keys[start..self.nonce_keys];
     }
 
     fn nextFrames(self: *Fill, fields: *rlp.Cursor) Error![]const frames.Frame {
@@ -576,12 +599,12 @@ fn inspectRaw(bytes: []const u8) Error!Counts {
 }
 
 fn inspectTyped(typed: transaction_envelope.TypedEnvelope) Error!Counts {
+    if (typed.type_id == type_id.frame) return inspectFrame(typed.payload);
     const field_count: usize = switch (typed.type_id) {
         0x01 => 11,
         0x02 => 12,
         0x03 => 14,
         transaction_envelope.set_code_transaction_type => 13,
-        type_id.frame => 7,
         else => return error.UnsupportedTransactionType,
     };
     var cursor = rlp.Cursor.init(typed.payload);
@@ -590,14 +613,7 @@ fn inspectTyped(typed: transaction_envelope.TypedEnvelope) Error!Counts {
     var counts: Counts = .{};
     for (0..field_count) |index| {
         const item = try fields.next();
-        if (typed.type_id == type_id.frame) {
-            switch (index) {
-                3 => counts.frames = try inspectLists(item),
-                4 => counts.signatures = try inspectLists(item),
-                6 => counts.blob_hashes = try inspectFixedList(item, 32),
-                else => {},
-            }
-        } else if (index == 7 and typed.type_id == 0x01 or
+        if (index == 7 and typed.type_id == 0x01 or
             index == 8 and typed.type_id != 0x01)
         {
             const access = try inspectAccessList(item);
@@ -609,6 +625,30 @@ fn inspectTyped(typed: transaction_envelope.TypedEnvelope) Error!Counts {
             counts.authorizations = try inspectLists(item);
         }
     }
+    try fields.expectDone();
+    return counts;
+}
+
+fn inspectFrame(payload: []const u8) Error!Counts {
+    var cursor = rlp.Cursor.init(payload);
+    var fields = try cursor.nextList();
+    try cursor.expectDone();
+    var counts: Counts = .{};
+    _ = try fields.next(); // chain_id
+    const nonce = try fields.next();
+    if (nonce.kind() == .list) {
+        var keys = try nonce.listCursor();
+        while (!keys.isDone()) {
+            _ = try keys.next();
+            counts.nonce_keys = try std.math.add(usize, counts.nonce_keys, 1);
+        }
+        _ = try fields.next(); // nonce_seq
+    }
+    _ = try fields.next(); // sender
+    counts.frames = try inspectLists(try fields.next());
+    counts.signatures = try inspectLists(try fields.next());
+    _ = try fields.next(); // fees
+    counts.blob_hashes = try inspectFixedList(try fields.next(), 32);
     try fields.expectDone();
     return counts;
 }

@@ -57,6 +57,10 @@ pub fn parseVector(
         "maxFeePerBlobGas",
         "blobVersionedHashes",
         "authorizationList",
+        "maxFee",
+        "frames",
+        "signatures",
+        "nonceKeys",
     });
     try rejectUnknownKeys(&env, &.{
         "currentCoinbase",
@@ -118,6 +122,10 @@ pub fn parseVector(
         .access_list = access_list.entries,
         .authorization_list = authorization_list.entries,
         .authorization_count = authorization_list.count,
+        .frames = try fixture_common.parseFrames(allocator, &tx),
+        .signatures = try fixture_common.parseFrameSignatures(allocator, &tx),
+        .max_fee = try optionalU256(&tx, "maxFee") orelse 0,
+        .nonce_keys = try fixture_common.parseNonceKeys(allocator, &tx),
     };
 
     return .{ .tx = public_tx, .env = vm_env, .pre = pre };
@@ -187,6 +195,7 @@ fn optionalU256(tx: *const std.json.ObjectMap, key: []const u8) !?u256 {
 }
 
 fn inferTxKind(tx: *const std.json.ObjectMap, has_access_list: bool) transaction.TxKind {
+    if (tx.get("frames") != null) return .frame;
     if (tx.get("authorizationList") != null) return .set_code;
     if (tx.get("blobVersionedHashes") != null or tx.get("maxFeePerBlobGas") != null) return .blob;
     if (tx.get("maxFeePerGas") != null or tx.get("maxPriorityFeePerGas") != null) return .dynamic_fee;

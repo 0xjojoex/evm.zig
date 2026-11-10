@@ -98,6 +98,10 @@ pub const Transaction = struct {
     signatures: []const frames.Signature = &.{},
     /// EIP-8141 `max_fee`: one wei budget for execution, state, and blob gas.
     max_fee: u256 = 0,
+    /// EIP-8250 nonce keys of a frame transaction, which then carries its
+    /// `nonce_seq` in `nonce`. Null is the EIP-8141 layout without keys; an
+    /// empty slice selects the sender's account nonce.
+    nonce_keys: ?[]const u256 = null,
 };
 
 /// One authenticated raw envelope and its normalized borrowed transaction

@@ -202,6 +202,16 @@ fn runVectorExact(
             summary.countFail(.missing_sender);
             return;
         }
+        if (err != error.OutOfMemory) {
+            if (expected_exception) |expected| {
+                if (try serializedTransactionExceptionMatches(allocator, &post_obj, expected)) {
+                    var host = try rejectedHost(revision, allocator, fixture, fork_name);
+                    defer host.deinit();
+                    try finishPostAssertions(allocator, fixture, &post_obj, &host, 1, null, summary);
+                    return;
+                }
+            }
+        }
         return err;
     };
     const pre = vector.pre;
@@ -237,17 +247,33 @@ fn runVectorExact(
     try finishVectorResult(allocator, fixture, &post_obj, &host, result, expected_exception, summary);
 }
 
+/// The pre-state host of a vector whose transaction cannot be built.
+fn rejectedHost(
+    comptime revision: evmz.eth.Revision,
+    allocator: std.mem.Allocator,
+    fixture: *const std.json.ObjectMap,
+    fork_name: []const u8,
+) !statetest.Host(revision, false) {
+    const pre = asObject(fixture.get("pre") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
+    const env = asObject(fixture.get("env") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
+    const config = try fixture_common.parseFixtureConfig(fixture, revision, fork_name);
+    return statetest.Host(revision, false).init(allocator, &pre, try statetest.parseEnv(revision, &env, config));
+}
+
 fn serializedTransactionExceptionMatches(
     allocator: std.mem.Allocator,
     post_obj: *const std.json.ObjectMap,
     expected: []const u8,
 ) !bool {
-    if (!tx_validation.exceptionNameMatches("TransactionException.INVALID_SIGNATURE_VRS", expected)) return false;
-
     const value = post_obj.get("txbytes") orelse return false;
     const tx_bytes = try parseBytesFromValue(allocator, value);
     defer allocator.free(tx_bytes);
 
+    // A frame transaction whose JSON no typed transaction can hold, such as a
+    // 33-byte fee or a short `msg`, is judged by its envelope.
+    if (tx_bytes.len != 0 and tx_bytes[0] == 0x06)
+        return tx_validation.frameEnvelopeExceptionMatches(allocator, tx_bytes, expected);
+    if (!tx_validation.exceptionNameMatches("TransactionException.INVALID_SIGNATURE_VRS", expected)) return false;
     return tx_validation.serializedSignatureExceptionMatches(allocator, tx_bytes, expected);
 }
 

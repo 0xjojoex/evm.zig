@@ -109,8 +109,8 @@ pub fn parseFixtureConfig(
     const schedule_value = config.get("blobSchedule") orelse return result;
     const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedules, &.{
-        "Cancun",               "Prague",               "Osaka", "Amsterdam", "BPO1", "BPO2",
-        "AmsterdamBPOIncrease", "AmsterdamBPODecrease",
+        "Cancun",               "Prague",               "Osaka",  "Amsterdam", "BPO1", "BPO2",
+        "AmsterdamBPOIncrease", "AmsterdamBPODecrease", "Bogota",
     });
     if (blobScheduleEntry(schedules, revision, fork_name)) |value| {
         result.blob_params = try parseBlobParams(value);
@@ -372,6 +372,72 @@ pub fn parseTransactionAuthorizationList(
         .entries = try entries.toOwnedSlice(allocator),
         .count = list.items.len,
     };
+}
+
+const frames = evmz.transaction.frames;
+
+/// EIP-8141 `frames`: `{mode, flags, target?, gasLimit, stateGasLimit, value, data}`.
+pub fn parseFrames(allocator: std.mem.Allocator, tx: *const std.json.ObjectMap) ![]frames.Frame {
+    const list = asArray(tx.get("frames") orelse return &.{}) orelse return error.MalformedFixture;
+    const result = try allocator.alloc(frames.Frame, list.items.len);
+    for (list.items, result) |item, *frame| {
+        const object = asObject(item) orelse return error.MalformedFixture;
+        try rejectUnknownKeys(&object, &.{ "mode", "flags", "target", "gasLimit", "stateGasLimit", "value", "data" });
+        const target = if (object.get("target")) |value| try parseOptionalAddress(value) else null;
+        frame.* = .{
+            .mode = @fromBackingInt(@intCast(try parseHexInt(u8, try requiredString(&object, "mode")))),
+            .flags = @bitCast(try parseHexInt(u8, try requiredString(&object, "flags"))),
+            .target = target,
+            .limits = .{
+                .execution = try parseU64FromValue(object.get("gasLimit") orelse return error.MalformedFixture),
+                .state = try parseU64FromValue(object.get("stateGasLimit") orelse return error.MalformedFixture),
+            },
+            .value = try parseU256FromValue(object.get("value") orelse return error.MalformedFixture),
+            .data = try parseBytesFromValue(allocator, object.get("data") orelse return error.MalformedFixture),
+        };
+    }
+    return result;
+}
+
+/// EIP-8141 `signatures`: `{scheme, signer, msg, signature}`; an empty
+/// `signer` or `msg` is absent.
+pub fn parseFrameSignatures(allocator: std.mem.Allocator, tx: *const std.json.ObjectMap) ![]frames.Signature {
+    const list = asArray(tx.get("signatures") orelse return &.{}) orelse return error.MalformedFixture;
+    const result = try allocator.alloc(frames.Signature, list.items.len);
+    for (list.items, result) |item, *signature| {
+        const object = asObject(item) orelse return error.MalformedFixture;
+        try rejectUnknownKeys(&object, &.{ "scheme", "signer", "msg", "signature" });
+        const msg_hex = strip0x(try requiredString(&object, "msg"));
+        signature.* = .{
+            .scheme = @fromBackingInt(@intCast(try parseHexInt(u8, try requiredString(&object, "scheme")))),
+            .signer = try parseOptionalAddress(object.get("signer") orelse return error.MalformedFixture),
+            .msg = if (msg_hex.len == 0) null else msg: {
+                var digest: [32]u8 = undefined;
+                try parseHexInto(msg_hex, &digest);
+                break :msg digest;
+            },
+            .signature = try parseBytesFromValue(allocator, object.get("signature") orelse return error.MalformedFixture),
+        };
+    }
+    return result;
+}
+
+/// EIP-8250 `nonceKeys`; null when the transaction predates them.
+pub fn parseNonceKeys(allocator: std.mem.Allocator, tx: *const std.json.ObjectMap) !?[]u256 {
+    const list = asArray(tx.get("nonceKeys") orelse return null) orelse return error.MalformedFixture;
+    const result = try allocator.alloc(u256, list.items.len);
+    for (list.items, result) |item, *key| key.* = try parseU256FromValue(item);
+    return result;
+}
+
+fn requiredString(object: *const std.json.ObjectMap, key: []const u8) ![]const u8 {
+    return jsonString(object.get(key) orelse return error.MalformedFixture) orelse error.MalformedFixture;
+}
+
+fn parseOptionalAddress(value: JsonValue) !?Address {
+    const string = jsonString(value) orelse return error.MalformedFixture;
+    if (strip0x(string).len == 0) return null;
+    return try parseAddress(string);
 }
 
 pub fn parseBlobHashes(allocator: std.mem.Allocator, tx: *const std.json.ObjectMap) ![]u256 {

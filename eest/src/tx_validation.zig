@@ -3,6 +3,7 @@ const evmz = @import("evmz");
 
 const transaction = evmz.transaction;
 const transaction_envelope = evmz.transaction.envelope;
+const rlp = evmz.rlp;
 const ValidationError = evmz.eth.transaction_validation.ValidationError;
 
 pub fn eestExceptionName(error_value: ValidationError) []const u8 {
@@ -58,6 +59,36 @@ pub fn rawEestExceptionName(error_value: transaction_envelope.RawValidationError
 
 pub fn rawValidationErrorMatchesEest(error_value: transaction_envelope.RawValidationError, expected: []const u8) bool {
     return exceptionNameMatches(rawEestExceptionName(error_value), expected);
+}
+
+/// A frame envelope the decoder rejected: an overflowing fee has its own
+/// name; every other field violation is a frame format error.
+pub fn frameDecodeExceptionName(bytes: []const u8) []const u8 {
+    const format = "TransactionException.TYPE_6_INVALID_FRAME_FORMAT";
+    var cursor = rlp.Cursor.init(bytes[1..]);
+    var fields = cursor.nextList() catch return format;
+    _ = fields.next() catch return format; // chain_id
+    const nonce = fields.next() catch return format;
+    // EIP-8250 splits the nonce into `nonce_keys` and `nonce_seq`.
+    if (nonce.kind() == .list) _ = fields.next() catch return format;
+    for (0..3) |_| _ = fields.next() catch return format; // sender, frames, signatures
+    var fees = fields.nextList() catch return format;
+    _ = fees.nextInt(u256) catch |err|
+        return if (err == error.IntTooLarge) "TransactionException.GASPRICE_OVERFLOW" else format;
+    _ = fees.nextInt(u256) catch |err|
+        return if (err == error.IntTooLarge) "TransactionException.PRIORITY_OVERFLOW" else format;
+    return format;
+}
+
+/// Whether a frame envelope fails to decode with `expected`, the name EEST
+/// gives a field no typed transaction can hold.
+pub fn frameEnvelopeExceptionMatches(allocator: std.mem.Allocator, bytes: []const u8, expected: []const u8) !bool {
+    var decoded = transaction.raw.decodeRaw(allocator, bytes) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return exceptionNameMatches(frameDecodeExceptionName(bytes), expected);
+    };
+    decoded.deinit(allocator);
+    return false;
 }
 
 pub fn serializedSignatureExceptionMatches(

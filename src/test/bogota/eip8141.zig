@@ -76,6 +76,7 @@ fn frameTx(sender: Address, frame_list: []const frames.Frame) evmz.transaction.T
         .sender = sender,
         .chain_id = 1,
         .nonce = 0,
+        .nonce_keys = &.{},
         .gas_limit = 0,
         .frames = frame_list,
         .max_fee = 10_000_000_000,
@@ -123,10 +124,11 @@ test "self-relayed frame transaction approves, executes, and settles from the pa
     // gas_used = max(intrinsic + execution, calldata floor) + state gas, with
     // the intrinsic and floor derived from the EIP's own terms.
     // The empty-msg signature's 65 bytes are priced as non-zero (4 tokens
-    // each); the frame data has 31 zero bytes and one non-zero byte.
+    // each); the frame data has 31 zero bytes and one non-zero byte; and the
+    // EIP-8250 nonce calldata, `rlp([]) || rlp(0)` = `c0 80`, two non-zero.
     const signature_tokens: u64 = 65 * 4;
-    const data_tokens: u64 = 31 + 4;
-    const data_floor_tokens: u64 = 32 * 4;
+    const data_tokens: u64 = 31 + 4 + 2 * 4;
+    const data_floor_tokens: u64 = (32 + 2) * 4;
     const fixed = eip8141.intrinsic_cost + 2 * eip8141.per_frame_cost + eip8141.secp256k1_signature_cost;
     const intrinsic = fixed + (signature_tokens + data_tokens) * evmz.eth.eip7623.standard_token_cost;
     const floor = fixed + (signature_tokens + data_floor_tokens) * evmz.eth.eip7976.total_cost_floor_per_token;
@@ -252,6 +254,55 @@ test "frame transactions without approval are invalid" {
         try h.transact(frameTx(h.sender, &default_only), env),
     ));
     try std.testing.expect(!h.executor.acceptedChanges().hasChanges());
+}
+
+/// `keccak256(left_pad_32(sender) || be32(key))`, the EIP-8250 slot formula.
+fn keyedSlot(sender: Address, key: u256) u256 {
+    var preimage: [64]u8 = @splat(0);
+    @memcpy(preimage[12..32], &sender.bytes);
+    std.mem.writeInt(u256, preimage[32..64], key, .big);
+    return std.mem.readInt(u256, &evmz.crypto.keccak256(&preimage), .big);
+}
+
+test "keyed nonces advance their slots on approval and leave the account nonce" {
+    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const ValidationError = evmz.transaction.validation.ValidationError;
+    const eip8250 = evmz.eth.eip8250;
+    var h: Harness(Bogota) = undefined;
+    try h.init(1_000_000_000);
+    defer h.deinit();
+
+    var verify = self_verify;
+    verify.limits.state = 2 * eip8250.keyed_nonce_first_use_state_gas;
+    const keys = [_]u256{ 3, 1 << 200 };
+    var transaction = frameTx(h.sender, &.{verify});
+    transaction.nonce_keys = &keys;
+    // A fresh key holds sequence 0.
+    transaction.nonce = 0;
+    const result = try support.expectExecuted(try h.transact(transaction, env));
+    // Both slots were fresh, so approval charged two first uses to the frame.
+    try std.testing.expectEqual(verify.limits.state, result.frame.?.receipts[0].state_gas_used);
+    for (keys) |key|
+        try std.testing.expectEqual(@as(u256, 1), try h.executor.getStorage(eip8250.nonce_manager, keyedSlot(h.sender, key)));
+    try std.testing.expectEqual(@as(u64, 0), (try h.executor.getAccount(h.sender)).?.nonce);
+
+    // Replaying the sequence is too low; an unsorted key set is malformed.
+    try std.testing.expectEqual(ValidationError.nonce_too_low, try support.expectRejected(try h.transact(transaction, env)));
+    const unsorted = [_]u256{ 1 << 200, 3 };
+    transaction.nonce_keys = &unsorted;
+    transaction.nonce = 1;
+    try std.testing.expectEqual(ValidationError.type_6_invalid_frame_format, try support.expectRejected(try h.transact(transaction, env)));
+
+    // A used key is no longer free for the single-use sequence; a fresh one
+    // is exhausted by it, and only it pays first-use state gas.
+    transaction.nonce = frames.max_nonce_seq;
+    transaction.nonce_keys = keys[0..1];
+    try std.testing.expectEqual(ValidationError.nonce_too_low, try support.expectRejected(try h.transact(transaction, env)));
+    const fresh = [_]u256{7};
+    transaction.nonce_keys = &fresh;
+    const single = try support.expectExecuted(try h.transact(transaction, env));
+    try std.testing.expectEqual(eip8250.keyed_nonce_first_use_state_gas, single.frame.?.receipts[0].state_gas_used);
+    try std.testing.expectEqual(@as(u256, frames.max_nonce_seq), try h.executor.getStorage(eip8250.nonce_manager, keyedSlot(h.sender, 7)));
 }
 
 test "forks before Bogotá reject frame transactions" {

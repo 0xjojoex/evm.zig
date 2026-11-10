@@ -1017,6 +1017,11 @@ pub fn ExecutorType(
             return self.state.getStorage(.fromAddress(address), key);
         }
 
+        /// Set storage as a direct family/STF state transition, without warming.
+        pub fn setStorage(self: *Executor, address: Address, key: u256, value: u256) !void {
+            _ = try self.state.setStorage(.fromAddress(address), key, value);
+        }
+
         /// Read an account balance through tracked state and its canonical reader.
         pub fn getBalance(self: *Executor, address: Address) !u256 {
             return self.state.getBalance(.fromAddress(address));
@@ -2382,7 +2387,8 @@ pub fn ExecutorType(
         /// Execute one root of a multi-root session under its entry mode.
         /// `.charge_call_target` charges the target's warm or cold access from
         /// the root's gas before dispatch, as EIP-8141 does at frame entry; a
-        /// root that cannot pay it halts out of gas in preparation.
+        /// root that cannot pay it halts out of gas in preparation, and one
+        /// whose sender cannot fund its value fails there with the access paid.
         pub fn executeRootTransactionRequestPhased(
             self: *Executor,
             request: ExecutionRequest,
@@ -2419,6 +2425,19 @@ pub fn ExecutorType(
                         },
                     };
                     charged.gas.regular_left -= cost;
+                    // EIP-8141 checks the value before any later entry charge,
+                    // such as resolving a delegation: a root that cannot fund
+                    // its value fails having paid only the target's access.
+                    if (call.value != 0 and !try self.hasBalance(call.sender, call.value)) return .{
+                        .stage = .preparation,
+                        .result = .{
+                            .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
+                            .gas_left = std.math.lossyCast(i64, charged.gas.regular_left),
+                            .gas_refund = 0,
+                            .gas_reservoir = std.math.lossyCast(i64, charged.gas.reservoir),
+                            .output_data = &.{},
+                        },
+                    };
                 },
             }
             return self.executeTransactionRequestTrustedPhased(charged, root_init.is_static);
