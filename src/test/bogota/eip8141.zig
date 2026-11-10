@@ -2,6 +2,7 @@
 //! Bogotá: frames exist only there.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const evmz = @import("../../evm.zig");
 const support = @import("../vm_support.zig");
 
@@ -24,6 +25,14 @@ const one_word: [32]u8 = word: {
     word[31] = 1;
     break :word word;
 };
+
+/// Bogotá for tests that sign frame transactions. Signing needs the native
+/// crypto profile, so like `t.Vm` the null under the zkVM profile prunes the
+/// test into a SKIP.
+fn SigningVm() ?type {
+    if (build_options.profile != .native) return null;
+    return evmz.t.Vm(.bogota);
+}
 
 fn Harness(comptime Bogota: type) type {
     return struct {
@@ -103,7 +112,7 @@ fn senderFrame(target: Address, data: []const u8, limits: frames.Limits, atomic:
 const env: evmz.Env = .{ .gas_limit = 30_000_000, .base_fee = 7, .coinbase = coinbase };
 
 test "self-relayed frame transaction approves, executes, and settles from the payer" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
     try h.init(1_000_000_000);
     defer h.deinit();
@@ -149,7 +158,7 @@ test "self-relayed frame transaction approves, executes, and settles from the pa
 }
 
 test "a state-gas charge beyond the frame pool is out of gas, not a spill" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
     try h.init(1_000_000_000);
     defer h.deinit();
@@ -166,7 +175,7 @@ test "a state-gas charge beyond the frame pool is out of gas, not a spill" {
 }
 
 test "a later frame's refill returns state gas to the frame that paid for the slot" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
     try h.init(1_000_000_000);
     defer h.deinit();
@@ -187,7 +196,7 @@ test "a later frame's refill returns state gas to the frame that paid for the sl
 }
 
 test "a failing frame unrolls its atomic batch and skips the rest of it" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
     try h.init(1_000_000_000);
     defer h.deinit();
@@ -211,7 +220,7 @@ test "a failing frame unrolls its atomic batch and skips the rest of it" {
 }
 
 test "approval creates a missing sender only from the frame's state pool" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     const free: evmz.Env = .{ .gas_limit = 30_000_000, .coinbase = coinbase };
     var short = self_verify;
     short.limits.state = eip8037.new_account_state_gas - 1;
@@ -239,7 +248,7 @@ test "approval creates a missing sender only from the frame's state pool" {
 }
 
 test "contract code approves payment and introspects the frame transaction" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
     try h.init(1_000_000_000);
     defer h.deinit();
@@ -281,7 +290,7 @@ test "contract code approves payment and introspects the frame transaction" {
 }
 
 test "frame opcodes halt outside a frame transaction" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
     try h.init(1_000_000_000);
     defer h.deinit();
@@ -306,7 +315,7 @@ test "frame opcodes halt outside a frame transaction" {
 }
 
 test "frame transactions without approval are invalid" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     var h: Harness(Bogota) = undefined;
     try h.init(1_000_000_000);
     defer h.deinit();
@@ -332,7 +341,7 @@ fn keyedSlot(sender: Address, key: u256) u256 {
 }
 
 test "keyed nonces advance their slots on approval and leave the account nonce" {
-    const Bogota = evmz.t.Vm(.bogota) orelse return error.SkipZigTest;
+    const Bogota = SigningVm() orelse return error.SkipZigTest;
     const ValidationError = evmz.transaction.validation.ValidationError;
     const eip8250 = evmz.eth.eip8250;
     var h: Harness(Bogota) = undefined;
