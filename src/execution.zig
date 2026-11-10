@@ -399,6 +399,25 @@ pub const ExecutionScopeInit = struct {
     initial_warm_set: InitialWarmSet = .{},
 };
 
+/// Account-access behavior when entering one root of a multi-root session.
+pub const RootAccessPolicy = enum {
+    /// Warm the root sender and recipient, as an ordinary transaction does.
+    prewarm_sender_and_recipient,
+    /// Charge the call target's warm or cold access (EIP-2929) from the root's
+    /// gas instead, without warming the sender.
+    charge_call_target,
+};
+
+/// Entry mode for one root of a multi-root session, reapplied to every root.
+/// Transaction-lifetime warmth belongs to `ExecutionScopeInit`.
+///
+/// Any non-default mode requires a call root. A static root must not
+/// transfer value.
+pub const RootExecutionInit = struct {
+    access: RootAccessPolicy = .prewarm_sender_and_recipient,
+    is_static: bool = false,
+};
+
 /// One immutable, borrowed EVM invocation.
 ///
 /// Slices are borrowed data, not a serialization format. Durable replay needs

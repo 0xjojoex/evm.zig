@@ -63,9 +63,17 @@ Added
 - `CompileOptions.transaction_journal`: an embedding-owned journal whose
   checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
   with it. See `examples/transaction_journal.zig`.
+- `execution.RootExecutionInit`: per-root entry mode for multi-root sessions.
+  `.charge_call_target` charges the target's warm or cold access from the root's
+  gas instead of warming sender and recipient, and `is_static` runs the root
+  read-only. These are the frame-entry rules of EIP-8141.
 
 Changed
 
+- Program `Context.beginRootSession` takes an `ExecutionScopeInit`, so a
+  session's warm set is applied once. `Context.runRoot` takes a
+  `RootExecutionInit` in its place and returns the root's `log_range` alongside
+  its stage and result; `LogBuffer.View.slice` reads it.
 - libsecp256k1 is the only native secp256k1 provider and is always fetched
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the

@@ -140,6 +140,8 @@ pub const PreparedCallTransaction = struct {
     gas: u64,
     gas_reservoir: u64 = 0,
     value: u256 = 0,
+    /// Run the root read-only, as STATICCALL does; `value` must be zero.
+    is_static: bool = false,
 };
 
 pub const Call = evmz.execution.Call;
@@ -505,7 +507,7 @@ pub fn ExecutorType(
             try self.openTransactionScope(context, mode);
             errdefer self.discardStateTransition();
 
-            try transaction_runtime.initializeMessageScope(self, message, scope_init, .none);
+            try transaction_runtime.initializeMessageScope(self, message, scope_init);
         }
 
         fn beginSystemCall(
@@ -2334,12 +2336,58 @@ pub fn ExecutorType(
 
             self.validateScopeContext(request.context);
             self.validateScopeRoot(.fromMessage(request.message));
-            return self.executeTransactionRequestTrustedPhased(request);
+            return self.executeTransactionRequestTrustedPhased(request, false);
+        }
+
+        /// Execute one root of a multi-root session under its entry mode.
+        /// `.charge_call_target` charges the target's warm or cold access from
+        /// the root's gas before dispatch, as EIP-8141 does at frame entry; a
+        /// root that cannot pay it halts out of gas in preparation.
+        pub fn executeRootTransactionRequestPhased(
+            self: *Executor,
+            request: ExecutionRequest,
+            root_init: evmz.execution.RootExecutionInit,
+        ) !TransactionExecutionOutcome {
+            const previous_phase = self.beginExecutionDispatch();
+            defer self.execution_phase = previous_phase;
+
+            self.validateScopeContext(request.context);
+            self.validateScopeRoot(.fromMessage(request.message));
+            if (std.meta.eql(root_init, evmz.execution.RootExecutionInit{}))
+                return self.executeTransactionRequestTrustedPhased(request, false);
+
+            const call = request.message.call;
+            std.debug.assert(!root_init.is_static or call.value == 0);
+            var charged = request;
+            switch (root_init.access) {
+                .prewarm_sender_and_recipient => {},
+                .charge_call_target => {
+                    var host_iface = self.host();
+                    const cold = try host_iface.accessAccount(.fromAddress(call.recipient)) == .cold;
+                    const access_gas = spec.call.base_gas +
+                        if (cold) spec.call.cold_account_access_gas orelse 0 else 0;
+                    std.debug.assert(access_gas >= 0);
+                    const cost: u64 = @intCast(access_gas);
+                    if (cost > charged.gas.regular_left) return .{
+                        .stage = .preparation,
+                        .result = .{
+                            .outcome = .{ .status = .out_of_gas, .cause = .out_of_gas },
+                            .gas_left = 0,
+                            .gas_refund = 0,
+                            .gas_reservoir = std.math.lossyCast(i64, charged.gas.reservoir),
+                            .output_data = &.{},
+                        },
+                    };
+                    charged.gas.regular_left -= cost;
+                },
+            }
+            return self.executeTransactionRequestTrustedPhased(charged, root_init.is_static);
         }
 
         fn executeTransactionRequestTrustedPhased(
             self: *Executor,
             request: ExecutionRequest,
+            is_static: bool,
         ) !TransactionExecutionOutcome {
             switch (request.message) {
                 .call => |call| try self.traceAccountAccess(call.recipient),
@@ -2347,12 +2395,13 @@ pub fn ExecutorType(
             }
             const call_capture = try self.beginRootCapture(request.message, request.gas);
             const outcome = try switch (request.message) {
-                .call => |call| self.executeCallTransactionPhased(
+                .call => |call| self.callTransactionPhased(
                     call.sender,
                     call.recipient,
                     call.input,
                     request.gas,
                     call.value,
+                    is_static,
                 ),
                 .create => |create| self.executeCreateTransactionPhased(create, request.gas),
             };
@@ -2398,6 +2447,18 @@ pub fn ExecutorType(
             gas: ExecutionGas,
             value: u256,
         ) !TransactionExecutionOutcome {
+            return self.callTransactionPhased(sender, recipient, input, gas, value, false);
+        }
+
+        fn callTransactionPhased(
+            self: *Executor,
+            sender: Address,
+            recipient: Address,
+            input: []const u8,
+            gas: ExecutionGas,
+            value: u256,
+            is_static: bool,
+        ) !TransactionExecutionOutcome {
             const previous_phase = self.beginExecutionDispatch();
             defer self.execution_phase = previous_phase;
 
@@ -2422,7 +2483,7 @@ pub fn ExecutorType(
 
             const resolved = try self.resolveCode(recipient);
             if (!resolved.delegated and nativeTargetActive(recipient)) {
-                var result = try self.runNativeCallTransaction(sender, recipient, input, execution_gas, value);
+                var result = try self.runNativeCallTransaction(sender, recipient, input, execution_gas, value, is_static);
                 top_frame_gas.finish(&result, top_frame_state_gas);
                 return .{ .stage = .payload, .result = result };
             }
@@ -2456,6 +2517,7 @@ pub fn ExecutorType(
                 .gas = execution_gas.regular_left,
                 .gas_reservoir = execution_gas.reservoir,
                 .value = value,
+                .is_static = is_static,
             });
             top_frame_gas.finish(&result, top_frame_state_gas);
             return .{ .stage = .payload, .result = result };
@@ -2468,6 +2530,7 @@ pub fn ExecutorType(
             input: []const u8,
             gas: ExecutionGas,
             value: u256,
+            is_static: bool,
         ) !ExecutionResult {
             self.clearLastOutput();
             _ = self.currentExecutionContext();
@@ -2491,6 +2554,7 @@ pub fn ExecutorType(
                 .input_data = input,
                 .value = value,
                 .code_address = recipient,
+                .is_static = is_static,
             };
             if (spec.precompile.resolve(recipient)) |entry| {
                 const call_result = try self.runPrecompile(&message, entry);
@@ -2534,6 +2598,7 @@ pub fn ExecutorType(
                 .input_data = options.input,
                 .value = options.value,
                 .code_address = options.recipient,
+                .is_static = options.is_static,
             };
 
             const host_result = try self.executePreparedCallMessage(message, options.bytecode);

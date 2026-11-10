@@ -1849,7 +1849,7 @@ test "multi-root transaction preserves committed roots and isolates failed roots
     };
     try transaction_runtime.begin(&executor, .normal);
     defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
-    try transaction_runtime.beginRootSession(&executor, session_context);
+    try transaction_runtime.beginRootSession(&executor, session_context, .{});
 
     const first = try transaction_runtime.runRoot(&executor, .{
         .context = session_context,
@@ -1903,6 +1903,136 @@ test "multi-root transaction preserves committed roots and isolates failed roots
     try std.testing.expect(executor.state.isAccountWarm(.fromAddress(first_contract)));
     try std.testing.expect(executor.state.isAccountWarm(.fromAddress(second_contract)));
     try std.testing.expectEqual(@as(usize, 2), executor.logView().len());
+
+    // Each root's range covers only the logs it kept.
+    const logs = executor.logView();
+    try std.testing.expectEqual(@as(usize, 1), logs.slice(first.log_range).len());
+    try std.testing.expectEqual(first_contract, logs.slice(first.log_range).get(0).address);
+    try std.testing.expectEqual(@as(usize, 1), logs.slice(second.log_range).len());
+    try std.testing.expectEqual(second_contract, logs.slice(second.log_range).get(0).address);
+    try std.testing.expectEqual(@as(usize, 0), logs.slice(failed.log_range).len());
+}
+
+test "multi-root entry policy charges target access without warming the caller" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const entry_point = evmz.addr(0xeeee);
+    const session_warm = evmz.addr(0xaaaa);
+    const target = evmz.addr(0x1111);
+    const failed_target = evmz.addr(0x2222);
+    const out_of_gas_target = evmz.addr(0x3333);
+    const context = execution_values.ExecutionContext{
+        .chain = .{ .chain_id = 1 },
+        .transaction = .{ .origin = entry_point },
+    };
+    const revert_code = evmz.t.bytecode(.{ .PUSH0, .PUSH0, .REVERT });
+    const warm_cost: u64 = @intCast(Latest.spec.call.base_gas);
+    const cold_cost: u64 = warm_cost + @as(u64, @intCast(Latest.spec.call.cold_account_access_gas.?));
+
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, target, .{});
+    try evmz.t.seedExecutorAccount(&executor, failed_target, .{ .code = &revert_code });
+    try evmz.t.seedExecutorAccount(&executor, out_of_gas_target, .{});
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{
+        .initial_warm_set = .{ .accounts = &.{session_warm} },
+    });
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(session_warm)));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(target)));
+
+    const cold = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = target } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(Interpreter.Status.success, cold.result.status());
+    try std.testing.expectEqual(@as(i64, @intCast(10_000 - cold_cost)), cold.result.gas_left);
+    try std.testing.expect(executor.state.isAccountWarm(.fromAddress(target)));
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(entry_point)));
+
+    const warm = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = target } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(@as(i64, @intCast(10_000 - warm_cost)), warm.result.gas_left);
+
+    // A failed root's access charge rolls back with it.
+    const failed = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = failed_target } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(Interpreter.Status.revert, failed.result.status());
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(failed_target)));
+
+    const out_of_gas = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = out_of_gas_target } },
+        .gas = .legacy(cold_cost - 1),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(TransactionExecutionStage.preparation, out_of_gas.stage);
+    try std.testing.expectEqual(Interpreter.Status.out_of_gas, out_of_gas.result.status());
+    try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(out_of_gas_target)));
+}
+
+test "multi-root static mode reaches nested frames" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const sender = evmz.addr(0xaaaa);
+    const direct = evmz.addr(0x1111);
+    const parent = evmz.addr(0x2222);
+    const child = evmz.addr(0x3333);
+    const context = execution_values.ExecutionContext{
+        .chain = .{ .chain_id = 1 },
+        .transaction = .{ .origin = sender },
+    };
+    const write_code = evmz.t.bytecode(.{ .PUSH1, 1, .PUSH0, .SSTORE, .STOP });
+    // CALL the child, then return its success flag as one word.
+    const parent_code = evmz.t.bytecode(.{
+        .PUSH0, .PUSH0,  .PUSH0, .PUSH0, .PUSH0, .PUSH2,  0x33, 0x33, .GAS, .CALL,
+        .PUSH0, .MSTORE, .PUSH1, 32,     .PUSH0, .RETURN,
+    });
+
+    // Budgets cover EIP-8037 state gas for a new slot, so only static mode
+    // stops the writes.
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, direct, .{ .code = &write_code });
+    try evmz.t.seedExecutorAccount(&executor, parent, .{ .code = &parent_code });
+    try evmz.t.seedExecutorAccount(&executor, child, .{ .code = &write_code });
+
+    try transaction_runtime.begin(&executor, .normal);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+
+    const direct_write = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = direct } },
+        .gas = .legacy(1_000_000),
+    }, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.invalid, direct_write.result.status());
+    try std.testing.expectEqual(execution_values.TerminalCause.write_protection, direct_write.result.outcome.cause);
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(direct, 0));
+
+    const nested_write = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = parent } },
+        .gas = .legacy(1_000_000),
+    }, .{ .is_static = true });
+    try std.testing.expectEqual(Interpreter.Status.success, nested_write.result.status());
+    try std.testing.expectEqual(@as(u8, 0), nested_write.result.output_data[31]);
+    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(child, 0));
+
+    // The same root without static mode writes, so the halt above is the mode.
+    const writable = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = sender, .recipient = direct } },
+        .gas = .legacy(1_000_000),
+    }, .{});
+    try std.testing.expectEqual(Interpreter.Status.success, writable.result.status());
+    try std.testing.expectEqual(@as(u256, 1), try executor.getStorage(direct, 0));
 }
 
 test "transaction nonce advancement survives payload rollback" {

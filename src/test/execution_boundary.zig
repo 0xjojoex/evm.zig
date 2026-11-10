@@ -515,7 +515,7 @@ test "execution checkpoints restore effects across multiple roots" {
     });
     try transaction_runtime.begin(&executor, .normal);
     defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
-    try transaction_runtime.beginRootSession(&executor, request(sender, contract).context);
+    try transaction_runtime.beginRootSession(&executor, request(sender, contract).context, .{});
 
     var outer = executor.checkpoint();
     defer outer.deinit();

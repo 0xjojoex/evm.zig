@@ -35,6 +35,11 @@ pub const Row = struct {
     }
 };
 
+/// Contiguous rows of one buffer, such as the logs of one root in a
+/// multi-root transaction. Later appends keep it valid; a truncation that cuts
+/// into it does not, so the owner of the truncating checkpoint drops it.
+pub const RowRange = range.Range(Row, u32);
+
 pub const AppendError = Allocator.Error || error{TooManyLogTopics};
 
 rows: std.ArrayList(Row) = .empty,
@@ -143,6 +148,11 @@ pub const View = struct {
 
     pub fn len(self: View) usize {
         return self.rows.len;
+    }
+
+    /// The rows in `rows`, sharing this view's topic and data arenas.
+    pub fn slice(self: View, rows: RowRange) View {
+        return .{ .rows = rows.slice(self.rows), .topics = self.topics, .data = self.data };
     }
 
     pub fn get(self: View, index: usize) Host.Log {
