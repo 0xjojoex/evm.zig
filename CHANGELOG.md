@@ -63,9 +63,23 @@ Added
 - `CompileOptions.transaction_journal`: an embedding-owned journal whose
   checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
   with it. See `examples/transaction_journal.zig`.
+- `TxExecutionResult.frame_halt`: how the root frame halted, or null when no
+  root frame ran (a precompile target, or a transaction included without
+  executing).
+- `ResultGas.execution_refund`: the EVM refund counter after the fork's refund
+  cap. `refunded` remains the unused gas returned to the payer.
 
 Changed
 
+- `execution.FrameHalt.success` is split into `.stop`, `.returned`, and
+  `.selfdestruct`. Replace a match on `.success` with all three, or compare
+  `halt.status() == .success`.
+- `transaction.AuthorizationTuple` is `transaction.RecoveredAuthorization` and
+  carries only `chain_id`, `target`, `signer`, and `nonce`. The executor no
+  longer re-checks signature scalar ranges, so an edge that builds
+  authorizations from raw signatures must call
+  `eip7702.authorizationSignatureShapeValid`, drop a failing tuple, and still
+  count it in `authorization_count`. The RLP decoder already does.
 - libsecp256k1 is the only native secp256k1 provider and is always fetched
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the
