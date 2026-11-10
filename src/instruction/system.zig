@@ -289,7 +289,7 @@ pub fn Handlers(comptime spec: Spec) type {
                 frame.gas_refund += spec.self_destruct.refund_gas;
             }
 
-            frame.halt(.success);
+            frame.halt(.selfdestruct);
         }
     };
 }

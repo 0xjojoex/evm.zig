@@ -210,6 +210,7 @@ pub fn ImplType(
             } else null;
             return .{ .completed = .{
                 .status = result.status,
+                .frame_halt = result.frame_halt,
                 .gas = result.gas,
                 .output = result.output_data,
                 .created_address = created_address,
@@ -221,6 +222,7 @@ pub fn ImplType(
             executable: PreparedTransaction,
         ) Error!struct {
             status: execution.Status,
+            frame_halt: ?execution.FrameHalt,
             gas: transaction.ResultGas,
             output_data: []const u8,
         } {
@@ -269,6 +271,7 @@ pub fn ImplType(
             };
             return .{
                 .status = result.outcome.status,
+                .frame_halt = result.frame_halt,
                 .gas = result_gas,
                 .output_data = result.output_data,
             };

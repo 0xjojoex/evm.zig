@@ -164,20 +164,31 @@ pub const TerminalCause = enum(u8) {
 ///
 /// Frame halts are historical facts. Engine finalization may produce a
 /// different execution outcome without rewriting the reason the frame stopped.
+///
+/// The tag values are pinned on purpose: `stop` is zero, the failures keep the
+/// values they had when one `success` tag covered every successful halt, and
+/// the other two successes follow them. Numbering the tags in declaration
+/// order measured about 5% slower on the call-heavy `evmz-executor` VM-loop
+/// fixtures. Re-run those before renumbering.
 pub const FrameHalt = enum(u8) {
-    success,
-    revert,
-    out_of_gas,
-    invalid_opcode,
-    stack_underflow,
-    stack_overflow,
-    invalid_jump,
-    write_protection,
-    return_data_out_of_bounds,
+    /// STOP, or execution ran past the end of the code.
+    stop = 0,
+    /// RETURN.
+    returned = 9,
+    /// SELFDESTRUCT.
+    selfdestruct = 10,
+    revert = 1,
+    out_of_gas = 2,
+    invalid_opcode = 3,
+    stack_underflow = 4,
+    stack_overflow = 5,
+    invalid_jump = 6,
+    write_protection = 7,
+    return_data_out_of_bounds = 8,
 
     pub fn status(self: FrameHalt) Status {
         return switch (self) {
-            .success => .success,
+            .stop, .returned, .selfdestruct => .success,
             .revert => .revert,
             .out_of_gas => .out_of_gas,
             .invalid_opcode,
@@ -192,7 +203,7 @@ pub const FrameHalt = enum(u8) {
 
     pub fn terminalCause(self: FrameHalt) TerminalCause {
         return switch (self) {
-            .success => .none,
+            .stop, .returned, .selfdestruct => .none,
             .revert => .revert,
             .out_of_gas => .out_of_gas,
             .invalid_opcode => .invalid_opcode,
@@ -206,7 +217,7 @@ pub const FrameHalt = enum(u8) {
 
     pub fn consumesAllGas(self: FrameHalt) bool {
         return switch (self) {
-            .success, .revert => false,
+            .stop, .returned, .selfdestruct, .revert => false,
             .out_of_gas,
             .invalid_opcode,
             .stack_underflow,
