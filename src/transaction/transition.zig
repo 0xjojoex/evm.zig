@@ -7,7 +7,6 @@
 const std = @import("std");
 
 const address = @import("../address.zig");
-const crypto = @import("../crypto.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const execution = @import("../execution.zig");
 const executor = @import("../executor.zig");
@@ -284,10 +283,20 @@ pub fn ImplType(
 
             const journal = context.frameJournal();
             journal.reset(@intCast(tx_value.frames.len));
+            const sender_account = try context.accountSummary(tx_value.sender);
+            const frame_transaction: frames.Context = .{
+                .transaction = &prepared.transaction,
+                .signature_hash = sig_hash,
+                .max_cost = gas_plan.max_cost,
+                .legacy_nonce = if (sender_account) |account| account.nonce else 0,
+                .receipts = journal.frameReceipts(),
+            };
+            var session = scope;
+            session.context.transaction.frame_transaction = &frame_transaction;
             const coinbase = scope.context.block.coinbase;
             const initially_warm = [_]Address{ tx_value.sender, coinbase };
             const warm_count: usize = if (spec.transaction.warms_coinbase) 2 else 1;
-            try context.beginRootSession(scope.context, .{
+            try context.beginRootSession(session.context, .{
                 .initial_warm_set = .{ .accounts = initially_warm[0..warm_count] },
             });
 
@@ -297,11 +306,11 @@ pub fn ImplType(
                 if (tx_value.frames[index].flags.atomic_batch) {
                     var end = index;
                     while (tx_value.frames[end].flags.atomic_batch) end += 1;
-                    if (try runAtomicBatch(context, scope, prepared, index, end, &refund_counter)) |reason|
+                    if (try runAtomicBatch(context, session, &frame_transaction, index, end, &refund_counter)) |reason|
                         return .{ .rejected = reason };
                     index = end + 1;
                 } else {
-                    if (try runFrame(context, scope, prepared, index, &refund_counter)) |reason|
+                    if (try runFrame(context, session, &frame_transaction, index, &refund_counter)) |reason|
                         return .{ .rejected = reason };
                     index += 1;
                 }
@@ -341,7 +350,7 @@ pub fn ImplType(
         fn runAtomicBatch(
             context: *Context,
             scope: transaction.TransactionScope,
-            prepared: frames.Prepared,
+            frame_transaction: *const frames.Context,
             first: usize,
             end: usize,
             refund_counter: *u64,
@@ -351,7 +360,7 @@ pub fn ImplType(
             defer checkpoint.deinit();
             const refund_before = refund_counter.*;
             for (first..end + 1) |index| {
-                if (try runFrame(context, scope, prepared, index, refund_counter)) |reason| return reason;
+                if (try runFrame(context, scope, frame_transaction, index, refund_counter)) |reason| return reason;
                 if (journal.receipts[index].status != .failure) continue;
 
                 // Restoring the journal zeroes the batch's attributed state gas;
@@ -371,11 +380,11 @@ pub fn ImplType(
         fn runFrame(
             context: *Context,
             scope: transaction.TransactionScope,
-            prepared: frames.Prepared,
+            frame_transaction: *const frames.Context,
             index: usize,
             refund_counter: *u64,
         ) Error!?Rejection {
-            const tx_value = prepared.transaction;
+            const tx_value = frame_transaction.transaction.*;
             const frame = tx_value.frames[index];
             const journal = context.frameJournal();
             if (frame.mode == .sender and !journal.sender_approved) return .type_6_invalid_frame_execution;
@@ -410,8 +419,8 @@ pub fn ImplType(
                 const allowed = frame.flags.allowedScope();
                 if (!frames.defaultCodeApproves(tx_value, target, allowed)) {
                     succeeded = false;
-                } else switch (try approve(context, prepared, target, allowed, &state_gas_left)) {
-                    .approved => {},
+                } else switch (try context.frameApprove(frame_transaction, @intCast(index), allowed, state_gas_left)) {
+                    .approved => |state_gas| state_gas_left -= state_gas,
                     .reverted => succeeded = false,
                     .out_of_gas => {
                         succeeded = false;
@@ -434,73 +443,6 @@ pub fn ImplType(
             });
             if (frame.mode == .verify and !succeeded) return .type_6_invalid_frame_execution;
             return null;
-        }
-
-        const ApproveOutcome = enum { approved, reverted, out_of_gas };
-
-        /// APPROVE's transaction effects for `target` approving `approval`:
-        /// set the approval context and, with payment, consume the nonce set
-        /// and collect `max_cost` from the payer. `state_gas_left` is the
-        /// frame's pool, which pays for creating the sender account or, with
-        /// EIP-8250 keys, each first-used key slot.
-        fn approve(
-            context: *Context,
-            prepared: frames.Prepared,
-            target: Address,
-            approval: u2,
-            state_gas_left: *u64,
-        ) Error!ApproveOutcome {
-            const journal = context.frameJournal();
-            const sender = prepared.transaction.sender;
-            const approves_execution = approval & frames.scope.execution != 0;
-            const approves_payment = approval & frames.scope.payment != 0;
-            if (approves_execution and (journal.sender_approved or !target.eql(sender))) return .reverted;
-            if (!approves_payment) {
-                try journal.approve(try context.allocator(), journal.payer, true);
-                return .approved;
-            }
-            if (journal.payer != null) return .reverted;
-            if (!approves_execution and !journal.sender_approved) return .reverted;
-            const max_cost = prepared.plan.max_cost;
-            const payer_balance = if (try context.accountSummary(target)) |account| account.balance else 0;
-            if (payer_balance < max_cost) return .reverted;
-
-            const keys = prepared.transaction.nonce_keys orelse &.{};
-            if (keys.len == 0) {
-                const sender_account = try context.accountSummary(sender);
-                const nonce = if (sender_account) |account| account.nonce else 0;
-                if (nonce == std.math.maxInt(u64)) return .out_of_gas;
-                // EIP-8037's existence rule: an empty account is not alive,
-                // e.g. a sender an earlier frame emptied.
-                const sender_alive = if (sender_account) |account|
-                    account.nonce != 0 or account.balance != 0 or
-                        !std.mem.eql(u8, &account.code_hash, &crypto.keccak256_empty)
-                else
-                    false;
-                if (!sender_alive) {
-                    if (state_gas_left.* < frame_params.sender_account_state_gas) return .out_of_gas;
-                    state_gas_left.* -= frame_params.sender_account_state_gas;
-                }
-                try context.setNonce(sender, nonce + 1);
-            } else {
-                // Protocol bookkeeping: no warming and no SSTORE pricing; the
-                // intrinsic KEYED_NONCE_ACCESS_COST paid for both.
-                const keyed = frame_params.keyed_nonces.?;
-                var first_uses: u64 = 0;
-                for (keys) |key| {
-                    if (try context.getStorage(keyed.nonce_manager, frames.nonceSlot(sender, key)) == 0) first_uses += 1;
-                }
-                const state_gas = first_uses * keyed.first_use_state_gas;
-                if (state_gas_left.* < state_gas) return .out_of_gas;
-                state_gas_left.* -= state_gas;
-                const consumed = frames.consumedNonceSeq(@intCast(prepared.transaction.nonce orelse 0));
-                for (keys) |key|
-                    try context.setStorage(keyed.nonce_manager, frames.nonceSlot(sender, key), consumed);
-            }
-            const debited = try context.subtractBalance(target, max_cost);
-            std.debug.assert(debited);
-            try journal.approve(try context.allocator(), target, true);
-            return .approved;
         }
 
         fn completeExecutable(

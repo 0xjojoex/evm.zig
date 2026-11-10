@@ -889,6 +889,7 @@ pub const bogota = amsterdam.extend(.{
         .active_kinds = std.EnumSet(tx.TxKind).initMany(&.{ .legacy, .access_list, .dynamic_fee, .blob, .set_code, .frame }),
         .frame = .{ .replace = eip8250.params },
     },
+    .instruction = eth_instruction.bogota,
 });
 
 pub fn specAt(comptime revision: Revision) Spec {

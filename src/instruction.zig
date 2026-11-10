@@ -12,6 +12,7 @@ pub const Spec = instruction_table.Spec;
 
 pub const disassemble = @import("./instruction/disassemble.zig");
 pub const environment = @import("./instruction/environment.zig");
+pub const frame = @import("./instruction/frame.zig");
 pub const immediate = @import("./instruction/immediate.zig");
 pub const storage = @import("./instruction/storage.zig");
 pub const system = @import("./instruction/system.zig");

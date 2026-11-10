@@ -14,6 +14,7 @@ const CaptureContext = @import("../executor/capture_context.zig").Context;
 const InstrumentationMode = @import("../executor/instrumentation.zig").Mode;
 const executor_engine = @import("../executor.zig");
 const executor_errors = @import("../executor/error.zig");
+const frames = @import("frames.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const state = @import("../state.zig");
 const gas = @import("gas.zig");
@@ -388,6 +389,19 @@ pub fn ContextType(
         /// The EIP-8141 frame journal; only for specs that activate frames.
         pub fn frameJournal(self: *Self) *Executor.FrameJournal {
             return &self.activeExecutor().frame_journal;
+        }
+
+        /// EIP-8141 APPROVE on behalf of frame `frame_index`; only for specs
+        /// that activate frames.
+        pub fn frameApprove(
+            self: *Self,
+            frame_context: *const frames.Context,
+            frame_index: u8,
+            approval: u256,
+            state_gas_left: u64,
+        ) ContextError!frames.Approval {
+            return self.activeExecutor().frameApprove(frame_context, frame_index, approval, state_gas_left) catch |err|
+                return executor_errors.normalize(err);
         }
 
         /// Open an inner rollback checkpoint without resolving the transaction.

@@ -22,6 +22,7 @@ const addr = evmz.addr;
 const Address = evmz.Address;
 const AddressWord = evmz.AddressWord;
 const execution = @import("./execution.zig");
+const frames = @import("./transaction/frames.zig");
 const AccessStatus = execution.AccessStatus;
 const ExecutionOutcome = execution.ExecutionOutcome;
 const FrameHalt = execution.FrameHalt;
@@ -213,6 +214,10 @@ pub const VTable = struct {
     /// spec activates frame transactions. Returns whether a refill credits the
     /// running frame's own pool.
     frameStorageStateGas: ?*const fn (ptr: *anyopaque, address: AddressWord, key: u256, gas: execution.StorageStateGas) anyerror!bool = null,
+    /// EIP-8141 APPROVE of `scope` by the running frame; present exactly when
+    /// the spec activates frame transactions. `state_gas_left` is the frame's
+    /// pool: an approval needing more applies nothing and is out of gas.
+    frameApprove: ?*const fn (ptr: *anyopaque, scope: u256, state_gas_left: u64) anyerror!frames.Approval = null,
     call: *const fn (ptr: *anyopaque, msg: Message) anyerror!Result,
     selfDestruct: *const fn (ptr: *anyopaque, address: AddressWord, beneficiary: AddressWord) anyerror!bool,
     getTransientStorage: *const fn (ptr: *anyopaque, address: AddressWord, key: u256) anyerror!u256,
@@ -256,6 +261,9 @@ pub fn observeAccountAccess(self: *Self, address: AddressWord, depth: u16) !void
 }
 pub fn frameStorageStateGas(self: *Self, address: AddressWord, key: u256, gas: execution.StorageStateGas) !bool {
     return self.vtable.frameStorageStateGas.?(self.ptr, address, key, gas);
+}
+pub fn frameApprove(self: *Self, scope: u256, state_gas_left: u64) !frames.Approval {
+    return self.vtable.frameApprove.?(self.ptr, scope, state_gas_left);
 }
 pub fn getCode(self: *Self, address: AddressWord) ![]const u8 {
     return self.vtable.getCode(self.ptr, address);
