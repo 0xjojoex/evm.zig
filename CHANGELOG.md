@@ -47,6 +47,14 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
 
 - Pinned the zkEVM fixture corpus to `tests-zkevm@v21.0.6`.
 - Updated the execution fixture corpus to `tests@v21.0.1`.
+- `zig build c-api` installs `libevmz.a`, `libblst.a`, and
+  `include/evmz/evmz.h`: a C session ABI (version 3) that executes transactions
+  and system calls against state the host serves through callbacks, with an
+  owned result per execution that the host accepts or discards. It is
+  experimental and outside the compatibility surface. `-Dc-api-forks=recent|all`
+  picks the compiled forks (default `recent`: Cancun, Prague, `.stable`,
+  `.latest`). A host links `-levmz -lblst -lc++`; `zig build c-api-test` runs
+  its tests.
 - Native artifacts keep frame pointers in `debug` and `safe` builds and omit
   them in `fast` and `small`; `safe` builds used to omit them.
   `-Dframe-pointers=<bool>` overrides the default. zkVM guests still omit them

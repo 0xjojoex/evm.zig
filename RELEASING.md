@@ -43,8 +43,10 @@ descriptors. They preserve focused tests, fuzzers, benchmarks, and package
 dependency checks without owning versions or release tags. MPT's local harness
 resolves RLP through the sibling path; root consumers never execute it.
 
-`include/evmz/evmz.h` is a reserved slot with no declarations. It enters the
-compatibility surface when it gets one.
+`include/evmz/evmz.h` declares the C session ABI, built by `zig build c-api`.
+It is experimental and outside the compatibility surface until it is promoted:
+it may change in any release, and a binding must match `evmz_abi_version()`
+exactly.
 
 ## Package versioning
 
