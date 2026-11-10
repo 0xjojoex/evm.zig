@@ -482,7 +482,7 @@ test "call capture retains Frontier committed code-store out-of-gas" {
 
     try std.testing.expectEqual(evmz.interpreter.Status.success, result.status());
     try std.testing.expectEqual(evmz.execution.TerminalCause.code_store_out_of_gas, result.outcome.cause);
-    try std.testing.expectEqual(evmz.execution.FrameHalt.success, result.frame_halt.?);
+    try std.testing.expectEqual(evmz.execution.FrameHalt.returned, result.frame_halt.?);
     try std.testing.expect(!result.checkpoint_reverted);
     try std.testing.expectEqual(@as(usize, 1), span.rows.len);
     try std.testing.expectEqual(evmz.trace.CallStatus.code_store_out_of_gas_committed, span.rows[0].status);

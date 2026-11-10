@@ -136,7 +136,7 @@ pub fn SessionType(comptime Vm: type) type {
                                 .gas_left = frame.gas_left,
                             } };
                         }
-                        frame.halt(.success);
+                        frame.halt(.stop);
                     },
                     .suspended => return .{ .suspended = .{
                         .site = .{ .frame_index = index, .depth = frame.msg.depth },
@@ -215,7 +215,7 @@ pub fn SessionType(comptime Vm: type) type {
 
             try StepDispatch.executeInstruction(frame);
             if (frame.pc >= frame.code.len and frame.isRunning()) {
-                frame.halt(.success);
+                frame.halt(.stop);
             }
         }
 

@@ -2992,7 +2992,7 @@ test "call runtime abort skips resolved top and restores enclosing checkpoint" {
 
     const child_index = call.frames.len() - 1;
     const child_frame = call.frames.frame(child_index);
-    child_frame.halt(.success);
+    child_frame.halt(.stop);
     _ = try call.finishFrame(child_index, child_frame.result());
 
     call.deinit();

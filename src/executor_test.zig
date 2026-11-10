@@ -2385,7 +2385,7 @@ test "Amsterdam raises create runtime code size limit" {
     } }, .legacy(20_000_000)));
     try std.testing.expectEqual(Interpreter.Status.out_of_gas, osaka_result.status());
     try std.testing.expectEqual(evmz.execution.TerminalCause.max_code_size_exceeded, osaka_result.outcome.cause);
-    try std.testing.expectEqual(evmz.execution.FrameHalt.success, osaka_result.frame_halt.?);
+    try std.testing.expectEqual(evmz.execution.FrameHalt.returned, osaka_result.frame_halt.?);
     try std.testing.expect(osaka_result.checkpoint_reverted);
 
     var latest = Latest.Executor.init(std.testing.allocator, .{});

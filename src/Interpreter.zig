@@ -180,7 +180,7 @@ pub fn Interpreter(comptime spec: Spec) type {
             }
 
             if (self.call_frame.isRunning()) {
-                self.call_frame.halt(.success);
+                self.call_frame.halt(.stop);
             }
             if (self.call_frame.suspendedAction()) |action| {
                 return .{ .suspended = action };
@@ -195,7 +195,7 @@ pub fn Interpreter(comptime spec: Spec) type {
             }
 
             if (frame.isRunning()) {
-                frame.halt(.success);
+                frame.halt(.stop);
             }
         }
 
@@ -304,7 +304,7 @@ pub const CallFrame = struct {
         self.return_data = self.io.return_data.slice();
         self.output_range = .{};
         self.jumpdest_masks = options.bytecode.jumpdest_masks;
-        self.state = if (code.len == 0) .{ .halted = .success } else .running;
+        self.state = if (code.len == 0) .{ .halted = .stop } else .running;
     }
 
     pub fn deinit(self: *CallFrame) void {
@@ -579,7 +579,7 @@ pub const CallFrame = struct {
         var frame_result = FrameResult{
             .gas_left = self.gas_left,
             // EIP-2200: a frame-local refund counter is discarded on revert.
-            .gas_refund = if (halt_reason == .success) self.gas_refund else 0,
+            .gas_refund = if (halt_reason.status() == .success) self.gas_refund else 0,
             .gas_reservoir = self.gas_reservoir,
             .state_gas_spent = self.state_gas_spent,
             .state_gas_from_gas_left = self.state_gas_from_gas_left,

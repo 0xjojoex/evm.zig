@@ -695,6 +695,58 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
     try std.testing.expect(result.gas.block.total > result.gas.used);
 }
 
+test "transaction result reports how the root frame halted" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const FrameHalt = evmz.execution.FrameHalt;
+    const sender = addr(0xaaaa);
+    const contract = addr(0xbbbb);
+    const identity_precompile = addr(0x04);
+
+    const cases = [_]struct {
+        code: []const u8 = &.{},
+        /// Defaults to `contract`, which holds `code`.
+        to: ?evmz.Address = null,
+        status: TxStatus = .success,
+        frame_halt: ?FrameHalt,
+    }{
+        .{ .code = &evmz.t.bytecode(.{.STOP}), .frame_halt = .stop },
+        // Running past the last opcode is an implicit STOP.
+        .{ .code = &evmz.t.bytecode(.{.PUSH0}), .frame_halt = .stop },
+        .{ .code = &evmz.t.bytecode(.{ .PUSH0, .PUSH0, .RETURN }), .frame_halt = .returned },
+        .{ .code = &evmz.t.bytecode(.{ .PUSH0, .SELFDESTRUCT }), .frame_halt = .selfdestruct },
+        .{
+            .code = &evmz.t.bytecode(.{ .PUSH0, .PUSH0, .REVERT }),
+            .status = .revert,
+            .frame_halt = .revert,
+        },
+        .{ .code = &evmz.t.bytecode(.{.INVALID}), .status = .invalid, .frame_halt = .invalid_opcode },
+        .{ .code = &evmz.t.bytecode(.{.POP}), .status = .invalid, .frame_halt = .stack_underflow },
+        // A codeless root target is an empty frame that stops at once.
+        .{ .frame_halt = .stop },
+        // A precompile runs no bytecode frame.
+        .{ .to = identity_precompile, .frame_halt = null },
+    };
+
+    for (cases) |case| {
+        var memory = MemoryStore.init(std.testing.allocator);
+        defer memory.deinit();
+        try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
+        try evmz.t.seedStoreAccount(&memory, contract, .{ .code = case.code });
+
+        var executor = Latest.Executor.init(std.testing.allocator, .{
+            .state = .{ .reader = memory.reader() },
+        });
+        defer executor.deinit();
+
+        const result = try expectExecuted(try transact(Latest, &executor, .{
+            .env = .{ .gas_limit = 1_000_000 },
+            .tx = .{ .sender = sender, .to = case.to orelse contract, .gas_limit = 500_000 },
+        }));
+        try std.testing.expectEqual(case.status, result.status);
+        try std.testing.expectEqual(case.frame_halt, result.frame_halt);
+    }
+}
+
 test "Executor exposes borrowed logs after transaction retention" {
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);

@@ -236,7 +236,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     // real final step at the logical boundary and never record
                     // the padded STOP.
                     if (pc >= ctx.frame.code.len) {
-                        ctx.frame.halt(.success);
+                        ctx.frame.halt(.stop);
                         ctx.capture.finishStep(.{
                             .pc_next = pc,
                             .gas_after = gas,
@@ -477,7 +477,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             }
             if (!frame.isRunning()) return;
             if (frame.pc >= frame.code.len) {
-                frame.halt(.success);
+                frame.halt(.stop);
                 return;
             }
 
@@ -546,7 +546,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
 
         fn tailStop(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: *const DispatchTable) TailStatus {
             _ = dispatch;
-            ctx.frame.halt(.success);
+            ctx.frame.halt(.stop);
             return ctx.finish(ip, sp, gas, .done);
         }
 
@@ -952,7 +952,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     const final_gas = expandMemory(offset, size, ip, nsp, gas, ctx) orelse return memoryFailureStatus(ctx);
                     ctx.frame.setOutputRange(offset, size);
                     ctx.frame.halt(switch (terminal_status) {
-                        .success => .success,
+                        .success => .returned,
                         .revert => .revert,
                     });
                     return ctx.finish(ip, nsp, final_gas, .done);
@@ -1302,7 +1302,7 @@ fn tapeStepOutcome(state: *const Interpreter.FrameState) trace.TraceStepOutcome 
     return switch (state.*) {
         .running, .suspended => .success,
         .halted => |reason| switch (reason) {
-            .success => .success,
+            .stop, .returned, .selfdestruct => .success,
             .revert => .revert,
             .out_of_gas => .out_of_gas,
             .invalid_opcode,

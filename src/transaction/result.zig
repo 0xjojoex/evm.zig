@@ -11,6 +11,13 @@ const transaction = @import("../transaction.zig");
 /// next operation can replace call output.
 pub const Execution = struct {
     status: execution.Status,
+    /// How the root bytecode frame halted, which `status` alone cannot say:
+    /// STOP, RETURN, and SELFDESTRUCT are all `.success`. A codeless target
+    /// is an empty frame and reports `.stop`. Null when no root frame ran: a
+    /// precompile target, or a transaction included without executing. Create
+    /// finalization can fail after the frame returned, so a non-success
+    /// `status` may carry a successful halt.
+    frame_halt: ?execution.FrameHalt = null,
     /// Settled transaction gas: receipt gas, refund gas, and block contribution.
     gas: transaction.ResultGas = .{},
     output: []const u8 = &.{},
