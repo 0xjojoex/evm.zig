@@ -693,6 +693,14 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
     try std.testing.expectEqual(TxStatus.success, result.status);
     try std.testing.expect(result.gas.refunded > 0);
     try std.testing.expect(result.gas.block.total > result.gas.used);
+    // Clearing a slot spends no state gas and this call is far above the
+    // calldata floor, so block gas is the pre-refund spend and the gap to
+    // receipt gas is exactly the EVM refund -- not the unused gas in `refunded`.
+    try std.testing.expectEqual(
+        result.gas.block.total - result.gas.used,
+        result.gas.execution_refund,
+    );
+    try std.testing.expect(result.gas.execution_refund < result.gas.refunded);
 }
 
 test "transaction result reports how the root frame halted" {
