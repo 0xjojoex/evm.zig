@@ -83,6 +83,7 @@ const table = [_]Row{
     // EIP-8037/8038: writes leave the regular schedule for state gas, and the
     // intrinsic base becomes TX_BASE_COST + COLD_ACCOUNT_ACCESS.
     row(.{ .amsterdam,                 100, 2_900,   100, 2_000, 10_000, 11_616, 15_000, 16, 4,    2_900, 2_000, 2, 131_072,  100, 0 }),
+    row(.{ .bogota,                    100, 2_900,   100, 2_000, 10_000, 11_616, 15_000, 16, 4,    2_900, 2_000, 2, 131_072,  100, 0 }),
 };
 // zig fmt: on
 

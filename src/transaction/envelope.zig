@@ -80,6 +80,11 @@ pub fn Exact(comptime transaction_spec: anytype) type {
                     };
                     return null;
                 },
+                // Frame structure is checked during preparation (`frames.plan`).
+                tx_type_id.frame => if (transaction_spec.active_kinds.contains(.frame))
+                    null
+                else
+                    .unsupported_transaction_type,
                 else => .unsupported_transaction_type,
             };
         }

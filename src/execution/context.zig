@@ -80,6 +80,10 @@ pub const TransactionEnvironment = struct {
     /// GASPRICE: the effective gas price, not the transaction's max fee.
     gas_price: u256 = 0,
     blob_hashes: []const u256 = &.{},
+    /// The executing EIP-8141 frame; null outside frame transactions. A frame
+    /// charges state gas only from its own pool (the reservoir): a charge
+    /// beyond it is out of gas rather than a spill into regular gas.
+    frame_index: ?u8 = null,
     /// Optional custom-family extension. Core opcodes ignore it; externally
     /// installed instructions may request their exact runtime type.
     extension: TransactionExtension = .{},
@@ -112,13 +116,15 @@ pub const ExecutionContext = struct {
     }
 
     /// Whether two roots belong to the same custom transaction session.
-    /// `ORIGIN` may change per root; all chain, block, fee, blob, and extension
-    /// identity must remain transaction-stable.
+    /// `ORIGIN` and the EIP-8141 frame index may change per root; all chain,
+    /// block, fee, blob, and extension identity must remain transaction-stable.
     pub fn sameRootSession(a: ExecutionContext, b: ExecutionContext) bool {
         var a_root = a;
         var b_root = b;
         a_root.transaction.origin = std.mem.zeroes(Address);
         b_root.transaction.origin = std.mem.zeroes(Address);
+        a_root.transaction.frame_index = null;
+        b_root.transaction.frame_index = null;
         return a_root.eql(b_root);
     }
 };

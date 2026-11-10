@@ -406,6 +406,7 @@ pub fn parseStateFork(name: []const u8) ?evmz.eth.Revision {
     if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
     if (std.ascii.eqlIgnoreCase(name, "Osaka")) return .osaka;
     if (std.ascii.eqlIgnoreCase(name, "Amsterdam")) return .amsterdam;
+    if (std.ascii.eqlIgnoreCase(name, "Bogota")) return .bogota;
     // BPO scenarios retain their parent fork's execution rules; the fixture's
     // named blob schedule entry supplies the changed parameters.
     if (std.ascii.eqlIgnoreCase(name, "BPO1")) return .osaka;
@@ -428,4 +429,5 @@ test "EEST state fork parser maps ConstantinopleFix to Petersburg" {
     try std.testing.expectEqual(evmz.eth.Revision.petersburg, parseStateFork("ConstantinopleFix"));
     try std.testing.expectEqual(evmz.eth.Revision.osaka, parseStateFork("Osaka"));
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseStateFork("Amsterdam"));
+    try std.testing.expectEqual(evmz.eth.Revision.bogota, parseStateFork("Bogota"));
 }

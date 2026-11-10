@@ -926,7 +926,7 @@ fn executeEthereumPrecompileForTest(
         => eth_precompile.berlin_config,
         .cancun => eth_precompile.cancun_config,
         .prague => eth_precompile.prague_config,
-        .osaka, .amsterdam => eth_precompile.osaka_config,
+        .osaka, .amsterdam, .bogota => eth_precompile.osaka_config,
     };
     const ExactConfig = Exact(.{ .config = config });
     const contract = ExactConfig.resolve(target) orelse return null;

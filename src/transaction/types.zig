@@ -12,6 +12,7 @@ const execution = @import("../execution.zig");
 const BlobParams = @import("./blob.zig").BlobParams;
 const BlockGas = @import("./settlement.zig").BlockGas;
 const ExecutionGas = execution.ExecutionGas;
+const frames = @import("./frames.zig");
 
 pub const AccessListCounts = struct {
     addresses: usize = 0,
@@ -27,6 +28,8 @@ pub const TxKind = enum {
     dynamic_fee,
     blob,
     set_code,
+    /// EIP-8141 frame transaction.
+    frame,
 };
 
 /// Sender-code category used by pre-execution transaction validation.
@@ -87,6 +90,14 @@ pub const Transaction = struct {
     access_list: []const AccessListEntry = &.{},
     authorization_list: []const AuthorizationTuple = &.{},
     authorization_count: ?usize = null,
+    /// EIP-8141 frames. A frame transaction leaves `gas_limit`, `to`, `value`,
+    /// `input`, and the per-gas fee caps other than the priority fee unused;
+    /// its gas follows from its frames and signatures (`frames.Plan`).
+    frames: []const frames.Frame = &.{},
+    /// EIP-8141 signatures validated before any frame runs.
+    signatures: []const frames.Signature = &.{},
+    /// EIP-8141 `max_fee`: one wei budget for execution, state, and blob gas.
+    max_fee: u256 = 0,
 };
 
 /// One authenticated raw envelope and its normalized borrowed transaction
@@ -270,6 +281,8 @@ pub fn effectiveGasPrice(env: Env, view: TransactionView) u256 {
             const capped_priority = env.base_fee +| priority_fee;
             break :blk @min(max_fee, capped_priority);
         },
+        // GASPRICE of a frame transaction is `frames.Plan.gas_price`.
+        .frame => unreachable,
     };
 }
 
@@ -295,6 +308,11 @@ pub fn Prepared(comptime SettlementPlan: type) type {
         /// Resolved execution gas; null when the transaction has no execution step.
         execution_gas: ?ExecutionGas,
         settlement: SettlementPlan,
+        /// The EIP-8141 transaction and its plan; null for every other kind.
+        /// A frame transaction has no root message or settlement plan of its
+        /// own: `message` and `settlement` are placeholders the frame path
+        /// ignores, and a rollup widens `frame.plan.max_cost` instead.
+        frame: ?frames.Prepared = null,
     };
 }
 

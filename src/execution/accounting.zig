@@ -26,10 +26,18 @@ pub fn settleChild(self: anytype, gas_limit: i64, state_gas_charged: i64, child:
 
 /// Charge from the reservoir first, then regular gas. Failure changes no state
 /// counters; trackGas performs the caller's exceptional halt.
+///
+/// An EIP-8141 frame's reservoir is its state-gas pool and never spills:
+/// `stateGasSpills` is false there, and a charge beyond the pool is out of gas
+/// at whatever depth it happens.
 pub fn trackStateGas(self: anytype, gas: i64) bool {
     if (gas <= 0) return true;
     const from_reservoir = @min(@max(self.gas_reservoir, 0), gas);
     const from_regular = gas - from_reservoir;
+    if (from_regular > 0 and !self.stateGasSpills()) {
+        @branchHint(.unlikely);
+        return self.trackGas(std.math.maxInt(i64));
+    }
     if (!self.trackGas(from_regular)) return false;
     self.gas_reservoir -= from_reservoir;
     self.state_gas_from_gas_left +|= from_regular;

@@ -23,8 +23,9 @@ fn resolveEnabledRevisions() []const evmz.eth.Revision {
     if (std.mem.eql(u8, preset, "all")) return std.enums.values(Revision);
     if (std.mem.eql(u8, preset, "head")) return &.{Revision.latest};
     // prague stays in `dev`: it is the pre-BAL boundary and the fork most
-    // amsterdam-lane tests compare against.
-    if (std.mem.eql(u8, preset, "dev")) return &.{ .cancun, .prague, Revision.stable, Revision.latest };
+    // amsterdam-lane tests compare against. bogota is the fork in development,
+    // not yet `latest`, so its feature tests would otherwise skip locally.
+    if (std.mem.eql(u8, preset, "dev")) return &.{ .cancun, .prague, Revision.stable, Revision.latest, .bogota };
     @compileError("unknown test_forks preset '" ++ preset ++ "'");
 }
 

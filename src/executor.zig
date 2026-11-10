@@ -34,6 +34,7 @@ const HostCallbacks = @import("./executor/host.zig").Callbacks;
 const native_contract = @import("./execution/native_contract.zig");
 const InstrumentationMode = @import("./executor/instrumentation.zig").Mode;
 const top_frame_gas = @import("./executor/top_frame_gas.zig");
+const frame_journal = @import("./executor/frame_journal.zig");
 const trace_capture = @import("./executor/trace_capture.zig");
 const transaction_runtime = @import("./transaction/runtime.zig");
 pub const capture_context = @import("./executor/capture_context.zig");
@@ -199,6 +200,14 @@ pub fn ExecutorType(
 
         pub const Init = ExecutorInitType(World, options_value.transaction_journal, spec.native_contract);
 
+        /// Whether this spec runs EIP-8141 frame transactions; it compiles in
+        /// the frame journal and the frame state-gas rules.
+        pub const frames_active = spec.transaction.framesActive();
+        pub const FrameJournal = if (frames_active)
+            frame_journal.Journal(spec.transaction.frame.?)
+        else
+            void;
+
         allocator: std.mem.Allocator,
         state: State,
         frame_store: FrameStore,
@@ -215,6 +224,8 @@ pub fn ExecutorType(
         next_block_execution_generation: u64 = 0,
         block_hash_source: ?BlockHashSource = null,
         transaction_journal: TransactionJournal,
+        /// EIP-8141 transaction context, scoped with every state checkpoint.
+        frame_journal: FrameJournal = if (frames_active) .{} else {},
         native_contract: if (has_native_contracts) ?*spec.native_contract else void,
         /// Native activations, interleaved with `frame_store` rows. Reserved to
         /// the depth limit on first use, so suspended actions never move.
@@ -342,6 +353,7 @@ pub fn ExecutorType(
             }
             self.call_scratch_slots.deinit(self.allocator);
             self.last_call_output.deinit();
+            if (frames_active) self.frame_journal.deinit(self.allocator);
         }
 
         // Transaction scope: at most one attempt is live between open and close.
@@ -792,17 +804,27 @@ pub fn ExecutorType(
 
         pub fn openScope(self: *Executor) ScopeCheckpoint {
             if (comptime transaction_journal_enabled) self.transaction_journal.checkpoint();
+            if (comptime frames_active) self.frame_journal.openScope();
             return self.state.checkpoint();
         }
 
         pub fn commitScope(self: *Executor, checkpoint_state: ScopeCheckpoint) void {
             self.state.commitCheckpoint(checkpoint_state);
             if (comptime transaction_journal_enabled) self.transaction_journal.commitCheckpoint();
+            if (comptime frames_active) self.frame_journal.commitScope();
         }
 
         pub fn revertScope(self: *Executor, checkpoint_state: ScopeCheckpoint) void {
             self.state.revertToCheckpoint(checkpoint_state);
             if (comptime transaction_journal_enabled) self.transaction_journal.revertCheckpoint();
+            if (comptime frames_active) self.frame_journal.revertScope();
+        }
+
+        /// Whether state gas beyond the reservoir spills into regular gas.
+        /// False while an EIP-8141 frame runs: its reservoir is its pool.
+        pub fn stateGasSpills(self: *const Executor) bool {
+            if (comptime !frames_active) return true;
+            return self.execution_context.?.transaction.frame_index == null;
         }
 
         /// Copy the accepted branch so a later `restoreBranch` can roll back
@@ -1504,7 +1526,7 @@ pub fn ExecutorType(
                 errdefer executor.endCallScratch(msg.depth);
                 executor.native_frames.appendAssumeCapacity(.{
                     .message = msg.*,
-                    .ledger = .init(msg),
+                    .ledger = .init(msg, executor.stateGasSpills()),
                     .guard = .{ .is_static = msg.is_static },
                     .checkpoint = checkpoint_state,
                     .call_capture = call_capture,
@@ -2206,6 +2228,23 @@ pub fn ExecutorType(
             return access;
         }
 
+        /// Attribute an SSTORE state-gas charge or refill inside an EIP-8141
+        /// frame. Returns whether a refill credits the running frame's pool.
+        pub fn frameStorageStateGas(
+            self: *Executor,
+            address: Address,
+            key: u256,
+            gas: evmz.execution.StorageStateGas,
+        ) !bool {
+            if (comptime !frames_active) unreachable else {
+                const frame = self.execution_context.?.transaction.frame_index.?;
+                const slot: frame_journal.Slot = .{ .address = address, .key = key };
+                if (gas.charge > 0) try self.frame_journal.chargeSlot(self.allocator, slot, frame);
+                if (gas.refund <= 0) return false;
+                return self.frame_journal.refillSlot(self.allocator, slot, frame, @intCast(gas.refund));
+            }
+        }
+
         fn chargeTopFrameValueTransferStateGas(
             self: *Executor,
             sender: Address,
@@ -2223,7 +2262,7 @@ pub fn ExecutorType(
                 .same_address = same_address,
                 .creates_account = creates_account,
             });
-            return top_frame_gas.charge(gas, charge_i64);
+            return top_frame_gas.charge(gas, charge_i64, self.stateGasSpills());
         }
 
         fn chargeTopFrameCreateStateGas(
@@ -2243,6 +2282,7 @@ pub fn ExecutorType(
             return top_frame_gas.charge(
                 gas,
                 spec.create.accountStateGas(.{ .target_alive = target_alive }),
+                self.stateGasSpills(),
             );
         }
 

@@ -440,6 +440,9 @@ fn encodeTransaction(allocator: Allocator, tx: TransactionInput, default_chain_i
         .dynamic_fee => tx.gasPrice != null,
         .blob => tx.gasPrice != null or tx.authorizationList != null,
         .set_code => tx.gasPrice != null or tx.maxFeePerBlobGas != null or tx.blobVersionedHashes != null,
+        // t8n's JSON input has no frame-transaction shape; `transactionKind`
+        // reports type 0x06 as unsupported.
+        .frame => unreachable,
     };
     if (forbidden) return error.InvalidInput;
 
@@ -516,6 +519,7 @@ fn typeId(kind: TxKind) ?u8 {
         .dynamic_fee => 2,
         .blob => 3,
         .set_code => 4,
+        .frame => 6,
     };
 }
 
@@ -1082,6 +1086,8 @@ fn preForkTransactionError(kind: TxKind) []const u8 {
         .dynamic_fee => "TransactionException.TYPE_2_TX_PRE_FORK",
         .blob => "TransactionException.TYPE_3_TX_PRE_FORK",
         .set_code => "TransactionException.TYPE_4_TX_PRE_FORK",
+        // EEST has no TYPE_6_TX_PRE_FORK (tests-bogota-devnet@v2.0.0).
+        .frame => "TransactionException.TYPE_NOT_SUPPORTED",
     };
 }
 
@@ -1112,6 +1118,11 @@ fn validationErrorName(reason: evmz.eth.transaction_validation.ValidationError) 
         .type_4_empty_authorization_list => "TransactionException.TYPE_4_EMPTY_AUTHORIZATION_LIST",
         .type_4_tx_contract_creation => "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
         .invalid_chain_id => "TransactionException.INVALID_CHAINID",
+        // EEST has no TYPE_6_TX_PRE_FORK (tests-bogota-devnet@v2.0.0).
+        .type_6_tx_pre_fork => "TransactionException.TYPE_NOT_SUPPORTED",
+        .type_6_invalid_frame_format => "TransactionException.TYPE_6_INVALID_FRAME_FORMAT",
+        .type_6_invalid_signature => "TransactionException.TYPE_6_INVALID_SIGNATURE",
+        .type_6_invalid_frame_execution => "TransactionException.TYPE_6_INVALID_FRAME_EXECUTION",
     };
 }
 
@@ -1310,6 +1321,7 @@ fn receiptDocument(
             .dynamic_fee => "0x2",
             .blob => "0x3",
             .set_code => "0x4",
+            .frame => "0x6",
         },
         .blobGasUsed = if (kind == .blob) quantity(blob_gas_used) else null,
         .blobGasPrice = if (kind == .blob) quantity(env.blob_base_fee) else null,

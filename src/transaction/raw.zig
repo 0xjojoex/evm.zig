@@ -5,6 +5,8 @@ const ExactSlab = @import("stdx").ExactSlab;
 const rlp = @import("rlp");
 const transaction = @import("types.zig");
 const transaction_envelope = @import("envelope.zig");
+const frames = @import("frames.zig");
+const type_id = @import("type_id.zig");
 const transaction_signing = @import("signing.zig");
 
 const Address = @import("../address.zig").Address;
@@ -20,12 +22,16 @@ const Counts = struct {
     storage_keys: usize = 0,
     blob_hashes: usize = 0,
     authorizations: usize = 0,
+    frames: usize = 0,
+    signatures: usize = 0,
 
     fn add(self: *Counts, other: Counts) Error!void {
         self.access_entries = try std.math.add(usize, self.access_entries, other.access_entries);
         self.storage_keys = try std.math.add(usize, self.storage_keys, other.storage_keys);
         self.blob_hashes = try std.math.add(usize, self.blob_hashes, other.blob_hashes);
         self.authorizations = try std.math.add(usize, self.authorizations, other.authorizations);
+        self.frames = try std.math.add(usize, self.frames, other.frames);
+        self.signatures = try std.math.add(usize, self.signatures, other.signatures);
     }
 };
 
@@ -36,6 +42,8 @@ const Storage = struct {
     storage_keys: []u256,
     blob_hashes: []u256,
     authorizations: []transaction.AuthorizationTuple,
+    frames: []frames.Frame,
+    signatures: []frames.Signature,
 
     fn init(allocator: std.mem.Allocator, transaction_count: usize, counts: Counts) Error!Storage {
         var slab_len: usize = 0;
@@ -44,6 +52,8 @@ const Storage = struct {
         slab_len = try ExactSlab.reserve(u256, slab_len, counts.storage_keys);
         slab_len = try ExactSlab.reserve(u256, slab_len, counts.blob_hashes);
         slab_len = try ExactSlab.reserve(transaction.AuthorizationTuple, slab_len, counts.authorizations);
+        slab_len = try ExactSlab.reserve(frames.Frame, slab_len, counts.frames);
+        slab_len = try ExactSlab.reserve(frames.Signature, slab_len, counts.signatures);
 
         var slab = try ExactSlab.init(allocator, slab_len);
         return .{
@@ -53,6 +63,8 @@ const Storage = struct {
             .storage_keys = slab.take(u256, counts.storage_keys),
             .blob_hashes = slab.take(u256, counts.blob_hashes),
             .authorizations = slab.take(transaction.AuthorizationTuple, counts.authorizations),
+            .frames = slab.take(frames.Frame, counts.frames),
+            .signatures = slab.take(frames.Signature, counts.signatures),
         };
     }
 
@@ -88,12 +100,22 @@ pub const DecodedBatch = struct {
 };
 
 pub fn decodeRaw(allocator: std.mem.Allocator, bytes: []const u8) Error!Decoded {
-    const sender = (try transaction_signing.recoverSender(allocator, bytes)).sender;
+    const sender = if (isFrameEnvelope(bytes))
+        Address.zero
+    else
+        (try transaction_signing.recoverSender(allocator, bytes)).sender;
     return decodeRawAssumeSender(allocator, bytes, sender);
+}
+
+/// EIP-8141 envelopes name their sender in the payload and carry no envelope
+/// signature, so decoding reads the sender instead of recovering it.
+fn isFrameEnvelope(bytes: []const u8) bool {
+    return bytes.len != 0 and bytes[0] == type_id.frame;
 }
 
 /// Decode an envelope whose sender was already authenticated by a trusted
 /// ingress adapter. The caller must bind `sender` to this exact signed payload.
+/// A frame transaction ignores `sender` and reads its own.
 pub fn decodeRawAssumeSender(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -130,7 +152,10 @@ pub fn decodeRawBatchWith(
 
     var fill = Fill.init(&storage);
     for (storage.transactions, raw_transactions, 0..) |*target, encoded, index| {
-        const sender = try resolver.resolve(allocator, index, encoded);
+        const sender = if (isFrameEnvelope(encoded))
+            Address.zero
+        else
+            try resolver.resolve(allocator, index, encoded);
         target.* = .initAssumeDecoded(try decodeRawInto(encoded, sender, &fill), encoded);
     }
     try fill.expectDone();
@@ -195,6 +220,7 @@ fn decodeTyped(typed: transaction_envelope.TypedEnvelope, sender: Address, fill:
         0x02 => decodeDynamicFee(&fields, sender, fill),
         0x03 => decodeBlob(&fields, sender, fill),
         transaction_envelope.set_code_transaction_type => decodeSetCode(&fields, sender, fill),
+        type_id.frame => decodeFrame(&fields, fill),
         else => error.UnsupportedTransactionType,
     };
 }
@@ -324,11 +350,47 @@ fn decodeSetCode(fields: *rlp.Cursor, sender: Address, fill: *Fill) Error!transa
     };
 }
 
+fn decodeFrame(fields: *rlp.Cursor, fill: *Fill) Error!transaction.Transaction {
+    const chain_id = try fields.nextInt(u256);
+    const nonce = try fields.nextInt(u256);
+    const sender = Address.fromBytes((try fields.nextBytesExact(20))[0..20].*);
+    const frame_list = try fill.nextFrames(fields);
+    const signatures = try fill.nextSignatures(fields);
+    var fees = try fields.nextList();
+    const max_fee = try fees.nextInt(u256);
+    const max_priority_fee_per_gas = try fees.nextInt(u256);
+    try fees.expectDone();
+    const blob_hashes = try fill.nextHashList(fields);
+    try fields.expectDone();
+
+    return .{
+        .kind = .frame,
+        .sender = sender,
+        .chain_id = chain_id,
+        .nonce = nonce,
+        .gas_limit = 0,
+        .max_priority_fee_per_gas = max_priority_fee_per_gas,
+        .blob_hashes = blob_hashes,
+        .frames = frame_list,
+        .signatures = signatures,
+        .max_fee = max_fee,
+    };
+}
+
 fn nextTo(fields: *rlp.Cursor) Error!?Address {
     const bytes = try fields.nextBytes();
     return switch (bytes.len) {
         0 => null,
         20 => Address.fromBytes(bytes[0..20].*),
+        else => error.InvalidTransactionFormat,
+    };
+}
+
+fn nextOptionalBytes(fields: *rlp.Cursor, comptime len: usize) Error!?[len]u8 {
+    const bytes = try fields.nextBytes();
+    return switch (bytes.len) {
+        0 => null,
+        len => bytes[0..len].*,
         else => error.InvalidTransactionFormat,
     };
 }
@@ -344,6 +406,8 @@ const Fill = struct {
     storage_keys: usize = 0,
     blob_hashes: usize = 0,
     authorizations: usize = 0,
+    frames: usize = 0,
+    signatures: usize = 0,
 
     fn init(storage: *Storage) Fill {
         return .{ .storage = storage };
@@ -352,7 +416,9 @@ const Fill = struct {
     fn expectDone(self: Fill) Error!void {
         if (self.access_entries != self.storage.access_entries.len or
             self.storage_keys != self.storage.storage_keys.len or
-            self.blob_hashes != self.storage.blob_hashes.len)
+            self.blob_hashes != self.storage.blob_hashes.len or
+            self.frames != self.storage.frames.len or
+            self.signatures != self.storage.signatures.len)
             return error.InvalidTransactionFormat;
         if (self.authorizations > self.storage.authorizations.len)
             return error.InvalidTransactionFormat;
@@ -397,6 +463,59 @@ const Fill = struct {
         }
         try list.expectDone();
         return self.storage.blob_hashes[start..self.blob_hashes];
+    }
+
+    fn nextFrames(self: *Fill, fields: *rlp.Cursor) Error![]const frames.Frame {
+        var list = try fields.nextList();
+        const start = self.frames;
+        while (!list.isDone()) {
+            if (self.frames >= self.storage.frames.len) return error.InvalidTransactionFormat;
+            var item = try list.nextList();
+            const mode = try item.nextInt(u8);
+            const flags = try item.nextInt(u8);
+            const target = try nextOptionalBytes(&item, Address.len);
+            var limits = try item.nextList();
+            const execution = try limits.nextInt(u64);
+            const state = try limits.nextInt(u64);
+            try limits.expectDone();
+            const value = try item.nextInt(u256);
+            const data = try item.nextBytes();
+            try item.expectDone();
+            self.storage.frames[self.frames] = .{
+                .mode = @fromBackingInt(@intCast(mode)),
+                .flags = @bitCast(flags),
+                .target = if (target) |bytes| Address.fromBytes(bytes) else null,
+                .limits = .{ .execution = execution, .state = state },
+                .value = value,
+                .data = data,
+            };
+            self.frames += 1;
+        }
+        try list.expectDone();
+        return self.storage.frames[start..self.frames];
+    }
+
+    fn nextSignatures(self: *Fill, fields: *rlp.Cursor) Error![]const frames.Signature {
+        var list = try fields.nextList();
+        const start = self.signatures;
+        while (!list.isDone()) {
+            if (self.signatures >= self.storage.signatures.len) return error.InvalidTransactionFormat;
+            var item = try list.nextList();
+            const scheme = try item.nextInt(u8);
+            const signer = try nextOptionalBytes(&item, Address.len);
+            const msg = try nextOptionalBytes(&item, 32);
+            const signature = try item.nextBytes();
+            try item.expectDone();
+            self.storage.signatures[self.signatures] = .{
+                .scheme = @fromBackingInt(@intCast(scheme)),
+                .signer = if (signer) |bytes| Address.fromBytes(bytes) else null,
+                .msg = msg,
+                .signature = signature,
+            };
+            self.signatures += 1;
+        }
+        try list.expectDone();
+        return self.storage.signatures[start..self.signatures];
     }
 
     // The guest pays a full secp recovery for tuples it will discard. Count raw
@@ -462,6 +581,7 @@ fn inspectTyped(typed: transaction_envelope.TypedEnvelope) Error!Counts {
         0x02 => 12,
         0x03 => 14,
         transaction_envelope.set_code_transaction_type => 13,
+        type_id.frame => 7,
         else => return error.UnsupportedTransactionType,
     };
     var cursor = rlp.Cursor.init(typed.payload);
@@ -470,7 +590,14 @@ fn inspectTyped(typed: transaction_envelope.TypedEnvelope) Error!Counts {
     var counts: Counts = .{};
     for (0..field_count) |index| {
         const item = try fields.next();
-        if (index == 7 and typed.type_id == 0x01 or
+        if (typed.type_id == type_id.frame) {
+            switch (index) {
+                3 => counts.frames = try inspectLists(item),
+                4 => counts.signatures = try inspectLists(item),
+                6 => counts.blob_hashes = try inspectFixedList(item, 32),
+                else => {},
+            }
+        } else if (index == 7 and typed.type_id == 0x01 or
             index == 8 and typed.type_id != 0x01)
         {
             const access = try inspectAccessList(item);

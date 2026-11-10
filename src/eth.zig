@@ -36,6 +36,7 @@ pub const eip7976 = @import("eth/eip/7976.zig");
 pub const eip8038 = @import("eth/eip/8038.zig");
 pub const eip8282 = @import("eth/eip/8282.zig");
 pub const eip8037 = @import("eth/eip/8037.zig");
+pub const eip8141 = @import("eth/eip/8141.zig");
 
 pub const Revision = revision.Revision;
 pub const Spec = spec.Spec;
@@ -60,6 +61,7 @@ pub const cancun = spec.cancun;
 pub const prague = spec.prague;
 pub const osaka = spec.osaka;
 pub const amsterdam = spec.amsterdam;
+pub const bogota = spec.bogota;
 pub const latest = spec.latest;
 pub const specAt = spec.specAt;
 

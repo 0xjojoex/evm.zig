@@ -41,9 +41,19 @@ pub const Ledger = struct {
     state_gas_from_gas_left: i64 = 0,
     /// Terminal: the activation ends out of gas whatever the entry returns.
     out_of_gas: bool = false,
+    /// False inside an EIP-8141 frame; see `accounting.trackStateGas`.
+    state_gas_spills: bool = true,
 
-    pub fn init(message: *const Host.Message) Ledger {
-        return .{ .gas_left = message.gas, .gas_reservoir = message.gas_reservoir };
+    pub fn init(message: *const Host.Message, state_gas_spills: bool) Ledger {
+        return .{
+            .gas_left = message.gas,
+            .gas_reservoir = message.gas_reservoir,
+            .state_gas_spills = state_gas_spills,
+        };
+    }
+
+    pub fn stateGasSpills(self: *const Ledger) bool {
+        return self.state_gas_spills;
     }
 
     /// Charge native work using an adapter-selected price. False is terminal.

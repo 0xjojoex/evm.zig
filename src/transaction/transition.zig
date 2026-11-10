@@ -15,6 +15,8 @@ const transaction_prepare = @import("prepare.zig");
 const transaction_result = @import("result.zig");
 const transaction_validation = @import("validation.zig");
 const tx_settlement = @import("settlement.zig");
+const frames = @import("frames.zig");
+const tx_validation = @import("validation.zig");
 
 const Address = address.Address;
 
@@ -164,6 +166,9 @@ pub fn ImplType(
             context: *Context,
             tx_value: transaction.Transaction,
         ) Error!transaction.PrepareResult(tx_settlement.DefaultPlan, Rejection) {
+            if (comptime frames_active) {
+                if (tx_value.kind == .frame) return prepareFrame(context, tx_value);
+            }
             const input_value = context.input();
             return (transaction_prepare.Runtime(spec){}).prepare(.{
                 .tx = tx_value,
@@ -178,7 +183,281 @@ pub fn ImplType(
             context: *Context,
             executable: PreparedTransaction,
         ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
+            if (comptime frames_active) {
+                if (executable.frame) |frame| return completeFrames(context, executable.scope, frame);
+            }
             return completeExecutable(context, executable);
+        }
+
+        // EIP-8141 frame transactions. Compiled only when the spec activates
+        // them; every other kind takes the paths above unchanged.
+
+        const frames_active = spec.transaction.framesActive();
+        const frame_params = if (frames_active) spec.transaction.frame.? else undefined;
+
+        /// Static checks, the gas and fee plan, chain id, and the nonce. No
+        /// balance is reserved: payment is collected when a frame approves it.
+        fn prepareFrame(
+            context: *Context,
+            tx_value: transaction.Transaction,
+        ) Error!transaction.PrepareResult(tx_settlement.DefaultPlan, Rejection) {
+            const input_value = context.input();
+            const env = input_value.env;
+            if (tx_value.chain_id) |chain_id| {
+                if (chain_id != env.chain_id) return .{ .rejected = .invalid_chain_id };
+            }
+            const gas_plan = switch (frames.plan(
+                frame_params,
+                spec.transaction.blob_schedule,
+                tx_value,
+                env,
+                input_value.progress,
+            )) {
+                .rejected => |reason| return .{ .rejected = reason },
+                .planned => |value| value,
+            };
+            const sender_account = context.preparationState().accountSummary(tx_value.sender) catch |err|
+                return context.infrastructureError(err);
+            const sender_nonce = if (sender_account) |account| account.nonce else 0;
+            switch (tx_validation.classifyTransactionNonce(tx_value.nonce)) {
+                .valid => |nonce| {
+                    if (nonce < sender_nonce) return .{ .rejected = .nonce_too_low };
+                    if (nonce > sender_nonce) return .{ .rejected = .nonce_too_high };
+                },
+                .absent => if (sender_nonce != 0) return .{ .rejected = .nonce_too_low },
+                .at_or_above_limit => return .{ .rejected = .nonce_is_max },
+            }
+            return .{ .executable = .{
+                .scope = .{ .context = env.executionContext(.{
+                    .origin = frame_params.entry_point,
+                    .gas_price = gas_plan.gas_price,
+                    .blob_hashes = tx_value.blob_hashes,
+                }) },
+                .message = .{ .call = .{ .sender = tx_value.sender, .recipient = tx_value.sender } },
+                .execution_gas = null,
+                .settlement = .{
+                    .gas_limit = gas_plan.max_gas,
+                    .intrinsic_gas = gas_plan.intrinsic_gas,
+                    .floor_gas = gas_plan.calldata_floor_gas,
+                    .gas_price = gas_plan.gas_price,
+                    .priority_fee = 0,
+                    .fee_recipient = env.coinbase,
+                },
+                .frame = .{ .transaction = tx_value, .plan = gas_plan },
+            } };
+        }
+
+        /// Validate signatures, run every frame as a root of one session, and
+        /// settle against the frame receipts.
+        fn completeFrames(
+            context: *Context,
+            scope: transaction.TransactionScope,
+            prepared: frames.Prepared,
+        ) Error!transaction.TransitionOutcomeType(Output, Rejection) {
+            const tx_value = prepared.transaction;
+            const gas_plan = prepared.plan;
+            try context.beginTransaction();
+            try context.runPrelude();
+
+            const allocator = try context.allocator();
+            const sig_hash = frames.signatureHash(allocator, tx_value) catch |err|
+                return context.infrastructureError(err);
+            if (!frames.signaturesValid(tx_value, sig_hash))
+                return .{ .rejected = .type_6_invalid_signature };
+
+            const journal = context.frameJournal();
+            journal.reset(@intCast(tx_value.frames.len));
+            const coinbase = scope.context.block.coinbase;
+            const initially_warm = [_]Address{ tx_value.sender, coinbase };
+            const warm_count: usize = if (spec.transaction.warms_coinbase) 2 else 1;
+            try context.beginRootSession(scope.context, .{
+                .initial_warm_set = .{ .accounts = initially_warm[0..warm_count] },
+            });
+
+            var refund_counter: u64 = 0;
+            var index: usize = 0;
+            while (index < tx_value.frames.len) {
+                if (tx_value.frames[index].flags.atomic_batch) {
+                    var end = index;
+                    while (tx_value.frames[end].flags.atomic_batch) end += 1;
+                    if (try runAtomicBatch(context, scope, prepared, index, end, &refund_counter)) |reason|
+                        return .{ .rejected = reason };
+                    index = end + 1;
+                } else {
+                    if (try runFrame(context, scope, prepared, index, &refund_counter)) |reason|
+                        return .{ .rejected = reason };
+                    index += 1;
+                }
+            }
+            const payer = journal.payer orelse return .{ .rejected = .type_6_invalid_frame_execution };
+            try context.finalizeExecution();
+
+            const amounts = frames.settle(
+                gas_plan,
+                tx_value.frames,
+                journal.frameReceipts(),
+                refund_counter,
+                settlement_spec.gas_refund_cap_divisor,
+            );
+            try context.addBalance(payer, amounts.payer_refund);
+            if (amounts.priority_fee_paid == 0)
+                try context.accountAccess(coinbase)
+            else
+                try context.addBalance(coinbase, amounts.priority_fee_paid);
+            return .{ .completed = .{
+                .status = .success,
+                .gas = .{
+                    .used = amounts.gas_used,
+                    .refunded = amounts.applied_refund,
+                    .block = .fromDimensions(amounts.block_execution_gas, amounts.state_gas),
+                },
+                .frame = .{
+                    .payer = payer,
+                    .receipts = journal.frameReceipts(),
+                    .settlement = amounts,
+                },
+            } };
+        }
+
+        /// Run frames `first..end` as one atomic batch: the first failure rolls
+        /// all of them back and skips the rest.
+        fn runAtomicBatch(
+            context: *Context,
+            scope: transaction.TransactionScope,
+            prepared: frames.Prepared,
+            first: usize,
+            end: usize,
+            refund_counter: *u64,
+        ) Error!?Rejection {
+            const journal = context.frameJournal();
+            var checkpoint = context.checkpoint();
+            defer checkpoint.deinit();
+            const refund_before = refund_counter.*;
+            for (first..end + 1) |index| {
+                if (try runFrame(context, scope, prepared, index, refund_counter)) |reason| return reason;
+                if (journal.receipts[index].status != .failure) continue;
+
+                // Restoring the journal zeroes the batch's attributed state gas;
+                // executed frames keep their status and execution gas.
+                checkpoint.restore();
+                refund_counter.* = refund_before;
+                for (journal.receipts[first .. index + 1]) |*receipt| receipt.log_range = .{};
+                for (journal.receipts[index + 1 .. end + 1]) |*receipt| receipt.* = .{ .status = .skipped };
+                return null;
+            }
+            checkpoint.commit();
+            return null;
+        }
+
+        /// Run one frame and close its receipt. A rejection makes the whole
+        /// transaction invalid.
+        fn runFrame(
+            context: *Context,
+            scope: transaction.TransactionScope,
+            prepared: frames.Prepared,
+            index: usize,
+            refund_counter: *u64,
+        ) Error!?Rejection {
+            const tx_value = prepared.transaction;
+            const frame = tx_value.frames[index];
+            const journal = context.frameJournal();
+            if (frame.mode == .sender and !journal.sender_approved) return .type_6_invalid_frame_execution;
+
+            const target = frame.resolvedTarget(tx_value.sender);
+            const origin = if (frame.mode == .sender) tx_value.sender else frame_params.entry_point;
+            const default_code = !spec.precompile.active(target) and (try context.code(target)).len == 0;
+            var frame_context = scope.context;
+            frame_context.transaction.origin = origin;
+            frame_context.transaction.frame_index = @intCast(index);
+
+            var checkpoint = context.checkpoint();
+            defer checkpoint.deinit();
+            const outcome = try context.runRoot(.{
+                .context = frame_context,
+                .message = .{ .call = .{
+                    .sender = origin,
+                    .recipient = target,
+                    .input = frame.data,
+                    .value = frame.value,
+                } },
+                .gas = .{ .regular_left = frame.limits.execution, .reservoir = frame.limits.state },
+            }, .{ .access = .charge_call_target, .is_static = frame.mode == .verify });
+
+            const result = outcome.result;
+            var succeeded = outcome.stage == .payload and result.outcome.status == .success;
+            var execution_gas_used = frame.limits.execution - @as(u64, @intCast(@max(result.gas_left, 0)));
+            var state_gas_left: u64 = @intCast(@max(result.gas_reservoir, 0));
+            std.debug.assert(state_gas_left <= frame.limits.state or !succeeded);
+
+            if (succeeded and default_code and frame.mode == .verify) {
+                const allowed = frame.flags.allowedScope();
+                if (!frames.defaultCodeApproves(tx_value, target, allowed)) {
+                    succeeded = false;
+                } else switch (try approve(context, prepared, target, allowed, &state_gas_left)) {
+                    .approved => {},
+                    .reverted => succeeded = false,
+                    .out_of_gas => {
+                        succeeded = false;
+                        execution_gas_used = frame.limits.execution;
+                    },
+                }
+            }
+
+            if (succeeded) {
+                checkpoint.commit();
+                refund_counter.* +|= @intCast(@max(result.gas_refund, 0));
+            } else {
+                checkpoint.restore();
+            }
+            try journal.closeFrame(try context.allocator(), @intCast(index), .{
+                .status = if (succeeded) .success else .failure,
+                .execution_gas_used = execution_gas_used,
+                .state_gas_used = if (succeeded) frame.limits.state - state_gas_left else 0,
+                .log_range = if (succeeded) outcome.log_range else .{},
+            });
+            if (frame.mode == .verify and !succeeded) return .type_6_invalid_frame_execution;
+            return null;
+        }
+
+        const ApproveOutcome = enum { approved, reverted, out_of_gas };
+
+        /// APPROVE's transaction effects for `target` approving `approval`:
+        /// set the approval context and, with payment, advance the sender
+        /// nonce and collect `max_cost` from the payer. `state_gas_left` is the
+        /// frame's pool, which pays for creating the sender account.
+        fn approve(
+            context: *Context,
+            prepared: frames.Prepared,
+            target: Address,
+            approval: u2,
+            state_gas_left: *u64,
+        ) Error!ApproveOutcome {
+            const journal = context.frameJournal();
+            const sender = prepared.transaction.sender;
+            const approves_execution = approval & frames.scope.execution != 0;
+            const approves_payment = approval & frames.scope.payment != 0;
+            if (approves_execution and (journal.sender_approved or !target.eql(sender))) return .reverted;
+            if (!approves_payment) {
+                try journal.approve(try context.allocator(), journal.payer, true);
+                return .approved;
+            }
+            if (journal.payer != null) return .reverted;
+            if (!approves_execution and !journal.sender_approved) return .reverted;
+            const max_cost = prepared.plan.max_cost;
+            const payer_balance = if (try context.accountSummary(target)) |account| account.balance else 0;
+            if (payer_balance < max_cost) return .reverted;
+
+            const sender_account = try context.accountSummary(sender);
+            if (sender_account == null) {
+                if (state_gas_left.* < frame_params.sender_account_state_gas) return .out_of_gas;
+                state_gas_left.* -= frame_params.sender_account_state_gas;
+            }
+            const nonce = if (sender_account) |account| account.nonce else 0;
+            try context.setNonce(sender, std.math.add(u64, nonce, 1) catch return .reverted);
+            const debited = try context.subtractBalance(target, max_cost);
+            std.debug.assert(debited);
+            try journal.approve(try context.allocator(), target, true);
+            return .approved;
         }
 
         fn completeExecutable(

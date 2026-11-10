@@ -39,6 +39,15 @@ pub const ValidationError = enum {
     type_4_empty_authorization_list,
     type_4_tx_contract_creation,
     invalid_chain_id,
+    type_6_tx_pre_fork,
+    /// An EIP-8141 static frame constraint failed.
+    type_6_invalid_frame_format,
+    /// A frame-transaction signature is malformed or does not verify.
+    type_6_invalid_signature,
+    /// Frame execution invalidated the transaction: a SENDER frame ran before
+    /// the sender approved execution, a VERIFY frame reverted or halted, or no
+    /// frame approved payment.
+    type_6_invalid_frame_execution,
 };
 
 /// Transaction-owned classification of the encoded nonce domain. The raw
@@ -196,6 +205,8 @@ pub fn Runtime(comptime spec: ExactSpec) type {
             const gas_price = switch (input.kind) {
                 .legacy, .access_list => input.gas_price,
                 .dynamic_fee, .blob, .set_code => input.max_fee_per_gas orelse return null,
+                // Paid at APPROVE from `frames.Plan.max_cost`, not prepaid.
+                .frame => return null,
             };
             const blob_fee = if (input.kind == .blob) input.max_fee_per_blob_gas orelse return null else 0;
             const gas_cost = uint256.checkedMul(@as(u256, input.gas_limit), gas_price) orelse return null;
@@ -220,6 +231,7 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 .dynamic_fee => .type_2_tx_pre_fork,
                 .blob => .type_3_tx_pre_fork,
                 .set_code => .type_4_tx_pre_fork,
+                .frame => .type_6_tx_pre_fork,
             };
         }
 
@@ -611,6 +623,8 @@ test "transaction validation caps total gas including the state reservoir" {
     const validator = testRuntime(Latest.spec);
     const limit = Latest.spec.transaction.total_gas_limit.?;
     for (std.enums.values(TxKind)) |kind| {
+        // Frame transactions carry no gas limit; `frames.plan` prices them.
+        if (kind == .frame) continue;
         var input = ValidationInput{
             .kind = kind,
             .gas_limit = limit,

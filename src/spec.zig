@@ -26,6 +26,7 @@ const precompile = @import("precompile.zig");
 const authorization = @import("transaction/authorization.zig");
 const tx = @import("transaction/types.zig");
 const tx_blob = @import("transaction/blob.zig");
+const tx_frames = @import("transaction/frames.zig");
 const tx_gas = @import("transaction/gas.zig");
 
 /// Transaction validation and intrinsic-gas rules.
@@ -77,6 +78,18 @@ pub const TransactionSpec = struct {
     total_gas_limit: ?u64,
     /// Pre-warm the fee recipient for execution (EIP-3651).
     warms_coinbase: bool,
+    /// EIP-8141 frame-transaction parameters; present exactly when
+    /// `active_kinds` contains `.frame` (see `framesActive`).
+    frame: ?tx_frames.Params = null,
+
+    /// Whether this spec accepts frame transactions. Their journal, state-gas
+    /// pool, and transition compile in only when it does.
+    pub fn framesActive(comptime self: TransactionSpec) bool {
+        const active = self.active_kinds.contains(.frame);
+        if (active != (self.frame != null))
+            @compileError("TransactionSpec.frame must be set exactly when .frame is an active kind");
+        return active;
+    }
 
     pub const Patch = struct {
         active_kinds: ?@FieldType(TransactionSpec, "active_kinds") = null,
@@ -99,6 +112,7 @@ pub const TransactionSpec = struct {
         intrinsic_regular_gas_limit: OptionalPatch(u64) = .inherit,
         total_gas_limit: OptionalPatch(u64) = .inherit,
         warms_coinbase: ?bool = null,
+        frame: OptionalPatch(tx_frames.Params) = .inherit,
     };
 
     fn extend(comptime self: TransactionSpec, comptime patch: Patch) TransactionSpec {

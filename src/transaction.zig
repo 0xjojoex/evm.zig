@@ -8,6 +8,7 @@ pub const gas = @import("./transaction/gas.zig");
 pub const settlement = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
 pub const envelope = @import("./transaction/envelope.zig");
+pub const frames = @import("./transaction/frames.zig");
 pub const raw = @import("./transaction/raw.zig");
 pub const signing = @import("./transaction/signing.zig");
 const transaction = @import("./transaction/types.zig");

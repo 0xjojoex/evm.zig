@@ -22,6 +22,9 @@ pub const Revision = enum(u8) {
     prague,
     osaka,
     amsterdam,
+    /// Hegotá's execution layer, in development: not `latest` until its
+    /// headliner (EIP-8141 frame transactions) is complete.
+    bogota,
 
     /// The latest supported revision.
     pub const latest = Self.amsterdam;
@@ -44,6 +47,7 @@ test "linear fork checks" {
     try std.testing.expectEqual(Revision.amsterdam, Revision.latest);
     try std.testing.expectEqual(Revision.osaka, Revision.stable);
     try std.testing.expectEqual(std.math.Order.lt, Revision.cancun.order(.prague));
+    try std.testing.expect(Revision.bogota.isImpl(.amsterdam));
     try std.testing.expect(Revision.amsterdam.isImpl(.osaka));
     try std.testing.expect(Revision.osaka.isImpl(.prague));
     try std.testing.expect(Revision.prague.isImpl(.cancun));
