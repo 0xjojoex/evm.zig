@@ -35,7 +35,7 @@ const Storage = struct {
     access_entries: []transaction.AccessListEntry,
     storage_keys: []u256,
     blob_hashes: []u256,
-    authorizations: []transaction.AuthorizationTuple,
+    authorizations: []transaction.RecoveredAuthorization,
 
     fn init(allocator: std.mem.Allocator, transaction_count: usize, counts: Counts) Error!Storage {
         var slab_len: usize = 0;
@@ -43,7 +43,7 @@ const Storage = struct {
         slab_len = try ExactSlab.reserve(transaction.AccessListEntry, slab_len, counts.access_entries);
         slab_len = try ExactSlab.reserve(u256, slab_len, counts.storage_keys);
         slab_len = try ExactSlab.reserve(u256, slab_len, counts.blob_hashes);
-        slab_len = try ExactSlab.reserve(transaction.AuthorizationTuple, slab_len, counts.authorizations);
+        slab_len = try ExactSlab.reserve(transaction.RecoveredAuthorization, slab_len, counts.authorizations);
 
         var slab = try ExactSlab.init(allocator, slab_len);
         return .{
@@ -52,7 +52,7 @@ const Storage = struct {
             .access_entries = slab.take(transaction.AccessListEntry, counts.access_entries),
             .storage_keys = slab.take(u256, counts.storage_keys),
             .blob_hashes = slab.take(u256, counts.blob_hashes),
-            .authorizations = slab.take(transaction.AuthorizationTuple, counts.authorizations),
+            .authorizations = slab.take(transaction.RecoveredAuthorization, counts.authorizations),
         };
     }
 
@@ -334,7 +334,7 @@ fn nextTo(fields: *rlp.Cursor) Error!?Address {
 }
 
 const ParsedAuthorizationList = struct {
-    entries: []const transaction.AuthorizationTuple,
+    entries: []const transaction.RecoveredAuthorization,
     count: usize,
 };
 
@@ -433,10 +433,6 @@ const Fill = struct {
                 .target = target,
                 .signer = signer,
                 .nonce = nonce,
-                .y_parity = y_parity,
-                .legacy_v = null,
-                .r = r,
-                .s = s,
             };
             self.authorizations += 1;
         }

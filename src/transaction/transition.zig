@@ -427,17 +427,11 @@ pub fn ImplType(
         fn applyAuthorizationTuple(
             context: *Context,
             chain_id: u256,
-            tuple: transaction.AuthorizationTuple,
+            tuple: transaction.RecoveredAuthorization,
             gas: *PreExecutionGas,
             authorities: *AuthorityIndex,
         ) !AuthorizationTupleOutcome {
             const eip7702 = executor.eip7702;
-            if (!eip7702.authorizationSignatureShapeValid(
-                tuple.y_parity,
-                tuple.legacy_v,
-                tuple.r,
-                tuple.s,
-            )) return if (gas.apply(authorization_spec.invalid_gas_adjustment)) .invalid else .out_of_gas;
             if (tuple.chain_id != 0 and tuple.chain_id != chain_id)
                 return if (gas.apply(authorization_spec.invalid_gas_adjustment)) .invalid else .out_of_gas;
             if (tuple.nonce == std.math.maxInt(u64))
