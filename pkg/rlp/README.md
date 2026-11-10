@@ -1,12 +1,10 @@
 # rlp
 
-Standalone strict RLP Recursive Length Prefix encoding and decoding library for Zig 0.17
+Strict Recursive Length Prefix (RLP) encoding and decoding for Zig 0.17.
 
 ## Install
 
-`rlp` is one of the modules exported by
-[`evmz`](https://github.com/0xjojoex/evm.zig), which is fetched as a single
-package:
+`rlp` is exported by [`evmz`](../../README.md), fetched as a single root package:
 
 ```sh
 zig fetch --save git+https://github.com/0xjojoex/evm.zig
@@ -22,33 +20,41 @@ const evmz = b.dependency("evmz", .{
 exe.root_module.addImport("rlp", evmz.module("rlp"));
 ```
 
-The historical `rlp-v0.1.0` tag and the `release/rlp` branch remain reachable
-for existing consumers, but no new package-prefixed releases are cut.
+## Quick start
 
 ```zig
+const rlp = @import("rlp");
+
+// Non-allocating encode/decode into caller storage (borrowed slices point into `written`).
 const written = try rlp.encode(Account, out, &account);
-const account = try rlp.decode(Account, written);
+const decoded = try rlp.decode(Account, written);
+
+// Single-allocation encode and budgeted owned decode.
+const encoded = try rlp.encodeAlloc(Account, allocator, &account);
+defer allocator.free(encoded);
+
+var owned = try rlp.decodeAlloc(Account, allocator, encoded);
+defer rlp.deinit(Account, allocator, &owned);
 ```
 
-`encode` and `decode` are the default calling convention: you name a Zig type
-and the package resolves the wire format from `@typeInfo(T)`, or from a
-type-owned `T.Rlp` override when one is declared. You never spell out a schema
-for the common cases.
+`encode` and `decode` are the default calling convention: name a Zig type and
+`rlp` resolves the wire format from `@typeInfo(T)`, or from a type-owned
+`T.Rlp` declaration when present.
 
-Explicit codecs
+### Explicit codecs
 
-When a value's RLP meaning isn't inferable from its type — or you need a
-specific application wire projection — pass a codec instead:
+When a value's RLP meaning is not inferable from its type — or requires a
+specific application wire projection — pass a codec to `encodeAs` / `decodeAs`:
 
 ```zig
 const written = try rlp.encodeAs(CustomCodec, out, value);
 const value = try rlp.decodeAs(CustomCodec, written);
 ```
 
-Codecs are schema sugar, not a prerequisite. They stay available for exact
-schemas and wire projections but are not the top-level default.
+Codecs are schema sugar for custom projections and bounds, not a prerequisite
+for ordinary types.
 
-## Default type mappings:
+## Default type mappings
 
 | Zig type                        | RLP meaning                                                       |
 | ------------------------------- | ----------------------------------------------------------------- |
@@ -66,70 +72,69 @@ schemas and wire projections but are not the top-level default.
 Both values and single-value pointers are accepted at the encoding boundary.
 
 Signed integers, enums, unions, non-byte mutable slices, packed/extern structs,
-and non-slice pointers require an explicit codec or a type-owned mapping. RLP
-cannot guess whether these mean tagging, an integer policy, or some other
-application-level representation.
+and non-slice pointers require an explicit codec or a type-owned `Rlp`
+declaration.
 
 An optional infers `Optional(T)`, where `null` is the empty byte string. That
-is unambiguous only when `T`'s codec can never encode to that same empty byte
-string, so `?[N>0]u8`, `?Address`, `?SomeStruct`, and `?[]const T` infer, while
-`?u64`, `?bool`, and `?[]const u8` are compile errors: zero, false, and the
-empty slice would decode back as `null`. Codecs declare the property with
-`pub const may_encode_empty`, defaulting to `true` when they stay silent, and
-`mayEncodeEmpty(Codec)` reads it. Any other meaning of absence — an omitted
-trailing field, a sentinel — still needs an explicit codec.
+is unambiguous only when `T`'s codec can never encode to the empty byte string:
+`?[N>0]u8`, `?Address`, `?SomeStruct`, and `?[]const T` infer automatically,
+whereas `?u64`, `?bool`, and `?[]const u8` fail at comptime because `0`,
+`false`, and `""` would decode back as `null`. Custom codecs declare this
+property with `pub const may_encode_empty` (defaulting to `true`).
 
 ## Lower-level surfaces
 
-Three complementary layers sit under the type-driven API:
+Three layers sit under the type-driven API:
 
-- **Raw parsing** — borrowed `Item` / `Cursor` traversal plus the
-  migration-friendly `Writer`.
+- **Raw parsing** — borrowed `Item` / `Cursor` traversal plus `Writer`.
 - **Runtime-shaped lists** — `encodeList` / `encodeListAlloc` for lists whose
-  fields are chosen at runtime.
-- **Reusable codecs** — exact schemas, bounded lists, raw items, and host/wire
-  projections.
+  fields depend on runtime branches.
+- **Reusable codecs** — `Struct`, `ArrayOf`, `ListOf`, `BoundedListOf`,
+  `FixedBytes`, `Optional`, `Mapped`, and `Raw`.
 
-The `Raw` codec recursively validates nested items against the same depth,
-item-count, and allocation budget. Because arbitrary nesting needs temporary
-validation scratch, decode it with `decodeAllocAs`; the returned `Item` still
-borrows its encoded bytes and owns no payload storage.
+The `Raw` codec recursively validates nested items against depth, item-count,
+and allocation budgets. Decode it with `decodeAllocAs(rlp.Raw, ...)`; the
+returned `Item` still borrows its encoded bytes and owns no payload storage.
 
-Building runtime-shaped lists
+### Building runtime-shaped lists
 
-Inside a runtime list, the `fields` helpers mirror the top-level API:
+Pass a deterministic emitter function to `encodeList` or `encodeListAlloc`:
 
-- `fields.encode(T, value)` — same inferred meaning as top-level `encode`;
-  encodes a struct as one nested RLP list.
-- `fields.encodeAs(Codec, value)` — selects an explicit wire projection.
-- `fields.encodeFields(T, value)` — expands a struct's fields into the current
-  list _without_ adding a nested prefix.
-- `fields.list(emit, value)` — nests a further runtime-shaped list.
+```zig
+const bytes = try rlp.encodeListAlloc(struct {
+    pub fn emit(fields: anytype, tx: Tx) !void {
+        try fields.encode(u64, tx.nonce);
+        try fields.encode([]const u8, tx.input);
+    }
+}.emit, allocator, tx);
+defer allocator.free(bytes);
+```
 
-## Emitter contract
+Inside an emitter, the `fields` sink supports four operations:
 
-The top-level emitter runs twice: once to measure, once to write. Nested
-emitters may run extra sizing passes to build their own list prefixes. Every
-emitter must therefore be deterministic and side-effect-free — a measured/write
-length mismatch is rejected. `encodeListAlloc` performs a single exact
-top-level allocation.
+- `fields.encode(T, value)` — inferred meaning (encodes a struct as a nested RLP list).
+- `fields.encodeAs(Codec, value)` — explicit wire projection.
+- `fields.encodeFields(T, value)` — splices a struct's fields into the current
+  list without a nested list prefix.
+- `fields.list(emit, value)` — nests another runtime-shaped list.
+
+The emitter runs twice (once to measure payload length, once to write) and must
+be side-effect-free; a measured/written length mismatch fails with
+`error.EncodedLengthMismatch`. `encodeListAlloc` performs one exact allocation.
 
 ## Memory and ownership
 
-Codecs write directly into caller storage; `encodeAlloc` performs one exact
-top-level allocation. Materialized decoding takes a caller-owned `Budget` that
-independently caps nesting depth, visited items, and aggregate storage.
-`ListOf(T).View` is the allocation-free path for nonallocating element codecs.
+- `encode` / `encodeList` write directly into caller-provided buffers;
+  `encodeAlloc` / `encodeListAlloc` allocate once at the exact encoded size.
+- Decoded `[]const u8` slices borrow from the input buffer (even inside a
+  struct or list decoded via `decodeAlloc`), so keep the input alive until
+  `deinit`. Use `[]u8` when you want `decodeAlloc` to allocate an owned copy.
+- `decodeWithBudget` and `decodeAllocWithBudget` take a caller-owned `Budget`
+  capping nesting depth, visited items, and total allocated bytes.
+- `ListOf(T).View` iterates homogeneous lists without allocating a slice when
+  the element codec is non-allocating.
 
-Schema inference maps `[]const u8` to an RLP byte string and other `[]const T`
-slices to homogeneous RLP lists; use `BoundedListOf` or a field override when a
-size limit or different projection is part of the schema.
-
-Decoded `[]const u8` strings are borrowed from the encoded input — including
-fields inside a materialized struct or list — so keep the input alive until
-`deinit`. Choosing `[]u8` instead requests an owned copy via `decodeAlloc`.
-
-Errors split into `ParseError`, `ValidationError`, `EncodeError`, and
+Errors are partitioned into `ParseError`, `ValidationError`, `EncodeError`, and
 `DecodeError`.
 
 ## Conformance

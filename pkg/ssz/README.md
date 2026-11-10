@@ -1,7 +1,7 @@
 # SSZ
 
 A comptime-typed [SimpleSerialize (SSZ)](https://github.com/ethereum/consensus-specs/blob/master/ssz/simple-serialize.md)
-codec for Zig, built for stateless Ethereum verification and zkVM
+codec for Zig 0.17, built for stateless Ethereum verification and zkVM
 guests. Encode and decode against caller-controlled memory, then compute
 `hash_tree_root` without retaining a Merkle tree or leaf cache.
 
@@ -11,9 +11,7 @@ const ssz = @import("ssz");
 
 ## Install
 
-`ssz` is one of the modules exported by
-[`evmz`](https://github.com/0xjojoex/evm.zig), which is fetched as a single
-package:
+`ssz` is exported by [`evmz`](../../README.md), fetched as a single root package:
 
 ```sh
 zig fetch --save git+https://github.com/0xjojoex/evm.zig
@@ -28,9 +26,6 @@ const evmz = b.dependency("evmz", .{
 });
 exe.root_module.addImport("ssz", evmz.module("ssz"));
 ```
-
-The historical `ssz-v0.1.0` tag and the `release/ssz` branch remain reachable
-for existing consumers, but no new package-prefixed releases are cut.
 
 ## Why this one
 
@@ -333,24 +328,18 @@ zig build ssz-bench
 zig build ssz-bench -- --filter list_u64
 ```
 
-The unpublished package harness keeps an isolated development lane:
+Or run the isolated package harness directly:
 
 ```sh
 cd pkg/ssz
 zig build test
 zig build bench -- --filter list_u64
-```
-
-The canonical zero-root table is a checked-in binary artifact. Regenerate it
-explicitly after changing its size or generation rules:
-
-```sh
 zig run tools/generate-zero-roots.zig -- src/merkle/zero_roots.bin
 ```
 
-`ssz-bench` delegates to the sidecar build in `bench/`, which consumes the
-repository root with `-Dcore=false` exactly as an external consumer does.
-Benchmarks cover primitives, vectors, containers, large `u64` and nested byte lists,
+`ssz-bench` delegates to `pkg/ssz/bench/`, which consumes the repository root
+with `-Dcore=false` just as an external module-only consumer does. Benchmarks
+cover primitives, vectors, containers, large `u64` and nested byte lists,
 expanded and packed bitfields, and a Phase 0 `BeaconState` at 16K/100K
 validators, reporting median time and throughput.
 

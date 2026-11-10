@@ -1,34 +1,39 @@
-# evmz Ethereum fixture adapters
+# Ethereum Conformance (`eest/`)
 
-Execution fixtures come from `ethereum/execution-specs`. Its Python tooling
-owns release resolution, downloads, caching, indexing, recursive discovery,
-pytest selection, parallelism, and reports. This repository owns only the
-evmz-specific execution seams.
+Runs official `ethereum/execution-specs` (EEST) and `ethereum/consensus-specs`
+test suites against `evmz`. Upstream Python tooling (`consume direct`, pinned in
+`consume/uv.lock`) owns fixture resolution, caching, selection, and parallel
+pytest execution; this package provides the `evmz-eest` and
+`evmz-ssz-conformance` runners.
+
+| Suite | Default corpus | Command (from repo root) |
+| --- | --- | --- |
+| Execution (`state_test`, `blockchain_test`, `transaction_test`) | `tests@v21.0.2` | `zig build -Doptimize=fast eest-consume -- --no-html -n 4` |
+| Stateless zkEVM (native BlockSTF + witness oracle) | `tests-zkevm@v21.0.6` | `zig build -Doptimize=fast zkevm-consume -- --no-html -n 4` |
+| Resolve zkEVM corpus manifest for guest/mutation lanes | `tests-zkevm@v21.0.6` | `zig build zkevm-resolve` |
+| Stateless zkEVM on zkVM guest (`zisk`, `sp1`, `openvm`) | manifest | `zig build zkevm -- --corpus-manifest .zig-cache/eest-consume/zkevm-corpus.json ...` |
+| Stateless witness rejection mutations | manifest | `zig build zkevm-mutations -- --corpus-manifest .zig-cache/eest-consume/zkevm-corpus.json` |
+| Consensus SSZ (`general`, `mainnet`, `minimal`) | `consensus.zon` | `zig build ssz-conformance` |
+| Runner unit tests | local | `zig build eest-test` |
 
 ## Direct conformance
 
-Released `state_test`, `blockchain_test`, and `transaction_test` conformance
-runs through `consume direct`:
+`eest-consume` runs released `state_test`, `blockchain_test`, and
+`transaction_test` fixtures through `consume direct`:
 
 ```sh
 zig build -Doptimize=fast eest-consume -- --no-html -n 4
 ```
 
-The default source is `tests@v21.0.2`, pinned in `eest/build.zig`. Pass another
-upstream release selector or a local fixture directory with `--input`:
+The default corpus is `tests@v21.0.2`, pinned in `eest/build.zig`. Override it
+with `--input`:
 
 ```sh
 zig build eest-consume -- --input=tests@latest -k add11
 zig build eest-consume -- --input=/path/to/fixtures -m state_test
 ```
 
-The execution-specs packages are pinned in `consume/uv.lock`, and the default
-execution and zkEVM fixture releases are pinned in `eest/build.zig`. Callers can
-still request `@latest` explicitly for a rolling diagnostic; CI evidence uses
-the repository defaults and records the resolved corpus identity.
-
-`evmz-eest` provides the deliberately small process boundary consumed by the
-pytest plugins:
+`evmz-eest` is the subprocess boundary invoked by the pytest plugins:
 
 ```sh
 evmz-eest statetest [--run EXACT_ID] fixture.json
@@ -38,51 +43,37 @@ evmz-eest zkevmtest [--run EXACT_ID] fixture.json
 ```
 
 Each command emits a JSON list of `{name, pass, skip, error}` records. `--run`
-selects one top-level fixture id exactly. Each pytest worker caches one complete
-file-level result, so indexed ids assigned to that worker do not restart evmz.
+selects one top-level fixture id exactly. Each pytest worker caches one
+file-level result so multiple test ids in the same file do not restart `evmz-eest`.
 
-The adapter does not turn missing semantics into success. A state fixture with
-no comparable post-state assertion fails. A regular block transaction carrying
-`expectException` passes only when BlockSTF returns the matching typed
-transaction rejection. Invalid-block exceptions require an equally precise
-block-level mapping. Upstream pytest output exposes any remaining adapter gaps.
-
-Transaction fixtures decode the signed bytes through the production raw
-decoder, then apply admission policy separately from block execution's EIP-7702
-tuple-skipping rules. Rejections must match the named exception; successful
-fixtures compare transaction hash, recovered sender, and intrinsic gas. These
-fixtures have no account allocation or block environment, so validation uses
-neutral account inputs and the default chain ID. The evmz plugin extends
-upstream's direct-consumer format collection only when its consumer is active.
-
-The default marker expression covers all state and transaction fixtures plus
-post-Merge blockchain fixtures through Amsterdam, including BPO1, BPO2, and the
-Amsterdam BPO increase/decrease scenarios. These use their parent execution
-rules with the fixture's named blob schedule. Pre-Merge reward, ommer, and PoW
-rules do not belong in BlockSTF. Transition-fork fixtures require a block-by-block
-revision adapter. Both are excluded at the upstream selection boundary.
-
-Direct conformance has no repository-owned execution-fixture downloader,
-general recursive runner, worker pool, classifier, or scope reporter.
+- **State & block fixtures:** A state fixture without a comparable post-state
+  assertion fails. A block transaction carrying `expectException` passes only
+  when `block.Stf` returns the matching typed transaction rejection; invalid
+  blocks require a matching block-level error.
+- **Transaction fixtures:** Decode signed bytes through the production raw
+  decoder and apply admission checks under neutral account state and default
+  chain ID (`1`), comparing either the expected rejection or `(tx_hash, sender, intrinsic_gas)`.
+- **Fork scope:** The default marker expression covers all state and transaction
+  fixtures plus post-Merge blockchain fixtures from Paris through Amsterdam
+  (including BPO1, BPO2, and Amsterdam BPO increase/decrease scenarios).
+  Pre-Merge PoW/ommer fixtures and transition-fork fixtures are excluded at the
+  pytest selection boundary.
 
 ## Stateless zkEVM fixtures
 
-Native stateless conformance uses the same upstream machinery:
+Native stateless conformance uses the same `consume direct` harness against
+`tests-zkevm@v21.0.6`:
 
 ```sh
 zig build -Doptimize=fast zkevm-consume -- --no-html -n 4
 ```
 
-`zkevmtest` executes every selected block with `statelessInputBytes`, compares
+`zkevmtest` executes every selected block from `statelessInputBytes`, compares
 the raw result with `statelessOutputBytes`, and runs the dense-versus-tracked
-oracle for valid blocks. A blockchain fixture without stateless input is an
-upstream-visible pytest skip.
+oracle for valid blocks.
 
-The custom guest and adversarial lanes need a persistent zkVM process and
-evmz-specific mutation semantics. Release qualification and mutations use
-execution-specs as their corpus source. `zkevm-resolve` asks the upstream
-`FixturesSource` implementation to resolve/cache the release and writes an
-explicit manifest for Zig:
+For persistent zkVM guest execution and witness-mutation checks, resolve the
+corpus into an explicit JSON manifest first:
 
 ```sh
 zig build zkevm-resolve
@@ -92,7 +83,7 @@ zig build zkevm-mutations -- \
   --corpus-manifest .zig-cache/eest-consume/zkevm-corpus.json
 ```
 
-For an exact corpus:
+To resolve a specific `tests-zkevm` version:
 
 ```sh
 zig build zkevm-resolve -- \
@@ -101,78 +92,44 @@ zig build zkevm-resolve -- \
 zig build zkevm -- --corpus-manifest /tmp/tests-zkevm.json
 ```
 
-The generated manifest records the exact resolved release, upstream index root
-hash, source commit, indexed test count, stateless block count, and resolved
-fixture roots. Zig never infers execution-specs cache layout and has no fallback
-to a repository cache or lock.
+The manifest records the resolved release, upstream index root hash, source
+commit, indexed test count, stateless block count, and fixture roots.
 
-The custom `zkevm` runner remains because each worker owns one guest-host child
-and converts the ELF to a ROM once. Per-fixture pytest subprocesses would repay
-that setup for every case. Native conformance does not use this runner.
+- **`zkevm` (`--executor zisk|sp1|openvm`):** Keeps one persistent guest-host
+  child process per worker so ELF-to-ROM conversion happens once, strips guest
+  framing, and checks output against `statelessOutputBytes`. Pass
+  `--evidence-dir` for aggregate release evidence and `--output-folder` for
+  ERE-compatible `BenchmarkRun` rows.
+- **`zkevm-input` / `zkevm-ere`:** Extract raw or guest-framed input from a
+  fixture (`zkevm-input`) or run the native ERE adapter on one raw input
+  (`zkevm-ere`).
+- **`zkevm-mutations`:** Applies structured schema-v1 SSZ witness mutations from
+  `fixtures/stateless-mutations-tests-zkevm.txt` and verifies that `block.Stf`
+  rejects each with the expected typed status.
 
-`zkevm --executor zisk|sp1|openvm` strips guest framing before comparing the
-result, so every executor is judged against the same `statelessOutputBytes`. Use
-`--evidence-dir` for aggregate evidence and `--output-folder` for ERE-compatible
-`BenchmarkRun` rows. `zkevm-input` extracts raw input or guest-framed stdin;
-`zkevm-ere` runs the native ERE adapter on one raw input.
-
-CI has no known-failure waiver. Unexpected failures, empty runs, I/O errors,
-and guest startup failures always fail. Strict evidence also requires an exact
-release and index hash.
-
-`zkevm-mutations` starts from the bounded paths in
-`fixtures/stateless-mutations-tests-zkevm.txt`, applies structured
-schema-v1 SSZ mutations, and requires the intended typed BlockSTF status. This
-is an evmz-specific existence gate for witness rejection paths, not a second
-general fixture consumer or a coverage proof.
+CI enforces zero known-failure waivers; unexpected failures, empty runs, I/O
+errors, or guest startup failures fail the run.
 
 ## Consensus SSZ fixtures
 
-Consensus SSZ is not an execution-spec fixture format. The EEST Zig package
-pins the General, Mainnet, and Minimal archives in
-`consensus.zon`:
+`zig build ssz-conformance` validates `pkg/ssz` against the `general`,
+`mainnet`, and `minimal` archives pinned in `consensus.zon` (Phase0 through
+Heze):
 
 ```sh
 zig build ssz-conformance
 ```
 
-Zig downloads, verifies, extracts, and caches those packages. A bare
-conformance run covers all three presets and fails on an empty, skipped, or
-failed case. Passing a fixture path after `--` runs only that local subtree or
-file and does not resolve the pinned archives.
+Valid fixtures must decode, re-encode byte-for-byte, and match their expected
+`hash_tree_root`; invalid generic fixtures must fail decoding. Static fork
+schemas in `src/ssz_static/` are generated from the matching consensus-spec
+pyspec release.
 
-General fixtures validate generic serialization types. Mainnet and Minimal
-fixtures validate typed consensus objects from Phase0 through Heze. Valid
-fixtures must decode, re-encode byte-for-byte, and match their expected root;
-invalid generic fixtures must reject.
-
-Static preset/fork schemas are generated into `src/ssz_static/` from the
-matching resolved consensus-spec pyspec. The generated index records their
-source release, which must match the archive release in
-`consensus.zon`.
-
-### Shared fixture storage
-
-`zig build ssz-conformance` automatically prepares the pinned fixtures in
-`${XDG_CACHE_HOME:-$HOME/.cache}/evmz/consensus/<hash>/` and passes those shared
-paths to the runner. New worktrees reuse the roughly 5 GB of extracted fixtures
-without setup commands, local copies, or symlinks. Explicit fixture paths after
-`--` bypass shared-cache preparation.
-
-These pins stay outside package dependencies so constructing the build graph
-never extracts the large archives into each worktree. The runner reads the URLs
-and hashes from `consensus.zon` and prepares missing packages only when the
-conformance command runs without explicit paths. It asks the pinned Zig compiler
-to fetch and verify them in a temporary directory, reuses Zig's global download
-cache, and publishes complete extractions atomically under their hashes. A file
-lock serializes preparation across worktrees and is released before tests run.
-Different pins coexist automatically; the pinned corpus run requires no Python.
-
-Treat shared fixtures as immutable. For fixture experiments, make a separate
-copy and pass its path after `--`. Existing worktree-local extractions are not
-used or modified. Deleting a worktree leaves the shared packages intact. The
-store has no automatic garbage collection; remove an old hash only when no
-worktree needs it.
+Without arguments, `zig build ssz-conformance` extracts the ~5 GB pinned
+archives once into `${XDG_CACHE_HOME:-$HOME/.cache}/evmz/consensus/<hash>/`
+(serialized by a file lock so worktrees share one read-only cache without
+re-extracting). Pass a local fixture path after `--` to test a single file or
+directory without resolving the shared cache.
 
 ## Ownership summary
 
@@ -185,6 +142,3 @@ worktree needs it.
 | zkVM guest corpus   | execution-specs resolver manifest | persistent guest executor/evidence  |
 | Witness mutations   | execution-specs resolver manifest | bounded semantic mutations          |
 | Consensus SSZ       | consensus-spec release archives   | SSZ conformance adapter and schemas |
-
-BlockSTF owns execution ordering and typed engine errors. The EEST adapter owns
-only fixture decoding and mapping those typed results to EEST exception names.

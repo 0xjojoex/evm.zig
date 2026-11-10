@@ -125,46 +125,26 @@ Each entry returns a `NativeContractStep`:
 
 - `.done` ends the call with a status and output.
 - `.call` requests one CALL-family child. The executor runs it, then enters the
-  native again with `call.child` set. The request's `continuation` pointer comes
-  back as `call.continuation`, so a native making several calls knows where it is.
+  native again with `call.child` set. An optional `continuation: ?*anyopaque` on
+  the `.call` request is handed back as `call.continuation` on the next entry so
+  multi-call native contracts can track state across entries.
 
 Entries never nest, so native recursion does not grow the Zig stack. Allocate
 output and continuation state from `call.allocator`. It lives until the native
 call ends, and so does the copied child output in `call.child`.
 
-CREATE cannot be requested. To deploy, call a factory contract, which then
-becomes the deployer.
+CREATE cannot be requested directly. To deploy, call a factory contract, which
+then becomes the deployer.
 
 ### Who owns what
 
-The executor builds the child message the way the CALL opcode would. It sets depth
-and staticness, forwards gas through `CallSpec.childGas`, and adds the value
-stipend. It settles the child's gas into `call.ledger`. When the native call ends,
-the executor applies bytecode's failure rules. Revert keeps output. Invalid and
-out-of-gas drop output and remaining gas. Any failure drops refunds, unwinds state
-gas and rolls back state, including state written by children that succeeded.
-
-In a static call, every `ctx` effect fails with `error.StaticModeViolation`, and
-so does a CALL request with value. Catching the error does not help. The call
-still ends as `.invalid` with `write_protection`.
-
-The adapter owns everything the chain decides:
-
-- Charge native work and CALL-like overhead such as account access and value
-  transfer with `call.ledger.trackGas`, `trackStateGas` and `refillStateGas`. A
-  false return is terminal, so return `.done` without further effects. Price
-  SSTORE- or CALL-like work from `@TypeOf(ctx).spec`, never a builtin fork.
-- Decide which senders a request may name. The executor does not restrict them.
-- Add chain gas rules the EVM lacks. Arc burns the retained 1/64 after a child
-  halts; `_ = call.ledger.trackGas(call.ledger.gas_left)` on the next entry does
-  the same.
-- Report chain-visible failures, such as bad input or an unauthorized caller, as
-  `.done` with `.revert` or `.invalid`. A Zig error aborts the whole execution, so
-  keep errors for infrastructure faults like allocation or database failures.
-- Define issuance. `addBalance` fails with `error.BalanceOverflow` and
-  `subtractBalance` returns false when the balance is short, both changing
-  nothing. Neither emits a transfer log, so emit the chain's own issuance log
-  after the balance moves.
+| Concern | Executor (`evmz`) | Native contract (`Spec.native_contract`) |
+| --- | --- | --- |
+| Child frame setup | Increments depth, propagates static mode, caps gas via `CallSpec.childGas`, adds value stipend, and settles returned gas into `call.ledger` | Chooses `.kind`, `sender` (unrestricted by the executor), `recipient`, `code_address`, `value`, `input_data`, and requested `gas` |
+| Gas accounting | Unwinds state gas and drops refunds on failure | Charges native work and CALL-like overhead via `call.ledger.trackGas`, `trackStateGas`, and `refillStateGas` (price against `@TypeOf(ctx).spec`, never a builtin fork); returns `.done` immediately if `trackGas` returns `false` |
+| Static mode (`STATICCALL`) | Fails any `ctx` mutation or value-carrying child request with `error.StaticModeViolation`, terminating the frame as `.invalid` (`write_protection`) even if caught | Checks `call.message.is_static` or propagates `error.StaticModeViolation` |
+| Failure & rollback | Applies bytecode failure rules when the native call finishes: `.revert` keeps output; `.invalid`/out-of-gas drops output and remaining gas; any failure rolls back journaled state (including succeeded child frames) | Returns chain-visible failures (bad input, unauthorized caller) as `.done` with `.revert` or `.invalid`; reserves Zig errors for fatal host/allocator faults |
+| Balance issuance | Journals `ctx.addBalance` (`error.BalanceOverflow` on overflow) and `ctx.subtractBalance` (`false` on insufficient balance) without side effects on failure | Emits any chain-specific transfer or mint/burn log after the balance change |
 
 ### Rules shared by both native kinds
 

@@ -18,40 +18,28 @@ line — accounts, storage, secure-key hashing, fork rules — lives in the call
 - **Honest absence.** A valid non-existence proof is a *result*; a missing or
   malformed witness node is an *error*. The two never blur.
 
-## Why another MPT package?
+## Choosing a representation
 
-Most trie libraries sit behind a database, cache, or persistent mutable state.
-A stateless executor receives a different boundary: a trusted root and a sealed
-bag of witness nodes. It must authenticate exactly the available topology,
-serve repeated reads without rehashing or re-decoding it, apply the final
-mutations, and return a post-state root under caller-controlled memory.
+Most trie libraries sit behind a persistent database. A stateless executor
+receives a trusted root and a sealed bag of witness nodes: it must authenticate
+available topology once, serve repeated reads without rehashing or re-decoding,
+and compute a post-state root under caller-controlled memory.
 
-The package therefore keeps three complementary representations instead of
-bending one general trie to every phase:
+`mpt` provides three lanes so each workload pays only for what it uses:
 
-- The arbitrary-key proof and sparse-update lane is the structural
-  specification, conformance surface, and differential oracle.
-- The immutable catalog authenticates and links witness-present topology once,
-  keeping missing hashed children as opaque references.
-- The fixed-key mutation lane overlays transient occurrences on 32-byte
-  structural keys: a selected child materializes once, later updates reuse it,
-  untouched children stay authenticated references, and dirty nodes encode
-  once at the end.
+| Lane | Key width | Witness ingestion | Read entry point | Mutation entry point | Best for |
+| --- | --- | --- | --- | --- | --- |
+| Generic / sparse | Arbitrary `[]const u8` | `Trie.indexWitness` | `WitnessIndex.lookup` | `Trie.updateSorted` | Variable-length keys, conformance tests, one-off proofs |
+| Fixed-key witness | `FixedKey` (`[32]u8`) | `Trie.indexWitness` | `WitnessIndex.lookup` | `Trie.updateFixedSorted(witnessSource, ...)` | Hashed 32-byte keys without pre-linking a catalog |
+| Authenticated catalog | `FixedKey` (`[32]u8`) | `Catalog.Builder` over `WitnessIndex` | `Catalog.lookup` / `Catalog.bindSorted` | `Trie.updateFixedSorted(catalogSource, ...)` | Stateless block execution: link reachable nodes once, then run zero-hash, zero-RLP-decode reads and batch updates |
 
 Optional `NodeUpdates` output retains each dirty root or hashed child as its
-already-computed digest plus encoded bytes. Embedded children remain part of
-their parent encoding and are not emitted as independent persistence records.
-
-The overlay fits hashed keys well: Keccak-derived keys disperse quickly, so an
-update batch shares little deep topology. Memoizing each materialized path
-across the batch captures the sharing that does exist, without dedicated batch
-machinery.
+already-computed digest plus encoded bytes (embedded `< 32`-byte children remain
+inline in their parent encoding).
 
 ## Install
 
-`mpt` is one of the modules exported by
-[`evmz`](https://github.com/0xjojoex/evm.zig), which is fetched as a single
-package:
+`mpt` is exported by [`evmz`](../../README.md), fetched as a single root package:
 
 ```sh
 zig fetch --save git+https://github.com/0xjojoex/evm.zig
@@ -67,15 +55,13 @@ const evmz = b.dependency("evmz", .{
 exe.root_module.addImport("mpt", evmz.module("mpt"));
 ```
 
-Depends only on the Zig standard library and the sibling `rlp` module for
-strict RLP encoding/decoding — wired for you by the same fetch. No global
-state, database, or Ethereum types.
+Depends only on the Zig standard library and the sibling `rlp` module (wired
+automatically by the root package).
 
 ## Quick start
 
 ```zig
 const mpt = @import("mpt");
-const allocator = ...;
 const trie = mpt.init(allocator);
 
 // 1. Build a canonical root from key/value entries (std Keccak-256).
@@ -86,13 +72,13 @@ const entries = [_]mpt.Entry{
 };
 const root_hash = try trie.root(&entries);
 
-// 2. Verify a key against a trusted root, using a sealed witness index.
+// 2. Verify a key against a trusted root using a sealed witness index.
 var witness = try trie.indexWitness(encoded_nodes);
 defer witness.deinit();
 
 switch (try witness.lookup(trusted_root, "dog")) {
-    .present => |value| { /* authenticated value bytes */ },
-    .absent  => |reason| { /* valid non-existence: reason says why */ },
+    .present => |value| { /* authenticated value bytes borrowed from `encoded_nodes` */ },
+    .absent  => |reason| { /* valid non-existence proof (`Absence` tag) */ },
 }
 
 // 3. Recompute a post-root from sorted updates without materializing the whole trie.
@@ -103,15 +89,19 @@ const updates = [_]mpt.Update{
 const post_root = try trie.updateSorted(trusted_root, witness, &updates);
 ```
 
-`mpt.init(allocator)` uses the stdlib Keccak context. For an accelerated
-Keccak implementation, use `mpt.Trie(MyKeccak).init(allocator, context)`.
+`mpt.init(allocator)` uses the stdlib Keccak-256 implementation. To route
+hashing through a native or zkVM accelerator, construct
+`mpt.Trie(MyKeccakContext).init(allocator, context)` where `MyKeccakContext`
+implements `pub fn keccak256(self, input: []const u8) mpt.Root`.
 
-Operations that execute Keccak — root construction, witness indexing, and
-every mutation — are `Trie` methods. Hash-free reads live on the data they
-read: `WitnessIndex.lookup`, `Catalog.lookup`, `Catalog.bindSorted`.
+Operations that hash (`root`, `indexWitness`, `update*`) live on `Trie`.
+Hash-free reads live on the indexed data (`WitnessIndex.lookup`,
+`Catalog.lookup`, `Catalog.bindSorted`).
 
-An optional typed-key facade projects domain keys into fixed 32-byte structural
-keys while leaving values raw:
+### Typed domain keys (`Keyed`)
+
+Project domain keys (such as `Address` or `u256`) into `mpt.FixedKey` (`[32]u8`)
+while keeping values as raw bytes:
 
 ```zig
 const Structural = mpt.Trie(MyKeccak);
@@ -121,93 +111,49 @@ const accounts = Accounts.init(structural_trie, account_key_context);
 const result = try accounts.lookup(root_hash, witness, address);
 ```
 
-`KeyContext.trieKey(self, key)` owns only key projection. It does not change
-node hashing, encode values, or add domain meaning to the structural trie.
+`KeyContext.trieKey(self, key)` owns only the key projection; it does not encode
+values or alter node hashing.
 
 ## Core concepts
 
-**Values.** An entry value must be non-empty. An empty byte string *is* absence
-in Ethereum's MPT and is never stored, so higher layers map domain defaults
-(e.g. a zero storage slot) to a delete rather than an empty value.
+### Values and key ordering
 
-**Keys and ordering.** `rootSorted`, `updateSorted`, and `updateFixedSorted`
-require strictly increasing, unique structural keys and
-validate that before mutation. `root` copies the entry descriptors into
-allocator-backed scratch and sorts them for you — it never copies key or value
-bytes.
+- **Non-empty values:** An empty byte string represents absence in Ethereum's
+  MPT and is never stored. Map domain defaults (such as a zero storage slot) to
+  a delete (`value = null`).
+- **Sorting:** A `Sorted` suffix (`rootSorted`, `updateSorted`,
+  `updateFixedSorted`, `bindSorted`) validates that keys are strictly ascending
+  and unique (`error.UnsortedKeys` / `error.DuplicateKey`). `AssumeSorted` skips
+  validation when the caller guarantees ordering; unsuffixed variants (`root`,
+  `Keyed.update`) sort for you in scratch memory without copying key or value
+  bytes.
 
-`Trie(...).Keyed(Key, KeyContext)` accepts typed keys whose `trieKey`
-projection returns `mpt.FixedKey` (`[32]u8`). Typed lookup projects one key on
-the stack; typed update batches materialize projected keys and sort by those
-bytes before the structural call, because domain-key ordering is not
-structural-key ordering.
+### Witness index and lookup outcomes
 
-Naming follows one rule: a `Sorted` suffix means the input must already be
-strictly ascending (validated), `AssumeSorted` means the caller guarantees it,
-and an unsuffixed variant sorts for the caller.
+`Trie.indexWitness` hashes each borrowed node slice once and seals an opaque
+`*WitnessIndex` (open-addressed at `<= 50%` load; identical duplicates
+collapsed; conflicting bytes for the same digest rejected; extra unreferenced
+nodes ignored).
 
-**Witness index.** `Trie.indexWitness` borrows a slice of encoded nodes,
-hashes each exactly once, and seals an allocator-owned open-addressed position
-table at no more than 50% load — first-occurrence record order, identical
-duplicates collapsed, one digest with conflicting bytes rejected. The returned
-`*WitnessIndex` is opaque: a valid pointer only comes from `indexWitness` (or
-the static `WitnessIndex.empty`), so raw records cannot be assembled into an
-accepted index. It serves any number of allocation-free `lookup`s and
-resolver-backed updates. `deinit()` releases records and table through the
-retained allocator while the encoded node bytes stay borrowed, and
-`allocationBytes()` reports the retained bytes for guest budgeting. Extra
-irrelevant nodes do not fail a proof.
+`WitnessIndex.lookup` returns `Lookup` (and allocation-free repeated reads can
+pass a `LookupCache` to `lookupCached`):
 
-**Authenticated catalog.** `Catalog.Builder.init(allocator, witness)` is an
-optional ingestion layer over the sealed index; it never hashes, because nodes
-were authenticated when the witness was sealed. `authenticateRoot` decodes the
-witness-present topology reachable from a trusted root into stable `u32`
-handles; `finish` rejects resolved cycles and noncanonical extension topology,
-then seals an immutable catalog whose lookup path performs no hashing, digest
-search, allocation, or RLP decoding. Embedded children are always linked; a
-hashed child absent from the witness stays opaque and produces `MissingNode`
-only when a lookup or update selects it. Several state or storage roots may
-share one builder, and content-addressed nodes retain one handle.
-`Builder.leafValue` lets ingestion code inspect authenticated leaf payloads
-without exposing catalog records. `Catalog.lookupBound` returns
-`Catalog.BoundLookup`, adding the stable terminal `Catalog.NodeId` needed by
-typed caches.
+- `.present` — authenticated value slice borrowed from the witness input.
+- `.absent` — valid exclusion proof tagged with `Absence` (`empty_trie`,
+  `divergent_path`, `missing_branch_child`, or `empty_branch_value`).
+- `error.MissingNode` — a required hashed node was omitted from the witness.
 
-**Fixed-key mutation.** `updateFixedSorted` applies one MPT mutation algebra
-for exactly 32-byte keys through a typed `Source`: `witnessSource(index, root)`
-resolves authenticated nodes lazily from a sealed witness index, while
-`catalogSource(topology, root)` carries stable catalog handles. Either way the
-call takes a `ScopedArenaAllocator` from the caller as scratch, creates
-mutable occurrences only along selected paths, retains untouched children as
-authenticated references, and encodes dirty ancestors bottom-up — a memoized
-write overlay, not another authenticated source of truth. Fixed width makes
-branch terminal values and prefix keys structurally invalid; arbitrary-width
-keys remain on `updateSorted` in the sparse engine.
+### Authenticated catalog and fixed-key mutations
 
-**Fixed-key binding.** `Catalog.bindSorted` and `Catalog.bindAssumeSorted`
-batch authenticated lookups through the catalog without allocation or RLP
-decoding, sharing prefixes across a fixed 65-frame `Catalog.BindWorkspace`.
-`FixedLookup` uses the smaller fixed-key absence algebra, which omits the
-impossible `empty_branch_value` result.
-
-**Lookup outcomes.** `WitnessIndex.lookup` returns a `Lookup` union:
-
-- `.present` — the authenticated value bytes, borrowed from the bag; they
-  cannot outlive it.
-- `.absent` — a valid non-existence proof, tagged with an `Absence` reason:
-  `empty_trie`, `divergent_path`, `missing_branch_child`, or
-  `empty_branch_value`.
-
-An omitted-but-required hashed node instead returns `error.MissingNode` — an
-incomplete witness, never a proof of absence. Repeated arbitrary-key reads may
-pass a `LookupCache` to `WitnessIndex.lookupCached`; the cache owns only
-memoization.
-
-**Sparse update.** `updateSorted` materializes only the nodes on changed paths;
-unvisited hashed siblings stay as blind 32-byte references. A non-null value
-inserts or replaces; a null value deletes; deleting an absent key is a no-op.
-Deletion performs canonical branch compression. The input bag and root are
-immutable, and a failed call leaves no partial state.
+- **Catalog (`Catalog.Builder`):** Links reachable witness nodes from one or
+  more roots into stable `u32` handles without rehashing, rejecting cycles and
+  noncanonical extension topology on `finish()`. Subsequent `Catalog.lookup`,
+  `Catalog.lookupBound`, and batch `Catalog.bindSorted` calls perform no
+  hashing, digest search, allocation, or RLP decoding.
+- **Fixed-key overlay (`updateFixedSorted`):** Accepts `witnessSource(index, root)`
+  or `catalogSource(topology, root)` plus a `ScopedArenaAllocator`. It
+  materializes mutable nodes only along updated 64-nibble paths, keeps untouched
+  subtrees as authenticated handles, and encodes dirty ancestors once bottom-up.
 
 ## Resource model
 

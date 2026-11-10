@@ -1,71 +1,62 @@
 # evmz
 
-A fast, composable EVM execution engine in Zig. One exact Ethereum specification —
-dispatch table, gas schedule, precompiles, transaction rules, and block hooks —
-is a compile-time value, resolved into one concrete VM with no runtime fork
-selection. The same block state transition function runs natively and as an
-RV64 guest on SP1, ZisK, and OpenVM.
+A fast, composable EVM execution engine in Zig.
+
+An Ethereum specification — opcode dispatch table, gas schedule, precompiles,
+transaction rules, and block hooks — is a compile-time `Spec` value compiled
+into one concrete machine with no runtime fork switches. The same state
+transition function runs natively and as an RV64 guest on ZisK, SP1, and OpenVM.
+
+## Why evmz
+
+evmz does not ship one general interpreter with runtime feature flags. Choices
+that other engines branch on per instruction — fork rules, tracing,
+single-stepping, custom opcodes, pool bounds — are resolved at compile time from
+one semantic definition:
+
+- **Default (`Interpreter`)** — tail-call dispatch. Each handler charges gas,
+  executes, and tail-calls the next instruction with no central dispatch loop.
+- **Trace** — a separate compilation whose dispatch table interleaves trace
+  hooks with the same handlers, keeping observability free on the default path.
+- **Step (`debug.SessionType`)** — replaces tail-chaining with per-instruction
+  yielding for deterministic single-step debugging.
+- **Pooled executor (`Executor`)** — frames, stacks, messages, and I/O buffers
+  live in preallocated slots with a low-overhead state journal. Hard-bounding
+  those pools produces the zkVM guest machine with zero dead branches in the
+  proving trace.
 
 ## Status
 
-evmz is pre-release. The version is `0.0.0`, the public API may change between
-commits, and the project has not been audited. `main` tracks the latest
-supported execution-spec prereleases. EEST conformance resolves fixture
-releases through execution-specs itself; release evidence records the exact
-resolved corpus and index hash.
+Pre-release (`0.0.0`, unaudited; APIs may change between commits).
 
-Implemented:
-
-- Ethereum execution through the latest supported Glamsterdam prerelease, whose
-  execution-layer fork is Amsterdam
-- Stateless block validation from execution witnesses
-- Native, SP1, ZisK, and OpenVM execution of the stateless validator
-
-Experimental:
-
-- Block-access-list validation and BAL-driven parallel verification
-- Deeper transaction and block programmability
-- A native evmz C API
+- **Implemented:** Ethereum execution through Amsterdam (Glamsterdam
+  prerelease), stateless block validation from execution witnesses, and RV64
+  stateless validator guests for ZisK, SP1, and OpenVM.
+- **Experimental:** Block Access List (`BalVm` / `ClosedWorld`) validation and
+  parallel verification, custom transaction/block hooks, and the C header slot.
 
 ## Install
+
+Requires **Zig 0.17.x** (CI and `mise.toml` pin **0.17.1**).
 
 ```sh
 zig fetch --save git+https://github.com/0xjojoex/evm.zig
 ```
 
-The four core modules are `evmz`, `rlp`, `mpt`, and `ssz`; import the ones you need.
+Import the modules you need in `build.zig`:
 
 ```zig
-// build.zig
 const evmz = b.dependency("evmz", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("evmz", evmz.module("evmz"));
-exe.root_module.addImport("rlp", evmz.module("rlp")); // also: mpt, ssz
+exe.root_module.addImport("rlp", evmz.module("rlp")); // also: "mpt", "ssz"
 ```
 
-`rlp`, `mpt`, and `ssz` are self-contained pure-Zig codecs. To use them without
-configuring the EVM core — and without fetching any C dependency — pass
-`.core = false` to `b.dependency`. For a zkVM guest, pass `.profile = .zkvm`.
-
-Native Keccak defaults to XKCP on `x86_64`, `aarch64`, and `riscv64`, falling
-back to Zig's `std` on other architectures. Use `-Dnative-keccak=std` (or
-`.@"native-keccak" = .std` in dependency options) to select `std` explicitly.
-The zkVM profile ignores this option and keeps its accelerator provider.
-
-Supports Zig **0.17.x**. Mise and CI pin **0.17.1**.
-Every module ships at the package version — see
-[the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md).
-Pin an evmz commit for reproducible builds.
-
-The [migration screen](bench/README.md#zig-017-migration-screen) records the
-initial compiler regression and the byte-conversion changes that address it.
-
-Use the pinned compiler:
-
-```sh
-mise trust
-mise install
-mise exec -- zig build test
-```
+| Build option | Default | Effect |
+| --- | --- | --- |
+| `.core = false` | `true` | Export only pure-Zig `rlp`, `mpt`, and `ssz` without fetching C/C++ crypto dependencies |
+| `.profile = .zkvm` | `.native` | Route crypto and precompiles through the `zkvm_accelerators.h` C ABI |
+| `.@"native-keccak" = .std` | `.xkcp` | Use `std` Keccak instead of XKCP assembly (`x86_64`, `aarch64`, `riscv64`) |
+| `.pic = true` | `false` | Build position-independent code |
 
 ## Quick start
 
@@ -96,59 +87,45 @@ const execution = switch (try vm.transact(.{
 defer execution.discardIfCurrent();
 
 const result = execution.result();
-std.debug.print("status: {any}, gas: {}\n", .{
+std.debug.print("status: {t}, gas: {}\n", .{
     result.status,
     result.gas.used,
 });
 
-// Accept the provisional branch. Without this, the deferred discard rolls back.
+// Commit into the VM's pending branch (otherwise `discardIfCurrent` rolls back).
 execution.retain();
 ```
 
-`retain()` accepts the execution into the VM's pending branch. Advanced
-block-level code can consume `vm.executor.acceptedChanges()` and persist it. See
-[`examples/basic.zig`](https://github.com/0xjojoex/evm.zig/blob/main/examples/basic.zig)
-for runnable transaction execution
-and provisional storage-change inspection.
+`retain()` accepts the execution into the VM's pending branch; block-level
+callers can consume `vm.executor.acceptedChanges()` and persist it. See
+[`examples/basic.zig`](examples/basic.zig) for a runnable transaction example,
+[`examples/transaction_journal.zig`](examples/transaction_journal.zig) for host
+state that rolls back with the EVM, and
+[`examples/bal_parallel.zig`](examples/bal_parallel.zig) for Block Access List
+execution.
 
-## Tools
+## Execution surfaces
 
-`zig build cli-build` installs `zig-out/bin/evmz`. Run `evmz --help` or
-`evmz help <command>` to see its commands and options. `zig build run -- <args>`
-runs the same binary. The former separate tool executables are replaced by
-subcommands:
+Each tier strips outer protocol concerns before calling the next:
 
-- [`evmz t8n`](tools/t8n/README.md) accepts alloc/env/transaction inputs and writes transition results.
-- [`evmz statetest`](tools/statetest/README.md) executes a General State Test vector and writes its observed root and optional opcode trace.
-- [`evmz blocktest`](tools/blocktest/README.md) imports encoded blocks and writes actual acceptance, committed state, and optional opcode traces.
-- `evmz debug` inspects controlled execution; add `-x` for a single command.
+| Surface | Entry point | Responsibility |
+| --- | --- | --- |
+| Bytecode | `Vm.Interpreter` | Single call-frame bytecode execution |
+| Message | `Vm.Executor.executeMessage` | Root `call \| create` execution, child frames, and state journaling |
+| Transaction | `Vm.transact` | Envelope validation, nonce/fee accounting, warm sets, and receipts |
+| Block | `block.Stf` | System calls, ordered transactions, withdrawals, and requests |
+| Stateless | `stateless.Exact(fork)` | Witness verification and post-state / receipts root computation |
+| Guest | [`guest/`](guest/README.md) | Stateless validator compiled to RV64 ELFs for ZisK, SP1, and OpenVM |
 
-## Execution layers
+## Customizing specifications
 
-evmz exposes the execution stack as separate reusable surfaces:
-
-| Surface             | Responsibility                                              |
-| ------------------- | ----------------------------------------------------------- |
-| Interpreter         | EVM bytecode and call-frame execution                       |
-| Transaction program | Envelope validation, fees, nonce, execution, and settlement |
-| Block program       | Ordered transaction execution and block-level rules         |
-| Stateless validator | Witness validation and post-state and receipts roots        |
-| Guest               | The stateless validator compiled for ZisK, SP1, or OpenVM   |
-
-## Exact specifications
-
-`Evm` is the latest exact Ethereum VM. Bind another specification at compile
-time:
+`evmz.Evm` aliases `evmz.Vm(evmz.eth.latest)`. Pass any built-in fork or derive
+a custom specification at comptime with `Spec.extend`:
 
 ```zig
-const LatestEvm = evmz.Evm;
 const CancunEvm = evmz.Vm(evmz.eth.cancun);
-```
 
-Extend the exact base you mean and compile it into a concrete VM:
-
-```zig
-const my_cancun = evmz.eth.cancun.extend(.{
+const my_spec = evmz.eth.cancun.extend(.{
     .transaction = .{
         .max_initcode_size = 0x10000,
     },
@@ -156,16 +133,17 @@ const my_cancun = evmz.eth.cancun.extend(.{
         .gas_refund_cap_divisor = 4,
     },
 });
-const MyEvm = evmz.Vm(my_cancun);
+const CustomEvm = evmz.Vm(my_spec);
 ```
 
-`Spec.extend` patches parameters and semantic functions. Complete instruction,
-precompile, transaction, or block bindings can also be replaced. See
-[`examples/custom_fork/`](https://github.com/0xjojoex/evm.zig/tree/main/examples/custom_fork)
-and
-[`examples/op/`](https://github.com/0xjojoex/evm.zig/blob/main/examples/op).
-For the difference between precompiles, native contracts, predeploys, and
-system calls, see [`doc/native-contracts.md`](doc/native-contracts.md).
+`Spec.extend` patches scalar parameters, gas functions, opcodes, precompiles,
+native contracts, and block hooks:
+
+- [`examples/custom_fork/`](examples/custom_fork/README.md) — tour of every
+  `Spec.extend` seam
+- [`examples/op/`](examples/op/) — OP Stack family specification
+- [`doc/native-contracts.md`](doc/native-contracts.md) — precompiles vs.
+  stateful native contracts vs. predeploys vs. system calls
 
 ## Stateless validation and zkVM guests
 
@@ -177,106 +155,63 @@ const Validator = evmz.stateless.Exact(.amsterdam);
 const result = try Validator.validate(allocator, input);
 ```
 
-The same validator is compiled natively and as an RV64 ELF under `guest/`.
-SP1, ZisK, and OpenVM share one accelerator ABI and persistent host protocol
-while retaining backend-specific runtimes and metrics.
-
-Run the full test suite through the zkVM adapters on the host, with no RV64
-toolchain or vendor library required:
+Test the zkVM accelerator path natively on the host without an RV64 toolchain,
+or build the RV64 guest ELFs:
 
 ```sh
 zig build test-evmz-zkvm
-```
 
-ZisK requires its exact-commit provider archive. SP1 and OpenVM build their
-ERE-backed providers from the pinned repo manifests:
-
-```sh
 zig build guest-zisk -Dguest-payload=stateless-ere -Doptimize=fast \
     -Dziskos-staticlib=/path/to/libziskos_staticlib.a
-
 zig build guest-sp1 -Dguest-payload=stateless-ere -Doptimize=fast
-
 zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=fast
 ```
 
-The matching `guest-zisk-run` and `guest-sp1-run` steps execute the built ELF
-on the backend emulator; pass `-Dguest-input=<file>` for the stateless input
-and `-Dguest-output=<file>` to capture public output. ZisK runs use `ziskemu`
-from `PATH` unless `-Dziskemu` points elsewhere; the SP1 run step builds its
-host driver with Cargo on demand.
+`guest-zisk-run` and `guest-sp1-run` execute the built ELF on the backend
+emulator with `-Dguest-input=<file>` and `-Dguest-output=<file>`. See
+[`guest/README.md`](guest/README.md) for provider setup, heap/RAM sizing,
+schema pinning, and proof verification.
 
-See [`guest/README.md`](guest/README.md) for provider setup, heap and RAM
-sizing, schema pinning, and proof-readiness checks.
+## Codec & trie modules
+
+Exported from the root package (pass `.core = false` to `b.dependency` when you
+only need these modules):
+
+- [`pkg/rlp`](pkg/rlp/README.md) — strict RLP encoding and decoding
+- [`pkg/mpt`](pkg/mpt/README.md) — stateless Merkle Patricia Trie proofs,
+  authenticated catalogs, and sparse/fixed-key updates
+- [`pkg/ssz`](pkg/ssz/README.md) — comptime-typed SSZ codec and zero-allocation
+  `hash_tree_root`
+
+## CLI tools
+
+`zig build cli-build` installs `zig-out/bin/evmz` (or run `zig build <subcommand> -- <args>`):
+
+- [`evmz t8n`](tools/t8n/README.md) — Ethereum state transition tool (Paris through Amsterdam)
+- [`evmz statetest`](tools/statetest/README.md) — General State Test runner with EIP-3155 tracing
+- [`evmz blocktest`](tools/blocktest/README.md) — raw block import and state root verification
+- `evmz debug` — interactive and single-command bytecode debugger (`zig build debug -- 6001600201`)
 
 ## Performance
 
-VM-loop snapshot on Apple M1 Max / macOS arm64, measured 2026-10-30 with fixed
-Osaka, Zig 0.16.0 native `ReleaseFast` and evmz's XKCP Keccak provider. Evmone is v0.25.0;
-EVM2 uses stable packed dispatch on Rust 1.96.0. Each cell is the median of five
-100-call medians, with 100 ms discarded warmup per fixture/engine. Lower is better:
+VM-loop interpreter medians on Apple M1 Max (macOS arm64, fixed Osaka,
+`ReleaseFast`, XKCP Keccak, 5 × 100 calls after 100 ms warmup; lower is better):
 
-| Fixture | evmz | evmone-base | EVM2 packed |
+| Fixture | evmz | evmone 0.25 base | EVM2 packed (Rust 1.96) |
 | --- | ---: | ---: | ---: |
 | Arithmetic loop | **0.092 ms** | 0.102 ms | 0.232 ms |
 | Storage SSTORE loop | **0.162 ms** | 0.870 ms | 0.923 ms |
 | ERC20 transfer | **3.694 ms** | 6.219 ms | 5.837 ms |
 | Snailtracer | **19.898 ms** | 59.461 ms | 34.356 ms |
 
-The full snapshot, host scope and reproduction commands are in
-[the benchmark lab](bench/README.md#published-snapshots).
-
-<details>
-<summary>The evmz approach</summary>
-
-evmz doesn't ship one general interpreter with runtime switches. Everything
-you'd normally toggle at runtime — fork rules, tracing, single-stepping,
-custom opcodes — is a compile-time decision, and each combination compiles
-into its own exact machine from one semantic foundation.
-
-The interpreter is where the principle pays off most visibly. One set of
-handler semantics compiles into different execution models for different
-purposes:
-
-- **Default** — pure tail dispatch: each handler charges gas, executes, and
-  tail-calls its successor. No central dispatch loop, no per-op capability
-  checks.
-- **Trace** — a separate build whose dispatch table interleaves trace hooks
-  with the same handlers. Observability is a different binary path, not a flag
-  the default build tests per instruction.
-- **Step** — the continuation flips from chaining to yielding after each
-  instruction, producing a genuine single-step interpreter for the debugger
-  with behavior identical to the default build.
-
-Around the interpreter sits a zero-alloc, pooled executor: frames, stacks,
-messages, and IO buffers live in preallocated slots (optionally hard-bounded for
-embedded/zkVM targets), and the state journal is cheap enough that the full
-executor benches within noise of the raw interpreter.
-
-Hard-bounding the pools yields yet another purpose-built machine
-— the zkVM guest, where every dead branch and allocator call would be a
-proven, costed cycle.
-
-Each purpose is its own compilation, and binaries
-carry exactly the machines they were built for. For an execution engine —
-where you know at ship time what you need
-
-</details>
-
-## Packages
-
-These standalone Zig libraries under `pkg/` can be fetched independently:
-
-- [`pkg/rlp`](pkg/rlp) — strict RLP encoding and decoding
-- [`pkg/mpt`](pkg/mpt) — stateless MPT proofs, authenticated catalogs, and
-  sparse/fixed-key updates
-- [`pkg/ssz`](pkg/ssz) — comptime-typed SSZ encoding and decoding
+Full snapshots, host scope, and reproduction commands are in
+[`bench/README.md`](bench/README.md#published-snapshots).
 
 ## Scope
 
-evmz is an execution engine, not a client. It includes the EVM, Ethereum block
-state transition, stateless witness validation, and the trie work needed to
-produce post-state and receipts roots.
+evmz is an execution engine, not a client. It owns EVM execution, transaction
+and block state transitions, stateless witness validation, and post-state /
+receipts trie roots.
 
 Networking, block sync, consensus-layer fork choice, RPC, persistent storage,
 proof generation, and prover orchestration remain the caller's responsibility.
@@ -285,19 +220,18 @@ Supply state through `StateReader` or an execution witness.
 ## Contributing
 
 ```sh
-zig build test                       # native unit tests
+mise trust && mise install           # install pinned Zig 0.17.1
+zig build test                       # native unit tests (cancun, prague, .stable, .latest)
+zig build test -Dtest-forks=head     # fastest inner loop (.latest only)
 zig build test-evmz-zkvm             # zkVM adapter semantics on the host
 zig build ci -j2                     # complete deterministic local CI
-zig build eest-test                  # EEST lane
-zig build tidy                       # dead and unexercised declarations
-zig build debug -- 6001600201        # interactive bytecode debugger
+zig build eest-consume               # execution-specs conformance suite
+zig build tidy                       # check for unused declarations and orphan files
 ```
 
-`tidy` reports review candidates and never edits source; pass `--strict` to
-promote advisory findings.
-
-See [the release policy](https://github.com/0xjojoex/evm.zig/blob/main/RELEASING.md)
-for the single-root package version, tag, and changelog conventions.
+`tidy` reports review candidates and never edits source; pass `-- --strict` to
+promote advisory findings. See [`RELEASING.md`](RELEASING.md) for package
+versioning, guest release tags, and release gates.
 
 ## License
 
@@ -308,7 +242,7 @@ Licensed under either of:
 
 at your option.
 
-Bundled third-party components retain their own licenses: blst (Apache-2.0) and
-mcl (BSD-3-Clause).
-Distributions including them should reproduce the applicable license and NOTICE
-files.
+Native builds link bundled third-party components under their own licenses:
+`blst` (Apache-2.0), `mcl` (BSD-3-Clause), `libsecp256k1` (MIT), and `XKCP`
+(CC0). Distributions including them should reproduce the applicable license and
+NOTICE files.

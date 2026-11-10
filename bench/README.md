@@ -1,118 +1,17 @@
 # evm.zig Benchmark Lab
 
-This sidecar is for measurement harnesses that are not EEST fixtures.
+Measurement harnesses for `evmz` interpreter dispatch, opcode kernels, block
+lifecycle, and inner-loop data structures.
 
-## Zig 0.17 migration screen
-
-Local Apple M1 Max / macOS ARM64 screen on 2026-10-05, comparing unchanged `3de034b3` under
-Zig 0.16.0 with this migration under Zig 0.17.0. Both use release-fast mode,
-omit frame pointers, compile the full fork range, and execute the same fixed
-Osaka fixtures through `Interpreter.execute`. Each row is the median of six
-batch medians, with 100 calls per batch and a 200 ms warmup; compiler order
-alternates between batches. Lower is better.
-
-| Fixture | Zig 0.16 ms | Zig 0.17 ms | Change |
-| ------- | -----------: | -----------: | -----: |
-| Arithmetic loop | 0.10775 | 0.11200 | +3.9% |
-| Memory MSTORE loop | 0.12600 | 0.27350 | +117.1% |
-| Storage SSTORE loop | 0.16225 | 0.16350 | +0.8% |
-| ERC20 transfer | 5.01050 | 5.62400 | +12.2% |
-
-The MSTORE slowdown also reproduces with `EVMZ_BENCH_ALLOCATOR=smp`. Its cause is
-the 0.17 lowering of array/int `@bitCast`, which `std.mem.readInt` and
-`std.mem.writeInt` use: for every integer width other than 8, 16, 32, and 64
-bits it expands into byte extraction and vector assembly. In the engine that
-covers u256 word conversion, PUSH5-PUSH32 immediates, and u160 address
-conversion. The engine now avoids that shape, which returns MSTORE,
-Snailtracer, and the ERC20 fixtures to within about 2% of Zig 0.16; a 6-9% code
-placement effect remains on the arithmetic and ten-thousand-hashes fixtures.
-The table above predates the conversion change.
-
-On eight small `tests-zkevm@v21.0.5` fixtures, ZisK guest steps under stock
-0.17 are within -3.0% to +2.2% of 0.16, and 2.3-6.9% below it with the
-conversion change. Live-block guest steps were not
-measured: the pinned live corpus predates the v21 stateless input format.
-
-## Overall Comparison
-
-`zig build compare` is the VM-core scoreboard lane for the VM-loop fixtures. It
-runs each engine through an interpreter-level path: evmz through direct
-bound-interpreter `execute()`, evmone baseline and advanced through a
-standalone C++ runner with analysis prepared once, and EVM2 through a Rust
-sidecar with prepared bytecode:
-
-```sh
-cd bench
-zig build compare
-zig build compare -- --fixture fixtures/vm-loop/erc20-transfer
-```
-
-From the repo root, use `zig build bench-compare`. Raw stdout/stderr plus
-`summary.csv` and `summary.json` are written under ignored `zig-out/compare/`.
-Native builds default to XKCP Keccak on supported architectures, matching the
-root build. Pass `-Dnative-keccak=std` to select Zig's implementation; standalone
-`evmz-compare` and `scripts/report.py` accept `--native-keccak std` instead.
-The compare lane defaults all engines to `--spec osaka`; pass `--spec` only
-when intentionally testing another shared fork.
-For the fair scoreboard, all compared engines explicitly omit frame pointers:
-Zig/C++ modules use the corresponding compiler setting (and evmone C++ uses
-`-fomit-frame-pointer`), while all Rust variants use `-C force-frame-pointers=no`.
-The stable Rust rows use the pinned `1.96.0` toolchain, native CPU tuning, fat LTO,
-and one codegen unit. Install it with `rustup toolchain install 1.96.0 --profile minimal`.
-Use repeated `--engine` filters for narrower runs. `--engine evmz` runs only
-evmz, while `--engine evmone` expands to both evmone baseline and advanced.
-`--engine evm2` selects
-`evm2-interpreter`.
-
-The executor/transaction comparison is intentionally a later lane. For now
-`evmz-executor` remains available as a diagnostic target, but it is not mixed
-into the VM-core scoreboard.
-
-Current VM-core rows:
-
-| engine             | level                         | prepared outside timing                                                                           | timed window                                    | transaction/overlay work |
-| ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------ |
-| `evmz`             | exact-spec tail interpreter   | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | bound-interpreter `execute()`                   | no                       |
-| `evmone-baseline`  | analyzed baseline interpreter | fixture loading, init-code deployment through EVMC, `baseline::analyze`                           | `baseline::execute` over `CodeAnalysis`         | no                       |
-| `evmone-advanced`  | analyzed advanced interpreter | fixture loading, init-code deployment through EVMC, `advanced::analyze`                           | `advanced::execute` over `AdvancedCodeAnalysis` | no                       |
-| `evm2-interpreter` | packed interpreter loop       | fixture loading, init-code deployment, forced jump analysis; per-run interpreter/host setup | `Interpreter::run` | no |
-
-EVM2 is pinned to `f93318f120f6300599b21170d6c7bef81ed63d87`, the revision used
-by Reth v2.9.0. The default build explicitly selects `EVM2_DISPATCH_BACKEND=packed`.
-Only the standard library, map hasher, and assembly Keccak features are enabled: this lane never
-executes precompiles or nested CALL/CREATE frames. LOG rows include each
-interpreter's own log construction costs; the mock hosts discard logs.
-
-All EVM2 interpreter variants emit an untimed reference call's gas used, deployed-code
-hash, and return-output hash. `compare` rejects a mismatch between selected EVM2
-interpreter rows. These fields, plus EVM2's dispatch, compiler version, and revision,
-are retained in summary JSON/CSV and raw stderr. This is a bounded fixture check, not an EEST or full-block result.
-
-```sh
-zig build compare -- --engine evmz --engine evm2 --num-runs 100 --warmup-ms 100
-zig build evm2-vm-loop -- --fixture fixtures/vm-loop/erc20-transfer --summary
-cargo +1.96.0 test --locked --manifest-path evm2/Cargo.toml
-```
-
-Nightly EVM2 rows are opt-in. `evm2-tail` selects `EVM2_DISPATCH_BACKEND=tco`;
-`evm2-packed-nightly` runs packed dispatch on the same `nightly-2026-06-01`
-compiler, isolating dispatch changes from stable/nightly compiler differences.
-Both keep the same dependency revision, feature set, and optimization flags.
-Each variant has its own Cargo target directory to preserve its compiled binary
-when switching backends. Summaries identify the compiled variant; the comparison
-rejects a runner whose engine label differs from the requested row. JIT is separate.
-
-```sh
-rustup toolchain install nightly-2026-06-01 --profile minimal
-zig build compare -- --engine evmz --engine evm2 \
-  --engine evm2-packed-nightly --engine evm2-tail
-zig build evm2-tail-vm-loop -- --fixture fixtures/vm-loop/arithmetic-loop --summary
-zig build report -- --evm2-nightly
-```
-
-Future transaction/integration rows should stay separate, for example
-`evmz-executor`, `evm2-transact`, or an evmone transaction shim. Keep the
-`scope` column visible whenever VM-core rows are compared.
+| Lane | Root command | `bench/` command | What it measures |
+| --- | --- | --- | --- |
+| Cross-engine VM scoreboard | `zig build bench-compare` | `zig build compare` | `evmz` vs `evmone` (baseline/advanced) vs `evm2` on deployed runtime bytecode |
+| Full comparison report | `zig build bench-report` | `zig build report` | Runs `compare` + `kernel`, writes Markdown report and `evmz-checkpoint.json` |
+| Single-engine VM loop | `zig build bench-vm-loop` | `zig build vm-loop` | Per-call runtime timing for `evmz` (`evmone-vm-loop` and `evm2-vm-loop` for peers) |
+| Opcode kernels | `zig build bench-kernel` | `zig build kernel` | Pure opcode loops on the null host (`small`, `edge`, `large`, `branch`) |
+| Block lifecycle | `zig build bench-block-lifecycle` | `zig build block-lifecycle` | `Executor` init, `BlockExecution` tx loop, and state persistence (`growable` vs `exact`) |
+| Inner-loop microbench | `zig build bench-micro` | `zig build micro` | zBench microbenchmarks (`arithmetic`, `sdiv`, `mulmod`, `sparse-hash-map`, `overlay`) |
+| Code analysis | `zig build bench-code-analysis` | `zig build code-analysis` | Bytecode jumpdest analysis timing and morphology |
 
 ## Published snapshots
 
@@ -183,6 +82,61 @@ Historical revm snapshot from a KVM guest pinned to one CPU.
 | ERC20 transfer          |  7.686 ms |    7.447 ms |   8.433 ms | 14.896 ms |     0.97× |     1.94× |
 | ERC20 approval+transfer |  6.278 ms |    6.227 ms |   7.032 ms | 13.413 ms |     0.99× |     2.14× |
 | Snailtracer             | 33.347 ms |   57.983 ms |  69.988 ms | 52.417 ms |     1.74× |     1.57× |
+
+## Cross-engine VM comparison (`compare`)
+
+`zig build compare` (or `zig build bench-compare` from the repository root)
+runs each engine through its interpreter-level entry point: `evmz` through
+bound-interpreter `execute()`, `evmone` baseline and advanced through a
+standalone C++ runner with bytecode analysis prepared once, and `EVM2` through
+a Rust sidecar with prepared bytecode:
+
+```sh
+cd bench
+zig build compare
+zig build compare -- --fixture fixtures/vm-loop/erc20-transfer
+```
+
+Raw stdout/stderr plus `summary.csv` and `summary.json` are written under
+ignored `zig-out/compare/`. Native builds default to XKCP Keccak on supported
+architectures (pass `-Dnative-keccak=std` or `--native-keccak std` to use
+`std`). All engines default to `--spec osaka` and omit frame pointers
+(`-fomit-frame-pointer` for C++, `-C force-frame-pointers=no` for Rust).
+Stable Rust rows use the pinned `1.96.0` toolchain (`rustup toolchain install 1.96.0 --profile minimal`),
+native CPU tuning, fat LTO, and one codegen unit.
+
+Filter engines with repeated `--engine` flags (`--engine evmz`, `--engine evmone`
+for both baseline and advanced, `--engine evm2` for `evm2-interpreter`):
+
+| Engine             | Level                         | Prepared outside timing                                                                           | Timed window                                    | Transaction/overlay work |
+| ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------ |
+| `evmz`             | exact-spec tail interpreter   | fixture loading, init-code deployment, frame/interpreter setup, jumpdest metadata preparation     | bound-interpreter `execute()`                   | no                       |
+| `evmone-baseline`  | analyzed baseline interpreter | fixture loading, init-code deployment through EVMC, `baseline::analyze`                           | `baseline::execute` over `CodeAnalysis`         | no                       |
+| `evmone-advanced`  | analyzed advanced interpreter | fixture loading, init-code deployment through EVMC, `advanced::analyze`                           | `advanced::execute` over `AdvancedCodeAnalysis` | no                       |
+| `evm2-interpreter` | packed interpreter loop       | fixture loading, init-code deployment, forced jump analysis; per-run interpreter/host setup | `Interpreter::run` | no |
+
+EVM2 is pinned to `f93318f120f6300599b21170d6c7bef81ed63d87` (Reth v2.9.0) with
+`EVM2_DISPATCH_BACKEND=packed`. Each EVM2 variant emits an untimed reference
+call's gas used, deployed-code hash, and return-output hash; `compare` rejects
+any mismatch across rows.
+
+```sh
+zig build compare -- --engine evmz --engine evm2 --num-runs 100 --warmup-ms 100
+zig build evm2-vm-loop -- --fixture fixtures/vm-loop/erc20-transfer --summary
+cargo +1.96.0 test --locked --manifest-path evm2/Cargo.toml
+```
+
+Opt-in nightly EVM2 rows (`evm2-tail` with `EVM2_DISPATCH_BACKEND=tco` and
+`evm2-packed-nightly` on `nightly-2026-06-01`) isolate tail-call dispatch from
+compiler version differences:
+
+```sh
+rustup toolchain install nightly-2026-06-01 --profile minimal
+zig build compare -- --engine evmz --engine evm2 \
+  --engine evm2-packed-nightly --engine evm2-tail
+zig build evm2-tail-vm-loop -- --fixture fixtures/vm-loop/arithmetic-loop --summary
+zig build report -- --evm2-nightly
+```
 
 ## Micro Benchmarks
 
@@ -389,13 +343,6 @@ zig build bench-report -- --out-dir ../output/bench-report
 The default lane is native release for the Rust sidecar: Zig/C++ runners use
 `fast`, and all Rust variants use `cargo +1.96.0 --release` with `target-cpu=native`,
 `force-frame-pointers=no`, fat LTO, and one codegen unit.
-Reports and checkpoints should stay under ignored `output/`; they are local
-measurement artifacts, not source fixtures. Use `--checkpoint <path>` to write
-the compact JSON somewhere stable. Use `--baseline <path>` to include
-evmz-vs-evmz deltas in the report after an optimization branch.
-
-Generated EEST benchmark fixtures are intentionally not part of this report
-lane. The old transaction-shaped runner mixed host, fixture, and precompile
-semantics with VM timing, so future EEST benchmark work should first adapt
-meaningful cases into the VM-loop protocol or a separate fair block-verdict
-lane.
+Reports and checkpoints stay under ignored `output/`. Use `--checkpoint <path>`
+to write the compact JSON to a stable path, and `--baseline <path>` to include
+evmz-vs-evmz deltas after an optimization change.
