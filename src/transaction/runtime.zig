@@ -7,8 +7,20 @@
 const std = @import("std");
 
 const execution = @import("../execution.zig");
+const executor_engine = @import("../executor.zig");
+const LogBuffer = @import("../state/LogBuffer.zig");
 
 pub const Mode = @import("../executor/instrumentation.zig").Mode;
+
+/// One attempted root of a multi-root session.
+pub const RootExecutionOutcome = struct {
+    stage: executor_engine.TransactionExecutionStage,
+    result: execution.ExecutionResult,
+    /// Logs this root left in the transaction log buffer; empty when it
+    /// rolled back. An outer rollback that truncates past its start
+    /// invalidates it.
+    log_range: LogBuffer.RowRange,
+};
 
 pub fn hasActive(executor: anytype) bool {
     const attempt = executor.attempt orelse return false;
@@ -21,8 +33,6 @@ pub fn hasActive(executor: anytype) bool {
 pub inline fn requireActive(executor: anytype) void {
     std.debug.assert(hasActive(executor));
 }
-
-pub const RootAccessReservation = enum { none, reserve };
 
 pub fn begin(executor: anytype, mode: Mode) !void {
     std.debug.assert(executor.attempt == null);
@@ -50,36 +60,55 @@ pub fn initializeMessageScope(
     executor: anytype,
     message: execution.Message,
     scope_init: execution.ExecutionScopeInit,
-    root_access_reservation: RootAccessReservation,
 ) !void {
     const initial_warm_set = scope_init.initial_warm_set;
-    if (root_access_reservation == .reserve or
-        initial_warm_set.accounts.len != 0 or
-        initial_warm_set.storage_slots.len != 0)
-    {
-        const root_accounts: usize = switch (message) {
-            .call => 2,
-            .create => 1,
-        };
+    if (initial_warm_set.accounts.len != 0 or initial_warm_set.storage_slots.len != 0) {
+        const root_accounts = rootAccounts(message);
         std.debug.assert(initial_warm_set.accounts.len <= std.math.maxInt(usize) - root_accounts);
         try executor.reserveAccessHint(.{
             .accounts = root_accounts + initial_warm_set.accounts.len,
             .storage_keys = initial_warm_set.storage_slots.len,
         });
     }
+    try initializeRoot(executor, message, .{});
+    try warmInitialSet(executor, initial_warm_set);
+}
 
-    switch (message) {
-        .call => |call| {
-            try executor.warmAccount(call.sender);
-            try executor.warmAccount(call.recipient);
-        },
-        .create => |create| try executor.warmAccount(create.sender),
-    }
+fn rootAccounts(message: execution.Message) usize {
+    return switch (message) {
+        .call => 2,
+        .create => 1,
+    };
+}
+
+fn warmInitialSet(executor: anytype, initial_warm_set: execution.InitialWarmSet) !void {
     for (initial_warm_set.accounts) |address| {
         try executor.warmAccount(address);
     }
     for (initial_warm_set.storage_slots) |slot| {
         try executor.warmStorage(slot.address, slot.key);
+    }
+}
+
+/// Warm and bind one root message. Non-default entry modes apply only to calls.
+fn initializeRoot(
+    executor: anytype,
+    message: execution.Message,
+    root_init: execution.RootExecutionInit,
+) !void {
+    switch (message) {
+        .call => |call| switch (root_init.access) {
+            .prewarm_sender_and_recipient => {
+                try executor.warmAccount(call.sender);
+                try executor.warmAccount(call.recipient);
+            },
+            // The executor charges and warms the target at dispatch.
+            .charge_call_target => {},
+        },
+        .create => |create| {
+            std.debug.assert(std.meta.eql(root_init, execution.RootExecutionInit{}));
+            try executor.warmAccount(create.sender);
+        },
     }
     executor.scope_root = switch (message) {
         .call => |call| .{
@@ -109,13 +138,18 @@ pub fn beginExecution(
     executor.state.openSession();
     errdefer closeExecutionScope(executor);
 
-    try initializeMessageScope(executor, request.message, scope_init, .none);
+    try initializeMessageScope(executor, request.message, scope_init);
 }
 
 /// Open one transaction-scoped execution session that may run multiple EVM
 /// roots. Unlike `beginExecution`, this does not bind or warm a root message;
 /// the family transition may take an outer checkpoint before `runRoot`.
-pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) !void {
+/// `scope_init` warms accounts and slots for the whole session.
+pub fn beginRootSession(
+    executor: anytype,
+    context: execution.ExecutionContext,
+    scope_init: execution.ExecutionScopeInit,
+) !void {
     requireActive(executor);
     std.debug.assert(executor.execution_context == null);
     std.debug.assert(!executor.state.hasOpenCheckpoint());
@@ -125,6 +159,16 @@ pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) 
     executor.execution_phase = .idle;
     executor.scope_root = null;
     executor.state.openSession();
+    errdefer closeExecutionScope(executor);
+
+    const initial_warm_set = scope_init.initial_warm_set;
+    if (initial_warm_set.accounts.len != 0 or initial_warm_set.storage_slots.len != 0) {
+        try executor.reserveAccessHint(.{
+            .accounts = initial_warm_set.accounts.len,
+            .storage_keys = initial_warm_set.storage_slots.len,
+        });
+    }
+    try warmInitialSet(executor, initial_warm_set);
 }
 
 /// Execute one independently rollback-armed EVM root inside an open custom
@@ -134,8 +178,8 @@ pub fn beginRootSession(executor: anytype, context: execution.ExecutionContext) 
 pub fn runRoot(
     executor: anytype,
     request: execution.ExecutionRequest,
-    scope_init: execution.ExecutionScopeInit,
-) @TypeOf(executor.executeTransactionRequestPhased(request)) {
+    root_init: execution.RootExecutionInit,
+) !RootExecutionOutcome {
     requireActive(executor);
     std.debug.assert(executor.execution_context != null);
     std.debug.assert(executor.execution_phase == .idle);
@@ -148,17 +192,25 @@ pub fn runRoot(
     executor.execution_context = request.context;
     executor.scope_root = null;
 
+    const log_start = executor.logView().len();
     var checkpoint = executor.checkpoint();
     defer checkpoint.deinit();
-    try initializeMessageScope(executor, request.message, scope_init, .reserve);
+    try executor.reserveAccessHint(.{ .accounts = rootAccounts(request.message), .storage_keys = 0 });
+    try initializeRoot(executor, request.message, root_init);
 
-    const outcome = try executor.executeTransactionRequestPhased(request);
+    const outcome = try executor.executeRootTransactionRequestPhased(request, root_init);
     if (outcome.stage == .preparation or executionRolledBack(outcome.result.outcome.status)) {
         checkpoint.restore();
     } else {
         checkpoint.commit();
     }
-    return outcome;
+    const log_end = executor.logView().len();
+    std.debug.assert(log_end >= log_start);
+    return .{
+        .stage = outcome.stage,
+        .result = outcome.result,
+        .log_range = .init(log_start, log_end - log_start),
+    };
 }
 
 pub fn runPayload(
