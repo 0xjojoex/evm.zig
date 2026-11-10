@@ -29,7 +29,7 @@ pub const AuthorizationListMode = enum {
 };
 
 pub const ParsedAuthorizationList = struct {
-    entries: []evmz.transaction.AuthorizationTuple = &.{},
+    entries: []evmz.transaction.RecoveredAuthorization = &.{},
     count: usize = 0,
 
     pub fn deinit(self: *ParsedAuthorizationList, allocator: std.mem.Allocator) void {
@@ -341,7 +341,7 @@ pub fn parseTransactionAuthorizationList(
         .ignore_malformed_list => return .{},
         .error_malformed_list => return error.MalformedFixture,
     };
-    var entries: std.ArrayList(evmz.transaction.AuthorizationTuple) = .empty;
+    var entries: std.ArrayList(evmz.transaction.RecoveredAuthorization) = .empty;
     errdefer entries.deinit(allocator);
 
     for (list.items) |item| {
@@ -355,16 +355,15 @@ pub fn parseTransactionAuthorizationList(
         const signer = parseAddressFromValue(auth.get("signer") orelse continue) catch continue;
         const nonce_value = parseU256FromValue(auth.get("nonce") orelse continue) catch continue;
         const nonce = std.math.cast(u64, nonce_value) orelse continue;
+        // The fixture supplies the recovered signer, so only the scalar ranges
+        // remain to check here. A dropped tuple still counts toward `count`.
+        if (!evmz.eip7702.authorizationSignatureShapeValid(y_parity, legacy_v, r, s)) continue;
 
         try entries.append(allocator, .{
             .chain_id = chain_id,
             .target = target,
             .signer = signer,
             .nonce = nonce,
-            .y_parity = y_parity,
-            .legacy_v = legacy_v,
-            .r = r,
-            .s = s,
         });
     }
 
@@ -428,4 +427,39 @@ test "EEST state fork parser maps ConstantinopleFix to Petersburg" {
     try std.testing.expectEqual(evmz.eth.Revision.petersburg, parseStateFork("ConstantinopleFix"));
     try std.testing.expectEqual(evmz.eth.Revision.osaka, parseStateFork("Osaka"));
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, parseStateFork("Amsterdam"));
+}
+
+test "authorization list drops bad signature shapes but still counts them" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"authorizationList": [
+        \\  {"chainId": "0x1", "address": "0x00000000000000000000000000000000000000aa",
+        \\   "nonce": "0x0", "v": "0x0", "r": "0x1", "s": "0x1",
+        \\   "signer": "0x00000000000000000000000000000000000000b1"},
+        \\  {"chainId": "0x1", "address": "0x00000000000000000000000000000000000000aa",
+        \\   "nonce": "0x0", "v": "0x2", "r": "0x1", "s": "0x1",
+        \\   "signer": "0x00000000000000000000000000000000000000b2"},
+        \\  {"chainId": "0x1", "address": "0x00000000000000000000000000000000000000aa",
+        \\   "nonce": "0x7", "yParity": "0x1", "r": "0x1", "s": "0x0",
+        \\   "signer": "0x00000000000000000000000000000000000000b3"},
+        \\  {"chainId": "0x1", "address": "0x00000000000000000000000000000000000000aa",
+        \\   "nonce": "0x7", "yParity": "0x1", "r": "0x1", "s": "0x1",
+        \\   "signer": "0x00000000000000000000000000000000000000b4"}
+        \\]}
+    ;
+    const parsed = try std.json.parseFromSlice(JsonValue, allocator, json, .{});
+    defer parsed.deinit();
+
+    var list = try parseTransactionAuthorizationList(
+        allocator,
+        &parsed.value.object,
+        .error_malformed_list,
+    );
+    defer list.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 4), list.count);
+    try std.testing.expectEqual(@as(usize, 2), list.entries.len);
+    try std.testing.expectEqual(evmz.addr(0xb1), list.entries[0].signer);
+    try std.testing.expectEqual(evmz.addr(0xb4), list.entries[1].signer);
+    try std.testing.expectEqual(@as(u64, 7), list.entries[1].nonce);
 }

@@ -43,15 +43,15 @@ pub const AccessListEntry = struct {
     storage_keys: []const u256 = &.{},
 };
 
-pub const AuthorizationTuple = struct {
+/// One EIP-7702 authorization whose signature the decoding edge has already
+/// checked and recovered; `signer` is the authority. A tuple that fails the
+/// signature scalar-range check or recovery never becomes a value of this
+/// type: the edge drops it and still counts it in `authorization_count`.
+pub const RecoveredAuthorization = struct {
     chain_id: u256,
     target: Address,
     signer: Address,
     nonce: u64,
-    y_parity: u256,
-    legacy_v: ?u256,
-    r: u256,
-    s: u256,
 };
 
 pub const FeeFields = struct {
@@ -85,7 +85,7 @@ pub const Transaction = struct {
     max_fee_per_blob_gas: ?u256 = null,
     blob_hashes: []const u256 = &.{},
     access_list: []const AccessListEntry = &.{},
-    authorization_list: []const AuthorizationTuple = &.{},
+    authorization_list: []const RecoveredAuthorization = &.{},
     authorization_count: ?usize = null,
 };
 
@@ -116,7 +116,7 @@ pub const TransactionView = struct {
     value: u256 = 0,
     input: []const u8 = &.{},
     access_list: []const AccessListEntry = &.{},
-    authorization_list: []const AuthorizationTuple = &.{},
+    authorization_list: []const RecoveredAuthorization = &.{},
     authorization_count: usize = 0,
     fee: FeeFields = .{},
     blob_hashes: []const u256 = &.{},
@@ -223,7 +223,7 @@ pub const TransactionScope = struct {
 
     context: Context,
     access_list: []const AccessListEntry = &.{},
-    authorization_list: []const AuthorizationTuple = &.{},
+    authorization_list: []const RecoveredAuthorization = &.{},
     /// Count of authorization tuples *parsed* from the transaction. May exceed
     /// `authorization_list.len` (malformed tuples are parsed but dropped from the
     /// list). Set explicitly — it does NOT default from the list, so a scope built

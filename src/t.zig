@@ -490,16 +490,12 @@ pub fn expectExecuted(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
     };
 }
 
-pub fn testAuthorization(signer: Address, target: Address) evmz.transaction.AuthorizationTuple {
+pub fn testAuthorization(signer: Address, target: Address) evmz.transaction.RecoveredAuthorization {
     return .{
         .chain_id = 0,
         .target = target,
         .signer = signer,
         .nonce = 0,
-        .y_parity = 0,
-        .legacy_v = null,
-        .r = 1,
-        .s = 1,
     };
 }
 

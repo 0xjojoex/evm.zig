@@ -277,7 +277,12 @@ pub fn build(b: *std.Build) void {
     const statetest_tests = b.addTest(.{ .root_module = statetest_cli_mod });
     statetest_tests.use_llvm = true;
     const run_statetest_tests = b.addRunArtifact(statetest_tests);
-    b.step("statetest-test", "Test state-test tooling").dependOn(&run_statetest_tests.step);
+    const fixtures_tests = b.addTest(.{ .root_module = fixtures_mod });
+    fixtures_tests.use_llvm = true;
+    const run_fixtures_tests = b.addRunArtifact(fixtures_tests);
+    const statetest_test_step = b.step("statetest-test", "Test state-test tooling");
+    statetest_test_step.dependOn(&run_statetest_tests.step);
+    statetest_test_step.dependOn(&run_fixtures_tests.step);
 
     const blocktest_cli_mod = b.createModule(.{
         .root_source_file = b.path("tools/blocktest/main.zig"),
@@ -362,6 +367,7 @@ pub fn build(b: *std.Build) void {
     const ci_step = b.step("ci", "Run deterministic pull-request verification");
     ci_step.dependOn(&core_check.step);
     ci_step.dependOn(&run_statetest_tests.step);
+    ci_step.dependOn(&run_fixtures_tests.step);
     ci_step.dependOn(&run_t8n_tests.step);
     ci_step.dependOn(&cli.step);
     ci_step.dependOn(blocktest_test_step);

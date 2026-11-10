@@ -1,8 +1,9 @@
 //! EIP-7702 runtime helpers and authorization-signature validation.
 //!
 //! Delegation bytes live under `code/`; authorization costs and signing
-//! parameters live under `transaction/`. Signature behavior stays here in the
-//! executor layer.
+//! parameters live under `transaction/`. The signature scalar-range checks
+//! here serve the decoding edges that recover signers: the executor consumes
+//! `transaction.RecoveredAuthorization` and never sees a signature.
 const std = @import("std");
 const delegation = @import("../code/eip7702.zig");
 
