@@ -58,6 +58,10 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   and the output root change. Witness trie reads and deletion collapses now reject
   a node that does not fit a 32-byte secured key wherever they reach it.
 - Updated the execution fixture corpus to `tests@v21.0.1`.
+- Native artifacts keep frame pointers in `debug` and `safe` builds and omit
+  them in `fast` and `small`; `safe` builds used to omit them.
+  `-Dframe-pointers=<bool>` overrides the default. zkVM guests still omit them
+  in every release mode.
 
 ### EVM
 
