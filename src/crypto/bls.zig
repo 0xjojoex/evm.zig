@@ -28,6 +28,14 @@ pub const PublicKey = struct {
         if (!c.blst_p1_affine_in_g1(&key.point)) return error.InvalidPublicKey;
         return key;
     }
+
+    /// The 48-byte compressed encoding `fromCompressed` takes: a key kept
+    /// decompressed can be stored and read back.
+    pub fn toCompressed(key: *const PublicKey) [48]u8 {
+        var out: [48]u8 = undefined;
+        c.blst_p1_affine_compress(&out, &key.point);
+        return out;
+    }
 };
 
 /// A running sum of public keys, `AggregatePKs` of the consensus specs.
@@ -114,7 +122,11 @@ test "fromCompressed is deserialization plus KeyValidate" {
             try testing.expect(!expected);
             continue;
         };
-        const valid = if (PublicKey.fromCompressed(&bytes)) |_| true else |_| false;
+        const valid = if (PublicKey.fromCompressed(&bytes)) |key| valid: {
+            // A valid key compresses back to the bytes it came from.
+            try testing.expectEqualSlices(u8, &bytes, &key.toCompressed());
+            break :valid true;
+        } else |_| false;
         testing.expectEqual(expected, valid) catch |err| {
             std.debug.print("vector {s}\n", .{name});
             return err;

@@ -56,6 +56,8 @@ Added
   `PublicKey`, an `Aggregate` of keys, and `verify` with the
   proof-of-possession ciphersuite), which together make `FastAggregateVerify`
   for light clients. Native profile only.
+- `crypto.bls.PublicKey.toCompressed`: the 48-byte encoding back from a
+  validated key, so a light client can store the keys it holds decompressed.
 - `state.OverrideReader`: a `state.Reader` that answers some accounts from
   caller overrides and the rest from a parent reader, for simulations with
   `eth_call`-style state overrides: balance, nonce and code by field, storage
