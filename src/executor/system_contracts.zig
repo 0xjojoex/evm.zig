@@ -209,7 +209,7 @@ fn callSystemContract(
     observer: anytype,
 ) !void {
     const has_code = try executor.accountHasCode(recipient);
-    if (validation == .checked and !has_code) return error.SystemCallFailed;
+    if (validation == .checked and !has_code) return error.SystemContractEmpty;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
             execution_context,
@@ -248,7 +248,7 @@ fn callSystemContractInPrelude(
     validation: block_lifecycle.BlockSystemCall.Validation,
 ) @TypeOf(prelude).Error!void {
     const has_code = (try prelude.code(recipient)).len != 0;
-    if (validation == .checked and !has_code) return error.SystemCallFailed;
+    if (validation == .checked and !has_code) return error.SystemContractEmpty;
 
     const result = try prelude.executeRequest(.{
         .context = execution_context,
@@ -280,7 +280,7 @@ fn callRequestSystemContract(
     observer: anytype,
 ) !?[]const u8 {
     const has_code = try executor.accountHasCode(recipient);
-    if (validation == .checked and !has_code) return error.SystemCallFailed;
+    if (validation == .checked and !has_code) return error.SystemContractEmpty;
     const result = switch (mode) {
         .normal => try executor.executeSystemCall(
             execution_context,
@@ -428,7 +428,7 @@ test "system call validation determines whether code is required" {
         .gas = evmz.eth.system_call_gas,
         .validation = .checked,
     };
-    try std.testing.expectError(error.SystemCallFailed, applyBeforeBlock(
+    try std.testing.expectError(error.SystemContractEmpty, applyBeforeBlock(
         &executor,
         testExecutionContext(),
         &.{call},
@@ -614,7 +614,7 @@ test "finalize block rejects missing required system contract code" {
         .state_gas = 0,
     });
     try std.testing.expectError(
-        error.SystemCallFailed,
+        error.SystemContractEmpty,
         applyFinalizeBlock(
             &executor,
             testExecutionContext(),

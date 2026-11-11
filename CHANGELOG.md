@@ -130,6 +130,11 @@ Changed
   gas, and `ValidationError` gains `type_6_tx_pre_fork` and the EEST-named
   `type_6_invalid_frame_format`, `type_6_invalid_signature` and
   `type_6_invalid_frame_execution` rejections.
+- A checked system call whose contract has no code fails with the new executor
+  error `SystemContractEmpty`, and the block STF reports it as
+  `Status.system_contract_empty` instead of `system_contract_failed`, which
+  now means only a call that ran and failed. This matches EEST's
+  `SYSTEM_CONTRACT_EMPTY` and `SYSTEM_CONTRACT_CALL_FAILED`.
 - libsecp256k1 is the only native secp256k1 provider and is always fetched
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the

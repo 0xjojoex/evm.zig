@@ -21,6 +21,8 @@ pub const Error = error{
     InvalidWitness,
     NotImplemented,
     SystemCallFailed,
+    /// A checked system call's contract has no code.
+    SystemContractEmpty,
 };
 
 pub fn normalize(err: anyerror) Error {
@@ -42,6 +44,7 @@ pub fn normalize(err: anyerror) Error {
         error.InvalidWitness => error.InvalidWitness,
         error.NotImplemented => error.NotImplemented,
         error.SystemCallFailed => error.SystemCallFailed,
+        error.SystemContractEmpty => error.SystemContractEmpty,
         else => error.InfrastructureFailure,
     };
 }

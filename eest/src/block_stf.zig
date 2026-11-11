@@ -231,6 +231,7 @@ fn expectedExceptionMatches(result: block_stf.Result, expected: []const u8) bool
         .invalid_deposit_event_layout => "BlockException.INVALID_DEPOSIT_EVENT_LAYOUT",
         .invalid_requests, .requests_hash_mismatch => "BlockException.INVALID_REQUESTS",
         .system_contract_failed => "BlockException.SYSTEM_CONTRACT_CALL_FAILED",
+        .system_contract_empty => "BlockException.SYSTEM_CONTRACT_EMPTY",
         .block_gas_exceeded => "BlockException.GAS_USED_OVERFLOW",
         .blob_gas_limit_exceeded => "BlockException.BLOB_GAS_USED_ABOVE_LIMIT",
         .parent_hash_mismatch, .parent_header_mismatch => "BlockException.UNKNOWN_PARENT",

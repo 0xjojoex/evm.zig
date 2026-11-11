@@ -995,6 +995,10 @@ fn executeFork(
                     block_exception = "BlockException.SYSTEM_CONTRACT_CALL_FAILED";
                     break :blk &.{};
                 },
+                error.SystemContractEmpty => blk: {
+                    block_exception = "BlockException.SYSTEM_CONTRACT_EMPTY";
+                    break :blk &.{};
+                },
                 else => return err,
             };
         }
