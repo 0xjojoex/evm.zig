@@ -46,6 +46,7 @@ class EvmzTransitionTool(TransitionTool):
         "Prague",
         "Osaka",
         "Amsterdam",
+        "Bogota",
     }
 
     def __init__(
