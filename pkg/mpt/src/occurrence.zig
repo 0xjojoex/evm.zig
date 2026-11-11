@@ -176,6 +176,8 @@ const DeleteFrame = union(enum) {
     branch: struct {
         node: OccurrenceId,
         child_index: u8,
+        /// Key nibbles left below the branch's children.
+        child_remaining: u7,
     },
 };
 
@@ -661,6 +663,7 @@ fn Context(
                         frames[frame_count] = .{ .branch = .{
                             .node = current,
                             .child_index = child_index,
+                            .child_remaining = @intCast(remaining.len - 1),
                         } };
                         frame_count += 1;
                         current = child;
@@ -681,7 +684,7 @@ fn Context(
                         if (self.occurrence(child).kind == .empty) {
                             self.occurrence(parent.node).kind.branch.children[parent.child_index] = .empty;
                         }
-                        try self.compressBranch(parent.node);
+                        try self.compressBranch(parent.node, parent.child_remaining);
                     },
                 }
             }
@@ -716,7 +719,10 @@ fn Context(
             self.markDirty(node);
         }
 
-        fn compressBranch(self: *Self, node: OccurrenceId) AllocUpdateError!void {
+        /// Collapse a branch left with one child. That child is reached here
+        /// for the first time, so it gets the same fixed-key path-length checks
+        /// as a node reached by `insert` or `delete`.
+        fn compressBranch(self: *Self, node: OccurrenceId, child_remaining: u7) AllocUpdateError!void {
             const branch = switch (self.occurrence(node).kind) {
                 .branch => |*value| value,
                 else => unreachable,
@@ -747,6 +753,7 @@ fn Context(
                 .empty => self.occurrence(node).kind = .empty,
                 .sealed, .source => unreachable,
                 .branch => {
+                    if (child_remaining == 0) return error.InvalidNode;
                     self.occurrence(node).kind = .{ .extension = .{
                         .path = try self.oneNibble(child_nibble),
                         .child = child,
@@ -754,12 +761,14 @@ fn Context(
                     self.setParent(child, .{ .extension = node });
                 },
                 .leaf => |leaf| {
+                    if (leaf.path.len != child_remaining) return error.InvalidNode;
                     self.occurrence(node).kind = .{ .leaf = .{
                         .path = try self.prepend(child_nibble, leaf.path),
                         .value = leaf.value,
                     } };
                 },
                 .extension => |extension| {
+                    if (extension.path.len >= child_remaining) return error.InvalidNode;
                     self.occurrence(node).kind = .{ .extension = .{
                         .path = try self.prepend(child_nibble, extension.path),
                         .child = extension.child,

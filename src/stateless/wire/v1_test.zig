@@ -403,6 +403,39 @@ test "stateless wire v1 validation failure preserves the input commitment" {
     }, result);
 }
 
+test "stateless wire v1 caps Amsterdam versioned hashes at 4096" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var input = try smoke.smokeInput(scratch);
+    const hashes = try scratch.alloc([32]u8, 4097);
+    @memset(hashes, @splat(0xab));
+    input.new_payload_request.amsterdam.versioned_hashes = hashes;
+    try std.testing.expectError(error.InvalidListLength, input.encodeSchemaPrefixed(scratch));
+
+    input.new_payload_request.amsterdam.versioned_hashes = hashes[0..4096];
+    const at_cap = try input.encodeSchemaPrefixed(scratch);
+    const decoded = try wire.StatelessInput.decodeSchemaPrefixed(scratch, at_cap);
+    try std.testing.expectEqual(@as(usize, 4096), decoded.new_payload_request.amsterdam.versioned_hashes.len);
+    const at_cap_output = try wire.validateStatelessBytes(scratch, at_cap);
+    try std.testing.expectEqual(wire.schema_id, (try wire.StatelessValidationResult.decode(scratch, at_cap_output)).schema_id);
+
+    // Splice one more hash into the canonical encoding. The request's fixed
+    // part is payload offset, hashes offset, parent root, requests offset;
+    // the requests offset and the top-level witness offset follow the hashes.
+    const request = wire.schema_id_size + std.mem.readInt(u32, at_cap[2..6], .little);
+    const hashes_end = request + std.mem.readInt(u32, at_cap[request + 4 ..][0..4], .little) + 4096 * 32;
+    const over_cap = try std.mem.concat(scratch, u8, &.{ at_cap[0..hashes_end], &hashes[0], at_cap[hashes_end..] });
+    for ([_]usize{ 6, request + 40 }) |offset| {
+        const field = over_cap[offset..][0..4];
+        std.mem.writeInt(u32, field, std.mem.readInt(u32, field, .little) + 32, .little);
+    }
+    try std.testing.expectError(error.InvalidListLength, wire.StatelessInput.decodeSchemaPrefixed(scratch, over_cap));
+    const output = try wire.validateStatelessBytes(scratch, over_cap);
+    try std.testing.expectEqualSlices(u8, &(@as([43]u8, @splat(0))), output);
+}
+
 test "stateless wire v1 protocol fork values match tests-zkevm v21.0.1" {
     try std.testing.expectEqual(wire.ProtocolFork.paris, try wire.ProtocolFork.fromInt(0x0e));
     try std.testing.expectEqual(wire.ProtocolFork.amsterdam, try wire.ProtocolFork.fromInt(0x15));

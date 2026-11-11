@@ -268,6 +268,24 @@ pub const Catalog = struct {
 
     /// Lookup plus the stable terminal node handle used to bind typed values.
     pub fn lookupBound(self: Catalog, root: Root, key: []const u8) errors.LookupError!BoundLookup {
+        return self.lookupBoundWith(root, key, false);
+    }
+
+    /// `lookupBound` for a trie whose every key is a `FixedKey`, such as a
+    /// secured state or storage trie. Every node the lookup reaches must fit
+    /// that key width: a leaf ends exactly at the last nibble, an extension
+    /// ends before it, and a branch holds no value. The checks match
+    /// `bindSorted`, but cover only the nodes on `key`'s path.
+    pub fn lookupFixed(self: Catalog, root: Root, key: *const fixed_key.FixedKey) errors.LookupError!BoundLookup {
+        return self.lookupBoundWith(root, key, true);
+    }
+
+    fn lookupBoundWith(
+        self: Catalog,
+        root: Root,
+        key: []const u8,
+        comptime fixed: bool,
+    ) errors.LookupError!BoundLookup {
         if (root == .empty) return .{ .absent = .empty_trie };
         const key_nibbles = std.math.mul(usize, key.len, 2) catch
             return error.ResourceLimitExceeded;
@@ -285,6 +303,7 @@ pub const Catalog = struct {
             switch (current_node.kind) {
                 .leaf => {
                     const path = current_node.path() orelse return error.InvalidNode;
+                    if (fixed and depth + path.len != key_nibbles) return error.InvalidNode;
                     if (!path.matchesKey(key, depth)) return .{ .absent = .divergent_path };
                     if (depth + path.len != key_nibbles) return .{ .absent = .divergent_path };
                     return .{ .present = .{
@@ -294,12 +313,17 @@ pub const Catalog = struct {
                 },
                 .extension => {
                     const path = current_node.path() orelse return error.InvalidNode;
+                    if (fixed and depth + path.len >= key_nibbles) return error.InvalidNode;
                     if (!path.matchesKey(key, depth)) return .{ .absent = .divergent_path };
                     current = try (current_node.extensionChild() orelse
                         return error.InvalidNodeReference).followRequired();
                     depth += path.len;
                 },
                 .branch => {
+                    if (fixed) {
+                        if (current_node.value() != null) return error.NonCanonicalNode;
+                        if (depth == key_nibbles) return error.InvalidNode;
+                    }
                     if (depth == key_nibbles) {
                         return if (current_node.value()) |value|
                             .{ .present = .{ .node = current, .value = value } }
