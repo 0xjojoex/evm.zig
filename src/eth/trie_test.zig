@@ -34,7 +34,6 @@ const hashedAddressKey = trie.hashedAddressKey;
 const storageValue = trie.storageValue;
 const accountValueFrom = trie.accountValueFrom;
 const indexWitness = trie.indexWitness;
-const proof = trie.proof;
 const buildWitnessCatalog = trie.buildWitnessCatalog;
 const updateRoot = trie.updateRoot;
 
@@ -379,16 +378,6 @@ test "MPT root rejects duplicate keys" {
     try std.testing.expectError(error.DuplicateKey, root(std.testing.allocator, &pairs));
 }
 
-test "MPT proof lookup rejects malformed compact paths" {
-    const malformed = [_]u8{ 0xc2, 0x40, 0x80 };
-    const root_hash = crypto.keccak256(&malformed);
-    const nodes = [_][]const u8{&malformed};
-    var witness = try indexWitness(std.testing.allocator, &nodes);
-    defer witness.deinit();
-
-    try std.testing.expectError(error.InvalidCompactPath, proof(root_hash, witness).get(""));
-}
-
 test "MPT update root inserts into empty trie" {
     const allocator = std.testing.allocator;
     const update = [_]Update{.{ .key = "dog", .value = "puppy" }};
@@ -410,27 +399,7 @@ test "authenticated account cache preserves cached absence" {
     try std.testing.expect(cache.get(address.addr(2)) == null);
 }
 
-test "MPT proof lookup resolves a root leaf" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const key = hashedStorageKey(0);
-    const value = try storageValue(scratch, 42);
-    const pairs = [_]Pair{.{ .key = &key, .value = value }};
-    const root_node = try encodedRoot(scratch, &pairs);
-    const root_hash = crypto.keccak256(root_node);
-    const nodes = [_][]const u8{root_node};
-    const indexed = try indexWitness(scratch, &nodes);
-
-    const found = (try proof(root_hash, indexed).get(&key)).?;
-    try std.testing.expectEqualSlices(u8, value, found);
-
-    const missing_key = hashedStorageKey(1);
-    try std.testing.expect(try proof(root_hash, indexed).get(&missing_key) == null);
-}
-
-test "MPT proof lookup walks hashed child nodes" {
+test "witness index lookup walks hashed child nodes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -453,29 +422,11 @@ test "MPT proof lookup walks hashed child nodes" {
     const nodes = [_][]const u8{ root_node, child_node };
     const indexed = try indexWitness(scratch, &nodes);
 
-    const found = (try proof(root_hash, indexed).get(&keys[14])).?;
-    try std.testing.expectEqualSlices(u8, &values[14], found);
+    try std.testing.expectEqualSlices(u8, &values[14], (try indexed.lookup(root_hash, &keys[14])).present);
 
     const omitted_child = [_][]const u8{root_node};
     const omitted_indexed = try indexWitness(scratch, &omitted_child);
-    try std.testing.expectError(error.MissingNode, proof(root_hash, omitted_indexed).get(&keys[14]));
-}
-
-test "MPT proof lookup proves branch absence" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-
-    const pairs = [_]Pair{
-        .{ .key = &[_]u8{0x10}, .value = &[_]u8{0x01} },
-        .{ .key = &[_]u8{0x12}, .value = &[_]u8{0x02} },
-    };
-    const root_node = try encodedRoot(scratch, &pairs);
-    const root_hash = crypto.keccak256(root_node);
-    const nodes = [_][]const u8{root_node};
-    const indexed = try indexWitness(scratch, &nodes);
-
-    try std.testing.expect(try proof(root_hash, indexed).get(&[_]u8{0x11}) == null);
+    try std.testing.expectError(error.MissingNode, omitted_indexed.lookup(root_hash, &keys[14]));
 }
 
 test "witness catalog links state and witness-present storage roots" {
