@@ -65,7 +65,8 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   experimental and outside the compatibility surface. `-Dc-api-forks=recent|all`
   picks the compiled forks (default `recent`: Cancun, Prague, `.stable`,
   `.latest`). A host links `-levmz -lblst -lc++`; `zig build c-api-test` runs
-  its tests.
+  its tests, and with `EVMZ_STATE_FIXTURES=<directory>` runs a tree of EEST
+  state fixtures through the ABI.
 - Native artifacts keep frame pointers in `debug` and `safe` builds and omit
   them in `fast` and `small`; `safe` builds used to omit them.
   `-Dframe-pointers=<bool>` overrides the default. zkVM guests still omit them

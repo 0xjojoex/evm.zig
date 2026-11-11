@@ -937,6 +937,7 @@ fn addressWord(value: Address) u256 {
 const TestHost = struct {
     memory: evmz.state.MemoryStore,
     fail: Failure = .none,
+    block_hash: *const fn (number: u64) u256 = blockHash,
     block_hash_requests: std.ArrayList(u64) = .empty,
     last_sink: ?*c.evmz_code_sink = null,
 
@@ -989,8 +990,9 @@ const TestHost = struct {
         return .{ .ptr = self, .vtable = &.{ .getBlockHash = engineBlockHash } };
     }
 
-    fn engineBlockHash(_: *anyopaque, number: u64) anyerror!?u256 {
-        return blockHash(number);
+    fn engineBlockHash(context: *anyopaque, number: u64) anyerror!?u256 {
+        const self: *TestHost = @ptrCast(@alignCast(context));
+        return self.block_hash(number);
     }
 
     fn from(context: ?*anyopaque) *TestHost {
@@ -1051,7 +1053,7 @@ const TestHost = struct {
         const self = from(context);
         if (self.fail == .block_hash) return host_failure;
         self.block_hash_requests.append(testing.allocator, number) catch return out_of_memory;
-        out.* = bytes32(blockHash(number));
+        out.* = bytes32(self.block_hash(number));
         found.* = 1;
         return ok;
     }
@@ -2143,4 +2145,186 @@ test "malformed arguments are refused and change nothing" {
     // None of it consumed the nonce or left a result pending.
     const result = try executeAccepted(&host, session, fixture.env, transfer(0));
     defer evmz_result_destroy(result);
+}
+
+// ---- State fixtures --------------------------------------------------------
+
+const statetest = @import("statetest");
+const json = statetest.fixture;
+
+/// The block hashes EEST state fixtures are filled against.
+fn stateFixtureBlockHash(number: u64) u256 {
+    var anchor: u8 = 0;
+    return (statetest.BlockHashSource.getBlockHash(&anchor, number) catch unreachable).?;
+}
+
+const StateVector = enum {
+    passed,
+    /// The fixture fails the transaction before a host would reach the ABI:
+    /// at its signature, which the host recovers, or at a nonce over the 64
+    /// bits EIP-2681 allows.
+    outside_abi,
+    /// The fixture's `post` names a fork this library was not built with.
+    fork_not_built,
+    unexpected_rejection,
+    missing_rejection,
+    status_mismatch,
+    gas_mismatch,
+    logs_mismatch,
+    root_mismatch,
+
+    fn failed(self: StateVector) bool {
+        return switch (self) {
+            .passed, .outside_abi, .fork_not_built => false,
+            else => true,
+        };
+    }
+};
+
+/// Whether the result's logs are the ones the fixture's receipt lists.
+fn logsMatch(arena: Allocator, data: *const c.evmz_result_data, expected: std.json.Array) !bool {
+    const logs = span(c.evmz_log, data.logs, data.logs_len);
+    if (logs.len != expected.items.len) return false;
+    for (logs, expected.items) |log, value| {
+        const object = json.asObject(value) orelse return error.MalformedFixture;
+        const log_address = try json.parseAddressFromValue(object.get("address") orelse
+            return error.MalformedFixture);
+        if (!std.mem.eql(u8, &log_address.bytes, &log.address.bytes)) return false;
+        const topics = json.asArray(object.get("topics") orelse return error.MalformedFixture) orelse
+            return error.MalformedFixture;
+        const log_topics = span(c.evmz_bytes32, log.topics, log.topics_len);
+        if (log_topics.len != topics.items.len) return false;
+        for (log_topics, topics.items) |topic, topic_value| {
+            if (word(topic) != try json.parseU256FromValue(topic_value)) return false;
+        }
+        const log_data = try json.parseBytesFromValue(arena, object.get("data") orelse
+            return error.MalformedFixture);
+        if (!std.mem.eql(u8, log_data, span(u8, log.data, log.data_len))) return false;
+    }
+    return true;
+}
+
+/// Runs one `post` entry through a session of its fork and applies the result
+/// to the host as `executeAccepted` does, then holds the host's state root,
+/// and the receipt where the fixture has one, to the fixture's.
+fn runStateVector(
+    comptime revision: Revision,
+    document: *const std.json.ObjectMap,
+    post: *const std.json.ObjectMap,
+    fork_name: []const u8,
+) !StateVector {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const expected_exception = if (post.get("expectException")) |value|
+        json.jsonString(value) orelse return error.MalformedFixture
+    else
+        null;
+    if (expected_exception) |expected| {
+        if (std.mem.find(u8, expected, "INVALID_SIGNATURE_VRS") != null) return .outside_abi;
+    }
+    const vector = try statetest.parseVector(revision, arena, document, post, fork_name);
+    if (vector.tx.nonce) |nonce| {
+        if (nonce > std.math.maxInt(u64)) return .outside_abi;
+    }
+
+    var host: TestHost = .init();
+    defer host.deinit();
+    host.block_hash = stateFixtureBlockHash;
+    try json.seedMemoryStore(testing.allocator, &host.memory, &vector.pre);
+    const session = try host.createSession(@backingInt(revision));
+    defer evmz_session_destroy(session);
+
+    var out: ?*c.evmz_result = null;
+    try testing.expectEqual(ok, try executeTransaction(session, vector.env, null, vector.tx, &out));
+    defer evmz_result_destroy(out);
+    const data = dataOf(out.?);
+    if (data.outcome == c.EVMZ_OUTCOME_REJECTED) {
+        if (expected_exception == null) return .unexpected_rejection;
+    } else {
+        if (expected_exception != null) return .missing_rejection;
+        try testing.expectEqual(ok, evmz_session_accept(session));
+        try host.apply(data);
+        if (post.get("receipt")) |receipt_value| {
+            const receipt = json.asObject(receipt_value) orelse return error.MalformedFixture;
+            const succeeded = switch (receipt.get("status") orelse return error.MalformedFixture) {
+                .bool => |status| status,
+                else => return error.MalformedFixture,
+            };
+            if (succeeded != (data.status == c.EVMZ_EXECUTION_SUCCESS)) return .status_mismatch;
+            // One transaction, so the cumulative gas is its own.
+            const gas_used = try json.parseU64FromValue(receipt.get("cumulativeGasUsed") orelse
+                return error.MalformedFixture);
+            if (gas_used != data.gas.used) return .gas_mismatch;
+            const logs = json.asArray(receipt.get("logs") orelse return error.MalformedFixture) orelse
+                return error.MalformedFixture;
+            if (!try logsMatch(arena, data, logs)) return .logs_mismatch;
+        }
+    }
+
+    const expected_root = try json.parseHashFromValue(post.get("hash") orelse
+        return error.MalformedFixture);
+    const root = try host.memory.stateRootWithOptions(testing.allocator, .{
+        .empty_accounts = if (evmz.eth.specAt(revision).retains_empty_accounts) .include else .omit,
+    });
+    return if (std.mem.eql(u8, &root, &expected_root)) .passed else .root_mismatch;
+}
+
+// Every EEST state fixture under the directory `EVMZ_STATE_FIXTURES` names,
+// for the forks this library was built with. Skipped when it is unset.
+test "state fixtures reach their post-state through the C ABI" {
+    const root_path = std.mem.span(std.c.getenv("EVMZ_STATE_FIXTURES") orelse
+        return error.SkipZigTest);
+    const io = testing.io;
+    var root = try std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true });
+    defer root.close(io);
+    var walker = try root.walk(testing.allocator);
+    defer walker.deinit();
+
+    var counts: std.EnumArray(StateVector, usize) = .initFill(0);
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".json")) continue;
+        var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const bytes = try root.readFileAlloc(io, entry.path, arena, .limited(1 << 30));
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{
+            .parse_numbers = false,
+        });
+        var cases = json.asObject(parsed) orelse return error.MalformedFixture;
+        var case_it = cases.iterator();
+        while (case_it.next()) |case| {
+            const document = json.asObject(case.value_ptr.*) orelse return error.MalformedFixture;
+            var posts = json.asObject(document.get("post") orelse return error.MalformedFixture) orelse
+                return error.MalformedFixture;
+            var post_it = posts.iterator();
+            while (post_it.next()) |fork_entry| {
+                const fork_name = fork_entry.key_ptr.*;
+                const vectors = json.asArray(fork_entry.value_ptr.*) orelse
+                    return error.MalformedFixture;
+                const revision = json.parseStateFork(fork_name) orelse return error.MalformedFixture;
+                for (vectors.items, 0..) |vector, index| {
+                    const post = json.asObject(vector) orelse return error.MalformedFixture;
+                    const verdict: StateVector = if (compiledFork(@backingInt(revision)) == null)
+                        .fork_not_built
+                    else switch (revision) {
+                        inline else => |exact| try runStateVector(exact, &document, &post, fork_name),
+                    };
+                    counts.set(verdict, counts.get(verdict) + 1);
+                    if (verdict.failed()) std.debug.print("{s}: {s} {s} {s}[{d}]\n", .{
+                        @tagName(verdict), entry.path, case.key_ptr.*, fork_name, index,
+                    });
+                }
+            }
+        }
+    }
+
+    var failed: usize = 0;
+    for (std.enums.values(StateVector)) |verdict| {
+        std.debug.print("{s:<22} {d:>7}\n", .{ @tagName(verdict), counts.get(verdict) });
+        if (verdict.failed()) failed += counts.get(verdict);
+    }
+    try testing.expect(counts.get(.passed) != 0);
+    try testing.expectEqual(0, failed);
 }
