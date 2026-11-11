@@ -1492,6 +1492,28 @@ test "stateless receipt encoder writes consensus receipt rlp" {
     try std.testing.expectEqualSlices(u8, encoded, typed[1..]);
 }
 
+test "frame transaction receipt carries the payer and per-frame logs, not a status or bloom" {
+    const topics = [_]u256{9};
+    var logs = try state.LogBuffer.fromLogs(std.testing.allocator, &.{
+        .{ .address = .fromBytes(@splat(0x33)), .topics = &topics, .data = &.{0xab} },
+        .{ .address = .fromBytes(@splat(0x22)), .topics = &.{}, .data = &.{} },
+    });
+    defer logs.deinit(std.testing.allocator);
+    const frame_receipts = [_]transaction.frames.Receipt{
+        .{ .status = .success, .execution_gas_used = 3, .state_gas_used = 0, .log_range = .init(0, 1) },
+        .{ .status = .success, .execution_gas_used = 5, .state_gas_used = 7, .log_range = .init(1, 1) },
+    };
+    const encoded = try encodeReceipt(std.testing.allocator, .frame, .{
+        .status = .success,
+        .cumulative_gas_used = 21_000,
+        .logs = logs.view(),
+        .frame = .{ .payer = .fromBytes(@splat(0x11)), .receipts = &frame_receipts },
+    });
+    defer std.testing.allocator.free(encoded);
+    // EELS `encode_receipt` of the same FrameTransactionReceipt.
+    try expectHex(encoded, "06f87b825208941111111111111111111111111111111111111111f861f84101c20380f83bf839943333333333333333333333333333333333333333e1a0000000000000000000000000000000000000000000000000000000000000000981abdd01c20507d8d7942222222222222222222222222222222222222222c080");
+}
+
 test "stateless receipt encoder includes logs and bloom" {
     const target = address.addr(0x3000);
     const topics = [_]u256{0x1234};

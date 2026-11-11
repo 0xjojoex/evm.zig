@@ -6,6 +6,7 @@
 
 const std = @import("std");
 
+const Address = @import("../address.zig").Address;
 const crypto = @import("../crypto.zig");
 const rlp = @import("rlp");
 const state = @import("../state.zig");
@@ -50,6 +51,34 @@ pub fn encode(allocator: std.mem.Allocator, kind: transaction.TxKind, receipt: T
     return encodeView(allocator, kind, receipt, &logs_bloom);
 }
 
+/// EIP-8141 frame transaction receipt payload: no transaction-level status
+/// and no bloom. Each frame reports its status, its gas per dimension, and
+/// its logs; the logs still reach the block bloom in frame order.
+pub const FramePayload = struct {
+    cumulative_gas_used: u64,
+    payer: Address,
+    frame_receipts: []const FrameReceipt,
+
+    pub const FrameReceipt = struct {
+        status: u8,
+        gas_used: GasUsed,
+        logs: []const Log,
+
+        pub const GasUsed = struct {
+            execution: u64,
+            state: u64,
+        };
+
+        pub const Rlp = rlp.Struct(@This(), .{
+            .logs = rlp.ListOf(LogRlp),
+        });
+    };
+
+    pub const Rlp = rlp.Struct(@This(), .{
+        .frame_receipts = rlp.ListOf(FrameReceipt.Rlp),
+    });
+};
+
 pub fn encodeView(
     allocator: std.mem.Allocator,
     kind: transaction.TxKind,
@@ -59,13 +88,40 @@ pub fn encodeView(
     const logs = try allocator.alloc(Log, receipt.logs.len());
     defer allocator.free(logs);
     for (logs, 0..) |*event_log, index| event_log.* = receipt.logs.get(index);
-    const payload: Payload = .{
+    if (receipt.frame) |frame| {
+        std.debug.assert(kind == .frame);
+        const frame_receipts = try allocator.alloc(FramePayload.FrameReceipt, frame.receipts.len);
+        defer allocator.free(frame_receipts);
+        for (frame_receipts, frame.receipts) |*encoded, frame_receipt| encoded.* = .{
+            .status = @backingInt(frame_receipt.status),
+            .gas_used = .{
+                .execution = frame_receipt.execution_gas_used,
+                .state = frame_receipt.state_gas_used,
+            },
+            .logs = logs[frame_receipt.log_range.offset..][0..frame_receipt.log_range.len],
+        };
+        return encodeEnvelope(allocator, kind, FramePayload, &.{
+            .cumulative_gas_used = receipt.cumulative_gas_used,
+            .payer = frame.payer,
+            .frame_receipts = frame_receipts,
+        });
+    }
+    return encodeEnvelope(allocator, kind, Payload, &.{
         .status = receiptStatus(receipt.status),
         .cumulative_gas_used = receipt.cumulative_gas_used,
         .logs_bloom = logs_bloom.*,
         .logs = logs,
-    };
-    const payload_len = try rlp.encodedLen(Payload, &payload);
+    });
+}
+
+/// `payload`'s RLP behind the EIP-2718 type byte for typed kinds.
+fn encodeEnvelope(
+    allocator: std.mem.Allocator,
+    kind: transaction.TxKind,
+    comptime T: type,
+    payload: *const T,
+) ![]u8 {
+    const payload_len = try rlp.encodedLen(T, payload);
     const type_id = transactionType(kind);
     const envelope_len: usize = if (type_id == null) 0 else 1;
     const encoded_len = std.math.add(usize, envelope_len, payload_len) catch
@@ -74,7 +130,7 @@ pub fn encodeView(
     errdefer allocator.free(encoded);
 
     if (type_id) |id| encoded[0] = id;
-    const written = try rlp.encode(Payload, encoded[envelope_len..], &payload);
+    const written = try rlp.encode(T, encoded[envelope_len..], payload);
     std.debug.assert(written.len == payload_len);
     return encoded;
 }
