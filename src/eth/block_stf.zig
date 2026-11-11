@@ -304,6 +304,8 @@ pub const Status = enum {
     block_access_list_mismatch,
     block_access_list_hash_mismatch,
     block_hash_mismatch,
+    /// A checked system call's contract has no code.
+    system_contract_empty,
 };
 
 pub const Result = struct {
@@ -921,6 +923,7 @@ fn PayloadFold(
             after_result catch |err| switch (err) {
                 error.InvalidWitness => return Result{ .status = .invalid_witness, .tx_index = tx_index },
                 error.SystemCallFailed => return Result{ .status = .system_contract_failed, .tx_index = tx_index },
+                error.SystemContractEmpty => return Result{ .status = .system_contract_empty, .tx_index = tx_index },
                 else => return err,
             };
 
@@ -1247,6 +1250,7 @@ fn executeBlock(
         before_result catch |err| switch (err) {
             error.InvalidWitness => return .{ .status = .invalid_witness },
             error.SystemCallFailed => return .{ .status = .system_contract_failed },
+            error.SystemContractEmpty => return .{ .status = .system_contract_empty },
             else => return err,
         };
     }
@@ -1349,6 +1353,7 @@ fn executeBlock(
         return switch (Executor.errors.normalize(err)) {
             error.InvalidWitness => .{ .status = .invalid_witness },
             error.SystemCallFailed => .{ .status = .system_contract_failed },
+            error.SystemContractEmpty => .{ .status = .system_contract_empty },
             else => |normalized| normalized,
         };
     };
