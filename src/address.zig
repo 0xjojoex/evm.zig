@@ -62,8 +62,17 @@ pub const Address = extern struct {
         return &self.bytes;
     }
 
+    /// Three word compares, the last overlapping. `std.mem.eql` calls an
+    /// out-of-line scan on targets where it compares with vectors, and a
+    /// `u160` cast assembles the integer a byte at a time.
     pub inline fn eql(a: Address, b: Address) bool {
-        return std.mem.eql(u8, &a.bytes, &b.bytes);
+        return nativeWord(a.bytes[0..8]) == nativeWord(b.bytes[0..8]) and
+            nativeWord(a.bytes[8..16]) == nativeWord(b.bytes[8..16]) and
+            nativeWord(a.bytes[12..20]) == nativeWord(b.bytes[12..20]);
+    }
+
+    inline fn nativeWord(bytes: *const [8]u8) u64 {
+        return @bitCast(bytes.*);
     }
 
     pub inline fn order(a: Address, b: Address) std.math.Order {
@@ -334,6 +343,17 @@ test "address word preserves canonical bytes and truncates EVM words" {
             Address.order(target, other),
             AddressWord.order(word, .fromAddress(other)),
         );
+    }
+}
+
+test "Address.eql sees a difference in every byte" {
+    const base = Address.fromBytes(@splat(0x5a));
+    try std.testing.expect(Address.eql(base, Address.fromBytes(@splat(0x5a))));
+    for (0..Address.len) |index| {
+        var other = base;
+        other.bytes[index] ^= 1;
+        try std.testing.expect(!Address.eql(base, other));
+        try std.testing.expect(!Address.eql(other, base));
     }
 }
 
