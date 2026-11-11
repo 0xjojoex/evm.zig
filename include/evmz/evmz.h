@@ -18,6 +18,10 @@
  * - One session is used by one thread at a time. Sessions are independent of
  *   each other. Callbacks run synchronously on the calling thread, only inside
  *   `evmz_session_execute` and `evmz_session_execute_system_call`.
+ * - A callback must not call a function that takes the session it serves. Such
+ *   a call returns `EVMZ_REENTRANT_CALL` and does nothing, and
+ *   `evmz_session_destroy` does nothing. Other sessions and results are free
+ *   to use.
  * - Until evmz 1.0 a binding must match `evmz_abi_version()` exactly.
  *
  * Linking: `zig build c-api` installs this header, `libevmz.a` and `libblst.a`.
@@ -51,7 +55,9 @@ enum {
     EVMZ_HOST_FAILURE = 5,
     EVMZ_OUT_OF_MEMORY = 6,
     /* The engine failed for a reason the host did not cause. */
-    EVMZ_INTERNAL_ERROR = 7
+    EVMZ_INTERNAL_ERROR = 7,
+    /* A callback called a function of the session it is serving. */
+    EVMZ_REENTRANT_CALL = 8
 };
 
 /* ---- Build identity ---------------------------------------------------- */
@@ -186,7 +192,10 @@ typedef struct evmz_env {
     uint64_t number;
     uint64_t slot_number;
     uint64_t timestamp;
-    /* The block gas limit. */
+    /*
+     * The block gas limit, at most INT64_MAX. Zero means the block has no
+     * limit.
+     */
     uint64_t gas_limit;
     /*
      * The header's two fields as they are. Opcode 0x44 returns `difficulty`
@@ -202,16 +211,24 @@ typedef struct evmz_env {
     evmz_blob_params blob_params;
 } evmz_env;
 
+/*
+ * Block gas in the two dimensions EIP-8037 counts. Before Amsterdam `regular`
+ * is the receipt gas and `state` is zero.
+ *
+ * The gas a block used, which its header carries, is
+ * max(sum of `regular`, sum of `state`) over its transactions. That is not the
+ * sum of a per-transaction maximum, so no total is reported to add up.
+ */
 typedef struct evmz_block_gas {
-    uint64_t total;
     uint64_t regular;
     uint64_t state;
 } evmz_block_gas;
 
 /*
  * What the block has consumed before this transaction. The session does not
- * track blocks: the host sums `receipt_gas_used` from `evmz_gas.used` and
- * `block_gas` from `evmz_gas.block` over the results it accepted.
+ * track blocks: the host sums `receipt_gas_used` from `evmz_gas.used`, and
+ * each field of `block_gas` from the same field of `evmz_gas.block`, over the
+ * results it accepted.
  */
 typedef struct evmz_block_progress {
     uint64_t receipt_gas_used;
@@ -244,6 +261,22 @@ typedef struct evmz_recovered_authorization {
     uint64_t nonce;
 } evmz_recovered_authorization;
 
+/*
+ * A field its `kind` does not have must be absent: the `has_*` flag 0, the
+ * list length 0. Anything else returns EVMZ_INVALID_ARGUMENT.
+ *
+ *                              LEGACY  ACCESS_LIST  DYNAMIC_FEE  BLOB  SET_CODE
+ *   access_list                  -          x            x        x       x
+ *   max_fee_per_gas              -          -            x        x       x
+ *   max_priority_fee_per_gas     -          -            x        x       x
+ *   max_fee_per_blob_gas         -          -            -        x       -
+ *   blob_hashes                  -          -            -        x       -
+ *   authorization_list           -          -            -        -       x
+ *   authorization_count          -          -            -        -       x
+ *
+ * LEGACY and ACCESS_LIST pay `gas_price`. The other kinds pay by
+ * `max_fee_per_gas` and are rejected without it.
+ */
 typedef struct evmz_transaction {
     /* One of EVMZ_TX_*. */
     uint32_t kind;
@@ -254,6 +287,11 @@ typedef struct evmz_transaction {
     /* Absent skips the nonce check. */
     uint8_t has_nonce;
     uint64_t nonce;
+    /*
+     * Above INT64_MAX the transaction is rejected, since no block gas limit
+     * is that high. In a block without a limit it returns
+     * EVMZ_INVALID_ARGUMENT instead.
+     */
     uint64_t gas_limit;
     /* Absent creates a contract. */
     uint8_t has_to;
@@ -286,6 +324,7 @@ typedef struct evmz_transaction {
  * A protocol call such as the EIP-4788 beacon root update. It pays no fees and
  * moves no value. The host supplies the gas: `gas_limit` is the regular budget
  * and `state_gas` the EIP-8037 state-gas reservoir, zero before Amsterdam.
+ * Each is at most INT64_MAX.
  */
 typedef struct evmz_system_call {
     evmz_address sender;
@@ -346,7 +385,7 @@ enum {
  * evmz_result_data.halt: how the root bytecode frame stopped. Valid when
  * `has_halt` is 1. No frame runs for a precompile target, so there is none to
  * report. Create finalization can fail after the frame returned, so a failed
- * status may carry a successful halt.
+ * status may carry a successful halt; `cause` says why it failed.
  */
 enum {
     EVMZ_HALT_STOP = 0,
@@ -360,6 +399,37 @@ enum {
     EVMZ_HALT_INVALID_JUMP = 8,
     EVMZ_HALT_WRITE_PROTECTION = 9,
     EVMZ_HALT_RETURN_DATA_OUT_OF_BOUNDS = 10
+};
+
+/*
+ * evmz_result_data.cause: why the execution ended with its status, counting
+ * what happens outside the root frame. Valid when the outcome is EXECUTED.
+ * EVMZ_CAUSE_NONE on success, except that a Frontier create that cannot pay
+ * for its code succeeds without code and reports CODE_STORE_OUT_OF_GAS.
+ */
+enum {
+    EVMZ_CAUSE_NONE = 0,
+    EVMZ_CAUSE_REVERT = 1,
+    EVMZ_CAUSE_OUT_OF_GAS = 2,
+    /* A failure with no more precise cause, such as a failed precompile. */
+    EVMZ_CAUSE_INVALID = 3,
+    EVMZ_CAUSE_CALL_DEPTH_EXCEEDED = 4,
+    EVMZ_CAUSE_INSUFFICIENT_BALANCE = 5,
+    EVMZ_CAUSE_NONCE_OVERFLOW = 6,
+    EVMZ_CAUSE_INVALID_OPCODE = 7,
+    EVMZ_CAUSE_STACK_UNDERFLOW = 8,
+    EVMZ_CAUSE_STACK_OVERFLOW = 9,
+    EVMZ_CAUSE_INVALID_JUMP = 10,
+    EVMZ_CAUSE_WRITE_PROTECTION = 11,
+    EVMZ_CAUSE_RETURN_DATA_OUT_OF_BOUNDS = 12,
+    /* The create address already holds a contract. */
+    EVMZ_CAUSE_CONTRACT_ADDRESS_COLLISION = 13,
+    /* The created code is longer than the fork allows. */
+    EVMZ_CAUSE_MAX_CODE_SIZE_EXCEEDED = 14,
+    /* The created code starts with 0xEF (EIP-3541). */
+    EVMZ_CAUSE_INVALID_CODE = 15,
+    /* The create could not pay to store its code. */
+    EVMZ_CAUSE_CODE_STORE_OUT_OF_GAS = 16
 };
 
 typedef struct evmz_gas {
@@ -463,6 +533,8 @@ typedef struct evmz_result_data {
     uint32_t status;
     uint8_t has_halt;
     uint32_t halt;
+    /* One of EVMZ_CAUSE_*. */
+    uint32_t cause;
     evmz_gas gas;
     const uint8_t *output;
     size_t output_len;
@@ -494,7 +566,10 @@ typedef struct evmz_session evmz_session;
 
 /* Copies `*host`; `host->context` must outlive the session. */
 evmz_status evmz_session_create(uint32_t fork, const evmz_host *host, evmz_session **out);
-/* Discards a pending result. NULL is a no-op. */
+/*
+ * Discards a pending result. NULL is a no-op, and so is a call from one of the
+ * session's own callbacks.
+ */
 void evmz_session_destroy(evmz_session *session);
 
 /*

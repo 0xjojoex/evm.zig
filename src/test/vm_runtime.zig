@@ -755,6 +755,35 @@ test "transaction result reports how the root frame halted" {
     }
 }
 
+test "transaction result reports why a create failed after its frame returned" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const sender = addr(0xaaaa);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
+
+    var executor = Latest.Executor.init(std.testing.allocator, .{
+        .state = .{ .reader = memory.reader() },
+    });
+    defer executor.deinit();
+
+    // The frame returns one byte, 0xEF, as the contract's code.
+    const result = try expectExecuted(try transact(Latest, &executor, .{
+        .env = .{ .gas_limit = 1_000_000 },
+        .tx = .{
+            .sender = sender,
+            .input = &evmz.t.bytecode(.{
+                .PUSH1, 0xef, .PUSH0, .MSTORE8,
+                .PUSH1, 1,    .PUSH0, .RETURN,
+            }),
+            .gas_limit = 500_000,
+        },
+    }));
+    try std.testing.expect(result.status != .success);
+    try std.testing.expectEqual(evmz.execution.FrameHalt.returned, result.frame_halt.?);
+    try std.testing.expectEqual(evmz.execution.TerminalCause.invalid_code, result.cause);
+}
+
 test "Executor exposes borrowed logs after transaction retention" {
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);

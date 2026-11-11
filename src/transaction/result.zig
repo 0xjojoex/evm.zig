@@ -18,6 +18,10 @@ pub const Execution = struct {
     /// finalization can fail after the frame returned, so a non-success
     /// `status` may carry a successful halt.
     frame_halt: ?execution.FrameHalt = null,
+    /// Why the execution ended as `status` says, after create finalization and
+    /// transaction prechecks. `.none` on success, except that a Frontier create
+    /// that cannot pay for its code succeeds with `.code_store_out_of_gas`.
+    cause: execution.TerminalCause = .none,
     /// Settled transaction gas: receipt gas, refund gas, and block contribution.
     gas: transaction.ResultGas = .{},
     output: []const u8 = &.{},
