@@ -66,7 +66,9 @@ Added
 - `execution.RootExecutionInit`: per-root entry mode for multi-root sessions.
   `.charge_call_target` charges the target's warm or cold access from the root's
   gas instead of warming sender and recipient, and `is_static` runs the root
-  read-only. These are the frame-entry rules of EIP-8141.
+  read-only. These are the frame-entry rules of EIP-8141. A charged root whose
+  sender cannot fund its value still records the target's access for the block
+  access list.
 - `eth.bogota` (`Revision.bogota`): Hegotá in development, Amsterdam plus
   EIP-8141 frame transactions with EIP-8250 keyed nonces, as bogota-devnet-2
   runs them. Not `latest` until EIP-8141 is complete. The `dev` test preset

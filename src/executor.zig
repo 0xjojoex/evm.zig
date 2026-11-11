@@ -2497,16 +2497,21 @@ pub fn ExecutorType(
                     // EIP-8141 checks the value before any later entry charge,
                     // such as resolving a delegation: a root that cannot fund
                     // its value fails having paid only the target's access.
-                    if (call.value != 0 and !try self.hasBalance(call.sender, call.value)) return .{
-                        .stage = .preparation,
-                        .result = .{
-                            .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
-                            .gas_left = std.math.lossyCast(i64, charged.gas.regular_left),
-                            .gas_refund = 0,
-                            .gas_reservoir = std.math.lossyCast(i64, charged.gas.reservoir),
-                            .output_data = &.{},
-                        },
-                    };
+                    // The target was already read to dispatch the frame, so
+                    // the failed root still records that access.
+                    if (call.value != 0 and !try self.hasBalance(call.sender, call.value)) {
+                        try self.traceAccountAccess(call.recipient);
+                        return .{
+                            .stage = .preparation,
+                            .result = .{
+                                .outcome = .{ .status = .invalid, .cause = .insufficient_balance },
+                                .gas_left = std.math.lossyCast(i64, charged.gas.regular_left),
+                                .gas_refund = 0,
+                                .gas_reservoir = std.math.lossyCast(i64, charged.gas.reservoir),
+                                .output_data = &.{},
+                            },
+                        };
+                    }
                 },
             }
             return self.executeTransactionRequestTrustedPhased(charged, root_init.is_static);

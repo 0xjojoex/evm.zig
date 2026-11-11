@@ -1992,6 +1992,47 @@ test "multi-root entry policy charges target access without warming the caller" 
     try std.testing.expectEqual(@as(i64, @intCast(10_000 - cold_cost)), unfunded.result.gas_left);
 }
 
+test "an unfunded charged root still observes its target" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const entry_point = evmz.addr(0xeeee);
+    const target = evmz.addr(0x1111);
+    const context = execution_values.ExecutionContext{
+        .chain = .{ .chain_id = 1 },
+        .transaction = .{ .origin = entry_point },
+    };
+
+    var executor = Latest.Executor.init(std.testing.allocator, .{});
+    defer executor.deinit();
+    try evmz.t.seedExecutorAccount(&executor, target, .{});
+
+    try transaction_runtime.begin(&executor, .observed);
+    defer if (executor.hasCurrentTransaction()) transaction_runtime.discard(&executor);
+    try transaction_runtime.beginRootSession(&executor, context, .{});
+    const unfunded = try transaction_runtime.runRoot(&executor, .{
+        .context = context,
+        .message = .{ .call = .{ .sender = entry_point, .recipient = target, .value = 1 } },
+        .gas = .legacy(10_000),
+    }, .{ .access = .charge_call_target });
+    try std.testing.expectEqual(Interpreter.Status.invalid, unfunded.result.status());
+    const executed = Latest.Executor.Executed(void){
+        .executor = &executor,
+        .generation = transaction_runtime.finish(&executor),
+        .output_value = {},
+    };
+    defer executed.discardIfCurrent();
+
+    // EIP-8141 reads the target to dispatch the frame before it checks the
+    // value, so the block access list records the target either way.
+    const accounts = executor.state.pendingView().observations().accounts;
+    var found = false;
+    var index: u32 = 0;
+    while (index < accounts.len()) : (index += 1) {
+        const record = accounts.at(index);
+        if (evmz.Address.eql(record.address, target)) found = record.observation.semantic_access;
+    }
+    try std.testing.expect(found);
+}
+
 test "multi-root static mode reaches nested frames" {
     const Latest = evmz.t.Vm(.latest).?;
     const sender = evmz.addr(0xaaaa);
