@@ -382,6 +382,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .evmz = native_evmz_mod,
+        .statetest = statetest_mod,
         .forks = c_api_forks,
         .omit_frame_pointer = omit_frame_pointer,
         .pic = if (pic) true else null,
@@ -818,6 +819,8 @@ const CApiConfig = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     evmz: *std.Build.Module,
+    /// The state-fixture parser, for the ABI's fixture-driven test.
+    statetest: *std.Build.Module,
     forks: CApiForks,
     omit_frame_pointer: bool,
     pic: ?bool,
@@ -853,6 +856,7 @@ fn addCApi(b: *std.Build, config: CApiConfig) *std.Build.Step {
         .imports = &.{
             .{ .name = "evmz", .module = config.evmz },
             .{ .name = "evmz_h", .module = header.mod },
+            .{ .name = "statetest", .module = config.statetest },
         },
     });
     module.addOptions("c_api_options", options);
