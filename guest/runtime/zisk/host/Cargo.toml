@@ -7,5 +7,5 @@ publish.workspace = true
 [dependencies]
 evmz-guest-host-protocol.workspace = true
 zisk-core.workspace = true
-zisk-transpiler-riscv.workspace = true
+zisk-transpiler-common.workspace = true
 ziskemu.workspace = true

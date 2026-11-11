@@ -34,13 +34,19 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   stage, and made guest releases promote one explicit strict-run artifact.
   Fixture roots travel in the resolved corpus manifest, and the `rev8` scan
   joined `check-guest-elf`.
-- Updated ERE platform providers and all release images to `v0.19.5`,
+- Updated ERE platform providers and all release images to `v0.20.0`,
   including SP1 verifier exit-code validation and verifier archive linking fixes.
   SP1 now uses upstream `v6.9.0`, which includes the standards-conformance fixes,
   replacing the temporary fork patch. OpenVM retains `v2.1.0-preview` and adopts
-  ERE's `openvm-accelerators` provider and matching host revision.
-  Updated the ZisK guest and execute-only host to `v1.3.2-alpha` at its exact
-  source commit with the `zisk-4.0.0` toolchain.
+  ERE's `openvm-accelerators` provider and matching host revision; ERE's platform
+  now exports the guest `read_input`/`write_output` ABI, so the repo-owned bridge
+  is gone.
+  Updated the ZisK guest and execute-only host to `v1.4.0-alpha` at its exact
+  source commit with the `zisk-4.1.0` toolchain. The guest follows ZisK 1.4's
+  memory map: ROM at `0x90000000`, and `-Dguest-zisk-ram-bytes` defaults to an
+  envelope ending at ZisK's heap top, `0xBFFC0000`, below the library scratch RAM;
+  a larger envelope fails to link. The host reports a nonzero guest exit code
+  apart from a trap.
   ZisK releases require fresh guest qualification and Blake3 key generation.
   The provider retains unaligned scalar-memory lowering; nonzero guest returns
   propagate through the host protocol.

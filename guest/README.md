@@ -14,9 +14,9 @@ id, corpus release, ELF SHA-256, and verification key. See
 
 | Backend | Pinned version | Rust toolchain | Target features | Heap model | Build step |
 | --- | --- | --- | --- | --- | --- |
-| ZisK | `v1.3.2-alpha` | `zisk-4.0.0` | `RV64IM` + `Zbb`, `Zbs`, `Zbkb`, `Zicclsm`, `unaligned_scalar_mem` | Fixed (`-Dguest-heap-bytes`, default 480 MiB) | `zig build guest-zisk` |
-| SP1 | `v6.9.0` (ERE `v0.19.5`) | `succinct-1.96.0-64bit-v3` | `RV64IM` | Shared platform heap | `zig build guest-sp1` |
-| OpenVM | `v2.1.0-preview` (ERE `v0.19.5`) | `openvm-1.94.1` | `RV64IM` + `Zicclsm`, `unaligned_scalar_mem` | Shared platform heap | `zig build guest-openvm` |
+| ZisK | `v1.4.0-alpha` | `zisk-4.1.0` | `RV64IM` + `Zbb`, `Zbs`, `Zbkb`, `Zicclsm`, `unaligned_scalar_mem` | Fixed (`-Dguest-heap-bytes`, default 480 MiB) | `zig build guest-zisk` |
+| SP1 | `v6.9.0` (ERE `v0.20.0`) | `succinct-1.96.0-64bit-v3` | `RV64IM` | Shared platform heap | `zig build guest-sp1` |
+| OpenVM | `v2.1.0-preview` (ERE `v0.20.0`) | `openvm-1.94.1` | `RV64IM` + `Zicclsm`, `unaligned_scalar_mem` | Shared platform heap | `zig build guest-openvm` |
 
 The native benchmark hosts and their shared protocol live in one Cargo
 workspace at `guest/runtime/Cargo.toml` (its OpenVM host uses ERE's Plonky3
@@ -28,8 +28,8 @@ toolchain.
 
 ### ZisK
 
-Install the ZisK `v1.3.2-alpha` SDK and the `zisk-4.0.0` Rust toolchain
-(`cargo-zisk toolchain install --toolchain-version zisk-4.0.0`; `zig build zisk-config`
+Install the ZisK `v1.4.0-alpha` SDK and the `zisk-4.1.0` Rust toolchain
+(`cargo-zisk toolchain install --toolchain-version zisk-4.1.0`; `zig build zisk-config`
 prints the exact source pin). Then build the static runtime archive and link the
 guest ELF:
 
@@ -58,7 +58,7 @@ curl -L https://sp1up.succinct.xyz | bash
 ~/.sp1/bin/sp1up -v v6.9.0
 ```
 
-`guest-sp1` compiles the repo-owned ERE `v0.19.5` SP1 platform and `libzkevm`
+`guest-sp1` compiles the repo-owned ERE `v0.20.0` SP1 platform and `libzkevm`
 accelerator archive automatically (or pass `-Dsp1-staticlib=/path/to/provider.a`
 to override):
 
@@ -88,11 +88,11 @@ zig build guest-openvm -Dguest-payload=stateless-ere -Doptimize=fast \
   -Dstateless-schema=0x1501
 ```
 
-The build links OpenVM's startup and ERE `v0.19.5`'s `ere-platform-openvm`
-(`openvm-accelerators`), verifying startup, I/O, and accelerator symbols before
-linking. Because OpenVM's startup calls a `void` `main`, guest validation
-failures surface as missing or mismatched public output rather than a non-zero
-exit code.
+The build links OpenVM's startup and ERE `v0.20.0`'s `ere-platform-openvm`,
+which exports the guest I/O and `openvm-accelerators` ABI, verifying startup,
+I/O, and accelerator symbols before linking. Because OpenVM's startup calls a
+`void` `main`, guest validation failures surface as missing or mismatched public
+output rather than a non-zero exit code.
 
 ## Input schema and public output
 
@@ -110,7 +110,8 @@ SSZ result in the 256-byte public-output region are zero-padded.
 
 - **ZisK:** Allocates from a fixed-capacity buffer sized by
   `-Dguest-heap-bytes=<bytes>` (default 480 MiB) within a total RAM envelope
-  (`-Dguest-zisk-ram-bytes=<bytes>`, defaulting to ZisK's declared RAM top).
+  (`-Dguest-zisk-ram-bytes=<bytes>`, defaulting to an envelope ending at ZisK's
+  heap top, `0xBFFC0000`, below its reserved library scratch RAM).
   Increasing the linker reservation changes neither ELF size nor execution cost.
 - **SP1 and OpenVM:** Route Zig allocations through the shared platform heap
   used by ERE and the Rust accelerator provider (`_end` to the backend's

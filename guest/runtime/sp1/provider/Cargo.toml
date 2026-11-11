@@ -10,7 +10,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.19.5" }
+ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
 
 [profile.release]
 opt-level = 3

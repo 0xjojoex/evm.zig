@@ -8,9 +8,12 @@ ENTRY(_start)
  */
 
 MEMORY {
-  rom (xa) : ORIGIN = 0x80000000, LENGTH = 0x08000000
+  rom (xa) : ORIGIN = 0x90000000, LENGTH = 0x08000000
   ram (wxa) : ORIGIN = 0xA0430000, LENGTH = _evmz_ram_size
 }
+
+/* ZisK reserves 0xBFFC0000..0xC0000000 for its library and float library scratch. */
+ASSERT(ORIGIN(ram) + LENGTH(ram) <= 0xBFFC0000, "evmz RAM overlaps ZisK reserved scratch RAM")
 
 PHDRS {
   text PT_LOAD FLAGS(1);

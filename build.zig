@@ -8,9 +8,9 @@ const ZiskConfig = struct {
 };
 
 const zisk: ZiskConfig = .{
-    .version = "1.3.2-alpha",
-    .commit = "1e22630bb7e143c30705a1603ed87cfd3da8c6ec",
-    .rust_toolchain = "zisk-4.0.0",
+    .version = "1.4.0-alpha",
+    .commit = "64a1f1664184e76053686745d50c6b9aaa51b034",
+    .rust_toolchain = "zisk-4.1.0",
 };
 
 const EvmzBuildConfig = struct {
@@ -494,12 +494,13 @@ pub fn build(b: *std.Build) void {
         "guest-heap-bytes",
         "Fixed ZisK guest payload heap capacity in bytes",
     ) orelse 480 * 1024 * 1024;
-    // 0xA0430000 + 532480000 = 0xC0000000, ZisK's RAM top.
+    // 0xA0430000 + 532217856 = 0xBFFC0000, ZisK's heap top: the 256 KiB above it
+    // is the ZisK library and float library scratch RAM.
     const guest_zisk_ram_bytes = b.option(
         u64,
         "guest-zisk-ram-bytes",
         "ZisK guest RAM envelope in bytes",
-    ) orelse 532480000;
+    ) orelse 532217856;
 
     const guest_payload_steps = addGuestPayloadTests(b, target, optimize, evmz_mod, guest_heap_bytes);
     ci_step.dependOn(guest_payload_steps.tests);
