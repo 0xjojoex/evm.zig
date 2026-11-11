@@ -114,6 +114,10 @@ pub fn Accumulator(comptime Engine: type, comptime Operations: type) type {
                 .cumulative_gas_used = next_progress.gas_used,
                 .created_address = included.result.created_address,
                 .logs = included.logs,
+                .frame = if (included.result.frame) |frame|
+                    .{ .payer = frame.payer, .receipts = frame.receipts }
+                else
+                    null,
             };
             try Operations.appendCandidateDepositRequestData(
                 self.allocator,

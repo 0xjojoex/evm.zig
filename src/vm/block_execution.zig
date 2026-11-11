@@ -221,6 +221,10 @@ pub fn ExecutionType(comptime Program: type) type {
                             .cumulative_gas_used = next.gas_used,
                             .created_address = view.output.created_address,
                             .logs = view.logs,
+                            .frame = if (view.output.frame) |frame|
+                                .{ .payer = frame.payer, .receipts = frame.receipts }
+                            else
+                                null,
                         },
                     };
 

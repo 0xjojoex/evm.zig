@@ -1619,7 +1619,8 @@ pub fn transactionBlobGasUsed(
     comptime Engine: type,
     tx: *const transaction.Transaction,
 ) !u64 {
-    if (tx.kind != .blob or !revision.isImpl(.cancun)) return 0;
+    // EIP-8141 frame transactions carry blobs as type-3 ones do.
+    if (!(tx.kind == .blob or tx.kind == .frame) or !revision.isImpl(.cancun)) return 0;
     const blob_count = std.math.cast(u64, tx.blob_hashes.len) orelse return error.BlobGasOverflow;
     const schedule = Engine.spec.transaction.blob_schedule orelse return error.BlobGasOverflow;
     const gas_per_blob = schedule.gas_per_blob;

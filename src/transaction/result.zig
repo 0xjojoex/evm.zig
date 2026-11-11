@@ -38,4 +38,12 @@ pub const Receipt = struct {
     cumulative_gas_used: u64 = 0,
     created_address: ?address.Address = null,
     logs: state.LogBuffer.View = .empty,
+    /// EIP-8141 receipt content; null for every other kind. Each frame
+    /// receipt's `log_range` indexes `logs`.
+    frame: ?Frame = null,
+
+    pub const Frame = struct {
+        payer: address.Address,
+        receipts: []const frames.Receipt,
+    };
 };

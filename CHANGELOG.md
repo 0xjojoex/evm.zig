@@ -95,6 +95,11 @@ Added
   frame receipts, and the settled base fee, priority fee, and payer refund.
   Frames run as roots of one session, with atomic batches, per-frame receipts
   and log ranges, and the default code's VERIFY approval.
+- Block execution encodes frame transaction receipts in EIP-8141's shape,
+  `[cumulative_gas_used, payer, [[status, [gas_used, state_gas_used], logs]...]]`
+  with no transaction status or bloom, and counts a frame transaction's blob
+  hashes toward the block's blob gas. `TxReceiptView` gains `frame`, the payer
+  and frame receipts.
 - The EIP-8141 frame opcodes in `eth.bogota`'s instruction spec: APPROVE
   (`0xaa`), TXPARAM (`0xb0`, with EIP-8250's keyed-nonce parameters),
   FRAMEDATALOAD, FRAMEDATACOPY, FRAMEPARAM, SIGPARAM, and SIGDATACOPY
