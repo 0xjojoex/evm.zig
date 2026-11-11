@@ -1,5 +1,5 @@
-//! Ethereum execution MPT helpers for root construction, proof lookup, the
-//! witness catalog, and hashed-key updates. Post-state roots from execution
+//! Ethereum execution MPT helpers for root construction, the witness catalog,
+//! and hashed-key updates. Post-state roots from execution
 //! changes live in `eth.commit`.
 //! This is not a persistent trie database or a complete general-purpose MPT library.
 
@@ -202,7 +202,6 @@ pub const AccountCache = @import("../state/sparse_hash_map.zig").WithContext(add
 pub const Update = mpt.Update;
 
 pub const WitnessIndex = mpt.WitnessIndex;
-pub const ProofCache = mpt.LookupCache;
 
 const StorageCatalogRoot = struct {
     hash: [32]u8,
@@ -215,8 +214,8 @@ const CatalogAccount = struct {
 };
 
 /// Block-lifetime authenticated topology for state reads and fixed-key commit.
-/// The sealed witness index remains separately owned by the backend for proof
-/// lookup and as the catalog's encoded-node backing.
+/// The sealed witness index remains separately owned by the backend as the
+/// catalog's encoded-node backing.
 pub const WitnessCatalog = struct {
     allocator: Allocator,
     topology: mpt.Catalog,
@@ -413,37 +412,12 @@ fn sortDeduplicateStorageRootAccounts(
     return unique_len;
 }
 
-pub const Proof = struct {
-    root_hash: [32]u8,
-    witness: *const WitnessIndex,
-    cache: ?*ProofCache = null,
-
-    pub fn get(self: Proof, key: []const u8) (Allocator.Error || ProofLookupError)!?[]const u8 {
-        const result = if (self.cache) |cache|
-            try self.witness.lookupCached(self.root_hash, key, cache)
-        else
-            try self.witness.lookup(self.root_hash, key);
-        return switch (result) {
-            .present => |value| value,
-            .absent => null,
-        };
-    }
-};
-
 pub fn root(allocator: Allocator, pairs: []const Pair) Error![32]u8 {
     return structuralTrie(allocator).root(pairs);
 }
 
 pub fn indexWitness(allocator: Allocator, nodes: []const []const u8) Error!*WitnessIndex {
     return structuralTrie(allocator).indexWitness(nodes);
-}
-
-pub fn proof(root_hash: [32]u8, witness: *const WitnessIndex) Proof {
-    return .{ .root_hash = root_hash, .witness = witness };
-}
-
-pub fn cachedProof(root_hash: [32]u8, witness: *const WitnessIndex, cache: *ProofCache) Proof {
-    return .{ .root_hash = root_hash, .witness = witness, .cache = cache };
 }
 
 pub fn orderedTrieRoot(allocator: Allocator, encoded_values: []const []const u8) Error![32]u8 {

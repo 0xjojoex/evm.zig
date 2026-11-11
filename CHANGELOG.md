@@ -103,6 +103,11 @@ Removed
   Every raising site was unreachable by construction (`pc`, `memory_size`, and
   `stack_len` are EVM-bounded; step counts are memory-bounded), so the
   narrowing is now a plain `@intCast`.
+- `eth.trie.Proof`, `eth.trie.proof`, `eth.trie.cachedProof`, and
+  `eth.trie.ProofCache`. Nothing in evmz used them, and their arbitrary-key
+  lookup reported a malformed secured-trie node as an absent key. Read witness
+  state through `eth.trie.WitnessCatalog`, or call `mpt.WitnessIndex.lookup`
+  directly for arbitrary keys.
 
 ### RLP
 
