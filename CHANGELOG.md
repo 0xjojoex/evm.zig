@@ -45,7 +45,12 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   The provider retains unaligned scalar-memory lowering; nonzero guest returns
   propagate through the host protocol.
 
-- Pinned the zkEVM fixture corpus to `tests-zkevm@v21.0.6`.
+- Pinned the zkEVM fixture corpus to `tests-zkevm@v21.0.7`. Stateless wire v1
+  now merkleizes `NewPayloadRequest` and `StatelessValidationResult` as progressive
+  containers and caps `versioned_hashes` at 4096, matching the Gloas/EIP-8025
+  consensus types; the serialization is unchanged but `new_payload_request_root`
+  and the output root change. Witness trie reads and deletion collapses now reject
+  a node that does not fit a 32-byte secured key wherever they reach it.
 - Updated the execution fixture corpus to `tests@v21.0.1`.
 
 ### EVM

@@ -117,7 +117,7 @@ pub fn build(b: *std.Build) void {
 }
 
 const default_execution_input = "tests@v21.0.2";
-const default_zkevm_input = "tests-zkevm@v21.0.6";
+const default_zkevm_input = "tests-zkevm@v21.0.7";
 
 const direct_selection =
     "state_test or transaction_test or (blockchain_test and " ++

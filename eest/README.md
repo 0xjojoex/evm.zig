@@ -9,8 +9,8 @@ pytest execution; this package provides the `evmz-eest` and
 | Suite | Default corpus | Command (from repo root) |
 | --- | --- | --- |
 | Execution (`state_test`, `blockchain_test`, `transaction_test`) | `tests@v21.0.2` | `zig build -Doptimize=fast eest-consume -- --no-html -n 4` |
-| Stateless zkEVM (native BlockSTF + witness oracle) | `tests-zkevm@v21.0.6` | `zig build -Doptimize=fast zkevm-consume -- --no-html -n 4` |
-| Resolve zkEVM corpus manifest for guest/mutation lanes | `tests-zkevm@v21.0.6` | `zig build zkevm-resolve` |
+| Stateless zkEVM (native BlockSTF + witness oracle) | `tests-zkevm@v21.0.7` | `zig build -Doptimize=fast zkevm-consume -- --no-html -n 4` |
+| Resolve zkEVM corpus manifest for guest/mutation lanes | `tests-zkevm@v21.0.7` | `zig build zkevm-resolve` |
 | Stateless zkEVM on zkVM guest (`zisk`, `sp1`, `openvm`) | manifest | `zig build zkevm -- --corpus-manifest .zig-cache/eest-consume/zkevm-corpus.json ...` |
 | Stateless witness rejection mutations | manifest | `zig build zkevm-mutations -- --corpus-manifest .zig-cache/eest-consume/zkevm-corpus.json` |
 | Consensus SSZ (`general`, `mainnet`, `minimal`) | `consensus.zon` | `zig build ssz-conformance` |
@@ -62,7 +62,7 @@ file-level result so multiple test ids in the same file do not restart `evmz-ees
 ## Stateless zkEVM fixtures
 
 Native stateless conformance uses the same `consume direct` harness against
-`tests-zkevm@v21.0.6`:
+`tests-zkevm@v21.0.7`:
 
 ```sh
 zig build -Doptimize=fast zkevm-consume -- --no-html -n 4

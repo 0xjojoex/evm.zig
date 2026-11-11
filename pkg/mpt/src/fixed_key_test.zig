@@ -136,6 +136,10 @@ test "catalog fixed batch preserves fixed-key validation and missing-node errors
         error.InvalidNode,
         short_catalog.bindSorted(short_root, &.{key}, &results, &workspace),
     );
+    // The generic reader sees only a divergent path; a fixed-key read must
+    // reject the short leaf it reaches, as the batch does.
+    try std.testing.expectEqual(mpt.Absence.divergent_path, (try short_catalog.lookup(short_root, &key)).absent);
+    try std.testing.expectError(error.InvalidNode, short_catalog.lookupFixed(short_root, &key));
 
     const missing_digest: [32]u8 = @splat(0x55);
     const missing_child = [_]u8{0xf3} ++ [_]u8{0xa0} ++ missing_digest ++
@@ -177,6 +181,8 @@ test "catalog fixed batch rejects branch values" {
         error.NonCanonicalNode,
         catalog.bindSorted(root, &.{key}, &results, &workspace),
     );
+    try std.testing.expectEqualSlices(u8, &.{0x02}, (try catalog.lookup(root, &key)).present);
+    try std.testing.expectError(error.NonCanonicalNode, catalog.lookupFixed(root, &key));
 }
 
 test "fixed delete collapse requires leaf extension and branch sibling witnesses" {
@@ -257,6 +263,136 @@ test "fixed delete collapse requires leaf extension and branch sibling witnesses
                 ));
             }
         }
+    }
+}
+
+test "fixed delete collapse rejects an over-length sibling leaf" {
+    // EEST tests-zkevm v21.0.7: the deletion leaves the root branch with one
+    // child, a leaf one nibble too long. The collapse reaches it first, so it
+    // must reject it rather than merge it into a 65-nibble leaf.
+    const trie = mpt.init(std.testing.allocator);
+    const deleted = try encodeZeroLeaf(63, 1);
+    defer std.testing.allocator.free(deleted);
+    const sibling = try encodeZeroLeaf(64, 2);
+    defer std.testing.allocator.free(sibling);
+    const root_node = try encodeBranch01(deleted, sibling);
+    defer std.testing.allocator.free(root_node);
+    const root_hash = mpt.StdKeccak256Context.keccak256(.{}, root_node);
+    const nodes = [_][]const u8{ root_node, deleted, sibling };
+    var indexed = try trie.indexWitness(&nodes);
+    defer indexed.deinit();
+    var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
+    defer builder.deinit();
+    const root = try builder.authenticateRoot(root_hash);
+    var catalog = try builder.finishAssumeCollisionResistant();
+    defer catalog.deinit();
+    var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const updates = [_]mpt.FixedUpdate{.{ .key = @splat(0), .value = null }};
+    try std.testing.expectError(error.InvalidNode, trie.updateFixedSorted(
+        &arena,
+        mpt.witnessSource(indexed, root_hash),
+        &updates,
+    ));
+    try std.testing.expectError(error.InvalidNode, trie.updateFixedSorted(
+        &arena,
+        mpt.catalogSource(&catalog, root),
+        &updates,
+    ));
+}
+
+test "catalog fixed lookup rejects extensions and branches past the key width" {
+    const trie = mpt.init(std.testing.allocator);
+    const tiny_leaf = try encodeZeroLeaf(0, 1);
+    defer std.testing.allocator.free(tiny_leaf);
+    const inner = try encodeBranch01(tiny_leaf, tiny_leaf);
+    defer std.testing.allocator.free(inner);
+
+    // An extension ending at the last nibble is rejected before its path is
+    // compared, so a key that diverges from it still fails.
+    const full_extension = try encodeZeroExtension(fixed_key_nibbles, inner);
+    defer std.testing.allocator.free(full_extension);
+    var divergent: mpt.FixedKey = @splat(0);
+    divergent[0] = 0x10;
+
+    // A branch reached at depth 64 through a branch at depth 63.
+    const mid = try encodeBranch01(inner, tiny_leaf);
+    defer std.testing.allocator.free(mid);
+    const to_depth_63 = try encodeZeroExtension(fixed_key_nibbles - 1, mid);
+    defer std.testing.allocator.free(to_depth_63);
+    const zero_key: mpt.FixedKey = @splat(0);
+
+    const Case = struct { root_node: []const u8, nodes: []const []const u8, key: *const mpt.FixedKey, generic: mpt.Absence };
+    const cases = [_]Case{
+        .{ .root_node = full_extension, .nodes = &.{full_extension}, .key = &divergent, .generic = .divergent_path },
+        .{ .root_node = to_depth_63, .nodes = &.{ to_depth_63, mid }, .key = &zero_key, .generic = .empty_branch_value },
+    };
+    for (cases) |case| {
+        var indexed = try trie.indexWitness(case.nodes);
+        defer indexed.deinit();
+        var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
+        defer builder.deinit();
+        const root = try builder.authenticateRoot(mpt.StdKeccak256Context.keccak256(.{}, case.root_node));
+        var catalog = try builder.finishAssumeCollisionResistant();
+        defer catalog.deinit();
+
+        try std.testing.expectEqual(case.generic, (try catalog.lookup(root, case.key)).absent);
+        try std.testing.expectError(error.InvalidNode, catalog.lookupFixed(root, case.key));
+    }
+}
+
+test "fixed delete collapse rejects an extension or branch sibling past the key width" {
+    const trie = mpt.init(std.testing.allocator);
+    const tiny_leaf = try encodeZeroLeaf(0, 1);
+    defer std.testing.allocator.free(tiny_leaf);
+    const inner = try encodeBranch01(tiny_leaf, tiny_leaf);
+    defer std.testing.allocator.free(inner);
+
+    // Root branch: deleted leaf in slot 0, and in slot 1 an extension whose
+    // path ends at the last nibble.
+    const deleted = try encodeZeroLeaf(fixed_key_nibbles - 1, 1);
+    defer std.testing.allocator.free(deleted);
+    const long_extension = try encodeZeroExtension(fixed_key_nibbles - 1, inner);
+    defer std.testing.allocator.free(long_extension);
+    const extension_root = try encodeBranch01(deleted, long_extension);
+    defer std.testing.allocator.free(extension_root);
+
+    // Extension to a branch at depth 63: deleted empty-path leaf in slot 0,
+    // and in slot 1 a branch at depth 64.
+    const mid = try encodeBranch01(tiny_leaf, inner);
+    defer std.testing.allocator.free(mid);
+    const branch_root = try encodeZeroExtension(fixed_key_nibbles - 1, mid);
+    defer std.testing.allocator.free(branch_root);
+
+    const Case = struct { root_node: []const u8, nodes: []const []const u8 };
+    const cases = [_]Case{
+        .{ .root_node = extension_root, .nodes = &.{ extension_root, deleted, long_extension } },
+        .{ .root_node = branch_root, .nodes = &.{ branch_root, mid } },
+    };
+    const updates = [_]mpt.FixedUpdate{.{ .key = @splat(0), .value = null }};
+    for (cases) |case| {
+        const root_hash = mpt.StdKeccak256Context.keccak256(.{}, case.root_node);
+        var indexed = try trie.indexWitness(case.nodes);
+        defer indexed.deinit();
+        var builder = try mpt.Catalog.Builder.init(trie.allocator, indexed);
+        defer builder.deinit();
+        const root = try builder.authenticateRoot(root_hash);
+        var catalog = try builder.finishAssumeCollisionResistant();
+        defer catalog.deinit();
+        var arena: mpt.ScopedArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+
+        try std.testing.expectError(error.InvalidNode, trie.updateFixedSorted(
+            &arena,
+            mpt.witnessSource(indexed, root_hash),
+            &updates,
+        ));
+        try std.testing.expectError(error.InvalidNode, trie.updateFixedSorted(
+            &arena,
+            mpt.catalogSource(&catalog, root),
+            &updates,
+        ));
     }
 }
 

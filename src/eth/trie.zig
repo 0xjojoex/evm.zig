@@ -231,12 +231,12 @@ pub const WitnessCatalog = struct {
         self.* = undefined;
     }
 
-    pub fn account(self: WitnessCatalog, key: []const u8) mpt.LookupError!?[]const u8 {
-        return catalogValue(try self.topology.lookup(self.state_root, key));
+    pub fn account(self: WitnessCatalog, key: *const mpt.FixedKey) mpt.LookupError!?[]const u8 {
+        return catalogValue(try self.topology.lookupFixed(self.state_root, key));
     }
 
-    pub fn decodedAccount(self: WitnessCatalog, key: []const u8) ProofLookupError!?Account {
-        const bound = switch (try self.topology.lookupBound(self.state_root, key)) {
+    pub fn decodedAccount(self: WitnessCatalog, key: *const mpt.FixedKey) ProofLookupError!?Account {
+        const bound = switch (try self.topology.lookupFixed(self.state_root, key)) {
             .present => |present| present,
             .absent => return null,
         };
@@ -257,11 +257,11 @@ pub const WitnessCatalog = struct {
     pub fn storage(
         self: WitnessCatalog,
         storage_root: [32]u8,
-        key: []const u8,
+        key: *const mpt.FixedKey,
     ) mpt.LookupError!?[]const u8 {
         if (std.mem.eql(u8, &storage_root, &empty_root_hash)) return null;
         const root_ref = self.findStorageRoot(storage_root) orelse return error.MissingNode;
-        return catalogValue(try self.topology.lookup(root_ref, key));
+        return catalogValue(try self.topology.lookupFixed(root_ref, key));
     }
 
     pub fn nodeCount(self: WitnessCatalog) usize {
@@ -383,9 +383,9 @@ pub fn buildWitnessCatalog(
     };
 }
 
-fn catalogValue(result: mpt.Lookup) ?[]const u8 {
+fn catalogValue(result: mpt.Catalog.BoundLookup) ?[]const u8 {
     return switch (result) {
-        .present => |value| value,
+        .present => |present| present.value,
         .absent => null,
     };
 }

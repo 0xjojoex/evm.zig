@@ -1,6 +1,6 @@
 //! Amsterdam schema `0x1501` wire contract for the stateless zkEVM guest interface.
 //! Defines the SSZ-encoded `StatelessInput`/`StatelessValidationResult` types
-//! (per tests-zkevm v21.0.1) and the schema-prefixed validate entry points.
+//! (per tests-zkevm v21.0.7) and the schema-prefixed validate entry points.
 //! The two-byte schema id gates decoding; unknown ids are rejected.
 //!
 //! This module implements exactly one `fork || revision` pair, so its id is
@@ -40,6 +40,8 @@ const max_witness_headers = 256;
 const max_bytes_per_witness_node = 1 << 10;
 const max_bytes_per_code = 1 << 16;
 const max_bytes_per_header = 1 << 10;
+/// Consensus-layer `MAX_BLOB_COMMITMENTS_PER_BLOCK`, the Gloas `VersionedHashes` limit.
+const max_blob_commitments_per_block = 4096;
 
 pub const Error = std.mem.Allocator.Error || ssz.Error || stateless_validate.Error || transaction_raw.Error || error{
     InvalidBool,
@@ -507,7 +509,7 @@ pub const NewPayloadRequestAmsterdam = struct {
 
     pub fn deinit(self: *NewPayloadRequestAmsterdam, allocator: std.mem.Allocator) void {
         self.execution_payload.deinit(allocator);
-        VersionedHashesSsz.deinit(allocator, &self.versioned_hashes);
+        AmsterdamVersionedHashesSsz.deinit(allocator, &self.versioned_hashes);
         self.execution_requests.deinit(allocator);
     }
 
@@ -695,6 +697,7 @@ pub const StatelessValidationResult = struct {
 const WithdrawalsSsz = ssz.ProgressiveList(Withdrawal);
 const TransactionsSsz = ssz.ProgressiveListOf(ssz.ProgressiveByteList);
 const VersionedHashesSsz = ssz.ProgressiveList([32]u8);
+const AmsterdamVersionedHashesSsz = ssz.List([32]u8, max_blob_commitments_per_block);
 const BlockAccessListSsz = ssz.ProgressiveByteList;
 
 const BorrowedTransactionsSsz = ssz.ProgressiveListOf(ssz.Borrowed(ssz.ProgressiveByteList));
@@ -818,8 +821,8 @@ const NewPayloadRequestAmsterdamWire = struct {
     parent_beacon_block_root: [32]u8,
     execution_requests: ExecutionRequests,
 
-    pub const Ssz = ssz.Container(@This(), .{
-        .versioned_hashes = VersionedHashesSsz,
+    pub const Ssz = ssz.ProgressiveContainer(@This(), @as([4]bool, @splat(true)), .{
+        .versioned_hashes = AmsterdamVersionedHashesSsz,
     });
 };
 
@@ -855,9 +858,9 @@ const BorrowedExecutionPayloadV4Ssz = ssz.ProgressiveContainer(ExecutionPayloadV
     .withdrawals = WithdrawalsSsz,
     .block_access_list = ssz.Borrowed(ssz.ProgressiveByteList),
 });
-const BorrowedNewPayloadRequestAmsterdamSsz = ssz.Container(NewPayloadRequestAmsterdamWire, .{
+const BorrowedNewPayloadRequestAmsterdamSsz = ssz.ProgressiveContainer(NewPayloadRequestAmsterdamWire, @as([4]bool, @splat(true)), .{
     .execution_payload = BorrowedExecutionPayloadV4Ssz,
-    .versioned_hashes = VersionedHashesSsz,
+    .versioned_hashes = AmsterdamVersionedHashesSsz,
 });
 const BorrowedStatelessInputSsz = ssz.Container(StatelessInputWire, .{
     .new_payload_request = BorrowedNewPayloadRequestAmsterdamSsz,
@@ -870,7 +873,7 @@ const StatelessValidationResultWire = struct {
     chain_id: u64,
     schema_id: u16,
 
-    pub const Ssz = ssz.Container(@This(), .{});
+    pub const Ssz = ssz.ProgressiveContainer(@This(), @as([4]bool, @splat(true)), .{});
 };
 
 fn encodeWire(comptime Codec: type, allocator: std.mem.Allocator, value: Codec.Value) Error![]u8 {
