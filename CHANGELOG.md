@@ -117,6 +117,12 @@ Changed
   and drops refunds like a failed bytecode frame. `@TypeOf(ctx).spec` is the
   executor's own spec, so native pricing follows `Spec.extend` overrides.
 - System-call entry rejects native targets with `NativeSystemCallUnsupported`.
+- `transaction.blob.BlobSchedule.max_per_transaction` is `?u64`, and null on
+  Cancun and Prague, where a transaction may carry as many blobs as the block.
+  A runtime `BlobParams.max` above the fork's own now raises the transaction's
+  limit with it on those forks; the limit used to stay at 6 and 9. From Osaka
+  the EIP-7594 cap is unchanged. A custom spec that set the field to its
+  `max` can pass `null`.
 
 Removed
 
