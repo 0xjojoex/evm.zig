@@ -177,7 +177,9 @@ fn words(scratch: Allocator, source: []const c.evmz_bytes32) Allocator.Error![]c
     return out;
 }
 
-fn envFromC(env: *const c.evmz_env) InputError!Env {
+/// `revision` is the session's fork: the engine reads DIFFICULTY and PREVRANDAO
+/// from one field, and the fork says which header field belongs in it.
+fn envFromC(env: *const c.evmz_env, revision: Revision) InputError!Env {
     return .{
         .chain_id = word(env.chain_id),
         .coinbase = address(env.coinbase),
@@ -185,7 +187,7 @@ fn envFromC(env: *const c.evmz_env) InputError!Env {
         .slot_number = env.slot_number,
         .timestamp = env.timestamp,
         .gas_limit = env.gas_limit,
-        .prev_randao = word(env.prev_randao),
+        .prev_randao = word(if (revision.isImpl(.merge)) env.prev_randao else env.difficulty),
         .base_fee = word(env.base_fee),
         .blob_base_fee = word(env.blob_base_fee),
         .blob_params = if (try flag(env.has_blob_params)) .{
@@ -462,6 +464,8 @@ const Result = struct {
 /// to the engine compiled for the session's fork.
 const Session = struct {
     vtable: *const VTable,
+    /// The fork the session was created for.
+    revision: Revision,
     host: c.evmz_host,
     /// Set when a callback fails. The engine folds a reader error it does not
     /// know into `InfrastructureFailure`, so the cause has to be kept here.
@@ -590,7 +594,7 @@ fn ForkSession(comptime revision: Revision) type {
         fn create(host: c.evmz_host) Allocator.Error!*Session {
             const self = try gpa.create(Self);
             self.* = .{
-                .session = .{ .vtable = &vtable, .host = host },
+                .session = .{ .vtable = &vtable, .revision = revision, .host = host },
                 .executor = undefined,
             };
             self.executor = .init(gpa, .{
@@ -644,6 +648,7 @@ fn ForkSession(comptime revision: Revision) type {
             result.setStatus(output.status, output.frame_halt);
             try result.copyOutput(output.output);
             result.data.gas = .{
+                .spent = output.gas.spent,
                 .used = output.gas.used,
                 .execution_refund = output.gas.execution_refund,
                 .refunded = output.gas.refunded,
@@ -703,7 +708,9 @@ fn ForkSession(comptime revision: Revision) type {
                 return session.failure(err);
             };
             result.setStatus(executed.status(), executed.frame_halt);
-            result.data.gas.used = call.gas_limit -| std.math.lossyCast(u64, executed.gas_left);
+            const spent = call.gas_limit -| std.math.lossyCast(u64, executed.gas_left);
+            result.data.gas.spent = spent;
+            result.data.gas.used = spent;
             out.* = result.handle();
             return ok;
         }
@@ -828,7 +835,7 @@ export fn evmz_session_execute(
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     const input: TransactInput = .{
-        .env = envFromC(env_pointer) catch return invalid_argument,
+        .env = envFromC(env_pointer, pointer.revision) catch return invalid_argument,
         .tx = transactionFromC(scratch.allocator(), tx_pointer) catch |err| return switch (err) {
             error.InvalidArgument => invalid_argument,
             error.OutOfMemory => out_of_memory,
@@ -852,7 +859,7 @@ export fn evmz_session_execute_system_call(
 
     return pointer.vtable.executeSystemCall(
         pointer,
-        envFromC(env_pointer) catch return invalid_argument,
+        envFromC(env_pointer, pointer.revision) catch return invalid_argument,
         .{
             .sender = address(call_pointer.sender),
             .recipient = address(call_pointer.recipient),
@@ -1135,14 +1142,24 @@ fn cEnv(env: Env) c.evmz_env {
     out.slot_number = env.slot_number;
     out.timestamp = env.timestamp;
     out.gas_limit = env.gas_limit;
+    // The engine keeps the header's two fields in one, so both carry it.
+    out.difficulty = bytes32(env.prev_randao);
     out.prev_randao = bytes32(env.prev_randao);
     out.base_fee = bytes32(env.base_fee);
     out.blob_base_fee = bytes32(env.blob_base_fee);
+    if (env.blob_params) |params| {
+        out.has_blob_params = 1;
+        out.blob_params = .{
+            .target = params.target,
+            .max = params.max,
+            .base_fee_update_fraction = bytes32(params.base_fee_update_fraction),
+        };
+    }
     return out;
 }
 
-/// The C form of `tx`, with its lists allocated in `arena`. Blob hashes are
-/// not carried; no test here sends a blob transaction.
+/// The C form of `tx`, with its lists allocated in `arena`. Asserts the nonce
+/// fits the ABI's 64 bits.
 fn cTransaction(arena: Allocator, tx: Transaction) !c.evmz_transaction {
     var out = std.mem.zeroes(c.evmz_transaction);
     out.kind = @backingInt(tx.kind);
@@ -1172,6 +1189,14 @@ fn cTransaction(arena: Allocator, tx: Transaction) !c.evmz_transaction {
         out.has_max_priority_fee_per_gas = 1;
         out.max_priority_fee_per_gas = bytes32(value);
     }
+    if (tx.max_fee_per_blob_gas) |value| {
+        out.has_max_fee_per_blob_gas = 1;
+        out.max_fee_per_blob_gas = bytes32(value);
+    }
+    const blob_hashes = try arena.alloc(c.evmz_bytes32, tx.blob_hashes.len);
+    for (blob_hashes, tx.blob_hashes) |*target, value| target.* = bytes32(value);
+    out.blob_hashes = cPointer(c.evmz_bytes32, blob_hashes);
+    out.blob_hashes_len = blob_hashes.len;
 
     const access_list = try arena.alloc(c.evmz_access_list_entry, tx.access_list.len);
     for (access_list, tx.access_list) |*target, entry| {
@@ -1239,6 +1264,7 @@ fn systemCall(
 
 const EngineRun = struct {
     root: [32]u8,
+    gas_spent: u64,
     gas_used: u64,
     execution_refund: u64,
     refunded: u64,
@@ -1267,6 +1293,7 @@ fn engineRun(host: *TestHost, env: Env, tx: Transaction) !EngineRun {
     const gas = executed.result().gas;
     return .{
         .root = try host.memory.stateRootAfterChanges(testing.allocator, delta.view()),
+        .gas_spent = gas.spent,
         .gas_used = gas.used,
         .execution_refund = gas.execution_refund,
         .refunded = gas.refunded,
@@ -1290,6 +1317,7 @@ fn executeAccepted(
     errdefer evmz_result_destroy(result);
     const data = dataOf(result);
     try expectCode(c.EVMZ_OUTCOME_EXECUTED, data.outcome);
+    try testing.expectEqual(engine.gas_spent, data.gas.spent);
     try testing.expectEqual(engine.gas_used, data.gas.used);
     try testing.expectEqual(engine.execution_refund, data.gas.execution_refund);
     try testing.expectEqual(engine.refunded, data.gas.refunded);
@@ -1440,6 +1468,112 @@ test "a storage write reports the value before the execution, and logs are copie
     try testing.expectEqual(1, logs[0].topics_len);
     try testing.expectEqual(0x11, word(logs[0].topics[0]));
     try testing.expectEqualSlices(u8, &.{0xab}, span(u8, logs[0].data, logs[0].data_len));
+}
+
+test "the gas spent before refunds is reported when the calldata floor sets the receipt gas" {
+    var host: TestHost = .init();
+    defer host.deinit();
+    try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 1_000_000 });
+
+    const session = try host.createSession(fixture.fork);
+    defer evmz_session_destroy(session);
+    // Non-zero calldata sent to an account without code: nothing executes, so
+    // the floor price of the calldata is more than the transaction spent.
+    const input: [64]u8 = @splat(0xff);
+    const result = try executeAccepted(&host, session, fixture.env, .{
+        .sender = fixture.sender,
+        .to = fixture.recipient,
+        .input = &input,
+        .gas_limit = fixture.gas_limit,
+    });
+    defer evmz_result_destroy(result);
+    const gas = dataOf(result).gas;
+
+    try testing.expectEqual(0, gas.execution_refund);
+    try testing.expect(gas.spent > 0 and gas.spent < gas.used);
+    try testing.expectEqual(fixture.gas_limit - gas.used, gas.refunded);
+}
+
+test "opcode 0x44 reads the difficulty before the Merge and prev_randao from it on" {
+    for (forks) |revision| {
+        var host: TestHost = .init();
+        defer host.deinit();
+        try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 1_000_000 });
+        try evmz.t.seedStoreAccount(&host.memory, fixture.contract, .{ .code = &evmz.t.bytecode(.{
+            .PREVRANDAO, .PUSH1, 0,
+            .MSTORE,     .PUSH1, 0x20,
+            .PUSH1,      0,      .RETURN,
+        }) });
+        const session = try host.createSession(@backingInt(revision));
+        defer evmz_session_destroy(session);
+
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        var env = cEnv(fixture.env);
+        env.difficulty = bytes32(0xd1ff);
+        env.prev_randao = bytes32(0xda0);
+        const tx = try cTransaction(arena.allocator(), .{
+            .sender = fixture.sender,
+            .to = fixture.contract,
+            .gas_limit = fixture.gas_limit,
+        });
+        var out: ?*c.evmz_result = null;
+        try testing.expectEqual(ok, evmz_session_execute(session, &env, null, &tx, &out));
+        defer evmz_result_destroy(out);
+        const data = dataOf(out.?);
+        try expectCode(c.EVMZ_EXECUTION_SUCCESS, data.status);
+        const expected: u256 = if (revision.isImpl(.merge)) 0xda0 else 0xd1ff;
+        try testing.expectEqualSlices(
+            u8,
+            &uint256.toBytes32(expected),
+            span(u8, data.output, data.output_len),
+        );
+    }
+}
+
+test "the blob limit of a block is the one the environment's blob params carry" {
+    const schedule = evmz.eth.latest.transaction.blob_schedule.?;
+    const blob_hash = @as(u256, schedule.hash_version) << 248;
+    const tx: Transaction = .{
+        .kind = .blob,
+        .sender = fixture.sender,
+        .to = fixture.recipient,
+        .gas_limit = fixture.gas_limit,
+        .max_fee_per_gas = 1,
+        .max_fee_per_blob_gas = 1,
+        .blob_hashes = &.{ blob_hash, blob_hash },
+    };
+
+    // Two schedules a host could pass, a blob apart, and a transaction that
+    // fits only the larger one.
+    for ([_]u64{ 1, 2 }) |max| {
+        var host: TestHost = .init();
+        defer host.deinit();
+        try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 10_000_000 });
+        const session = try host.createSession(fixture.fork);
+        defer evmz_session_destroy(session);
+
+        var env = fixture.env;
+        env.blob_base_fee = 1;
+        env.blob_params = .{
+            .target = 1,
+            .max = max,
+            .base_fee_update_fraction = schedule.base_fee_update_fraction,
+        };
+        var out: ?*c.evmz_result = null;
+        try testing.expectEqual(ok, try executeTransaction(session, env, null, tx, &out));
+        defer evmz_result_destroy(out);
+        const data = dataOf(out.?);
+        if (max < tx.blob_hashes.len) {
+            try expectCode(c.EVMZ_OUTCOME_REJECTED, data.outcome);
+            try expectCode(
+                c.EVMZ_REJECTION_TYPE_3_TX_MAX_BLOB_GAS_ALLOWANCE_EXCEEDED,
+                data.rejection,
+            );
+        } else {
+            try expectCode(c.EVMZ_EXECUTION_SUCCESS, data.status);
+        }
+    }
 }
 
 test "one executed result is pending until it is accepted or discarded" {
@@ -1813,6 +1947,7 @@ test "a system call is accepted at once and seen by the next execute" {
     try expectCode(c.EVMZ_HALT_RETURN, data.halt);
     try testing.expectEqualSlices(u8, &input, span(u8, data.output, data.output_len));
     try testing.expect(data.gas.used > 0 and data.gas.used < call.gas_limit);
+    try testing.expectEqual(data.gas.used, data.gas.spent);
     try testing.expectEqual(
         addressWord(fixture.system_sender),
         word(storageRow(data, fixture.contract, 0).?.current),
