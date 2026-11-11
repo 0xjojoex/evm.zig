@@ -290,19 +290,32 @@ const SystemCall = struct {
 /// One owned, self-contained copy of an execution's output. Nothing in it
 /// points back into the session, which is what lets it outlive one.
 const Result = struct {
+    /// Holds what `inline_bytes` cannot.
     arena: std.heap.ArenaAllocator,
+    /// Serves the copies from `inline_bytes` first.
+    buffer_first: std.heap.BufferFirstAllocator,
     data: c.evmz_result_data,
+    inline_bytes: [inline_size]u8 align(@alignOf(c.evmz_account_delta)),
+
+    /// Room for what a transfer or a token transfer reports (three account
+    /// rows, two storage rows, one log), so that such a result is one heap
+    /// allocation. Every execute pays for these bytes, so they stay few.
+    const inline_size = 1024;
 
     const CopyError = Allocator.Error || error{InconsistentState};
 
     fn create() Allocator.Error!*Result {
         const self = try gpa.create(Result);
-        self.* = .{
-            .arena = .init(gpa),
-            .data = std.mem.zeroes(c.evmz_result_data),
-        };
+        self.arena = .init(gpa);
+        self.buffer_first = .init(&self.inline_bytes, self.arena.allocator());
+        self.data = std.mem.zeroes(c.evmz_result_data);
         self.data.struct_size = @sizeOf(c.evmz_result_data);
         return self;
+    }
+
+    /// Lives as long as the result does.
+    fn allocator(self: *Result) Allocator {
+        return self.buffer_first.allocator();
     }
 
     fn destroy(self: *Result) void {
@@ -335,19 +348,19 @@ const Result = struct {
     }
 
     fn copyOutput(self: *Result, output: []const u8) Allocator.Error!void {
-        const copy = try self.arena.allocator().dupe(u8, output);
+        const copy = try self.allocator().dupe(u8, output);
         self.data.output = cPointer(u8, copy);
         self.data.output_len = copy.len;
     }
 
     fn copyLogs(self: *Result, logs: evmz.state.LogBuffer.View) Allocator.Error!void {
-        const arena = self.arena.allocator();
-        const out = try arena.alloc(c.evmz_log, logs.len());
+        const owned = self.allocator();
+        const out = try owned.alloc(c.evmz_log, logs.len());
         for (out, 0..) |*target, index| {
             const log = logs.get(index);
-            const topics = try arena.alloc(c.evmz_bytes32, log.topics.len);
+            const topics = try owned.alloc(c.evmz_bytes32, log.topics.len);
             for (topics, log.topics) |*topic, value| topic.* = bytes32(value);
-            const data = try arena.dupe(u8, log.data);
+            const data = try owned.dupe(u8, log.data);
             target.* = .{
                 .address = cAddress(log.address),
                 .topics = cPointer(c.evmz_bytes32, topics),
@@ -363,29 +376,21 @@ const Result = struct {
     /// Project one sealed transition: the net changes, each joined to the
     /// observation that holds its pre-execution value.
     ///
-    /// `changes` and `observations` are the engine's borrowed views. A change
-    /// without its observation, or a new code hash without its bytes, breaks an
-    /// engine invariant and is reported rather than asserted, because an abort
-    /// would take the embedding process down.
+    /// `changes` and `observations` are the engine's borrowed views of the
+    /// transaction still open. A change without its observation, or a new code
+    /// hash without its bytes, breaks an engine invariant and is reported
+    /// rather than asserted, because an abort would take the embedding process
+    /// down.
     fn copyState(self: *Result, changes: anytype, observations: anytype) CopyError!void {
-        const arena = self.arena.allocator();
-        var scratch_state: std.heap.ArenaAllocator = .init(gpa);
-        defer scratch_state.deinit();
-        const scratch = scratch_state.allocator();
+        const owned = self.allocator();
 
-        var account_records: std.AutoHashMapUnmanaged(Address, u32) = .empty;
-        try account_records.ensureTotalCapacity(scratch, observations.accounts.len());
-        for (0..observations.accounts.len()) |index| account_records.putAssumeCapacity(
-            observations.accounts.at(@intCast(index)).address,
-            @intCast(index),
-        );
-
-        const accounts = try arena.alloc(c.evmz_account_delta, changes.accounts.len());
+        const accounts = try owned.alloc(c.evmz_account_delta, changes.accounts.len());
         var codes: std.ArrayList(c.evmz_code_change) = .empty;
         for (accounts, 0..) |*target, index| {
             const change = changes.accounts.at(@intCast(index));
             const record = observations.accounts.at(
-                account_records.get(change.address) orelse return error.InconsistentState,
+                changes.accounts.observationIndex(@intCast(index)) orelse
+                    return error.InconsistentState,
             );
             target.* = .{
                 .address = cAddress(change.address),
@@ -406,39 +411,30 @@ const Result = struct {
             if (std.mem.eql(u8, &current.code_hash, &crypto.keccak256_empty)) continue;
             if (containsCode(codes.items, current.code_hash)) continue;
             const code = observations.code(current.code_hash) orelse return error.InconsistentState;
-            const bytes = try arena.dupe(u8, code.bytes);
-            try codes.append(arena, .{
+            const bytes = try owned.dupe(u8, code.bytes);
+            try codes.append(owned, .{
                 .code_hash = .{ .bytes = current.code_hash },
                 .code = cPointer(u8, bytes),
                 .code_len = bytes.len,
             });
         }
 
-        const StorageKey = struct { address: Address, key: u256 };
-        var storage_originals: std.AutoHashMapUnmanaged(StorageKey, u256) = .empty;
-        try storage_originals.ensureTotalCapacity(scratch, observations.storage.len());
-        for (0..observations.storage.len()) |index| {
-            const record = observations.storage.at(@intCast(index));
-            storage_originals.putAssumeCapacity(
-                .{ .address = record.address, .key = record.key },
-                record.original,
-            );
-        }
-
-        const storage = try arena.alloc(c.evmz_storage_delta, changes.storage_writes.len());
+        const storage = try owned.alloc(c.evmz_storage_delta, changes.storage_writes.len());
         for (storage, 0..) |*target, index| {
             const change = changes.storage_writes.at(@intCast(index));
-            const original = storage_originals.get(.{ .address = change.address, .key = change.key }) orelse
-                return error.InconsistentState;
+            const record = observations.storage.at(
+                changes.storage_writes.observationIndex(@intCast(index)) orelse
+                    return error.InconsistentState,
+            );
             target.* = .{
                 .address = cAddress(change.address),
                 .key = bytes32(change.key),
-                .original = bytes32(original),
+                .original = bytes32(record.original),
                 .current = bytes32(change.value),
             };
         }
 
-        const wipes = try arena.alloc(c.evmz_address, changes.storage_wipes.len());
+        const wipes = try owned.alloc(c.evmz_address, changes.storage_wipes.len());
         for (wipes, 0..) |*target, index|
             target.* = cAddress(changes.storage_wipes.at(@intCast(index)));
 

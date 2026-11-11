@@ -474,6 +474,17 @@ pub fn WorldState(comptime World: type) type {
                 };
             }
 
+            /// Index in `ObservationsView.accounts` of this account's record,
+            /// which holds its value before the transaction. Null when the
+            /// account has no record in the open transaction; the transaction
+            /// layer never yields that, because a write observes its row first.
+            pub fn observationIndex(self: AccountChanges, index: u32) ?u32 {
+                if (self.layer != .transaction) return null;
+                const observation = self.state.world.accountRow(self.ids()[index]).observation;
+                if (observation.transaction != self.state.lifetime.transaction) return null;
+                return observation.index;
+            }
+
             fn ids(self: AccountChanges) []const AccountId {
                 return switch (self.layer) {
                     .accepted => if (self.state.transaction_active)
@@ -504,6 +515,15 @@ pub fn WorldState(comptime World: type) type {
                         .transaction => self.state.effectiveStorage(id),
                     },
                 };
+            }
+
+            /// Index in `ObservationsView.storage` of this slot's record; see
+            /// `AccountChanges.observationIndex`.
+            pub fn observationIndex(self: StorageChanges, index: u32) ?u32 {
+                if (self.layer != .transaction) return null;
+                const observation = self.state.world.storageRow(self.ids()[index]).observation;
+                if (observation.transaction != self.state.lifetime.transaction) return null;
+                return observation.index;
             }
 
             fn ids(self: StorageChanges) []const StorageId {
