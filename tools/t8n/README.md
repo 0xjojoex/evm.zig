@@ -28,7 +28,7 @@ zig-out/bin/evmz t8n \
 | `--state.chainid` | positive chain ID, default 1 |
 | `--state.reward` | `-1` (disabled) or `0` |
 | `--state-test` | skip block-level system calls; EEST passes this for state tests |
-| `--trace.callframes` | write `trace-<index>-<txhash>.jsonl` per accepted transaction |
+| `--trace.callframes` | write `trace-<position>-<txhash>.jsonl` per accepted transaction, numbered by block position |
 
 Exit codes: 3 bad configuration (fork rule violated, unsupported option),
 4 missing block hash, 10 malformed input, 11 I/O failure, 2 anything else.

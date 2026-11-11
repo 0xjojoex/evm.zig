@@ -784,11 +784,6 @@ const BalCollector = struct {
     }
 };
 
-const Submitted = struct {
-    index: usize,
-    bytes: []const u8,
-};
-
 fn executeFork(
     comptime revision: Revision,
     allocator: Allocator,
@@ -827,8 +822,9 @@ fn executeFork(
         try applySystemCalls(&executor, context, calls.slice(), observer);
     }
 
+    // Included transactions only: a rejected one leaves no trace in the
+    // block, and the next included one takes the position it would have had.
     var body: std.ArrayList([]const u8) = .empty;
-    var trie: std.ArrayList(Submitted) = .empty;
     var encoded_receipts: std.ArrayList([]const u8) = .empty;
     var receipts: std.ArrayList(Receipt) = .empty;
     var rejected: std.ArrayList(Rejected) = .empty;
@@ -849,9 +845,7 @@ fn executeFork(
             },
             .ready => |value| value,
         };
-        try body.append(allocator, ready.bytes);
-        // The reference tool rejects pre-fork types before touching the
-        // transaction trie; every later rejection happens after the insert.
+        const position = body.items.len;
         if (!Engine.spec.transaction.active_kinds.contains(ready.value.kind)) {
             try rejected.append(allocator, .{
                 .index = index,
@@ -859,7 +853,6 @@ fn executeFork(
             });
             continue;
         }
-        try trie.append(allocator, .{ .index = index, .bytes = ready.bytes });
         const tx_blob_gas = try block_stf.transactionBlobGasUsed(revision, Engine, &ready.value);
         const next_blob_gas = std.math.add(u64, blob_gas_used, tx_blob_gas) catch std.math.maxInt(u64);
         if (next_blob_gas > blob_gas_limit) {
@@ -870,7 +863,7 @@ fn executeFork(
             continue;
         }
         if (produces_bal) {
-            bal_collector.block_access_index = try evmz.eth.bal.transactionIndex(@intCast(index));
+            bal_collector.block_access_index = try evmz.eth.bal.transactionIndex(@intCast(position));
         }
         if (tracing) try capture.begin();
         const outcome = transactPayload(
@@ -904,13 +897,14 @@ fn executeFork(
             _ = try capture.finish();
             try traces.append(allocator, .{
                 .name = try std.fmt.allocPrint(allocator, "trace-{d}-0x{x}.jsonl", .{
-                    index,
+                    position,
                     evmz.crypto.keccak256(ready.bytes),
                 }),
                 .bytes = try callframes.encode(allocator, call_arena.latest().?),
             });
         }
         blob_gas_used = next_blob_gas;
+        try body.append(allocator, ready.bytes);
         if (!state_test and revision.isImpl(.prague) and !invalid_deposit_event_layout) {
             evmz.eth.eip6110.appendRequestDataFromLogs(
                 allocator,
@@ -936,7 +930,7 @@ fn executeFork(
             included.receipt,
             bloom,
             ready,
-            index,
+            position,
             env,
             log_index,
             tx_blob_gas,
@@ -961,7 +955,7 @@ fn executeFork(
     if (!state_test) {
         if (produces_bal) {
             bal_collector.block_access_index = try evmz.eth.bal.postExecutionSystemIndex(
-                @intCast(candidates.len),
+                @intCast(body.items.len),
             );
         }
         try block_stf.applyWithdrawals(&executor, context, environment.withdrawals, observer);
@@ -1035,7 +1029,7 @@ fn executeFork(
         .alloc = try allocDocument(allocator, store),
         .result = .{
             .stateRoot = .{ .bytes = try store.stateRootWithOptions(allocator, .{ .empty_accounts = .include }) },
-            .txRoot = .{ .bytes = try transactionRoot(allocator, trie.items) },
+            .txRoot = .{ .bytes = try evmz.eth.trie.transactionRoot(allocator, body.items) },
             .receiptsRoot = .{ .bytes = try evmz.eth.trie.receiptRoot(allocator, encoded_receipts.items) },
             .logsHash = .{ .bytes = evmz.crypto.keccak256(logs_rlp.written()) },
             .logsBloom = .{ .bytes = logs_bloom },
@@ -1141,19 +1135,6 @@ fn writeLogs(writer: *Writer, logs: evmz.state.LogBuffer.View) !void {
         try writer.bytes(event.data);
         try closeList(writer, start);
     }
-}
-
-fn transactionRoot(allocator: Allocator, transactions: []const Submitted) ![32]u8 {
-    if (transactions.len == 0) return evmz.eth.trie.empty_root_hash;
-    const pairs = try allocator.alloc(evmz.eth.trie.Pair, transactions.len);
-    const keys = try allocator.alloc([1 + @sizeOf(usize)]u8, transactions.len);
-    for (transactions, pairs, keys) |transaction, *pair, *key| {
-        pair.* = .{
-            .key = try evmz.rlp.encode(usize, key, transaction.index),
-            .value = transaction.bytes,
-        };
-    }
-    return evmz.eth.trie.root(allocator, pairs);
 }
 
 fn encodeBody(allocator: Allocator, transactions: []const []const u8) ![]u8 {
@@ -1703,4 +1684,97 @@ test "frame fields wider than 256 bits reach the decoder and are named as EEST e
     try std.testing.expectEqualStrings("TransactionException.GASPRICE_OVERFLOW", rejected[0].@"error");
     try std.testing.expectEqualStrings("TransactionException.PRIORITY_OVERFLOW", rejected[1].@"error");
     try std.testing.expectEqualStrings("TransactionException.TYPE_6_INVALID_FRAME_FORMAT", rejected[2].@"error");
+}
+
+test "a rejected transaction leaves no trace in the transaction trie or body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // The first transfer's nonce is too high; the second takes position 0.
+    // Expectations are EELS t8n's output for the same input.
+    const documents = try transition(allocator, .{ .fork = .osaka }, .{
+        .alloc =
+        \\{"0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {"nonce": "0x0", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}}}
+        ,
+        .env =
+        \\{"currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba", "currentGasLimit": "0x1c9c380",
+        \\ "currentNumber": "0x1", "currentTimestamp": "0x3e8", "currentRandom": "0x0", "currentBaseFee": "0x7",
+        \\ "currentExcessBlobGas": "0x0", "withdrawals": [],
+        \\ "parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        \\ "blockHashes": {"0x0": "0x1111111111111111111111111111111111111111111111111111111111111111"}}
+        ,
+        .txs =
+        \\[{"type": "0x0", "chainId": "0x1", "nonce": "0x5", "gasPrice": "0xa", "gas": "0x5208",
+        \\  "to": "0x00000000000000000000000000000000000000bb", "value": "0x1", "input": "0x", "v": "0x25",
+        \\  "r": "0x08bb72ff66a86641387fbeec739fcbe7b865c102dca12f63fa568aeb714a4275",
+        \\  "s": "0x45ef52539753def9b5dea377c5795ead6a7cbf852cfb5e9aea567efc7175f853"},
+        \\ {"type": "0x0", "chainId": "0x1", "nonce": "0x0", "gasPrice": "0xa", "gas": "0x5208",
+        \\  "to": "0x00000000000000000000000000000000000000bb", "value": "0x1", "input": "0x", "v": "0x25",
+        \\  "r": "0xaa8ac4063046bb3f3a35ab6358a097afb910a31da043a694ff2a7dd1e575158d",
+        \\  "s": "0x6c9bc738c319055fc72a7c5f4d533705180720290e793189c9598d94f8e2218a"}]
+        ,
+    });
+    try std.testing.expectEqual(@as(usize, 0), documents.result.rejected.?[0].index);
+    var tx_root: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&tx_root, "5bcda53cb9bbaefea6742639cf88dc089257d98240793b86fa6c184827805147");
+    try std.testing.expectEqual(tx_root, documents.result.txRoot.bytes);
+    var body: [99]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&body, "f861f85f800a8252089400000000000000000000000000000000000000bb018025a0" ++
+        "aa8ac4063046bb3f3a35ab6358a097afb910a31da043a694ff2a7dd1e575158d" ++
+        "a06c9bc738c319055fc72a7c5f4d533705180720290e793189c9598d94f8e2218a");
+    try std.testing.expectEqualSlices(u8, &body, documents.body.bytes);
+}
+
+test "block access indices and trace names count included transactions only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // Transfers [rejected, included, rejected], then one withdrawal. The
+    // included transfer takes block access index 1 and the withdrawal the
+    // post-execution index 2. System contracts are STOP stubs, enough for a
+    // valid block. The expected list is EELS t8n's output for the same input.
+    const stub =
+        \\{"nonce": "0x1", "balance": "0x0", "code": "0x00", "storage": {}}
+    ;
+    const rejected_tx =
+        \\{"type": "0x0", "chainId": "0x1", "nonce": "0x5", "gasPrice": "0xa", "gas": "0x5208",
+        \\ "to": "0x00000000000000000000000000000000000000bb", "value": "0x1", "input": "0x", "v": "0x25",
+        \\ "r": "0x08bb72ff66a86641387fbeec739fcbe7b865c102dca12f63fa568aeb714a4275",
+        \\ "s": "0x45ef52539753def9b5dea377c5795ead6a7cbf852cfb5e9aea567efc7175f853"}
+    ;
+    const included_tx =
+        \\{"type": "0x0", "chainId": "0x1", "nonce": "0x0", "gasPrice": "0xa", "gas": "0x5208",
+        \\ "to": "0x00000000000000000000000000000000000000bb", "value": "0x1", "input": "0x", "v": "0x25",
+        \\ "r": "0xaa8ac4063046bb3f3a35ab6358a097afb910a31da043a694ff2a7dd1e575158d",
+        \\ "s": "0x6c9bc738c319055fc72a7c5f4d533705180720290e793189c9598d94f8e2218a"}
+    ;
+    const documents = try transition(allocator, .{ .fork = .amsterdam, .trace_callframes = true }, .{
+        .alloc = "{\"0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b\": " ++
+            \\{"nonce": "0x0", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}}
+        ++
+            ", \"0x00000961ef480eb55e80d19ad83579a64c007002\": " ++ stub ++
+            ", \"0x0000bbddc7ce488642fb579f8b00f3a590007251\": " ++ stub ++
+            ", \"0x0000f90827f1c53a10cb7a02335b175320002935\": " ++ stub ++
+            ", \"0x000f3df6d732807ef1319fb7b8bb8522d0beac02\": " ++ stub ++
+            ", \"0x0000bff46984e3725691fa540a8c7589300d8282\": " ++ stub ++
+            ", \"0x000064d678505ad48f8ccb093bc65613800e8282\": " ++ stub ++ "}",
+        .env =
+        \\{"currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba", "currentGasLimit": "0x1c9c380",
+        \\ "currentNumber": "0x1", "currentTimestamp": "0x3e8", "currentRandom": "0x0", "currentBaseFee": "0x7",
+        \\ "currentExcessBlobGas": "0x0", "slotNumber": "0x0",
+        \\ "parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        \\ "blockHashes": {"0x0": "0x1111111111111111111111111111111111111111111111111111111111111111"},
+        \\ "withdrawals": [{"index": "0x0", "validatorIndex": "0x0",
+        \\                  "address": "0x00000000000000000000000000000000000000cc", "amount": "0x1"}]}
+        ,
+        .txs = "[" ++ rejected_tx ++ ", " ++ included_tx ++ ", " ++ rejected_tx ++ "]",
+    });
+    const result = documents.result;
+    try std.testing.expectEqual(@as(?[]const u8, null), result.blockException);
+    try std.testing.expectEqual(@as(usize, 2), result.rejected.?.len);
+    var bal_hash: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bal_hash, "9b7f48f04c9c9160510e3fd217583b0028ae42f35c37ead14b4d424f2ad76e85");
+    try std.testing.expectEqual(bal_hash, result.blockAccessListHash.?.bytes);
+    try std.testing.expectEqual(@as(usize, 1), documents.traces.len);
+    try std.testing.expect(std.mem.startsWith(u8, documents.traces[0].name, "trace-0-"));
 }
