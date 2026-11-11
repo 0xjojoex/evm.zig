@@ -48,6 +48,14 @@ pub fn deinit(self: *LogBuffer, allocator: Allocator) void {
     self.* = undefined;
 }
 
+/// Exchange two buffers. `std.mem.swap` lowers to an unvectorized byte loop
+/// for a struct this size, which the per-transaction retain pays every time.
+pub fn swap(self: *LogBuffer, other: *LogBuffer) void {
+    const held = self.*;
+    self.* = other.*;
+    other.* = held;
+}
+
 pub fn clone(self: *const LogBuffer, allocator: Allocator) Allocator.Error!LogBuffer {
     var result: LogBuffer = .{};
     errdefer result.deinit(allocator);
