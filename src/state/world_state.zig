@@ -1783,13 +1783,7 @@ pub fn WorldState(comptime World: type) type {
         }
 
         fn writeAccount(self: *State, id: AccountId, value: ?Account) !void {
-            self.assertMutable();
-            try self.observeAccount(id, .{
-                .accessed = true,
-                .semantic_access = true,
-                .value_read = true,
-            });
-            const row = try self.prepareAccountMutation(id);
+            const row = try self.prepareAccountWrite(id);
             const previous = row.current;
             const previous_hash = accountCodeHash(previous);
             const current_hash = accountCodeHash(value);
@@ -2036,20 +2030,25 @@ pub fn WorldState(comptime World: type) type {
             return account.balance;
         }
 
+        /// A balance or nonce write to an existing account keeps its code hash,
+        /// so it sets the field and its one effect bit instead of rebinding
+        /// code and diffing the whole account as `writeAccount` does.
         fn writeResolvedBalance(self: *State, id: AccountId, balance: u256) !void {
-            const current = self.world.accountRow(id).current;
-            var account = current orelse Account{};
-            if (current != null and account.balance == balance) return;
-            account.balance = balance;
-            try self.writeAccount(id, account);
+            const current = self.world.accountRow(id).current orelse
+                return self.writeAccount(id, .{ .balance = balance });
+            if (current.balance == balance) return;
+            const row = try self.prepareAccountWrite(id);
+            row.current.?.balance = balance;
+            self.observed_accounts.items[row.observation.index].effect.balance_written = true;
         }
 
         fn writeResolvedNonce(self: *State, id: AccountId, nonce: u64) !void {
-            const current = self.world.accountRow(id).current;
-            var account = current orelse Account{};
-            if (current != null and account.nonce == nonce) return;
-            account.nonce = nonce;
-            try self.writeAccount(id, account);
+            const current = self.world.accountRow(id).current orelse
+                return self.writeAccount(id, .{ .nonce = nonce });
+            if (current.nonce == nonce) return;
+            const row = try self.prepareAccountWrite(id);
+            row.current.?.nonce = nonce;
+            self.observed_accounts.items[row.observation.index].effect.nonce_written = true;
         }
 
         fn resolveStorageKey(self: *State, address: AccountKey, key: u256, policy: ResolutionPolicy) !?ResolvedStorage {
@@ -2158,6 +2157,17 @@ pub fn WorldState(comptime World: type) type {
         /// incarnation a wipe has since retired.
         inline fn effectiveValue(account: *const AccountRow, row: *const StorageRow) u256 {
             return if (row.storage_incarnation != account.storage_incarnation) 0 else row.current;
+        }
+
+        /// Observe the row as written, then `prepareAccountMutation`.
+        fn prepareAccountWrite(self: *State, id: AccountId) !*AccountRow {
+            self.assertMutable();
+            try self.observeAccount(id, .{
+                .accessed = true,
+                .semantic_access = true,
+                .value_read = true,
+            });
+            return self.prepareAccountMutation(id);
         }
 
         /// Reserve, journal, and list the row for its first change at every layer;
