@@ -5,6 +5,7 @@ const Spec = @import("../spec.zig").Spec;
 const Interpreter = @import("../Interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
+const Memory = @import("../Memory.zig");
 const uint256 = @import("../uint256.zig");
 const instruction = @import("../instruction.zig");
 const environment = @import("../instruction/environment.zig");
@@ -142,6 +143,15 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             jumpdest_masks: [*]const JumpDestMaskInt,
             stack_base: [*]u256,
             stack_limit: [*]u256,
+            /// `frame.msg.is_static`, copied so write-protected builtins test
+            /// one byte off `ctx` instead of chasing frame -> msg.
+            is_static: bool,
+            /// `frame.memory.bytes.items` and the gas already paid for that
+            /// size. Refreshed by `refreshMemory` after every path that may
+            /// resize memory; handlers never read the frame's view directly.
+            mem_ptr: [*]u8 = undefined,
+            mem_len: usize = 0,
+            mem_cost: i64 = 0,
             final_ip: [*]const u8 = undefined,
             final_sp: [*]u256 = undefined,
             final_gas: i64 = 0,
@@ -152,11 +162,29 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 return @intFromPtr(ip) - @intFromPtr(self.code_base);
             }
 
+            /// The analyzed mask is the authority: the scanner sets a bit only
+            /// for a JUMPDEST byte outside PUSH data. Asserts that a set bit
+            /// names a JUMPDEST byte.
             inline fn isValidJumpTarget(self: *const Context, target: usize) bool {
                 if (target >= self.code_len) return false;
-                if (self.code_base[target] != @backingInt(Opcode.JUMPDEST)) return false;
                 const shift: std.math.Log2Int(JumpDestMaskInt) = @truncate(target);
-                return (self.jumpdest_masks[target / @bitSizeOf(JumpDestMaskInt)] & (@as(JumpDestMaskInt, 1) << shift)) != 0;
+                const mask = self.jumpdest_masks[target / @bitSizeOf(JumpDestMaskInt)];
+                if (mask & (@as(JumpDestMaskInt, 1) << shift) == 0) return false;
+                std.debug.assert(self.code_base[target] == @backingInt(Opcode.JUMPDEST));
+                return true;
+            }
+
+            inline fn mem(self: *const Context) []u8 {
+                return self.mem_ptr[0..self.mem_len];
+            }
+
+            /// Reload the memory view after a path that may have resized it.
+            /// The paid cost is recomputed only when the size moved.
+            inline fn refreshMemory(self: *Context) void {
+                const items = self.frame.memory.bytes.items;
+                if (items.len != self.mem_len) self.mem_cost = Memory.costOfSize(items.len);
+                self.mem_ptr = items.ptr;
+                self.mem_len = items.len;
             }
 
             inline fn finish(self: *Context, ip: [*]const u8, sp: [*]u256, gas: i64, status: TailStatus) TailStatus {
@@ -292,11 +320,13 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     const info = spec.instruction.entry(opcode_byte).info;
                     const next_gas = chargeGas(ip, sp, gas, ctx, info.static_gas) orelse return .out_of_gas;
                     if (comptime writeProtectedBuiltin(opcode)) {
-                        if (ctx.frame.msg.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
+                        if (ctx.is_static) return halt(ctx, ip, sp, next_gas, .write_protection);
                     }
-                    if (!ctx.hasStack(sp, info.stack_in)) {
-                        @branchHint(.unlikely);
-                        return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                    if (comptime info.stack_in != 0) {
+                        if (!ctx.hasStack(sp, info.stack_in)) {
+                            @branchHint(.unlikely);
+                            return halt(ctx, ip, sp, next_gas, .stack_underflow);
+                        }
                     }
                     return @call(.always_tail, builtinBehaviorHandler(opcode), .{ ip, sp, next_gas, ctx, dispatch });
                 }
@@ -436,7 +466,9 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 .jumpdest_masks = frame.jumpdest_masks,
                 .stack_base = stack_base,
                 .stack_limit = stack_base + Stack.capacity,
+                .is_static = frame.msg.is_static,
             };
+            ctx.refreshMemory();
 
             const ip = code_base + frame.pc;
             const status = dispatchFirst(ip, stack_base + frame.stack.len, frame.gas_left, &ctx, &table);
@@ -490,8 +522,10 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 .jumpdest_masks = frame.jumpdest_masks,
                 .stack_base = stack_base,
                 .stack_limit = stack_base + Stack.capacity,
+                .is_static = frame.msg.is_static,
                 .capture = capture,
             };
+            ctx.refreshMemory();
 
             const ip = code_base + frame.pc;
             const status = traced_table.entries[ip[0]](ip + 1, stack_base + frame.stack.len, frame.gas_left, &ctx, &traced_table);
@@ -570,6 +604,9 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     if (!ctx.frame.isRunning()) {
                         return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
                     }
+                    // A suspended or halted frame leaves this activation, so
+                    // only a continuing one needs its memory view again.
+                    ctx.refreshMemory();
                     return tailNext(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, ctx, dispatch);
                 }
             };
@@ -894,6 +931,9 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     if (!ctx.frame.isRunning()) {
                         return ctx.finish(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, .done);
                     }
+                    // A suspended or halted frame leaves this activation, so
+                    // only a continuing one needs its memory view again.
+                    ctx.refreshMemory();
                     return tailNext(ctx.code_base + ctx.frame.pc, ctx.reloadSp(), ctx.frame.gas_left, ctx, dispatch);
                 }
             };
@@ -984,7 +1024,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     ctx.frame.host.emitLog(.{
                         .address = ctx.frame.msg.recipient,
                         .topics = topics[0..],
-                        .data = ctx.frame.memory.readBytes(offset, size),
+                        .data = ctx.mem()[offset..][0..size],
                     }) catch |err| {
                         ctx.spill(ip, nsp, ctx.frame.gas_left);
                         ctx.err = err;
@@ -1087,7 +1127,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             const nsp = sp - 1;
             const target = std.math.cast(usize, nsp[0]) orelse return halt(ctx, ip, nsp, gas, .invalid_jump);
             if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, gas, .invalid_jump);
-            return tailNext(ctx.code_base + target, nsp, gas, ctx, dispatch);
+            return tailJumpTo(target, nsp, gas, ctx, dispatch);
         }
 
         fn tailJumpi(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: *const DispatchTable) TailStatus {
@@ -1095,7 +1135,18 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             if (nsp[0] == 0) return tailNext(ip, nsp, gas, ctx, dispatch);
             const target = std.math.cast(usize, (nsp + 1)[0]) orelse return halt(ctx, ip, nsp, gas, .invalid_jump);
             if (!ctx.isValidJumpTarget(target)) return halt(ctx, ip, nsp, gas, .invalid_jump);
-            return tailNext(ctx.code_base + target, nsp, gas, ctx, dispatch);
+            return tailJumpTo(target, nsp, gas, ctx, dispatch);
+        }
+
+        /// Continue at a validated jump target. The byte there is JUMPDEST, so
+        /// its handler is known without a table load: chained untraced
+        /// dispatch enters it directly. Traced dispatch must route through
+        /// its own table, and step dispatch must return at the boundary.
+        inline fn tailJumpTo(target: usize, sp: [*]u256, gas: i64, ctx: *Context, dispatch: *const DispatchTable) TailStatus {
+            const ip = ctx.code_base + target;
+            if (comptime traced or continuation != .chain) return tailNext(ip, sp, gas, ctx, dispatch);
+            const jumpdest = comptime table.entries[@backingInt(Opcode.JUMPDEST)];
+            return @call(.always_tail, jumpdest, .{ ip + 1, sp, gas, ctx, dispatch });
         }
 
         fn tailPc(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: *const DispatchTable) TailStatus {
@@ -1106,7 +1157,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
 
         fn tailMsize(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: *const DispatchTable) TailStatus {
             if (sp == ctx.stack_limit) return halt(ctx, ip, sp, gas, .stack_overflow);
-            sp[0] = ctx.frame.memory.len();
+            sp[0] = ctx.mem_len;
             return tailNext(ip, sp + 1, gas, ctx, dispatch);
         }
 
@@ -1138,17 +1189,17 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
         fn tailMload(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: *const DispatchTable) TailStatus {
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, 32, ip, sp, gas, ctx) orelse return memoryFailureStatus(ctx);
-            ctx.frame.memory.readInto(offset, &(sp - 1)[0]);
+            Memory.readWordInto(ctx.mem(), offset, &(sp - 1)[0]);
             return tailNext(ip, sp, mem_gas, ctx, dispatch);
         }
 
         fn tailMstore(ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context, dispatch: *const DispatchTable) TailStatus {
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, gas, ctx) orelse return .done;
-            const memory_len = ctx.frame.memory.len();
+            const memory_len = ctx.mem_len;
             if (memory_len < 32 or offset > memory_len - 32)
                 return @call(.always_tail, tailMstoreGrow, .{ ip, sp, gas, ctx, dispatch });
             const nsp = sp - 2;
-            ctx.frame.memory.writeFrom(offset, &nsp[0]);
+            Memory.writeWordFrom(ctx.mem(), offset, &nsp[0]);
             return tailNext(ip, nsp, gas, ctx, dispatch);
         }
 
@@ -1164,7 +1215,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             const offset = wordToUsizeOrOog((sp - 1)[0], ip, sp, gas, ctx) orelse return .done;
             const mem_gas = expandMemory(offset, 1, ip, sp, gas, ctx) orelse return memoryFailureStatus(ctx);
             const nsp = sp - 2;
-            ctx.frame.memory.write8(offset, nsp[0]);
+            ctx.mem()[offset] = @truncate(nsp[0]);
             return tailNext(ip, nsp, mem_gas, ctx, dispatch);
         }
 
@@ -1176,7 +1227,7 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
             const mem_gas = expandMemory(offset, size, ip, sp, gas, ctx) orelse return memoryFailureStatus(ctx);
             const word_gas = keccakWordGas(size, ip, sp, mem_gas, ctx) orelse return .done;
             const final_gas = chargeGas(ip, sp, mem_gas, ctx, word_gas) orelse return .out_of_gas;
-            const input = ctx.frame.memory.readBytes(offset, size);
+            const input = ctx.mem()[offset..][0..size];
             var result: [32]u8 align(8) = undefined;
             if (input.len == 0)
                 result = evmz.crypto.keccak256_empty
@@ -1210,8 +1261,8 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                 _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
-            if (end <= ctx.frame.memory.len()) return gas;
-            const expansion = ctx.frame.memory.planExpansion(offset, byte_size) orelse {
+            if (end <= ctx.mem_len) return gas;
+            const expansion = Memory.planExpansionFrom(ctx.mem_len, ctx.mem_cost, offset, byte_size) orelse {
                 _ = halt(ctx, ip, sp, gas, .out_of_gas);
                 return null;
             };
@@ -1222,50 +1273,39 @@ pub fn Dispatch(comptime spec: Spec, comptime cfg: struct {
                     return null;
                 },
             };
+            const items = ctx.frame.memory.bytes.items;
+            ctx.mem_ptr = items.ptr;
+            ctx.mem_len = items.len;
+            ctx.mem_cost += expansion.cost;
             return next_gas;
         }
 
+        /// Largest byte size whose per-word and per-byte gas below stays in
+        /// `i64` with plain arithmetic: `size + 31` fits, and `8 * size` fits.
+        /// Anything above it cannot be paid for, so it halts out of gas the
+        /// same way the checked arithmetic did.
+        const max_word_gas_size: usize = @intCast(@divFloor(std.math.maxInt(i64), 8) - 31);
+
+        inline fn sizeGas(comptime per_word: i64, comptime per_byte: i64, size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
+            if (size > max_word_gas_size) {
+                @branchHint(.unlikely);
+                _ = halt(ctx, ip, sp, gas, .out_of_gas);
+                return null;
+            }
+            const words: i64 = @intCast((size + 31) / 32);
+            return per_word * words + per_byte * @as(i64, @intCast(size));
+        }
+
         inline fn keccakWordGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
-            const padded = std.math.add(usize, size, 31) catch {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
-            const words = padded / 32;
-            const gas_usize = std.math.mul(usize, 6, words) catch {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
-            return std.math.cast(i64, gas_usize) orelse {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
+            return sizeGas(6, 0, size, ip, sp, gas, ctx);
         }
 
         inline fn copyWordGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
-            const padded = std.math.add(usize, size, 31) catch {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
-            const words = padded / 32;
-            const gas_usize = std.math.mul(usize, 3, words) catch {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
-            return std.math.cast(i64, gas_usize) orelse {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
+            return sizeGas(3, 0, size, ip, sp, gas, ctx);
         }
 
         inline fn logDataGas(size: usize, ip: [*]const u8, sp: [*]u256, gas: i64, ctx: *Context) ?i64 {
-            const gas_usize = std.math.mul(usize, 8, size) catch {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
-            return std.math.cast(i64, gas_usize) orelse {
-                _ = halt(ctx, ip, sp, gas, .out_of_gas);
-                return null;
-            };
+            return sizeGas(0, 8, size, ip, sp, gas, ctx);
         }
 
         inline fn sourceFromOffset(source: []const u8, offset_word: u256) []const u8 {

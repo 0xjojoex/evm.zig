@@ -72,10 +72,16 @@ pub fn read(self: *const Memory, offset: usize) u256 {
 }
 
 pub inline fn readInto(self: *const Memory, offset: usize, destination: *u256) void {
+    readWordInto(self.bytes.items, offset, destination);
+}
+
+/// Word read against a caller-held view of the bytes, for hot paths that
+/// cache `bytes.items` instead of chasing `*Storage` per access.
+pub inline fn readWordInto(items: []const u8, offset: usize, destination: *u256) void {
+    assert(offset + word_size <= items.len);
+    const bytes = items[offset..][0..word_size];
     if (comptime use_limb_word_io) {
-        assert(offset + word_size <= self.bytes.items.len);
-        const bytes = self.bytes.items[offset..][0..word_size];
-        assert(std.mem.isAligned(@intFromPtr(self.bytes.items.ptr), limb_alignment));
+        assert(std.mem.isAligned(@intFromPtr(items.ptr), limb_alignment));
         // Aligned offsets lower to limb loads; unusual offsets remain valid
         // through the isolated bytewise path.
         if (std.mem.isAligned(offset, limb_alignment)) {
@@ -84,7 +90,7 @@ pub inline fn readInto(self: *const Memory, offset: usize, destination: *u256) v
         }
         readUnalignedInto(bytes, destination);
     } else {
-        destination.* = self.read(offset);
+        destination.* = uint256.fromBytes32(bytes);
     }
 }
 
@@ -138,12 +144,17 @@ pub fn write(self: *Memory, offset: usize, value: u256) void {
 }
 
 pub inline fn writeFrom(self: *Memory, offset: usize, source: *const u256) void {
+    writeWordFrom(self.bytes.items, offset, source);
+}
+
+/// Word write against a caller-held view of the bytes; see `readWordInto`.
+pub inline fn writeWordFrom(items: []u8, offset: usize, source: *const u256) void {
+    assert(offset + word_size <= items.len);
+    const bytes = items[offset..][0..word_size];
     if (comptime use_limb_word_io) {
-        assert(offset + word_size <= self.bytes.items.len);
-        const bytes = self.bytes.items[offset..][0..word_size];
         uint256.writeBytes32From(bytes, source);
     } else {
-        self.write(offset, source.*);
+        uint256.writeBytes32(bytes, source.*);
     }
 }
 
@@ -192,6 +203,22 @@ pub fn planExpansion(self: *const Memory, offset: usize, byte_size: usize) ?Expa
     else
         0;
     return .{ .cost = cost, .next_size = next_size };
+}
+
+/// `planExpansion` for a caller that already holds the current size and the
+/// gas it paid for it (`costOfSize(current_len)`), so only the new size's
+/// cost is evaluated. Assumes `current_len` is word-aligned.
+pub inline fn planExpansionFrom(current_len: usize, current_cost: i64, offset: usize, byte_size: usize) ?Expansion {
+    const next_size = nextSize(offset, byte_size) orelse return null;
+    if (current_len >= next_size) return .{ .cost = 0, .next_size = next_size };
+    const next_cost = memoryCost(next_size) orelse return null;
+    return .{ .cost = next_cost - current_cost, .next_size = next_size };
+}
+
+/// Total gas paid for a word-aligned memory size. Asserts the size is one a
+/// successful expansion produced, so its cost fits `i64`.
+pub inline fn costOfSize(size: usize) i64 {
+    return memoryCost(size) orelse unreachable;
 }
 
 pub fn expandToFit(self: *Memory, offset: usize, byte_size: usize) !void {
