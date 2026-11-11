@@ -137,6 +137,9 @@ Added
 - EEST state and transaction fixtures for `Bogota` load: the fixture tools parse
   `frames`, `signatures`, `maxFee`, and `nonceKeys`, and a frame envelope that
   fails to decode maps to EEST's frame exception names.
+- Blockchain fixtures on `AmsterdamToBogotaAtTime15k` run, and
+  `fixtures.parseFork` maps `BogotaBPOIncrease` and `BogotaBPODecrease` to
+  Bogotá.
 - EIP-8141 frame transactions (type `0x06`, `TxKind.frame`) for specs whose
   `TransactionSpec.active_kinds` contains `.frame` and whose
   `TransactionSpec.frame` carries `transaction.frames.Params`; specs extended

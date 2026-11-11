@@ -497,6 +497,8 @@ test "EEST fork parser maps BPO names onto their parent execution rules" {
     try std.testing.expectEqual(evmz.eth.Revision.osaka, fixture_common.parseStateFork("BPO2"));
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, fixture_common.parseStateFork("AmsterdamBPOIncrease"));
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, fixture_common.parseStateFork("AmsterdamBPODecrease"));
+    try std.testing.expectEqual(evmz.eth.Revision.bogota, fixture_common.parseStateFork("BogotaBPOIncrease"));
+    try std.testing.expectEqual(evmz.eth.Revision.bogota, fixture_common.parseStateFork("BogotaBPODecrease"));
     try std.testing.expectEqual(null, fixture_common.parseStateFork("AmsterdamToBPODecreaseAtTime15k"));
 }
 
@@ -506,6 +508,11 @@ test "EEST transition networks switch forks at their timestamp" {
     try std.testing.expectEqual(evmz.eth.Revision.osaka, amsterdam.forkAt(14_999).revision);
     try std.testing.expectEqualStrings("Amsterdam", amsterdam.forkAt(15_000).name);
     try std.testing.expectEqual(evmz.eth.Revision.amsterdam, amsterdam.forkAt(15_000).revision);
+    const bogota = fixture_common.Network.parse("AmsterdamToBogotaAtTime15k").?;
+    try std.testing.expectEqualStrings("Amsterdam", bogota.forkAt(14_999).name);
+    try std.testing.expectEqual(evmz.eth.Revision.amsterdam, bogota.forkAt(14_999).revision);
+    try std.testing.expectEqualStrings("Bogota", bogota.forkAt(15_000).name);
+    try std.testing.expectEqual(evmz.eth.Revision.bogota, bogota.forkAt(15_000).revision);
 
     // A scenario target drops its source fork's prefix; its blob schedule
     // entry is the full name.

@@ -109,9 +109,9 @@ pub fn parseFixtureConfig(
     const schedule_value = config.get("blobSchedule") orelse return result;
     const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedules, &.{
-        "Cancun", "Prague", "Osaka",                "Amsterdam",
-        "BPO1",   "BPO2",   "AmsterdamBPOIncrease", "AmsterdamBPODecrease",
-        "Bogota",
+        "Cancun", "Prague",            "Osaka",                "Amsterdam",
+        "BPO1",   "BPO2",              "AmsterdamBPOIncrease", "AmsterdamBPODecrease",
+        "Bogota", "BogotaBPOIncrease", "BogotaBPODecrease",
     });
     if (blobScheduleEntry(schedules, revision, fork_name)) |value| {
         result.blob_params = try parseBlobParams(value);
@@ -486,6 +486,8 @@ const known_forks = [_]Fork{
     .{ .name = "BPO2", .revision = .osaka },
     .{ .name = "AmsterdamBPOIncrease", .revision = .amsterdam },
     .{ .name = "AmsterdamBPODecrease", .revision = .amsterdam },
+    .{ .name = "BogotaBPOIncrease", .revision = .bogota },
+    .{ .name = "BogotaBPODecrease", .revision = .bogota },
 };
 
 pub fn parseFork(name: []const u8) ?Fork {
