@@ -79,6 +79,8 @@ Added
 - `TxExecutionResult.frame_halt`: how the root frame halted, or null when no
   root frame ran (a precompile target, or a transaction included without
   executing).
+- `TxExecutionResult.cause`: why the execution ended with its status, which
+  `frame_halt` cannot say for a create that fails after its frame returned.
 - `ResultGas.execution_refund`: the EVM refund counter after the fork's refund
   cap. `refunded` remains the unused gas returned to the payer.
 - `ResultGas.spent`: the gas spent before refunds and floor rules. When the

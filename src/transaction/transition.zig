@@ -211,6 +211,7 @@ pub fn ImplType(
             return .{ .completed = .{
                 .status = result.status,
                 .frame_halt = result.frame_halt,
+                .cause = result.cause,
                 .gas = result.gas,
                 .output = result.output_data,
                 .created_address = created_address,
@@ -223,6 +224,7 @@ pub fn ImplType(
         ) Error!struct {
             status: execution.Status,
             frame_halt: ?execution.FrameHalt,
+            cause: execution.TerminalCause,
             gas: transaction.ResultGas,
             output_data: []const u8,
         } {
@@ -272,6 +274,7 @@ pub fn ImplType(
             return .{
                 .status = result.outcome.status,
                 .frame_halt = result.frame_halt,
+                .cause = result.outcome.cause,
                 .gas = result_gas,
                 .output_data = result.output_data,
             };

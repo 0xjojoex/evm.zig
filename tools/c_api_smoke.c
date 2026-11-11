@@ -158,6 +158,7 @@ int main(void) {
     CHECK(data->status == EVMZ_EXECUTION_SUCCESS);
     CHECK(data->has_halt == 1);
     CHECK(data->halt == EVMZ_HALT_STOP);
+    CHECK(data->cause == EVMZ_CAUSE_NONE);
     CHECK(data->gas.used > 0);
     /* No refund and no calldata, so the receipt gas is what was spent. */
     CHECK(data->gas.spent == data->gas.used);
