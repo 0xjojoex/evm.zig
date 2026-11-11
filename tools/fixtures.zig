@@ -109,8 +109,9 @@ pub fn parseFixtureConfig(
     const schedule_value = config.get("blobSchedule") orelse return result;
     const schedules = asObject(schedule_value) orelse return error.MalformedFixture;
     try rejectUnknownKeys(&schedules, &.{
-        "Cancun",               "Prague",               "Osaka",  "Amsterdam", "BPO1", "BPO2",
-        "AmsterdamBPOIncrease", "AmsterdamBPODecrease", "Bogota",
+        "Cancun", "Prague",            "Osaka",                "Amsterdam",
+        "BPO1",   "BPO2",              "AmsterdamBPOIncrease", "AmsterdamBPODecrease",
+        "Bogota", "BogotaBPOIncrease", "BogotaBPODecrease",
     });
     if (blobScheduleEntry(schedules, revision, fork_name)) |value| {
         result.blob_params = try parseBlobParams(value);
@@ -451,36 +452,98 @@ pub fn parseBlobHashes(allocator: std.mem.Allocator, tx: *const std.json.ObjectM
     return result;
 }
 
-pub fn parseStateFork(name: []const u8) ?evmz.eth.Revision {
-    if (std.ascii.eqlIgnoreCase(name, "Frontier")) return .frontier;
-    if (std.ascii.eqlIgnoreCase(name, "Homestead")) return .homestead;
-    if (std.ascii.eqlIgnoreCase(name, "EIP150")) return .tangerine_whistle;
-    if (std.ascii.eqlIgnoreCase(name, "TangerineWhistle")) return .tangerine_whistle;
-    if (std.ascii.eqlIgnoreCase(name, "EIP158")) return .spurious_dragon;
-    if (std.ascii.eqlIgnoreCase(name, "SpuriousDragon")) return .spurious_dragon;
-    if (std.ascii.eqlIgnoreCase(name, "Byzantium")) return .byzantium;
-    if (std.ascii.eqlIgnoreCase(name, "Constantinople")) return .constantinople;
-    if (std.ascii.eqlIgnoreCase(name, "ConstantinopleFix")) return .petersburg;
-    if (std.ascii.eqlIgnoreCase(name, "Petersburg")) return .petersburg;
-    if (std.ascii.eqlIgnoreCase(name, "Istanbul")) return .istanbul;
-    if (std.ascii.eqlIgnoreCase(name, "Berlin")) return .berlin;
-    if (std.ascii.eqlIgnoreCase(name, "London")) return .london;
-    if (std.ascii.eqlIgnoreCase(name, "Paris")) return .merge;
-    if (std.ascii.eqlIgnoreCase(name, "Merge")) return .merge;
-    if (std.ascii.eqlIgnoreCase(name, "Shanghai")) return .shanghai;
-    if (std.ascii.eqlIgnoreCase(name, "Cancun")) return .cancun;
-    if (std.ascii.eqlIgnoreCase(name, "Prague")) return .prague;
-    if (std.ascii.eqlIgnoreCase(name, "Osaka")) return .osaka;
-    if (std.ascii.eqlIgnoreCase(name, "Amsterdam")) return .amsterdam;
-    if (std.ascii.eqlIgnoreCase(name, "Bogota")) return .bogota;
+/// A fork as EEST names it, with the execution rules it runs.
+pub const Fork = struct {
+    /// EEST's spelling, which also keys the fixture's blob schedule.
+    name: []const u8,
+    revision: evmz.eth.Revision,
+};
+
+const known_forks = [_]Fork{
+    .{ .name = "Frontier", .revision = .frontier },
+    .{ .name = "Homestead", .revision = .homestead },
+    .{ .name = "EIP150", .revision = .tangerine_whistle },
+    .{ .name = "TangerineWhistle", .revision = .tangerine_whistle },
+    .{ .name = "EIP158", .revision = .spurious_dragon },
+    .{ .name = "SpuriousDragon", .revision = .spurious_dragon },
+    .{ .name = "Byzantium", .revision = .byzantium },
+    .{ .name = "Constantinople", .revision = .constantinople },
+    .{ .name = "ConstantinopleFix", .revision = .petersburg },
+    .{ .name = "Petersburg", .revision = .petersburg },
+    .{ .name = "Istanbul", .revision = .istanbul },
+    .{ .name = "Berlin", .revision = .berlin },
+    .{ .name = "London", .revision = .london },
+    .{ .name = "Paris", .revision = .merge },
+    .{ .name = "Merge", .revision = .merge },
+    .{ .name = "Shanghai", .revision = .shanghai },
+    .{ .name = "Cancun", .revision = .cancun },
+    .{ .name = "Prague", .revision = .prague },
+    .{ .name = "Osaka", .revision = .osaka },
+    .{ .name = "Amsterdam", .revision = .amsterdam },
+    .{ .name = "Bogota", .revision = .bogota },
     // BPO scenarios retain their parent fork's execution rules; the fixture's
     // named blob schedule entry supplies the changed parameters.
-    if (std.ascii.eqlIgnoreCase(name, "BPO1")) return .osaka;
-    if (std.ascii.eqlIgnoreCase(name, "BPO2")) return .osaka;
-    if (std.ascii.eqlIgnoreCase(name, "AmsterdamBPOIncrease")) return .amsterdam;
-    if (std.ascii.eqlIgnoreCase(name, "AmsterdamBPODecrease")) return .amsterdam;
+    .{ .name = "BPO1", .revision = .osaka },
+    .{ .name = "BPO2", .revision = .osaka },
+    .{ .name = "AmsterdamBPOIncrease", .revision = .amsterdam },
+    .{ .name = "AmsterdamBPODecrease", .revision = .amsterdam },
+    .{ .name = "BogotaBPOIncrease", .revision = .bogota },
+    .{ .name = "BogotaBPODecrease", .revision = .bogota },
+};
+
+pub fn parseFork(name: []const u8) ?Fork {
+    for (known_forks) |fork| {
+        if (std.ascii.eqlIgnoreCase(name, fork.name)) return fork;
+    }
     return null;
 }
+
+pub fn parseStateFork(name: []const u8) ?evmz.eth.Revision {
+    return (parseFork(name) orelse return null).revision;
+}
+
+/// A fixture's network: one fork, or EEST's `<From>To<To>AtTime<N>k`
+/// transition, which runs `from` before timestamp `at` and `to` from it on.
+pub const Network = struct {
+    from: Fork,
+    to: ?Fork = null,
+    at: u64 = 0,
+
+    pub fn parse(name: []const u8) ?Network {
+        if (parseFork(name)) |fork| return .{ .from = fork };
+        const marker = std.mem.lastIndexOf(u8, name, "AtTime") orelse return null;
+        const time = name[marker + "AtTime".len ..];
+        if (time.len < 2 or time[time.len - 1] != 'k') return null;
+        const thousands = std.fmt.parseInt(u64, time[0 .. time.len - 1], 10) catch return null;
+        const at = std.math.mul(u64, thousands, 1000) catch return null;
+        const forks = name[0..marker];
+        var split: usize = 1;
+        while (std.mem.indexOfPos(u8, forks, split, "To")) |index| : (split = index + 1) {
+            const from = parseFork(forks[0..index]) orelse continue;
+            const to = scenarioOf(from, forks[index + 2 ..]) orelse
+                parseFork(forks[index + 2 ..]) orelse continue;
+            return .{ .from = from, .to = to, .at = at };
+        }
+        return null;
+    }
+
+    /// The fork that runs a block at `timestamp`.
+    pub fn forkAt(self: Network, timestamp: u64) Fork {
+        const to = self.to orelse return self.from;
+        return if (timestamp >= self.at) to else self.from;
+    }
+
+    /// EEST drops the source fork's prefix from a scenario of it:
+    /// `AmsterdamToBPOIncreaseAtTime15k` moves to `AmsterdamBPOIncrease`.
+    fn scenarioOf(from: Fork, suffix: []const u8) ?Fork {
+        for (known_forks) |fork| {
+            if (fork.name.len != from.name.len + suffix.len) continue;
+            if (!std.mem.startsWith(u8, fork.name, from.name)) continue;
+            if (std.ascii.eqlIgnoreCase(fork.name[from.name.len..], suffix)) return fork;
+        }
+        return null;
+    }
+};
 
 fn hexDigit(char: u8) !u8 {
     return switch (char) {

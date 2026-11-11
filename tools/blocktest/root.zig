@@ -16,7 +16,6 @@ const parseAddressFromValue = fixture_common.parseAddressFromValue;
 const parseBytesFromValue = fixture_common.parseBytesFromValue;
 const parseHashFromValue = fixture_common.parseHashFromValue;
 const parseFixtureConfig = fixture_common.parseFixtureConfig;
-const parseStateFork = fixture_common.parseStateFork;
 const parseU256FromValue = fixture_common.parseU256FromValue;
 const parseU64FromValue = fixture_common.parseU64FromValue;
 const seedMemoryStore = fixture_common.seedMemoryStore;
@@ -25,16 +24,17 @@ pub const fixtures = fixture_common;
 
 /// A linear post-Merge chain. Fixture JSON is borrowed for the session lifetime.
 /// Rejected blocks leave the committed state, parent, and BLOCKHASH history intact.
+/// A transition network runs each block under the fork its timestamp selects.
 pub const Session = struct {
     allocator: std.mem.Allocator,
     fixture_object: JsonObject,
-    revision: evmz.eth.Revision,
+    network: fixture_common.Network,
     store: evmz.state.MemoryStore,
     block_hashes: FixtureBlockHashes,
     parent: ParentContext,
 
     pub fn init(allocator: std.mem.Allocator, object: JsonObject) !Session {
-        const revision = try fixtureRevision(&object);
+        const network = try fixtureNetwork(&object);
         const pre = asObject(object.get("pre") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
         const genesis = asObject(object.get("genesisBlockHeader") orelse return error.MalformedFixture) orelse return error.MalformedFixture;
         var store = evmz.state.MemoryStore.init(allocator);
@@ -47,7 +47,7 @@ pub const Session = struct {
         var hashes = FixtureBlockHashes.init(allocator);
         errdefer hashes.deinit();
         try hashes.put(parent.number, parent.hash);
-        return .{ .allocator = allocator, .fixture_object = object, .revision = revision, .store = store, .block_hashes = hashes, .parent = parent };
+        return .{ .allocator = allocator, .fixture_object = object, .network = network, .store = store, .block_hashes = hashes, .parent = parent };
     }
 
     pub fn deinit(self: *Session) void {
@@ -57,7 +57,11 @@ pub const Session = struct {
     }
 
     pub fn apply(self: *Session, comptime trace: bool, source: BlockSource, entry: *const JsonObject, capture: ?block_stf.ExecutionCapture) !block_stf.Result {
-        return runBlock(trace, self.allocator, self.revision, source, &self.fixture_object, entry, &self.store, &self.block_hashes, &self.parent, capture);
+        const fork = if (self.network.to == null)
+            self.network.from
+        else
+            self.network.forkAt(try blockTimestamp(self.allocator, source, entry));
+        return runBlock(trace, self.allocator, fork, source, &self.fixture_object, entry, &self.store, &self.block_hashes, &self.parent, capture);
     }
 
     pub fn stateRoot(self: *Session) ![32]u8 {
@@ -88,7 +92,7 @@ pub fn isBlockRejection(err: anyerror) bool {
 fn runBlock(
     comptime trace: bool,
     allocator: std.mem.Allocator,
-    revision: evmz.eth.Revision,
+    fork: fixture_common.Fork,
     source: BlockSource,
     fixture: *const JsonObject,
     entry: *const JsonObject,
@@ -97,7 +101,7 @@ fn runBlock(
     parent: *ParentContext,
     capture: ?block_stf.ExecutionCapture,
 ) !block_stf.Result {
-    return switch (revision) {
+    return switch (fork.revision) {
         inline else => |exact_revision| blk: {
             if (comptime !exact_revision.isImpl(.merge)) return error.UnsupportedFork;
             break :blk switch (source) {
@@ -106,6 +110,7 @@ fn runBlock(
                     trace,
                     allocator,
                     fixture,
+                    fork.name,
                     entry,
                     store,
                     block_hashes,
@@ -117,6 +122,7 @@ fn runBlock(
                     trace,
                     allocator,
                     fixture,
+                    fork.name,
                     entry,
                     store,
                     block_hashes,
@@ -133,6 +139,7 @@ fn runPayloadExact(
     comptime trace: bool,
     allocator: std.mem.Allocator,
     fixture: *const JsonObject,
+    fork_name: []const u8,
     entry: *const JsonObject,
     store: *evmz.state.MemoryStore,
     block_hashes: *FixtureBlockHashes,
@@ -151,7 +158,7 @@ fn runPayloadExact(
     const payload_number = try u64Field(&payload, "blockNumber");
     try validateChildNumber(parent.number, payload_number);
 
-    const fixture_config = try parseFixtureConfig(fixture, revision, fixture_common.fixtureForkName(fixture));
+    const fixture_config = try parseFixtureConfig(fixture, revision, fork_name);
     var decoded_transactions = try parseTransactions(scratch, asArray(payload.get("transactions") orelse return error.MalformedFixture) orelse return error.MalformedFixture);
     defer decoded_transactions.deinit(scratch);
     try validateBlobVersionedHashes(revision, params, decoded_transactions.transactions);
@@ -243,6 +250,7 @@ fn runBlockBodyExact(
     comptime trace: bool,
     allocator: std.mem.Allocator,
     fixture: *const JsonObject,
+    fork_name: []const u8,
     entry: *const JsonObject,
     store: *evmz.state.MemoryStore,
     block_hashes: *FixtureBlockHashes,
@@ -261,7 +269,7 @@ fn runBlockBodyExact(
     if (!std.mem.eql(u8, &header.parent_hash, &parent.hash)) return error.ParentHashMismatch;
     try validateChildNumber(parent.number, header.number);
 
-    const fixture_config = try parseFixtureConfig(fixture, revision, fixture_common.fixtureForkName(fixture));
+    const fixture_config = try parseFixtureConfig(fixture, revision, fork_name);
     const block_access_list = if (revision.isImpl(.amsterdam)) blk: {
         if (entry.get("blockAccessList") != null) break :blk try bal_fixture.encodeClaim(scratch, entry);
         if (entry.get("rlp_decoded")) |value| {
@@ -412,6 +420,12 @@ fn parseExecutionHeader(
     item: evmz.rlp.Item,
 ) !evmz.eth.ExecutionHeader {
     var fields = try item.listCursor();
+    // A field set that is not the fork's, such as the first post-fork block
+    // without the new fields, is a header surface error rather than bad RLP.
+    var count_cursor = fields;
+    var count: usize = 0;
+    while (!count_cursor.isDone()) : (count += 1) _ = try count_cursor.next();
+    if (count != headerFieldCount(revision)) return error.HeaderSurfaceMismatch;
     const header = evmz.eth.ExecutionHeader{
         .parent_hash = try nextFixed(&fields, 32),
         .ommers_hash = try nextFixed(&fields, 32),
@@ -440,6 +454,16 @@ fn parseExecutionHeader(
     try fields.expectDone();
     try header.validate(revision);
     return header;
+}
+
+fn headerFieldCount(comptime revision: evmz.eth.Revision) usize {
+    var count: usize = 15;
+    if (revision.isImpl(.london)) count += 1; // base fee
+    if (revision.isImpl(.shanghai)) count += 1; // withdrawals root
+    if (revision.isImpl(.cancun)) count += 3; // blob gas used, excess blob gas, beacon root
+    if (revision.isImpl(.prague)) count += 1; // requests hash
+    if (revision.isImpl(.amsterdam)) count += 2; // block access list hash, slot number
+    return count;
 }
 
 fn nextFixed(cursor: *evmz.rlp.Cursor, comptime len: usize) ![len]u8 {
@@ -580,11 +604,36 @@ const FixtureBlockHashes = struct {
     }
 };
 
-fn fixtureRevision(fixture: *const JsonObject) !evmz.eth.Revision {
-    const network = fixture_common.fixtureForkName(fixture) orelse return error.MalformedFixture;
-    const revision = parseStateFork(network) orelse return error.UnsupportedFork;
-    if (!revision.isImpl(.merge)) return error.UnsupportedFork;
-    return revision;
+fn fixtureNetwork(fixture: *const JsonObject) !fixture_common.Network {
+    const name = fixture_common.fixtureForkName(fixture) orelse return error.MalformedFixture;
+    const network = fixture_common.Network.parse(name) orelse return error.UnsupportedFork;
+    if (!network.from.revision.isImpl(.merge)) return error.UnsupportedFork;
+    return network;
+}
+
+/// The block's timestamp, read before its fork is known. A consensus header
+/// keeps the timestamp twelfth in every fork. A block too malformed to show
+/// one reads as 0, so the transition's first fork decodes it and rejects it.
+fn blockTimestamp(allocator: std.mem.Allocator, source: BlockSource, entry: *const JsonObject) !u64 {
+    switch (source) {
+        .payload => {
+            const params = asArray(entry.get("params") orelse return error.MalformedFixture) orelse
+                return error.MalformedFixture;
+            if (params.items.len == 0) return error.UnsupportedPayloadShape;
+            const payload = asObject(params.items[0]) orelse return error.MalformedFixture;
+            return u64Field(&payload, "timestamp");
+        },
+        .block_body => {
+            const block_rlp = try parseBytesFromValue(allocator, entry.get("rlp") orelse return error.MalformedFixture);
+            defer allocator.free(block_rlp);
+            var block_cursor = evmz.rlp.Cursor.init(block_rlp);
+            var block = block_cursor.nextList() catch return 0;
+            const header = block.next() catch return 0;
+            var fields = header.listCursor() catch return 0;
+            for (0..11) |_| _ = fields.next() catch return 0;
+            return fields.nextInt(u64) catch 0;
+        },
+    }
 }
 
 fn parseTransactions(allocator: std.mem.Allocator, array: JsonArray) !evmz.transaction.raw.DecodedBatch {
