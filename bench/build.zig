@@ -94,6 +94,32 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const tx_loop_mod = benchModule(b, "src/tx_loop.zig", target, optimize, evmz_mod);
+        const tx_loop = b.addExecutable(.{
+            .name = "evmz-tx-loop",
+            .root_module = tx_loop_mod,
+        });
+        b.installArtifact(tx_loop);
+
+        const run_tx_loop = b.addRunArtifact(tx_loop);
+        run_tx_loop.addPassthruArgs();
+        b.step("tx-loop", "Run evmz transaction-level benchmark").dependOn(&run_tx_loop.step);
+    }
+
+    {
+        const run = b.addSystemCommand(&.{
+            "cargo",           "+1.96.0",         "run", "--quiet", "--release", "--locked",
+            "--manifest-path", "evm2/Cargo.toml", "--",  "tx-loop",
+        });
+        run.setCwd(b.path("."));
+        run.setEnvironmentVariable("EVM2_DISPATCH_BACKEND", "packed");
+        run.setEnvironmentVariable("CARGO_TARGET_DIR", "evm2/target");
+        addNativeRustFlags(run);
+        run.addPassthruArgs();
+        b.step("evm2-tx-loop", "Run EVM2 transaction-level benchmark").dependOn(&run.step);
+    }
+
+    {
         const kernel_mod = benchModule(b, "src/kernel.zig", target, optimize, evmz_mod);
         kernel_mod.addImport("evmc_bindings", evmc_bindings_mod);
         addEvmoneVm(kernel_mod, evmone_dep, intx_dep, evmone_libgcc);

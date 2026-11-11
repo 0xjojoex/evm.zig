@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod kernel;
+mod tx_loop;
 
 use alloy_primitives::{Address, B256, Bytes, U256, hex, keccak256};
 use evm2::bytecode::Bytecode;
@@ -36,6 +37,10 @@ fn main() -> Result<(), String> {
     if args.peek().is_some_and(|arg| arg == "kernel") {
         args.next();
         return kernel::run(args);
+    }
+    if args.peek().is_some_and(|arg| arg == "tx-loop") {
+        args.next();
+        return tx_loop::run(args);
     }
     let mut fixture = None;
     let mut code_path = None;

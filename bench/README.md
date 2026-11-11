@@ -10,6 +10,7 @@ lifecycle, and inner-loop data structures.
 | Single-engine VM loop | `zig build bench-vm-loop` | `zig build vm-loop` | Per-call runtime timing for `evmz` (`evmone-vm-loop` and `evm2-vm-loop` for peers) |
 | Opcode kernels | `zig build bench-kernel` | `zig build kernel` | Pure opcode loops on the null host (`small`, `edge`, `large`, `branch`) |
 | Block lifecycle | `zig build bench-block-lifecycle` | `zig build block-lifecycle` | `Executor` init, `BlockExecution` tx loop, and state persistence (`growable` vs `exact`) |
+| Transaction loop | `zig build bench-tx-loop` | `zig build tx-loop` | One complete transaction per call on a long-lived VM (`evm2-tx-loop` for the peer) |
 | Inner-loop microbench | `zig build bench-micro` | `zig build micro` | zBench microbenchmarks (`arithmetic`, `sdiv`, `mulmod`, `sparse-hash-map`, `overlay`) |
 | Code analysis | `zig build bench-code-analysis` | `zig build code-analysis` | Bytecode jumpdest analysis timing and morphology |
 
@@ -266,6 +267,44 @@ is CSV:
 
 ```text
 suite,policy,case,spec,repeat,txs,access_list_addresses,access_list_storage_keys,elapsed_ns,ns_per_tx,gas_used,block_gas_used,tx_count,commit
+```
+
+## Transaction loop runner
+
+`zig build tx-loop` times one complete legacy transaction per call on a VM that
+lives for the whole run: validation, fee debit, nonce advance, the top-level
+call, refund, coinbase payment, and acceptance of the state transition. The
+VM-loop lane starts from a prepared call frame and cannot show this fixed cost.
+`zig build evm2-tx-loop` runs the same workloads through EVM2's `Evm::transact`
+and `ExecutedTx::commit`.
+
+```sh
+cd bench
+zig build tx-loop -- --case eth-transfer --txs 200000 --summary
+zig build evm2-tx-loop -- --case eth-transfer --txs 200000 --summary
+zig build tx-loop -- --case erc20-transfer --txs 200000 --no-code-cache
+```
+
+| Case | Transaction |
+| --- | --- |
+| `eth-transfer` | 1 wei to an existing codeless account |
+| `stop-call` | Zero-value call to a contract whose runtime is `STOP` |
+| `erc20-transfer` | `transfer(address,uint256)` on the `erc20-transfer` fixture, both balance slots non-zero |
+
+Both runners deploy the contracts and prime the state through transactions
+before timing, pay a 10 wei gas price over a 7 wei base fee to a non-zero
+coinbase, and keep state in the engine's own in-memory store. Each runner fails
+unless every timed transaction succeeds with the gas of the steady-state
+reference transaction and the recipient ends with the expected balance; equal
+`gas_per_tx` across engines is the cross-check that they ran the same work.
+
+EVM2 keeps jump analysis inside its committed bytecode. `evmz` keeps prepared
+code in a pool, which block execution installs by default and this runner
+installs too; `--no-code-cache` removes it and prepares the callee's code on
+every transaction. Stdout is CSV:
+
+```text
+suite,engine,case,spec,code_cache,repeat,txs,elapsed_ns,ns_per_tx,gas_per_tx
 ```
 
 ## Opcode kernel runner
