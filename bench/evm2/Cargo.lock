@@ -1414,6 +1414,7 @@ dependencies = [
 name = "evmz-evm2-vm-loop"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "evm2",
 ]
