@@ -39,7 +39,7 @@ then
     exit 1
 fi
 
-symbols=$("$nm" -g "$output")
+symbols=$("$nm" -g --defined-only "$output")
 for symbol in \
     _start \
     read_input \

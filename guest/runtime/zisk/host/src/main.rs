@@ -8,8 +8,8 @@ use std::{
     path::PathBuf,
 };
 use zisk_core::ZiskRom;
-use zisk_transpiler_riscv::Riscv2zisk;
-use ziskemu::{Emu, EmuOptions};
+use zisk_transpiler_common::ZiskTranspiler;
+use ziskemu::{Emu, EmuOptions, FailureReason};
 
 #[derive(Default)]
 struct Options {
@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_args()?;
     let elf_path = options.elf.ok_or("missing --elf PATH")?;
     let elf = fs::read(elf_path)?;
-    let rom = Riscv2zisk::new(&elf)
+    let rom = ZiskTranspiler::new(&elf)
         .run()
         .map_err(|err| format!("ELF-to-ROM conversion failed: {err}"))?;
 
@@ -41,16 +41,15 @@ fn execute(rom: &ZiskRom, input: Vec<u8>) -> Result<Success, String> {
                 emu.number_of_steps()
             ));
         }
-        if emu.ctx.inst_ctx.error {
-            return Err(format!(
-                "ZisK emulator failed at pc=0x{:x} after {} steps",
-                emu.ctx.inst_ctx.pc,
-                emu.number_of_steps()
-            ));
-        }
-        let exit_code = emu.get_reg(10) as i32;
-        if exit_code != 0 {
-            return Err(format!("ZisK guest exited with code {exit_code}"));
+        match emu.failure() {
+            None => {}
+            // a0 holds main's sign-extended C int return value.
+            Some((FailureReason::ExitCode(code), _, _)) => {
+                return Err(format!("ZisK guest exited with code {}", code as i32));
+            }
+            Some((FailureReason::Trap, step, pc)) => {
+                return Err(format!("ZisK guest trapped at pc=0x{pc:x} at step {step}"));
+            }
         }
 
         Ok((emu.get_output_8(), emu.number_of_steps()))
