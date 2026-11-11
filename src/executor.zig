@@ -1091,8 +1091,7 @@ pub fn ExecutorType(
 
         /// Increment an account nonce, saturating at `maxInt(u64)`.
         fn incrementNonce(self: *Executor, address: Address) !void {
-            const account = try self.getAccount(address) orelse AccountState{};
-            try self.state.setNonce(.fromAddress(address), account.nonce +| 1);
+            try self.state.incrementNonce(.fromAddress(address));
         }
 
         /// Borrow a Host for the current execution session. Callbacks assert an

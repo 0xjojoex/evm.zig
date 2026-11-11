@@ -1325,37 +1325,39 @@ pub fn WorldState(comptime World: type) type {
 
         pub fn setBalance(self: *State, address: AccountKey, balance: u256) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
-            const current = self.world.accountRow(id).current;
-            var account = current orelse Account{};
-            if (current != null and account.balance == balance) return;
-            account.balance = balance;
-            try self.writeAccount(id, account);
+            try self.writeResolvedBalance(id, balance);
         }
 
         pub fn addBalance(self: *State, address: AccountKey, value: u256) !void {
             if (value == 0) return;
-            const balance = try self.getBalance(address);
-            try self.setBalance(
-                address,
+            const id = (try self.world.resolveAccount(address, .required_observed)).?;
+            const balance = try self.readResolvedBalance(id);
+            try self.writeResolvedBalance(
+                id,
                 std.math.add(u256, balance, value) catch return error.BalanceOverflow,
             );
         }
 
         pub fn subtractBalance(self: *State, address: AccountKey, value: u256) !bool {
             if (value == 0) return true;
-            const balance = try self.getBalance(address);
+            const id = (try self.world.resolveAccount(address, .required_observed)).?;
+            const balance = try self.readResolvedBalance(id);
             if (balance < value) return false;
-            try self.setBalance(address, balance - value);
+            try self.writeResolvedBalance(id, balance - value);
             return true;
         }
 
         pub fn setNonce(self: *State, address: AccountKey, nonce: u64) !void {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
-            const current = self.world.accountRow(id).current;
-            var account = current orelse Account{};
-            if (current != null and account.nonce == nonce) return;
-            account.nonce = nonce;
-            try self.writeAccount(id, account);
+            try self.writeResolvedNonce(id, nonce);
+        }
+
+        /// Read the nonce and write it back one higher, saturating at `maxInt(u64)`.
+        pub fn incrementNonce(self: *State, address: AccountKey) !void {
+            const id = (try self.world.resolveAccount(address, .required_observed)).?;
+            const account = (try self.readResolvedAccount(id, .{ .accessed = true, .value_read = true })) orelse
+                Account{};
+            try self.writeResolvedNonce(id, account.nonce +| 1);
         }
 
         pub fn setCode(self: *State, address: AccountKey, code_bytes: []const u8) !void {
@@ -2016,10 +2018,38 @@ pub fn WorldState(comptime World: type) type {
 
         fn readAccount(self: *State, address: AccountKey, observation: AccountObservation) !?Account {
             const id = (try self.world.resolveAccount(address, .required_observed)).?;
+            return self.readResolvedAccount(id, observation);
+        }
+
+        /// A read-modify-write resolves its address once and shares the row
+        /// between the read and the write; each address resolution is a hash probe.
+        fn readResolvedAccount(self: *State, id: AccountId, observation: AccountObservation) !?Account {
             // Block-system-call admission may inspect code presence before opening the
             // managed system-call attempt. The actual call records the access.
             if (self.attemptOpen()) try self.observeAccount(id, observation);
             return self.world.accountRow(id).current;
+        }
+
+        fn readResolvedBalance(self: *State, id: AccountId) !u256 {
+            const account = (try self.readResolvedAccount(id, .{ .accessed = true, .value_read = true })) orelse
+                return 0;
+            return account.balance;
+        }
+
+        fn writeResolvedBalance(self: *State, id: AccountId, balance: u256) !void {
+            const current = self.world.accountRow(id).current;
+            var account = current orelse Account{};
+            if (current != null and account.balance == balance) return;
+            account.balance = balance;
+            try self.writeAccount(id, account);
+        }
+
+        fn writeResolvedNonce(self: *State, id: AccountId, nonce: u64) !void {
+            const current = self.world.accountRow(id).current;
+            var account = current orelse Account{};
+            if (current != null and account.nonce == nonce) return;
+            account.nonce = nonce;
+            try self.writeAccount(id, account);
         }
 
         fn resolveStorageKey(self: *State, address: AccountKey, key: u256, policy: ResolutionPolicy) !?ResolvedStorage {
