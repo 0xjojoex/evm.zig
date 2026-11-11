@@ -870,9 +870,29 @@ fn addCApi(b: *std.Build, config: CApiConfig) *std.Build.Step {
     lib.bundle_ubsan_rt = true;
     lib.installHeader(header_path, "evmz/evmz.h");
 
+    // A host's linker reads the archives, and Apple's rejects one Zig leaves
+    // unpadded, so they are installed through `tools/pad_archive.zig`. The
+    // artifact step itself installs only the header.
+    // https://codeberg.org/ziglang/zig/issues/30572
+    const pad_archive_mod = b.createModule(.{
+        .root_source_file = b.path("tools/pad_archive.zig"),
+        .target = b.graph.host,
+        .optimize = .safe,
+    });
+    const pad_archive = b.addExecutable(.{ .name = "pad-archive", .root_module = pad_archive_mod });
+    const pad_archive_tests = b.addTest(.{
+        .name = "pad-archive-test",
+        .root_module = pad_archive_mod,
+    });
+
     const install_step = b.step("c-api", "Build and install libevmz and its C header");
-    install_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
-    install_step.dependOn(&b.addInstallArtifact(config.blst_lib, .{}).step);
+    install_step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .disabled }).step);
+    for ([_]*std.Build.Step.Compile{ lib, config.blst_lib }) |archive| {
+        const pad = b.addRunArtifact(pad_archive);
+        pad.addArtifactArg(archive);
+        const padded = pad.addOutputFileArg(archive.out_filename);
+        install_step.dependOn(&b.addInstallLibFile(padded, archive.out_filename).step);
+    }
 
     const tests = b.addTest(.{
         .name = "c-api-tests",
@@ -897,6 +917,7 @@ fn addCApi(b: *std.Build, config: CApiConfig) *std.Build.Step {
     const test_step = b.step("c-api-test", "Test the C session ABI");
     test_step.dependOn(runTests(b, tests));
     test_step.dependOn(&b.addRunArtifact(smoke).step);
+    test_step.dependOn(&b.addRunArtifact(pad_archive_tests).step);
     return test_step;
 }
 
