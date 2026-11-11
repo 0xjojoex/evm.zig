@@ -111,6 +111,11 @@ Added
   sender cannot fund its value fails in preparation having paid only the
   target's access, before any delegation is resolved, and still records the
   target's access for the block access list.
+- Blockchain fixtures on EEST's timestamp transition networks
+  (`<From>To<To>AtTime<N>k`, such as `PragueToOsakaAtTime15k`) run: each
+  block executes under the fork its timestamp selects, with that fork's blob
+  schedule. `fixtures.Network` parses the name, and `fixtures.parseFork` keeps
+  EEST's fork spelling.
 
 Changed
 

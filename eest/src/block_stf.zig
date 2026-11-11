@@ -258,12 +258,20 @@ fn expectedExceptionMatches(result: block_stf.Result, expected: []const u8) bool
 }
 
 fn expectedAdapterErrorMatches(err: anyerror, expected: []const u8) bool {
+    // A header whose field set is not its fork's. EEST names the Amsterdam
+    // boundary cases from the engine side: a pre-fork header carrying a BAL
+    // hash yields a block hash the client cannot rebuild, and a post-fork one
+    // without it lacks the BAL hash. Decoded from RLP, all are this one error.
+    if (err == error.HeaderSurfaceMismatch) {
+        return tx_validation.exceptionNameMatches("BlockException.INCORRECT_BLOCK_FORMAT", expected) or
+            tx_validation.exceptionNameMatches("BlockException.INVALID_BLOCK_HASH", expected) or
+            tx_validation.exceptionNameMatches("BlockException.INVALID_BAL_HASH", expected);
+    }
     const name = switch (err) {
         error.ParentHashMismatch => "BlockException.UNKNOWN_PARENT",
         error.BlockNumberMismatch => "BlockException.INVALID_BLOCK_NUMBER",
         error.BlobGasOverflow => "BlockException.INCORRECT_EXCESS_BLOB_GAS",
         error.ExtraDataTooLong => "BlockException.EXTRA_DATA_TOO_BIG",
-        error.HeaderSurfaceMismatch => "BlockException.INCORRECT_BLOCK_FORMAT",
         error.BlockRlpTooLarge => "BlockException.RLP_BLOCK_LIMIT_EXCEEDED",
         error.InvalidSignature, error.UnsupportedLegacyV => "TransactionException.INVALID_SIGNATURE_VRS",
         error.InputTooShort => "BlockException.RLP_STRUCTURES_ENCODING",
