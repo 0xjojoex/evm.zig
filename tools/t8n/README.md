@@ -63,6 +63,21 @@ zig build t8n-diff -Deest-source=$ES -Dt8n-reference-bin=/path/to/other-t8n -- t
 `t8n-diff` defaults to EELS as the reference. Another `evmz` binary can also serve as the reference. Mismatch
 artifacts land in `.zig-cache/eest-diff/mismatches/`.
 
+Both steps run in `eest/consume`'s pinned Python environment, whose testing
+package predates the frame-transaction helpers that Bogotá tests import. For
+Bogotá, check out a devnet branch such as `devnets/bogota/2` and add
+`-Deest-source-env` to fill in that checkout's own environment; it needs
+whatever `uv` version the checkout requires.
+
+```sh
+zig build t8n-fill -Deest-source=$ES -Deest-source-env -- \
+  --fork Bogota tests/bogota/eip8141_frame_transactions/test_fee_budget.py
+```
+
+Type 0x06 transactions arrive as EEST's frame JSON (`frames`, `signatures`,
+`maxFee`, `nonceKeys`); frame receipts report `payer` and `frameReceipts`
+instead of a `status`.
+
 ## Replay a single case
 
 EEST deletes the per-call inputs unless asked to keep them:

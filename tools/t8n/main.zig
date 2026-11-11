@@ -13,7 +13,7 @@ const system_contracts = evmz.executor.system_contracts;
 const eql = std.mem.eql;
 
 /// Forks the tool accepts. `--state.fork` matches these tags; Paris is `merge`.
-const forks = [_]Revision{ .merge, .shanghai, .cancun, .prague, .osaka, .amsterdam };
+const forks = [_]Revision{ .merge, .shanghai, .cancun, .prague, .osaka, .amsterdam, .bogota };
 
 const Options = struct {
     input_alloc: []const u8 = "alloc.json",
@@ -185,7 +185,7 @@ const TransactionInput = struct {
     chainId: ?Quantity = null,
     nonce: Quantity = .zero,
     gasPrice: ?Quantity = null,
-    maxPriorityFeePerGas: ?Quantity = null,
+    maxPriorityFeePerGas: ?WideQuantity = null,
     maxFeePerGas: ?Quantity = null,
     gas: Quantity = .{ .value = 21_000 },
     to: ?Recipient = null,
@@ -202,6 +202,30 @@ const TransactionInput = struct {
     sender: ?AddressHex = null,
     secretKey: ?Hash = null,
     rlpOverride: ?Hex = null,
+    // EIP-8141 frame transactions (type 0x06) and EIP-8250 nonce keys.
+    maxFee: ?WideQuantity = null,
+    frames: ?[]const FrameInput = null,
+    signatures: ?[]const FrameSignatureInput = null,
+    nonceKeys: ?[]const WideQuantity = null,
+};
+
+/// An absent or empty `target` is the sender.
+const FrameInput = struct {
+    mode: Quantity = .zero,
+    flags: Quantity = .zero,
+    target: ?Recipient = null,
+    gasLimit: Quantity = .zero,
+    stateGasLimit: Quantity = .zero,
+    value: Quantity = .zero,
+    data: Hex = .{ .bytes = &.{} },
+};
+
+/// Raw signature entry; an empty `signer` or `msg` is absent.
+const FrameSignatureInput = struct {
+    scheme: Quantity = .zero,
+    signer: Hex = .{ .bytes = &.{} },
+    msg: Hex = .{ .bytes = &.{} },
+    signature: Hex = .{ .bytes = &.{} },
 };
 
 const AccessListInput = struct {
@@ -426,7 +450,9 @@ fn parseTransactions(
         };
         candidate.* = if (evmz.transaction.raw.decodeRaw(allocator, bytes)) |decoded|
             .{ .ready = .{ .value = decoded.tx, .bytes = bytes } }
-        else |err|
+        else |err| if (bytes[0] == evmz.transaction.type_id.frame)
+            .{ .rejected = frameDecodeError(bytes) }
+        else
             .{ .rejected = rawTransactionError(err) };
     }
     return candidates;
@@ -434,14 +460,15 @@ fn parseTransactions(
 
 fn encodeTransaction(allocator: Allocator, tx: TransactionInput, default_chain_id: u256) ![]const u8 {
     const kind = try transactionKind(tx);
+    if (kind == .frame) return encodeFrameTransaction(allocator, tx, default_chain_id);
+    if (tx.maxFee != null or tx.frames != null or tx.signatures != null or tx.nonceKeys != null)
+        return error.InvalidInput;
     const forbidden = switch (kind) {
         .legacy => tx.accessList != null or tx.maxFeePerGas != null or tx.maxPriorityFeePerGas != null,
         .access_list => tx.maxFeePerGas != null or tx.maxPriorityFeePerGas != null,
         .dynamic_fee => tx.gasPrice != null,
         .blob => tx.gasPrice != null or tx.authorizationList != null,
         .set_code => tx.gasPrice != null or tx.maxFeePerBlobGas != null or tx.blobVersionedHashes != null,
-        // t8n's JSON input has no frame-transaction shape; `transactionKind`
-        // reports type 0x06 as unsupported.
         .frame => unreachable,
     };
     if (forbidden) return error.InvalidInput;
@@ -453,7 +480,7 @@ fn encodeTransaction(allocator: Allocator, tx: TransactionInput, default_chain_i
     switch (kind) {
         .legacy, .access_list => try payload.int(u256, if (tx.gasPrice) |v| v.value else 10),
         else => {
-            try payload.int(u256, if (tx.maxPriorityFeePerGas) |v| v.value else 0);
+            try payload.int(u256, if (tx.maxPriorityFeePerGas) |v| try v.narrow() else 0);
             try payload.int(u256, if (tx.maxFeePerGas) |v| v.value else 7);
         },
     }
@@ -489,9 +516,67 @@ fn encodeTransaction(allocator: Allocator, tx: TransactionInput, default_chain_i
     return envelope(allocator, kind, payload.written());
 }
 
+/// EIP-8141 envelope with EIP-8250 `nonce_keys` when present. EEST signs
+/// frame transactions itself, so the signature entries pass through as
+/// given; the call fields it also sends (`gas`, `to`, `value`, `input`,
+/// `accessList`, `v`, `r`, `s`) have no place in this type and are ignored.
+/// Fields are written as raw RLP so that out-of-range values reach the
+/// decoder and are rejected there, as a client would see them.
+fn encodeFrameTransaction(allocator: Allocator, tx: TransactionInput, default_chain_id: u256) ![]const u8 {
+    if (tx.gasPrice != null or tx.maxFeePerGas != null or tx.maxFeePerBlobGas != null or
+        tx.authorizationList != null) return error.InvalidInput;
+    const sender = tx.sender orelse return error.InvalidInput;
+    var payload = Writer.alloc(allocator);
+    try payload.int(u256, if (tx.chainId) |v| v.value else default_chain_id);
+    if (tx.nonceKeys) |keys| {
+        const start = payload.written().len;
+        for (keys) |key| try payload.bytes(key.bytes);
+        try closeList(&payload, start);
+    }
+    try payload.int(u256, tx.nonce.value);
+    try payload.bytes(&sender.bytes);
+
+    const frames_start = payload.written().len;
+    for (tx.frames orelse &.{}) |frame| {
+        const start = payload.written().len;
+        try payload.int(u256, frame.mode.value);
+        try payload.int(u256, frame.flags.value);
+        const target = if (frame.target) |recipient| recipient.address else null;
+        try payload.bytes(if (target) |address| address.asBytes() else &.{});
+        const limits_start = payload.written().len;
+        try payload.int(u256, frame.gasLimit.value);
+        try payload.int(u256, frame.stateGasLimit.value);
+        try closeList(&payload, limits_start);
+        try payload.int(u256, frame.value.value);
+        try payload.bytes(frame.data.bytes);
+        try closeList(&payload, start);
+    }
+    try closeList(&payload, frames_start);
+
+    const signatures_start = payload.written().len;
+    for (tx.signatures orelse &.{}) |signature| {
+        const start = payload.written().len;
+        try payload.int(u256, signature.scheme.value);
+        try payload.bytes(signature.signer.bytes);
+        try payload.bytes(signature.msg.bytes);
+        try payload.bytes(signature.signature.bytes);
+        try closeList(&payload, start);
+    }
+    try closeList(&payload, signatures_start);
+
+    const fees_start = payload.written().len;
+    try payload.bytes(if (tx.maxFee) |v| v.bytes else &.{});
+    try payload.bytes(if (tx.maxPriorityFeePerGas) |v| v.bytes else &.{});
+    try closeList(&payload, fees_start);
+    try writeHashList(&payload, tx.blobVersionedHashes orelse &.{});
+    return envelope(allocator, .frame, payload.written());
+}
+
 fn transactionKind(tx: TransactionInput) !TxKind {
     const type_id: u8 = if (tx.type) |value|
         try value.narrow(u8)
+    else if (tx.frames != null)
+        6
     else if (tx.authorizationList != null)
         4
     else if (tx.maxFeePerBlobGas != null or tx.blobVersionedHashes != null)
@@ -508,6 +593,7 @@ fn transactionKind(tx: TransactionInput) !TxKind {
         2 => .dynamic_fee,
         3 => .blob,
         4 => .set_code,
+        6 => .frame,
         else => error.UnsupportedTransactionType,
     };
 }
@@ -1126,6 +1212,26 @@ fn validationErrorName(reason: evmz.eth.transaction_validation.ValidationError) 
     };
 }
 
+/// A frame envelope the decoder rejected: an overflowing fee has its own
+/// name; every other field violation is a frame format error. Mirrors the
+/// EEST fixture tool's `frameDecodeExceptionName`.
+fn frameDecodeError(bytes: []const u8) []const u8 {
+    const format = "TransactionException.TYPE_6_INVALID_FRAME_FORMAT";
+    var cursor = evmz.rlp.Cursor.init(bytes[1..]);
+    var fields = cursor.nextList() catch return format;
+    _ = fields.next() catch return format; // chain_id
+    const nonce = fields.next() catch return format;
+    // EIP-8250 splits the nonce into `nonce_keys` and `nonce_seq`.
+    if (nonce.kind() == .list) _ = fields.next() catch return format;
+    for (0..3) |_| _ = fields.next() catch return format; // sender, frames, signatures
+    var fees = fields.nextList() catch return format;
+    _ = fees.nextInt(u256) catch |err|
+        return if (err == error.IntTooLarge) "TransactionException.GASPRICE_OVERFLOW" else format;
+    _ = fees.nextInt(u256) catch |err|
+        return if (err == error.IntTooLarge) "TransactionException.PRIORITY_OVERFLOW" else format;
+    return format;
+}
+
 fn rawTransactionError(err: anyerror) []const u8 {
     return switch (err) {
         error.InvalidSignature, error.UnsupportedLegacyV => "TransactionException.INVALID_SIGNATURE_VRS",
@@ -1184,6 +1290,38 @@ const Quantity = struct {
     }
 };
 
+/// A quantity of any width, kept as its minimal big-endian bytes. EEST sends
+/// 2**256 in some frame fields on purpose, and the decoder must see it.
+const WideQuantity = struct {
+    bytes: []const u8,
+
+    pub fn jsonParse(allocator: Allocator, source: anytype, options: std.json.ParseOptions) !WideQuantity {
+        const text = try textToken(allocator, source, options);
+        const body = stripHexPrefix(text);
+        if (body.len == text.len) {
+            const value = std.fmt.parseInt(u256, text, 10) catch return error.InvalidNumber;
+            var word: [32]u8 = undefined;
+            std.mem.writeInt(u256, &word, value, .big);
+            const start = std.mem.indexOfNone(u8, &word, &.{0}) orelse word.len;
+            return .{ .bytes = try allocator.dupe(u8, word[start..]) };
+        }
+        const digits = std.mem.trimStart(u8, body, "0");
+        const padded = try allocator.alloc(u8, digits.len + digits.len % 2);
+        if (digits.len % 2 == 1) padded[0] = '0';
+        @memcpy(padded[digits.len % 2 ..], digits);
+        const out = try allocator.alloc(u8, padded.len / 2);
+        _ = std.fmt.hexToBytes(out, padded) catch return error.InvalidNumber;
+        return .{ .bytes = out };
+    }
+
+    fn narrow(self: WideQuantity) !u256 {
+        if (self.bytes.len > 32) return error.InvalidInput;
+        var value: u256 = 0;
+        for (self.bytes) |byte| value = (value << 8) | byte;
+        return value;
+    }
+};
+
 fn quantity(value: anytype) Quantity {
     return .{ .value = value };
 }
@@ -1229,7 +1367,8 @@ const Rejected = struct {
 
 const Receipt = struct {
     root: []const u8 = "0x",
-    status: []const u8,
+    /// Absent for a frame transaction, whose frames carry the outcomes.
+    status: ?[]const u8,
     cumulativeGasUsed: Quantity,
     logsBloom: Bloom,
     logs: []const Log,
@@ -1242,6 +1381,17 @@ const Receipt = struct {
     type: ?[]const u8,
     blobGasUsed: ?Quantity,
     blobGasPrice: ?Quantity,
+    payer: ?AddressHex = null,
+    frameReceipts: ?[]const FrameReceipt = null,
+};
+
+/// EIP-8141 per-frame receipt as EELS's t8n reports it: the consensus
+/// `gas_used = [execution, state]` pair split into two fields.
+const FrameReceipt = struct {
+    status: Quantity,
+    gasUsed: Quantity,
+    stateGasUsed: Quantity,
+    logs: []const Log,
 };
 
 const Log = struct {
@@ -1299,11 +1449,23 @@ fn receiptDocument(
         };
     }
     const kind = transaction.value.kind;
+    const frame_receipts: ?[]const FrameReceipt = if (receipt.frame) |frame| frame_receipts: {
+        const documents = try allocator.alloc(FrameReceipt, frame.receipts.len);
+        for (documents, frame.receipts) |*document, frame_receipt| document.* = .{
+            .status = quantity(@backingInt(frame_receipt.status)),
+            .gasUsed = quantity(frame_receipt.execution_gas_used),
+            .stateGasUsed = quantity(frame_receipt.state_gas_used),
+            .logs = logs[frame_receipt.log_range.offset..][0..frame_receipt.log_range.len],
+        };
+        break :frame_receipts documents;
+    } else null;
     return .{
-        .status = switch (receipt.status) {
+        .status = if (receipt.frame != null) null else switch (receipt.status) {
             .success => "0x1",
             .revert, .invalid, .out_of_gas => "0x0",
         },
+        .payer = if (receipt.frame) |frame| .{ .bytes = frame.payer.bytes } else null,
+        .frameReceipts = frame_receipts,
         .cumulativeGasUsed = quantity(receipt.cumulative_gas_used),
         .logsBloom = .{ .bytes = bloom },
         .logs = logs,
@@ -1394,7 +1556,7 @@ pub const usage =
     \\  --output.result <path>     transition result JSON
     \\  --output.body <path>       accepted transaction body
     \\  --output.basedir <path>    base directory for relative outputs
-    \\  --state.fork <name>        Paris through Amsterdam
+    \\  --state.fork <name>        Paris through Bogota
     \\  --state.chainid <id>       positive chain ID
     \\  --state.reward <-1|0>      disabled or zero reward
     \\  --state-test               skip block-level system operations
@@ -1460,4 +1622,85 @@ test "state-test mode skips block system calls" {
     try std.testing.expectEqual(@as(usize, 1), normal.alloc.map.get(beacon).?.storage.?.map.count());
     try std.testing.expect(state.alloc.map.get(beacon).?.storage == null);
     try std.testing.expect(!std.mem.eql(u8, &normal.result.stateRoot.bytes, &state.result.stateRoot.bytes));
+}
+
+test "frame transaction JSON yields EIP-8141 receipts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // An EEST-signed frame transaction: a VERIFY frame under the default code,
+    // then a SENDER frame whose target emits one LOG0. Expectations are EELS
+    // t8n's output for the same input.
+    const inputs = Inputs{
+        .alloc =
+        \\{"0xd66f224cbd2fabb21b17bb53c56118f32f62ebd6": {"nonce": "0x0", "balance": "0xde0b6b3a7640000", "code": "0x", "storage": {}},
+        \\ "0xaa76e38b5dfe88030eb7336cec9941d9681a81a6": {"nonce": "0x1", "balance": "0x0", "code": "0x5f5fa000", "storage": {}}}
+        ,
+        .env =
+        \\{"currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba", "currentGasLimit": "0x7270e00",
+        \\ "currentNumber": "0x1", "currentTimestamp": "0x3e8", "currentRandom": "0x0", "currentBaseFee": "0x7",
+        \\ "currentExcessBlobGas": "0x0", "slotNumber": "0x0", "withdrawals": [],
+        \\ "parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000"}
+        ,
+        .txs =
+        \\[{"type": "0x6", "chainId": "0x1", "nonce": "0x0", "maxPriorityFeePerGas": "0x5", "maxFee": "0x4a3e8",
+        \\  "gas": "0x7270e00", "to": "0x00000000000000000000000000000000000000aa", "value": "0x0", "input": "0x",
+        \\  "accessList": [], "blobVersionedHashes": [], "v": "0x0", "r": "0x0", "s": "0x0",
+        \\  "sender": "0xd66f224cbd2fabb21b17bb53c56118f32f62ebd6",
+        \\  "frames": [{"mode": "0x1", "flags": "0x3", "gasLimit": "0x64", "stateGasLimit": "0x0", "value": "0x0", "data": "0x"},
+        \\             {"mode": "0x0", "flags": "0x0", "target": "0xaa76e38b5dfe88030eb7336cec9941d9681a81a6",
+        \\              "gasLimit": "0x1fa4", "stateGasLimit": "0x0", "value": "0x0", "data": "0x"}],
+        \\  "signatures": [{"scheme": "0x1", "signer": "0xd66f224cbd2fabb21b17bb53c56118f32f62ebd6", "msg": "0x",
+        \\                  "signature": "0x004ff608a632982fb6881dd732dcbe01dae52a10d0de40127cab42b904883b56d96aa9182a41f5442aa6309dd4f726514a35c20f1abbcd544b7b1949c5c372424f"}],
+        \\  "nonceKeys": []}]
+        ,
+    };
+    const documents = try transition(allocator, .{ .fork = .bogota, .state_test = true }, inputs);
+    const result = documents.result;
+    try std.testing.expect(result.rejected == null);
+    var receipts_root: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&receipts_root, "03d05be829387b31ff095b462c92c6da5c509654229c1f5b8fb2d6c1c0fd5b8d");
+    try std.testing.expectEqual(receipts_root, result.receiptsRoot.bytes);
+    const receipt = result.receipts[0];
+    try std.testing.expectEqual(@as(?[]const u8, null), receipt.status);
+    const payer = try evmz.Address.fromHex("0xd66f224cbd2fabb21b17bb53c56118f32f62ebd6");
+    try std.testing.expectEqual(payer.bytes, receipt.payer.?.bytes);
+    const frame_receipts = receipt.frameReceipts.?;
+    try std.testing.expectEqual(@as(usize, 2), frame_receipts.len);
+    try std.testing.expectEqual(@as(u256, 0x64), frame_receipts[0].gasUsed.value);
+    try std.testing.expectEqual(@as(usize, 0), frame_receipts[0].logs.len);
+    try std.testing.expectEqual(@as(u256, 1), frame_receipts[1].status.value);
+    try std.testing.expectEqual(@as(u256, 0xd33), frame_receipts[1].gasUsed.value);
+    try std.testing.expectEqual(@as(usize, 1), frame_receipts[1].logs.len);
+}
+
+test "frame fields wider than 256 bits reach the decoder and are named as EEST expects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const wide = "0x10000000000000000000000000000000000000000000000000000000000000000";
+    const tx_format =
+        \\{{"type": "0x6", "chainId": "0x1", "nonce": "0x0", "sender": "0x00000000000000000000000000000000000000aa",
+        \\  "frames": [], "signatures": [], "maxFee": "{s}", "maxPriorityFeePerGas": "{s}", "nonceKeys": [{s}]}}
+    ;
+    const txs = try std.fmt.allocPrint(allocator, "[{s}, {s}, {s}]", .{
+        try std.fmt.allocPrint(allocator, tx_format, .{ wide, "0x1", "" }),
+        try std.fmt.allocPrint(allocator, tx_format, .{ "0x1", wide, "" }),
+        try std.fmt.allocPrint(allocator, tx_format, .{ "0x1", "0x1", "\"" ++ wide ++ "\"" }),
+    });
+    const documents = try transition(allocator, .{ .fork = .bogota, .state_test = true }, .{
+        .alloc = "{}",
+        .env =
+        \\{"currentCoinbase": "0x0000000000000000000000000000000000000000", "currentGasLimit": "0x1c9c380",
+        \\ "currentNumber": "0x1", "currentTimestamp": "0xc", "currentRandom": "0x0", "currentBaseFee": "0x7",
+        \\ "currentExcessBlobGas": "0x0", "withdrawals": [],
+        \\ "parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000"}
+        ,
+        .txs = txs,
+    });
+    const rejected = documents.result.rejected.?;
+    try std.testing.expectEqual(@as(usize, 3), rejected.len);
+    try std.testing.expectEqualStrings("TransactionException.GASPRICE_OVERFLOW", rejected[0].@"error");
+    try std.testing.expectEqualStrings("TransactionException.PRIORITY_OVERFLOW", rejected[1].@"error");
+    try std.testing.expectEqualStrings("TransactionException.TYPE_6_INVALID_FRAME_FORMAT", rejected[2].@"error");
 }

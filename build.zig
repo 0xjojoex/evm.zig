@@ -342,6 +342,11 @@ pub fn build(b: *std.Build) void {
         b.option([]const u8, "eest-source", "Path to an execution-specs source checkout"),
         b.option([]const u8, "t8n-reference-bin", "Reference t8n binary; defaults to EELS"),
         b.option([]const u8, "t8n-diff-output", "Directory for t8n mismatch artifacts"),
+        b.option(
+            bool,
+            "eest-source-env",
+            "Fill in the -Deest-source checkout's own Python environment, for tests eest/consume's pin predates",
+        ) orelse false,
     );
 
     const tests = addTests(b, .{
@@ -589,6 +594,7 @@ fn addT8nSteps(
     execution_specs_source: ?[]const u8,
     reference_binary: ?[]const u8,
     mismatch_output: ?[]const u8,
+    source_env: bool,
 ) void {
     const fill_step = b.step("t8n-fill", "Fill execution-specs source tests with evmz t8n");
     const diff_step = b.step("t8n-diff", "Diff EEST-generated transitions against another t8n");
@@ -601,12 +607,12 @@ fn addT8nSteps(
         return;
     };
 
-    const fill = addEestFill(b, install_t8n, source, "eest-fill");
+    const fill = addEestFill(b, install_t8n, source, source_env, "eest-fill");
     fill.addArg("--");
     fill.addPassthruArgs();
     fill_step.dependOn(&fill.step);
 
-    const diff = addEestFill(b, install_t8n, source, "eest-diff");
+    const diff = addEestFill(b, install_t8n, source, source_env, "eest-diff");
     diff.addArgs(&.{
         "-p",
         "evmz_differential",
@@ -621,18 +627,26 @@ fn addT8nSteps(
 }
 
 /// `uv run fill` inside the execution-specs checkout with the installed
-/// evmz t8n; every output lives under `.zig-cache/<cache_name>/`.
+/// evmz t8n; every output lives under `.zig-cache/<cache_name>/`. The fill
+/// runs in eest/consume's pinned environment, or with `source_env` in the
+/// checkout's own, importing evmz's plugins from eest/consume.
 fn addEestFill(
     b: *std.Build,
     install_t8n: *std.Build.Step.InstallArtifact,
     source: []const u8,
+    source_env: bool,
     cache_name: []const u8,
 ) *std.Build.Step.Run {
     const cache = b.root.joinString(b.allocator, b.fmt(".zig-cache/{s}", .{cache_name})) catch @panic("OOM");
     const fill = b.addSystemCommand(&.{"python3"});
     fill.addFileArg2(b.path("eest/scripts/fill.py"), .{ .make_absolute = true });
     fill.addArgs(&.{ "uv", "run", "--frozen", "--project" });
-    fill.addDirectoryArg(b.path("eest/consume"));
+    if (source_env) {
+        fill.addArg(source);
+        fill.setEnvironmentVariable("PYTHONPATH", b.root.joinString(b.allocator, "eest/consume") catch @panic("OOM"));
+    } else {
+        fill.addDirectoryArg(b.path("eest/consume"));
+    }
     fill.addArgs(&.{ "fill", "--evm-bin" });
     fill.addArtifactArg2(install_t8n.artifact, .{ .make_absolute = true });
     fill.step.dependOn(&install_t8n.step);
