@@ -1168,7 +1168,7 @@ pub fn WorldState(comptime World: type) type {
             self.assertCurrent(attempt);
             std.debug.assert(self.sealed);
             std.debug.assert(!self.sessionActive());
-            std.mem.swap(LogBuffer, &self.logs, &self.retained_logs);
+            self.logs.swap(&self.retained_logs);
             if (self.transaction_scope_reverted) self.compactAcceptedAccountChanges();
             if (self.transaction_scope_reverted) self.compactAcceptedStorageWipes();
             if (self.transaction_scope_reverted or self.transaction_storage_wipes.items.len != 0)
@@ -1234,7 +1234,7 @@ pub fn WorldState(comptime World: type) type {
             self.dirty_storage.appendSliceAssumeCapacity(snapshot.dirty_storage);
             self.block_introduced_codes.items.len = snapshot.block_introduced_codes_len;
             self.code.truncateIntroduced(self.allocator, snapshot.introduced_code_len);
-            std.mem.swap(LogBuffer, &self.retained_logs, &snapshot.retained_logs);
+            self.retained_logs.swap(&snapshot.retained_logs);
             snapshot.resolved = true;
         }
 
