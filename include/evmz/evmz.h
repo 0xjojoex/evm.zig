@@ -188,6 +188,12 @@ typedef struct evmz_env {
     uint64_t timestamp;
     /* The block gas limit. */
     uint64_t gas_limit;
+    /*
+     * The header's two fields as they are. Opcode 0x44 returns `difficulty`
+     * on a fork before the Merge and `prev_randao` from the Merge on; evmz
+     * never reads the other one.
+     */
+    evmz_bytes32 difficulty;
     evmz_bytes32 prev_randao;
     evmz_bytes32 base_fee;
     evmz_bytes32 blob_base_fee;
@@ -357,9 +363,20 @@ enum {
 };
 
 typedef struct evmz_gas {
-    /* Receipt gas after refunds and floor rules. */
+    /*
+     * Gas spent before refunds and floor rules: the gas limit minus what
+     * execution left.
+     */
+    uint64_t spent;
+    /*
+     * Receipt gas after refunds and floor rules:
+     * max(spent - execution_refund, the calldata floor).
+     */
     uint64_t used;
-    /* The EVM refund counter after the fork's refund cap. */
+    /*
+     * The EVM refund counter after the fork's refund cap. The calldata floor
+     * does not zero it, so `used + execution_refund` can exceed `spent`.
+     */
     uint64_t execution_refund;
     /* Unused gas returned to the payer: the gas limit minus `used`. */
     uint64_t refunded;
@@ -498,9 +515,10 @@ evmz_status evmz_session_execute(evmz_session *session, const evmz_env *env,
  * fails reports its status and changes no state.
  *
  * The call runs from `call->sender` with a zero origin and no value, pays no
- * fee and no intrinsic gas. In the result only `gas.used` is set: `gas_limit`
- * minus the gas the frame left. A `recipient` that is a precompile or another
- * contract evmz implements natively returns EVMZ_INVALID_ARGUMENT.
+ * fee and no intrinsic gas. In the result `gas.spent` and `gas.used` are both
+ * `gas_limit` minus the gas the frame left, and the rest of `gas` is zero. A
+ * `recipient` that is a precompile or another contract evmz implements
+ * natively returns EVMZ_INVALID_ARGUMENT.
  */
 evmz_status evmz_session_execute_system_call(evmz_session *session, const evmz_env *env,
                                              const evmz_system_call *call,

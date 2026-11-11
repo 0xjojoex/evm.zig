@@ -80,6 +80,8 @@ Added
   executing).
 - `ResultGas.execution_refund`: the EVM refund counter after the fork's refund
   cap. `refunded` remains the unused gas returned to the payer.
+- `ResultGas.spent`: the gas spent before refunds and floor rules. When the
+  calldata floor sets `used`, `used + execution_refund` is more than this.
 
 Changed
 

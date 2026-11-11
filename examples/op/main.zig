@@ -342,7 +342,11 @@ fn DepositTransition(comptime op_spec: OpSpec) type {
                     // A success or revert status proves the payload ran, so the
                     // runnable plan exists.
                     .gas = if (failed_deposit)
-                        .{ .used = tx.gas_limit, .block = .legacy(tx.gas_limit) }
+                        .{
+                            .spent = tx.gas_limit,
+                            .used = tx.gas_limit,
+                            .block = .legacy(tx.gas_limit),
+                        }
                     else
                         try depositGas(context, tx, prepared.runnable.?.plan, gas_result),
                     .output = if (failed_deposit) &.{} else output,
