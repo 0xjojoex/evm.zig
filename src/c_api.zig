@@ -5,8 +5,11 @@
 //! the header's numbering to the engine enums it mirrors; a drift is a compile
 //! error, not a silent renumbering.
 //!
-//! No assert is reachable from caller input: malformed arguments return
-//! `EVMZ_INVALID_ARGUMENT` and a misbehaving host returns `EVMZ_HOST_FAILURE`.
+//! No assert is reachable from a value the caller passes: malformed arguments
+//! return `EVMZ_INVALID_ARGUMENT` and a misbehaving host returns
+//! `EVMZ_HOST_FAILURE`. Where a pointer leads is not checked. The exports
+//! assume every pointer and handle meets the header's "Pointers and lifetimes"
+//! rules, except that a handle is asserted to be aligned.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -1010,6 +1013,10 @@ const TestHost = struct {
     reenter: ?*c.evmz_session = null,
     /// What those calls returned: execute, system call, accept, discard, reset.
     reentered: ?[5]Status = null,
+    /// Whether `load_code` hands other bytes over after the code.
+    set_code_again: bool = false,
+    /// What that second hand-over returned.
+    second_set: ?Status = null,
 
     const Failure = enum {
         none,
@@ -1069,12 +1076,19 @@ const TestHost = struct {
         return @ptrCast(@alignCast(context.?));
     }
 
+    /// Whether `out` arrived zeroed, as the header promises. A callback fails
+    /// its read otherwise, and with it every test that reads through the host.
+    fn zeroed(out: anytype) bool {
+        return std.meta.eql(out, std.mem.zeroes(@TypeOf(out)));
+    }
+
     fn loadAccount(
         context: ?*anyopaque,
         account_address: [*c]const c.evmz_address,
         out: [*c]c.evmz_host_account,
     ) callconv(.c) Status {
         const self = from(context);
+        if (!zeroed(out.*)) return host_failure;
         if (self.fail == .account) return host_failure;
         if (self.reenter) |session| {
             self.reenter = null;
@@ -1102,7 +1116,9 @@ const TestHost = struct {
             else => {},
         }
         const code = self.memory.reader().loadCode(code_hash.*.bytes) catch return host_failure;
-        return evmz_code_sink_set(sink, cPointer(u8, code), code.len);
+        const status = evmz_code_sink_set(sink, cPointer(u8, code), code.len);
+        if (self.set_code_again) self.second_set = evmz_code_sink_set(sink, &[_]u8{0xfe}, 1);
+        return status;
     }
 
     fn getStorage(
@@ -1112,6 +1128,7 @@ const TestHost = struct {
         out: [*c]c.evmz_bytes32,
     ) callconv(.c) Status {
         const self = from(context);
+        if (!zeroed(out.*)) return host_failure;
         if (self.fail == .storage) return host_failure;
         const account = self.memory.getAccount(address(account_address.*));
         out.* = bytes32(if (account) |value| value.getStorage(word(key.*)) else 0);
@@ -1125,6 +1142,7 @@ const TestHost = struct {
         found: [*c]u8,
     ) callconv(.c) Status {
         const self = from(context);
+        if (!zeroed(out.*) or found.* != 0) return host_failure;
         if (self.fail == .block_hash) return host_failure;
         self.block_hash_requests.append(testing.allocator, number) catch return out_of_memory;
         out.* = bytes32(self.block_hash(number));
@@ -1431,6 +1449,33 @@ fn executeAccepted(
     return result;
 }
 
+/// A `*out` no call has written: not NULL and not a handle. The header has
+/// every call that fails replace it with NULL.
+fn unwritten(comptime Handle: type) ?*Handle {
+    const anchor = struct {
+        var byte: u8 = 0;
+    };
+    return @ptrCast(&anchor.byte);
+}
+
+/// `evmz_session_execute` over an unwritten `*out`, for a call that must fail.
+fn executeRefused(
+    session: ?*c.evmz_session,
+    env: ?*const c.evmz_env,
+    tx: ?*const c.evmz_transaction,
+) !Status {
+    var out = unwritten(c.evmz_result);
+    const status = evmz_session_execute(session, env, null, tx, &out);
+    try testing.expect(status != ok);
+    try testing.expect(out == null);
+    return status;
+}
+
+/// Overwrite memory a call was handed, as a caller that frees it at once may.
+fn scribble(comptime T: type, pointer: [*c]const T, len: usize) void {
+    @memset(std.mem.sliceAsBytes(@constCast(span(T, pointer, len))), 0xa5);
+}
+
 fn transfer(nonce: ?u256) Transaction {
     return .{
         .sender = fixture.sender,
@@ -1690,11 +1735,13 @@ test "one executed result is pending until it is accepted or discarded" {
     try testing.expectEqual(ok, try executeTransaction(session, fixture.env, null, transfer(0), &first));
     defer evmz_result_destroy(first);
 
-    var refused: ?*c.evmz_result = null;
+    var refused = unwritten(c.evmz_result);
     try testing.expectEqual(
         pending_result,
         try executeTransaction(session, fixture.env, null, transfer(0), &refused),
     );
+    try testing.expect(refused == null);
+    refused = unwritten(c.evmz_result);
     try testing.expectEqual(pending_result, systemCall(session, fixture.env, .{
         .sender = fixture.system_sender,
         .recipient = fixture.contract,
@@ -2299,6 +2346,118 @@ test "access lists and authorizations reach the engine" {
     try testing.expectEqualSlices(u8, &designation, span(u8, code.code, code.code_len));
 }
 
+test "nothing a transaction points at is read after execute returns" {
+    const target = evmz.addr(0xdddd);
+    const authority = evmz.addr(0xeeee);
+    const first: u256 = 0x1111;
+    const second: u256 = 0x2222;
+    const keys = [_]u256{ 1, 2 };
+    const access_list = [_]evmz.transaction.AccessListEntry{
+        .{ .address = authority, .storage_keys = &keys },
+    };
+    const authorizations = [_]evmz.transaction.RecoveredAuthorization{
+        evmz.t.testAuthorization(authority, target),
+    };
+
+    // One run leaves the caller's memory alone and the other overwrites all of
+    // it between the execute and the accept.
+    var roots: [2][32]u8 = undefined;
+    for (&roots, [_]bool{ false, true }) |*root, overwrite| {
+        var host: TestHost = .init();
+        defer host.deinit();
+        try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{
+            .balance = 1_000_000_000_000,
+        });
+        // Adds the calldata word to slot 0 and returns the calldata.
+        try evmz.t.seedStoreAccount(&host.memory, target, .{
+            .code = &evmz.t.bytecode(.{
+                .PUSH0,        .CALLDATALOAD, .PUSH0,        .SLOAD,  .ADD,
+                .PUSH0,        .SSTORE,       .CALLDATASIZE, .PUSH0,  .PUSH0,
+                .CALLDATACOPY, .CALLDATASIZE, .PUSH0,        .RETURN,
+            }),
+        });
+        const session = try host.createSession(fixture.fork);
+        defer evmz_session_destroy(session);
+
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        var input = bytes32(first).bytes;
+        var env = cEnv(fixture.env);
+        var tx = try cTransaction(arena.allocator(), .{
+            .kind = .set_code,
+            .sender = fixture.sender,
+            .to = authority,
+            .gas_limit = fixture.gas_limit,
+            .max_fee_per_gas = 1,
+            .max_priority_fee_per_gas = 0,
+            .input = &input,
+            .access_list = &access_list,
+            .authorization_list = &authorizations,
+        });
+        var out: ?*c.evmz_result = null;
+        try testing.expectEqual(ok, evmz_session_execute(session, &env, null, &tx, &out));
+        defer evmz_result_destroy(out);
+        if (overwrite) {
+            for (span(c.evmz_access_list_entry, tx.access_list, tx.access_list_len)) |entry|
+                scribble(c.evmz_bytes32, entry.storage_keys, entry.storage_keys_len);
+            scribble(c.evmz_access_list_entry, tx.access_list, tx.access_list_len);
+            scribble(
+                c.evmz_recovered_authorization,
+                tx.authorization_list,
+                tx.authorization_list_len,
+            );
+            scribble(u8, &input, input.len);
+            scribble(c.evmz_transaction, &tx, 1);
+            scribble(c.evmz_env, &env, 1);
+        }
+
+        const data = dataOf(out.?);
+        try expectCode(c.EVMZ_EXECUTION_SUCCESS, data.status);
+        try testing.expectEqualSlices(
+            u8,
+            &bytes32(first).bytes,
+            span(u8, data.output, data.output_len),
+        );
+        try testing.expectEqual(ok, evmz_session_accept(session));
+        try host.apply(data);
+
+        // The next call runs on what the session kept of the first: the
+        // authority's delegation and the word in its slot.
+        const next = try executeAccepted(&host, session, fixture.env, .{
+            .sender = fixture.sender,
+            .to = authority,
+            .gas_limit = fixture.gas_limit,
+            .input = &bytes32(second).bytes,
+        });
+        defer evmz_result_destroy(next);
+        try testing.expectEqual(first + second, host.memory.getAccount(authority).?.getStorage(0));
+        root.* = try host.memory.stateRoot(testing.allocator);
+    }
+    try testing.expectEqualSlices(u8, &roots[0], &roots[1]);
+}
+
+test "the code sink takes one hand-over and keeps it" {
+    var host: TestHost = .init();
+    defer host.deinit();
+    try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 1_000_000 });
+    // Stores 7, which the bytes of the second hand-over would not.
+    try evmz.t.seedStoreAccount(&host.memory, fixture.contract, .{
+        .code = &evmz.t.bytecode(.{ .PUSH1, 7, .PUSH0, .SSTORE, .STOP }),
+    });
+    const session = try host.createSession(fixture.fork);
+    defer evmz_session_destroy(session);
+
+    host.set_code_again = true;
+    const result = try executeAccepted(&host, session, fixture.env, .{
+        .sender = fixture.sender,
+        .to = fixture.contract,
+        .gas_limit = fixture.gas_limit,
+    });
+    defer evmz_result_destroy(result);
+    try testing.expectEqual(invalid_argument, host.second_set.?);
+    try testing.expectEqual(7, host.memory.getAccount(fixture.contract).?.getStorage(0));
+}
+
 test "a system call is accepted at once and seen by the next execute" {
     var host: TestHost = .init();
     defer host.deinit();
@@ -2433,7 +2592,7 @@ test "a failing host aborts the execute and leaves the session usable" {
         defer evmz_session_destroy(session);
 
         host.fail = failure;
-        var out: ?*c.evmz_result = null;
+        var out = unwritten(c.evmz_result);
         try testing.expectEqual(host_failure, try executeTransaction(session, env, null, tx, &out));
         try testing.expect(out == null);
         try testing.expectEqual(no_pending_result, evmz_session_accept(session));
@@ -2445,7 +2604,8 @@ test "a failing host aborts the execute and leaves the session usable" {
             TestHost.blockHash(99),
             host.memory.getAccount(fixture.contract).?.getStorage(0),
         );
-        // The sink died with the `load_code` call it was passed to.
+        // The header leaves a sink kept past its `load_code` undefined. While
+        // the session lives the library still refuses one.
         try testing.expectEqual(invalid_argument, evmz_code_sink_set(host.last_sink, null, 0));
     }
 }
@@ -2455,20 +2615,25 @@ test "malformed arguments are refused and change nothing" {
     defer host.deinit();
     try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 1_000_000 });
 
-    var created: ?*c.evmz_session = null;
+    // Each failing call starts from an unwritten `*out` and must leave NULL.
+    var created = unwritten(c.evmz_session);
     try testing.expectEqual(invalid_argument, evmz_session_create(fixture.fork, null, &created));
+    try testing.expect(created == null);
     try testing.expectEqual(
         invalid_argument,
         evmz_session_create(fixture.fork, &host.host(), null),
     );
     var callbacks = host.host();
     callbacks.struct_size -= 1;
+    created = unwritten(c.evmz_session);
     try testing.expectEqual(
         invalid_argument,
         evmz_session_create(fixture.fork, &callbacks, &created),
     );
+    try testing.expect(created == null);
     callbacks = host.host();
     callbacks.load_code = null;
+    created = unwritten(c.evmz_session);
     try testing.expectEqual(
         invalid_argument,
         evmz_session_create(fixture.fork, &callbacks, &created),
@@ -2489,29 +2654,24 @@ test "malformed arguments are refused and change nothing" {
     defer arena.deinit();
     const env = cEnv(fixture.env);
     const good = try cTransaction(arena.allocator(), transfer(0));
-    var out: ?*c.evmz_result = null;
 
-    try testing.expectEqual(invalid_argument, evmz_session_execute(null, &env, null, &good, &out));
-    try testing.expectEqual(
-        invalid_argument,
-        evmz_session_execute(session, null, null, &good, &out),
-    );
-    try testing.expectEqual(invalid_argument, evmz_session_execute(session, &env, null, null, &out));
+    try testing.expectEqual(invalid_argument, try executeRefused(null, &env, &good));
+    try testing.expectEqual(invalid_argument, try executeRefused(session, null, &good));
+    try testing.expectEqual(invalid_argument, try executeRefused(session, &env, null));
     try testing.expectEqual(
         invalid_argument,
         evmz_session_execute(session, &env, null, &good, null),
     );
+    var out = unwritten(c.evmz_result);
     try testing.expectEqual(
         invalid_argument,
         evmz_session_execute_system_call(session, &env, null, &out),
     );
+    try testing.expect(out == null);
 
     var bad_env = env;
     bad_env.has_blob_params = 2;
-    try testing.expectEqual(
-        invalid_argument,
-        evmz_session_execute(session, &bad_env, null, &good, &out),
-    );
+    try testing.expectEqual(invalid_argument, try executeRefused(session, &bad_env, &good));
 
     const two_authorizations: [2]c.evmz_recovered_authorization =
         @splat(std.mem.zeroes(c.evmz_recovered_authorization));
@@ -2530,11 +2690,7 @@ test "malformed arguments are refused and change nothing" {
     malformed[5].has_authorization_count = 1;
     malformed[5].authorization_count = 1;
     for (&malformed) |*tx| {
-        try testing.expectEqual(
-            invalid_argument,
-            evmz_session_execute(session, &env, null, tx, &out),
-        );
-        try testing.expect(out == null);
+        try testing.expectEqual(invalid_argument, try executeRefused(session, &env, tx));
     }
 
     // None of it consumed the nonce or left a result pending.
