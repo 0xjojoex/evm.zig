@@ -5,6 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-evm2 = { git = "https://github.com/alloy-rs/evm2", rev = "f93318f120f6300599b21170d6c7bef81ed63d87", default-features = false, features = ["std", "map-foldhash", "asm-keccak"] }
+evm2 = { git = "https://github.com/alloy-rs/evm2", rev = "66687c18b34d3bdbb899f5eb7605070615c03475", default-features = false, features = ["std", "map-foldhash", "asm-keccak"] }
 alloy-primitives = "1.6.1"
 alloy-consensus = { version = "2.5.0", default-features = false }

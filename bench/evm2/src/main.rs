@@ -15,8 +15,7 @@ use evm2::env::{BlockEnv, TxEnv};
 use evm2::evm::{AccountLoad, SLoad, SStore, SelfDestructResult};
 use evm2::interpreter::{Host, Interpreter, Message, MessageKind, MessageResult, Word};
 use evm2::{
-    DatabaseError, EvmFeatures, EvmTypesHost, ExecutionConfig, ExecutionError, HostError,
-    LoadError, SpecId,
+    DatabaseError, EvmTypesHost, ExecutionConfig, ExecutionError, HostError, LoadError, SpecId,
 };
 
 const ENGINE: &str = env!("EVM2_BENCH_ENGINE");
@@ -24,7 +23,7 @@ const DISPATCH: &str = env!("EVM2_BENCH_DISPATCH");
 const RUSTC: &str = env!("EVM2_BENCH_RUSTC");
 
 const MAX_GAS: u64 = 1_000_000_000_000;
-const REVISION: &str = "f93318f120f6300599b21170d6c7bef81ed63d87";
+const REVISION: &str = "66687c18b34d3bdbb899f5eb7605070615c03475";
 const CALLER: Address = Address::new([
     0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ]);
@@ -120,9 +119,9 @@ fn main() -> Result<(), String> {
     let deploy = execute(&message, &config, true, host_profile)?;
     message.kind = MessageKind::Call;
     message.code = prepared_code(deploy.output.to_vec());
-    message.input = hex::decode(call_data.unwrap_or_default().trim())
-        .map_err(|e| e.to_string())?
-        .into();
+    message.input =
+        Bytes::from(hex::decode(call_data.unwrap_or_default().trim()).map_err(|e| e.to_string())?)
+            .into();
     let reference = execute(&message, &config, true, host_profile)?;
     let warmup_start = Instant::now();
     let mut warmup_calls = 0;
@@ -184,13 +183,8 @@ fn execute(
     capture: bool,
     profile: &str,
 ) -> Result<Measurement, String> {
-    let tx_env = TxEnv::<BenchTypes> {
-        origin: CALLER,
-        chain_id: U256::ZERO,
-        ..Default::default()
-    };
     let mut host = BenchHost::new(config.clone());
-    let mut interpreter = Interpreter::<BenchTypes>::new(&tx_env, message);
+    let mut interpreter = Interpreter::<BenchTypes>::new(message);
     let start = Instant::now();
     let stop = interpreter.run(&mut host);
     let elapsed = start.elapsed();
@@ -237,6 +231,7 @@ struct StorageSlot {
 struct BenchHost {
     config: ExecutionConfig<BenchTypes>,
     block: BlockEnv<BenchTypes>,
+    tx: TxEnv<BenchTypes>,
     storage: HashMap<(Address, Word), StorageSlot>,
     original_storage: HashMap<(Address, Word), Word>,
     transient_storage: HashMap<(Address, Word), Word>,
@@ -250,6 +245,11 @@ impl BenchHost {
             config,
             block: BlockEnv::<BenchTypes> {
                 gas_limit: U256::from(MAX_GAS),
+                ..Default::default()
+            },
+            tx: TxEnv::<BenchTypes> {
+                origin: CALLER,
+                chain_id: U256::ZERO,
                 ..Default::default()
             },
             storage: HashMap::new(),
@@ -271,20 +271,18 @@ impl Host<BenchTypes> for BenchHost {
     fn block_env(&mut self) -> &BlockEnv<BenchTypes> {
         &self.block
     }
+    fn tx_env(&mut self) -> &TxEnv<BenchTypes> {
+        &self.tx
+    }
+    fn initial_call_depth(&self) -> u16 {
+        0
+    }
     fn load_account(&mut self, _: &Address, _: bool, _: bool) -> Result<AccountLoad, HostError> {
         self.host_calls += 1;
         Ok(AccountLoad {
             is_empty: true,
             ..Default::default()
         })
-    }
-    fn target_is_empty_for_new_account_gas(
-        &mut self,
-        _: &Address,
-        _: EvmFeatures,
-    ) -> Result<bool, DatabaseError> {
-        self.host_calls += 1;
-        Ok(true)
     }
     fn block_hash(&mut self, _: &Word) -> Result<B256, DatabaseError> {
         self.host_calls += 1;
@@ -353,7 +351,6 @@ impl Host<BenchTypes> for BenchHost {
     }
     fn execute_message(
         &mut self,
-        _: &TxEnv<BenchTypes>,
         _: &mut Message<BenchTypes>,
     ) -> Result<MessageResult<BenchTypes>, ExecutionError> {
         Err(ExecutionError::Fatal(
