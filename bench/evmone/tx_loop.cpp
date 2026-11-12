@@ -67,7 +67,7 @@ enum class Case
 struct Options
 {
     Case test_case = Case::eth_transfer;
-    evmc_revision spec = EVMC_OSAKA;
+    evmc_revision spec = EVMC_AMSTERDAM;
     size_t repeats = 5;
     size_t warmups = 1;
     size_t txs = 1000;

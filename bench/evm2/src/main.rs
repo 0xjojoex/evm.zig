@@ -47,7 +47,7 @@ fn main() -> Result<(), String> {
     let mut num_runs = None;
     let mut host_profile = None;
     let mut warmup_ms = 100;
-    let mut spec = SpecId::OSAKA;
+    let mut spec = SpecId::AMSTERDAM;
     let mut summary = false;
     while let Some(arg) = args.next() {
         if arg == "--summary" {

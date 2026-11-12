@@ -48,7 +48,7 @@ struct Options
     std::optional<std::string> call_data_hex;
     std::optional<size_t> num_runs;
     size_t warmup_ms = default_warmup_ms;
-    evmc_revision spec = EVMC_OSAKA;
+    evmc_revision spec = EVMC_AMSTERDAM;
     HostProfile host_profile = HostProfile::null;
     Mode mode = Mode::advanced;
     bool summary = false;
@@ -61,7 +61,7 @@ struct ResolvedOptions
     std::string call_data_hex;
     size_t num_runs = 1;
     size_t warmup_ms = default_warmup_ms;
-    evmc_revision spec = EVMC_OSAKA;
+    evmc_revision spec = EVMC_AMSTERDAM;
     HostProfile host_profile = HostProfile::null;
     Mode mode = Mode::advanced;
     bool summary = false;
@@ -685,7 +685,7 @@ void print_usage()
         << "  --call-data <hex>            calldata hex for each runtime call\n"
         << "  --num-runs, -n <n>           number of timed calls\n"
         << "  --warmup-ms <n>              discarded warmup duration in milliseconds, default 100; 0 disables\n"
-        << "  --spec <name>                amsterdam, osaka, prague, cancun, shanghai, latest; default osaka\n"
+        << "  --spec <name>                amsterdam, osaka, prague, cancun, shanghai, latest; default amsterdam\n"
         << "  --host-profile <null|mock>   fixture host profile label, default null\n"
         << "  --mode <advanced|baseline>   evmone mode, default advanced\n"
         << "  --summary                    print fixture metadata to stderr\n";

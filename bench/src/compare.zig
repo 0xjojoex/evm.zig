@@ -52,7 +52,7 @@ const Options = struct {
     fixtures: std.ArrayList([]const u8) = .empty,
     num_runs: ?usize = null,
     warmup_ms: usize = default_warmup_ms,
-    spec: ?[]const u8 = "osaka",
+    spec: ?[]const u8 = "amsterdam",
     out_dir: ?[]const u8 = null,
     json: bool = false,
 };
@@ -237,7 +237,7 @@ fn printUsage() void {
         \\  --fixture <dir>        VM-loop fixture directory, repeatable
         \\  --num-runs, -n <n>     override fixture num-runs.txt for every engine
         \\  --warmup-ms <n>        discarded warmup duration for every engine, default 100; 0 disables
-        \\  --spec <name>          fork spec forwarded to each engine, default osaka
+        \\  --spec <name>          fork spec forwarded to each engine, default amsterdam
         \\  --out-dir <dir>        raw output directory, default zig-out/compare/<timestamp>
         \\  --json                 print JSON summary instead of markdown table
         \\
