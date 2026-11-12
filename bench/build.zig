@@ -270,6 +270,24 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const run_tx_loop_compare = b.addSystemCommand(&.{
+            "python3",
+            "scripts/tx_loop_compare.py",
+            "--zig-exe",
+            b.graph.zig_exe,
+            "--optimize",
+            @tagName(compare_optimize),
+            "--profile",
+            @tagName(profile),
+            "--native-keccak",
+            @tagName(native_keccak),
+        });
+        run_tx_loop_compare.setCwd(b.path("."));
+        run_tx_loop_compare.addPassthruArgs();
+        b.step("tx-loop-compare", "Run transaction-level comparison").dependOn(&run_tx_loop_compare.step);
+    }
+
+    {
         const micro_evmz_dep = b.dependency("evmz", .{
             .target = target,
             .optimize = micro_optimize,

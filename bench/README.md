@@ -11,6 +11,7 @@ lifecycle, and inner-loop data structures.
 | Opcode kernels | `zig build bench-kernel` | `zig build kernel` | Pure opcode loops on the null host (`small`, `edge`, `large`, `branch`) |
 | Block lifecycle | `zig build bench-block-lifecycle` | `zig build block-lifecycle` | `Executor` init, `BlockExecution` tx loop, and state persistence (`growable` vs `exact`) |
 | Transaction loop | `zig build bench-tx-loop` | `zig build tx-loop` | One complete transaction per call on a long-lived VM (`evm2-tx-loop` and `evmone-tx-loop` for peers) |
+| Cross-engine transaction scoreboard | `zig build bench-tx-loop-compare` | `zig build tx-loop-compare` | The transaction loop on `evmz`, `evm2`, and `evmone`, with a gas cross-check |
 | Inner-loop microbench | `zig build bench-micro` | `zig build micro` | zBench microbenchmarks (`arithmetic`, `sdiv`, `mulmod`, `sparse-hash-map`, `overlay`) |
 | Code analysis | `zig build bench-code-analysis` | `zig build code-analysis` | Bytecode jumpdest analysis timing and morphology |
 
@@ -330,6 +331,25 @@ initialization. It uses the null host and fails if a case touches host callbacks
 The default comparison mode is native release for the Rust sidecar: Zig uses
 `fast`, evmone is compiled into the Zig benchmark binary with the same
 optimization mode. EVM2 uses Cargo `--release` with
+The evmone row is not like-for-like on transactions that emit a log. Evmone's
+transition also builds the receipt's logs bloom, four Keccak-256 calls for a
+log with three topics, which `evmz` and EVM2 leave to their block layer and
+this lane does not time. Both transfer cases emit such a log: the ERC20
+`Transfer` event, and from Amsterdam the EIP-7708 log of the ETH transfer.
+
+`zig build tx-loop-compare` runs every case on every engine, including an
+`evmz-no-code-cache` row, and fails when `gas_per_tx` differs between engines
+on a case. It writes the per-batch `rows.csv`, the per-engine medians in
+`summary.csv` and `summary.md`, and each runner's raw output under ignored
+`zig-out/tx-loop-compare/`. The `Benchmark` workflow runs it as a second job
+next to the VM-loop comparison.
+
+```sh
+cd bench
+zig build tx-loop-compare
+zig build tx-loop-compare -- --case erc20-transfer --engine evmz --engine evm2 --repeats 20
+```
+
 `RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=no"`, fat LTO, and one
 codegen unit.
 
