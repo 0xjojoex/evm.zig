@@ -31,6 +31,14 @@ on:
         description: "Engine set: all, evmz, evmone, evm2, or comma-separated engine names"
         required: true
         default: "all"
+      tx_loop_txs:
+        description: "Transaction loop: transactions per batch"
+        required: true
+        default: "200000"
+      tx_loop_repeats:
+        description: "Transaction loop: measured batches per engine/case"
+        required: true
+        default: "20"
 
 permissions:
   contents: read
@@ -166,6 +174,109 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench/${{ env.OUT_DIR }}
+          if-no-files-found: warn
+          retention-days: 30
+
+  tx-loop-compare:
+    name: Transaction-loop compare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    env:
+      OUT_DIR: zig-out/tx-loop-compare/benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+      SPEC: ${{ inputs.spec }}
+      ENGINES: ${{ inputs.engines }}
+      TXS: ${{ inputs.tx_loop_txs }}
+      REPEATS: ${{ inputs.tx_loop_repeats }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: Install Rust
+        if: ${{ inputs.engines == 'all' || contains(inputs.engines, 'evm2') }}
+        run: rustup toolchain install 1.96.0 --profile minimal
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Record benchmark environment
+        run: |
+          mkdir -p "bench/${OUT_DIR}"
+          {
+            echo "ref=${GITHUB_REF}"
+            echo "sha=${GITHUB_SHA}"
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo
+            uname -a
+            echo
+            lscpu
+            echo
+            zig version
+            zig env
+            echo
+            if [[ "$ENGINES" == "all" || "$ENGINES" == *evm2* ]]; then
+              rustc +1.96.0 -Vv
+              cargo +1.96.0 -V
+            fi
+          } | tee "bench/${OUT_DIR}/environment.txt"
+
+      - name: Run transaction-loop comparison
+        run: |
+          set -euo pipefail
+
+          args=(
+            --spec "${SPEC}"
+            --txs "${TXS}"
+            --repeats "${REPEATS}"
+            --out-dir "${OUT_DIR}"
+          )
+
+          if [[ "${ENGINES}" != "all" ]]; then
+            IFS=',' read -ra selected_engines <<< "${ENGINES}"
+            for engine in "${selected_engines[@]}"; do
+              engine="${engine//[[:space:]]/}"
+              if [[ -n "${engine}" ]]; then
+                args+=(--engine "${engine}")
+              fi
+            done
+          fi
+
+          zig build bench-tx-loop-compare -Dbench-optimize=fast -- "${args[@]}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Transaction-loop benchmark"
+            echo
+            echo "- Ref: \`${GITHUB_REF}\`"
+            echo "- SHA: \`${GITHUB_SHA}\`"
+            echo "- Batches: \`${REPEATS}\` of \`${TXS}\` transactions per engine/case"
+            echo "- Spec: \`${SPEC}\`"
+            echo "- Engines: \`${ENGINES}\`"
+            echo
+            if [[ -f "bench/${OUT_DIR}/summary.md" ]]; then
+              cat "bench/${OUT_DIR}/summary.md"
+            else
+              echo "No benchmark summary was produced."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tx-loop-${{ github.run_id }}-${{ github.run_attempt }}
           path: bench/${{ env.OUT_DIR }}
           if-no-files-found: warn
           retention-days: 30

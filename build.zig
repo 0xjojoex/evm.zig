@@ -480,6 +480,7 @@ pub fn build(b: *std.Build) void {
         addBenchDelegate(b, "bench-tx-loop", "Run evmz transaction-level benchmark", "tx-loop", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-evm2-tx-loop", "Run EVM2 transaction-level benchmark", "evm2-tx-loop", null, evmz_build, null);
         addBenchDelegate(b, "bench-evmone-tx-loop", "Run evmone transaction-level benchmark", "evmone-tx-loop", bench_optimize_name, evmz_build, null);
+        addBenchDelegate(b, "bench-tx-loop-compare", "Run transaction-level comparison", "tx-loop-compare", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-kernel", "Run pure opcode kernel benchmark", "kernel", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-code-analysis", "Run code-analysis morphology and timing report", "code-analysis", bench_optimize_name, evmz_build, null);
         addBenchDelegate(b, "bench-evm2-kernel", "Run EVM2 opcode kernel benchmark", "evm2-kernel", null, evmz_build, null);
