@@ -14,7 +14,11 @@
  * - Words (`evmz_bytes32`) are 32-byte big-endian integers.
  * - A `has_*` field is 0 or 1; the field it guards is ignored when 0.
  * - A pointer paired with a `_len` may be NULL only when the length is 0.
- * - Malformed input returns `EVMZ_INVALID_ARGUMENT`. It never aborts.
+ * - evmz checks every value it is given. A NULL where one is not allowed, an
+ *   out-of-range enum or flag, an inconsistent count, a field its transaction
+ *   kind does not have or a gas amount its field refuses returns
+ *   `EVMZ_INVALID_ARGUMENT` and changes nothing. evmz cannot check where a
+ *   pointer leads; see below.
  * - One session is used by one thread at a time. Sessions are independent of
  *   each other. Callbacks run synchronously on the calling thread, only inside
  *   `evmz_session_execute` and `evmz_session_execute_system_call`.
@@ -23,6 +27,25 @@
  *   `evmz_session_destroy` does nothing. Other sessions and results are free
  *   to use.
  * - Until evmz 1.0 a binding must match `evmz_abi_version()` exactly.
+ *
+ * Pointers and lifetimes. Where one of these binds the caller, breaking it is
+ * undefined behaviour, not an error evmz reports:
+ *
+ * - A non-NULL pointer refers to a whole object of its type, aligned for it.
+ *   A pointer with a `_len` refers to that many elements.
+ * - Input is borrowed for the call. Everything a call reads, including what
+ *   its structs point at, stays valid and unchanged until the call returns.
+ *   evmz keeps none of it afterwards, so the caller may free it at once.
+ * - An `out` parameter is writable. `*out` is NULL after every status but
+ *   `EVMZ_OK`.
+ * - A handle (`evmz_session *`, `evmz_result *`) is one evmz returned and has
+ *   not destroyed. No other pointer is a handle, and a destroyed one is never
+ *   used again.
+ * - Neither handle belongs to a thread: either may move to another thread
+ *   between calls.
+ * - What `evmz_result_get_data` returns, and everything it points at, is
+ *   read-only and lives until `evmz_result_destroy`. An array of length 0 has
+ *   a NULL pointer.
  *
  * Linking: `zig build c-api` installs this header, `libevmz.a` and `libblst.a`.
  * Link both archives and LLVM's C++ runtime: `-levmz -lblst -lc++`. GNU
@@ -43,7 +66,11 @@ extern "C" {
 typedef uint32_t evmz_status;
 enum {
     EVMZ_OK = 0,
-    /* A NULL pointer, an out-of-range enum or flag, or an inconsistent count. */
+    /*
+     * A NULL pointer where one is not allowed, an out-of-range enum or flag,
+     * an inconsistent count, a field the transaction kind does not have, or a
+     * gas amount its field refuses.
+     */
     EVMZ_INVALID_ARGUMENT = 1,
     /* The fork number is unknown or was not compiled into this library. */
     EVMZ_UNSUPPORTED_FORK = 2,
@@ -135,10 +162,17 @@ typedef struct evmz_host_account {
 
 /* ---- Host -------------------------------------------------------------- */
 
-/* Valid only inside the `load_code` call that received it. */
+/*
+ * Valid only inside the `load_code` call that received it. The host does not
+ * keep it: using it after that call returns is undefined.
+ */
 typedef struct evmz_code_sink evmz_code_sink;
 
-/* Hand over the code for one `load_code` call. evmz copies `len` bytes. */
+/*
+ * Hand over the code for one `load_code` call. evmz copies `len` bytes before
+ * it returns, so the host may free them at once. A second call inside the same
+ * `load_code` returns EVMZ_INVALID_ARGUMENT and keeps the first call's bytes.
+ */
 evmz_status evmz_code_sink_set(evmz_code_sink *sink, const uint8_t *ptr, size_t len);
 
 /*
@@ -152,10 +186,18 @@ evmz_status evmz_code_sink_set(evmz_code_sink *sink, const uint8_t *ptr, size_t 
  * session may have read, except by applying an accepted result. Out-of-band
  * writes such as withdrawals happen after the last transaction; then the host
  * destroys the session or calls `evmz_session_reset`.
+ *
+ * Every pointer a callback receives other than `context` is valid only until
+ * that callback returns. `out` and `found` arrive zeroed, so a callback that
+ * writes nothing reports an absent account, a zero slot or a missing hash.
  */
 typedef struct evmz_host {
-    /* sizeof(evmz_host) as the caller compiled it. */
+    /*
+     * sizeof(evmz_host) as the caller compiled it. A value below the library's
+     * own sizeof(evmz_host) returns EVMZ_INVALID_ARGUMENT.
+     */
     uint32_t struct_size;
+    /* Passed to every callback as is; evmz never reads through it. */
     void *context;
     /* Set `out->exists` to 0 for an absent account. */
     evmz_status (*load_account)(void *context, const evmz_address *address,
@@ -552,10 +594,13 @@ typedef struct evmz_result_data {
     size_t code_changes_len;
 } evmz_result_data;
 
-/* An owned copy. It outlives the session and stays valid until destroyed. */
+/*
+ * An owned copy that shares nothing with its session. It stays valid across
+ * accept, discard, reset and `evmz_session_destroy`, until it is destroyed.
+ */
 typedef struct evmz_result evmz_result;
 
-/* Borrowed from `result`. NULL when `result` is NULL. */
+/* Borrowed from `result` until it is destroyed. NULL when `result` is NULL. */
 const evmz_result_data *evmz_result_get_data(const evmz_result *result);
 /* Frees the copy. It does not accept or discard anything. NULL is a no-op. */
 void evmz_result_destroy(evmz_result *result);
@@ -564,7 +609,11 @@ void evmz_result_destroy(evmz_result *result);
 
 typedef struct evmz_session evmz_session;
 
-/* Copies `*host`; `host->context` must outlive the session. */
+/*
+ * Copies `*host`, which the caller may free once this returns. The callbacks
+ * and whatever `host->context` points at stay valid until
+ * `evmz_session_destroy` returns.
+ */
 evmz_status evmz_session_create(uint32_t fork, const evmz_host *host, evmz_session **out);
 /*
  * Discards a pending result. NULL is a no-op, and so is a call from one of the
