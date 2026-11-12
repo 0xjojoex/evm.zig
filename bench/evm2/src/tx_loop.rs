@@ -270,7 +270,7 @@ fn abi_call(selector: [u8; 4], account: Address, amount: Option<u64>) -> Bytes {
 
 pub fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let mut case = Case::EthTransfer;
-    let mut spec = SpecId::OSAKA;
+    let mut spec = SpecId::AMSTERDAM;
     let mut repeats = 5;
     let mut warmups = 1;
     let mut txs = 1000;

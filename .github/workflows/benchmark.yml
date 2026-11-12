@@ -14,7 +14,7 @@ on:
       spec:
         description: "Fork spec forwarded to each engine"
         required: true
-        default: "osaka"
+        default: "amsterdam"
       bench_support_min:
         description: "Minimum compiled evmz benchmark fork (blank uses spec)"
         required: false

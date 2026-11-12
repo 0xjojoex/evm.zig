@@ -101,7 +101,7 @@ zig build compare -- --fixture fixtures/vm-loop/erc20-transfer
 Raw stdout/stderr plus `summary.csv` and `summary.json` are written under
 ignored `zig-out/compare/`. Native builds default to XKCP Keccak on supported
 architectures (pass `-Dnative-keccak=std` or `--native-keccak std` to use
-`std`). All engines default to `--spec osaka` and omit frame pointers
+`std`). All engines default to `--spec amsterdam` and omit frame pointers
 (`-fomit-frame-pointer` for C++, `-C force-frame-pointers=no` for Rust).
 Stable Rust rows use the pinned `1.96.0` toolchain (`rustup toolchain install 1.96.0 --profile minimal`),
 native CPU tuning, fat LTO, and one codegen unit.

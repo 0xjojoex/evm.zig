@@ -42,7 +42,7 @@ const selector_transfer = 0xa9059cbb;
 
 const Options = struct {
     case: Case = .eth_transfer,
-    spec: evmz.eth.Revision = .osaka,
+    spec: evmz.eth.Revision = .amsterdam,
     repeats: usize = 5,
     warmups: usize = 1,
     txs: usize = 1000,
@@ -445,7 +445,7 @@ fn printUsage() void {
         \\
         \\Options:
         \\  --case <name>         eth-transfer, stop-call, erc20-transfer; default eth-transfer
-        \\  --spec <name>         fork spec, default osaka
+        \\  --spec <name>         fork spec, default amsterdam
         \\  --repeats <n>         measured batches, default 5
         \\  --warmups <n>         untimed batches, default 1
         \\  --txs <n>             transactions per batch, default 1000
