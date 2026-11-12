@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the transaction-loop lane on every engine and write one comparison."""
+"""Run the transaction-loop lane on several engines and write one comparison."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ BENCH_DIR = SCRIPT_DIR.parent
 
 CASES = ("eth-transfer", "stop-call", "erc20-transfer")
 BASELINE_ROW = "evmz"
+
+# evmone runs only when named: its transition also builds the receipt's logs
+# bloom, so its row is not like-for-like on transactions that emit a log.
+DEFAULT_FAMILIES = ("evmz", "evm2")
 
 # Row name -> (engine family, build step, extra runner flags). The evmz row
 # without its prepared-code pool is the one that prepares the callee's code on
@@ -95,7 +99,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--engine",
         action="append",
-        help="repeatable; evmz, evm2, or evmone, also as a VM-loop row name such as evmone-baseline",
+        help="repeatable; evmz, evm2, or evmone, also as a VM-loop row name such as evmone-baseline; "
+        "default evmz and evm2",
     )
     parser.add_argument("--out-dir", default="zig-out/tx-loop-compare")
     return parser.parse_args()
@@ -109,9 +114,9 @@ def resolve_path(value: str) -> Path:
 
 
 def selected_families(engines: list[str] | None) -> set[str]:
-    families = {family for family, _, _ in ROWS.values()}
     if not engines:
-        return families
+        return set(DEFAULT_FAMILIES)
+    families = {family for family, _, _ in ROWS.values()}
     selected = set()
     for engine in engines:
         family = next((name for name in sorted(families) if engine.startswith(name)), None)
