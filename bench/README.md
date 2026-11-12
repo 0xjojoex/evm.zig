@@ -116,8 +116,9 @@ for both baseline and advanced, `--engine evm2` for `evm2-interpreter`):
 | `evmone-advanced`  | analyzed advanced interpreter | fixture loading, init-code deployment through EVMC, `advanced::analyze`                           | `advanced::execute` over `AdvancedCodeAnalysis` | no                       |
 | `evm2-interpreter` | packed interpreter loop       | fixture loading, init-code deployment, forced jump analysis; per-run interpreter/host setup | `Interpreter::run` | no |
 
-EVM2 is pinned to `f93318f120f6300599b21170d6c7bef81ed63d87` (Reth v2.9.0) with
-`EVM2_DISPATCH_BACKEND=packed`. Each EVM2 variant emits an untimed reference
+EVM2 is pinned to `66687c18b34d3bdbb899f5eb7605070615c03475` (Reth v2.11.0) with
+`EVM2_DISPATCH_BACKEND=packed`. The published snapshots above predate this pin.
+Each EVM2 variant emits an untimed reference
 call's gas used, deployed-code hash, and return-output hash; `compare` rejects
 any mismatch across rows.
 
