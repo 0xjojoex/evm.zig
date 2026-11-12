@@ -116,11 +116,21 @@ inline fn lookup(table: Lanes, indices: Lanes) Lanes {
         ),
         // PSHUFB zeroes lanes whose index has its top bit set and otherwise uses
         // the low four bits; +0x70 sets the top bit of 16..143 only.
-        .x86_64 => asm ("pshufb %[indices], %[out]"
-            : [out] "=x" (-> Lanes),
-            : [table] "0" (table),
-              [indices] "x" (indices +% @as(Lanes, @splat(0x70))),
-        ),
+        .x86_64 => if (comptime builtin.target.cpu.has(.x86, .avx))
+            // The compiler encodes the surrounding vector code with VEX once the
+            // target has AVX. A legacy-encoded PSHUFB between those instructions
+            // pays Intel's SSE/AVX transition penalty on every lookup.
+            asm ("vpshufb %[indices], %[table], %[out]"
+                : [out] "=x" (-> Lanes),
+                : [table] "x" (table),
+                  [indices] "x" (indices +% @as(Lanes, @splat(0x70))),
+            )
+        else
+            asm ("pshufb %[indices], %[out]"
+                : [out] "=x" (-> Lanes),
+                : [table] "0" (table),
+                  [indices] "x" (indices +% @as(Lanes, @splat(0x70))),
+            ),
         else => comptime unreachable,
     };
 }
