@@ -194,15 +194,15 @@ only need these modules):
 
 ## Performance
 
-VM-loop interpreter medians on Apple M1 Max (macOS arm64, fixed Osaka,
+VM-loop interpreter medians on Apple M1 Max (macOS arm64, fixed Amsterdam,
 `ReleaseFast`, XKCP Keccak, 5 × 100 calls after 100 ms warmup; lower is better):
 
-| Fixture | evmz | evmone 0.25 base | EVM2 packed (Rust 1.96) |
+| Fixture | evmz | evmone `6fb712f3` base | EVM2 packed (Rust 1.96) |
 | --- | ---: | ---: | ---: |
-| Arithmetic loop | **0.092 ms** | 0.102 ms | 0.232 ms |
-| Storage SSTORE loop | **0.162 ms** | 0.870 ms | 0.923 ms |
-| ERC20 transfer | **3.694 ms** | 6.219 ms | 5.837 ms |
-| Snailtracer | **19.898 ms** | 59.461 ms | 34.356 ms |
+| Arithmetic loop | **0.092 ms** | 0.094 ms | 0.232 ms |
+| Storage SSTORE loop | **0.168 ms** | 0.589 ms | 0.932 ms |
+| ERC20 transfer | **3.766 ms** | 4.370 ms | 5.987 ms |
+| Snailtracer | **20.402 ms** | 47.854 ms | 35.014 ms |
 
 Full snapshots, host scope, and reproduction commands are in
 [`bench/README.md`](bench/README.md#published-snapshots).
