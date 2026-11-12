@@ -10,7 +10,7 @@ lifecycle, and inner-loop data structures.
 | Single-engine VM loop | `zig build bench-vm-loop` | `zig build vm-loop` | Per-call runtime timing for `evmz` (`evmone-vm-loop` and `evm2-vm-loop` for peers) |
 | Opcode kernels | `zig build bench-kernel` | `zig build kernel` | Pure opcode loops on the null host (`small`, `edge`, `large`, `branch`) |
 | Block lifecycle | `zig build bench-block-lifecycle` | `zig build block-lifecycle` | `Executor` init, `BlockExecution` tx loop, and state persistence (`growable` vs `exact`) |
-| Transaction loop | `zig build bench-tx-loop` | `zig build tx-loop` | One complete transaction per call on a long-lived VM (`evm2-tx-loop` for the peer) |
+| Transaction loop | `zig build bench-tx-loop` | `zig build tx-loop` | One complete transaction per call on a long-lived VM (`evm2-tx-loop` and `evmone-tx-loop` for peers) |
 | Inner-loop microbench | `zig build bench-micro` | `zig build micro` | zBench microbenchmarks (`arithmetic`, `sdiv`, `mulmod`, `sparse-hash-map`, `overlay`) |
 | Code analysis | `zig build bench-code-analysis` | `zig build code-analysis` | Bytecode jumpdest analysis timing and morphology |
 
@@ -278,12 +278,15 @@ lives for the whole run: validation, fee debit, nonce advance, the top-level
 call, refund, coinbase payment, and acceptance of the state transition. The
 VM-loop lane starts from a prepared call frame and cannot show this fixed cost.
 `zig build evm2-tx-loop` runs the same workloads through EVM2's `Evm::transact`
-and `ExecutedTx::commit`.
+and `ExecutedTx::commit`. `zig build evmone-tx-loop` runs them through evmone's
+baseline interpreter under `test::transition`, the transaction entry point of
+evmone's state-test tooling.
 
 ```sh
 cd bench
 zig build tx-loop -- --case eth-transfer --txs 200000 --summary
 zig build evm2-tx-loop -- --case eth-transfer --txs 200000 --summary
+zig build evmone-tx-loop -- --case eth-transfer --txs 200000 --summary
 zig build tx-loop -- --case erc20-transfer --txs 200000 --no-code-cache
 ```
 
@@ -293,7 +296,7 @@ zig build tx-loop -- --case erc20-transfer --txs 200000 --no-code-cache
 | `stop-call` | Zero-value call to a contract whose runtime is `STOP` |
 | `erc20-transfer` | `transfer(address,uint256)` on the `erc20-transfer` fixture, both balance slots non-zero |
 
-Both runners deploy the contracts and prime the state through transactions
+All runners deploy the contracts and prime the state through transactions
 before timing, pay a 10 wei gas price over a 7 wei base fee to a non-zero
 coinbase, and keep state in the engine's own in-memory store. Each runner fails
 unless every timed transaction succeeds with the gas of the steady-state
@@ -303,7 +306,17 @@ reference transaction and the recipient ends with the expected balance; equal
 EVM2 keeps jump analysis inside its committed bytecode. `evmz` keeps prepared
 code in a pool, which block execution installs by default and this runner
 installs too; `--no-code-cache` removes it and prepares the callee's code on
-every transaction. Stdout is CSV:
+every transaction.
+
+Evmone ships no block executor, so its row measures the state-test harness, not
+a production path. Every transaction builds a fresh `state::State` over a
+`std::map` world state, copies the callee's code out of it, analyzes that code,
+computes the receipt's log bloom, and applies a `StateDiff`; the row always
+reports `code_cache=false`. Compare its contract cases with `evmz
+--no-code-cache`. The runner links evmone's precompiles except the blst-backed
+BLS12-381 and KZG ones, which abort if a workload calls them.
+
+Stdout is CSV:
 
 ```text
 suite,engine,case,spec,code_cache,repeat,txs,elapsed_ns,ns_per_tx,gas_per_tx

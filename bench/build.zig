@@ -196,6 +196,32 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const evmone_tx_loop_mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .omit_frame_pointer = true,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        addEvmoneVm(evmone_tx_loop_mod, evmone_dep, intx_dep, evmone_libgcc);
+        addEvmoneState(evmone_tx_loop_mod, evmone_dep);
+        evmone_tx_loop_mod.addCSourceFiles(.{
+            .root = b.path("evmone"),
+            .files = &.{ "tx_loop.cpp", "unlinked_precompiles.cpp" },
+            .flags = evmone_state_cxx_flags,
+        });
+        const evmone_tx_loop = b.addExecutable(.{
+            .name = "evmone-tx-loop",
+            .root_module = evmone_tx_loop_mod,
+        });
+        b.installArtifact(evmone_tx_loop);
+
+        const run_evmone_tx_loop = b.addRunArtifact(evmone_tx_loop);
+        run_evmone_tx_loop.addPassthruArgs();
+        b.step("evmone-tx-loop", "Run evmone transaction-level benchmark").dependOn(&run_evmone_tx_loop.step);
+    }
+
+    {
         const compare_mod = b.createModule(.{
             .root_source_file = b.path("src/compare.zig"),
             .target = target,
@@ -389,6 +415,49 @@ fn addEvmoneVm(
     module.addCSourceFile(.{
         .file = evmone_dep.path("lib/evmone_precompiles/keccak.cpp"),
         .flags = cxx_flags,
+    });
+}
+
+/// Unlike the interpreter library, evmone's state harness is built with exceptions and RTTI.
+const evmone_state_cxx_flags = &[_][]const u8{
+    "-std=c++20",
+    "-Wall",
+    "-Wextra",
+    "-Wno-missing-field-initializers",
+    "-Wno-unknown-attributes",
+    "-fomit-frame-pointer",
+};
+
+/// Adds evmone's state-test transaction harness (`state::transition` and `test::TestState`) and
+/// the precompiles it links, except the blst-backed BLS12-381 and KZG ones.
+fn addEvmoneState(module: *std.Build.Module, evmone_dep: *std.Build.Dependency) void {
+    // The harness includes its own headers as `<test/state/...>`.
+    module.addIncludePath(evmone_dep.path("."));
+    module.addCSourceFiles(.{
+        .root = evmone_dep.path("."),
+        .files = &.{
+            "test/state/authorization.cpp",
+            "test/state/block.cpp",
+            "test/state/bloom_filter.cpp",
+            "test/state/host.cpp",
+            "test/state/precompiles.cpp",
+            "test/state/requests.cpp",
+            "test/state/rlp_decode.cpp",
+            "test/state/state.cpp",
+            "test/state/system_contracts.cpp",
+            "test/state/transaction.cpp",
+            "test/utils/test_state.cpp",
+            "lib/evmone_precompiles/blake2b.cpp",
+            "lib/evmone_precompiles/bn254.cpp",
+            "lib/evmone_precompiles/modexp.cpp",
+            "lib/evmone_precompiles/mulmod.cpp",
+            "lib/evmone_precompiles/pairing/bn254/pairing.cpp",
+            "lib/evmone_precompiles/ripemd160.cpp",
+            "lib/evmone_precompiles/secp256k1.cpp",
+            "lib/evmone_precompiles/secp256r1.cpp",
+            "lib/evmone_precompiles/sha256.cpp",
+        },
+        .flags = evmone_state_cxx_flags,
     });
 }
 
