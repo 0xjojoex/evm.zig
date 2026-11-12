@@ -17,16 +17,19 @@ lifecycle, and inner-loop data structures.
 
 ## Published snapshots
 
-The current Apple M1 Max snapshot uses EVM2 stable packed dispatch. The AMD
-snapshot retains its historical revm baseline. Both are fixed Osaka, native
-`ReleaseFast`, with frame pointers omitted for every engine. Lower is better;
-ratios above `1.00×` mean evmz is faster than the named baseline.
+The current Apple M1 Max snapshot is fixed Amsterdam and uses EVM2 stable
+packed dispatch. The AMD snapshot is fixed Osaka and retains its historical
+revm baseline. Both are native `ReleaseFast`, with frame pointers omitted for
+every engine. Lower is better; ratios above `1.00×` mean evmz is faster than
+the named baseline.
 
-### Apple M1 Max / macOS arm64 — 2026-10-30
+### Apple M1 Max / macOS arm64 — 2026-11-12
 
-Evmz explicitly selects the XKCP Keccak provider. Evmone is v0.25.0 (EVMC 19),
-with intx v0.15.0. EVM2 uses Rust 1.96.0, packed dispatch and revision `f93318f120f6300599b21170d6c7bef81ed63d87`, pinned to
-Reth v2.9.0. Rust uses native CPU tuning, fat LTO and one codegen unit.
+Evmz explicitly selects the XKCP Keccak provider. Evmone is master revision
+`6fb712f3035cb2aa29e810728f11dfb3d786b81e` (reports v0.25.0, EVMC 19), with
+intx v0.15.0. EVM2 uses Rust 1.96.0, packed dispatch and revision
+`66687c18b34d3bdbb899f5eb7605070615c03475`, pinned to Reth v2.11.0. Rust uses
+native CPU tuning, fat LTO and one codegen unit.
 
 Each cell is the median of five 100-call medians per deployed-runtime fixture,
 with a 100 ms discarded warmup before each fixture/engine run. Engine order
@@ -41,28 +44,47 @@ from the five `summary.csv` files:
 
 ```sh
 zig build bench-compare -Dbench-optimize=fast \
-  -Dbench-support-min=osaka -Dbench-support-max=osaka \
+  -Dbench-support-min=amsterdam -Dbench-support-max=amsterdam \
   -Dnative-keccak=xkcp \
-  -- --spec osaka --num-runs 100 --warmup-ms 100 \
-  --out-dir ../output/readme-evmone-v0.25.0-rerun-20261030-202401/round-1
+  -- --spec amsterdam --num-runs 100 --warmup-ms 100 \
+  --out-dir ../output/readme-amsterdam-20261112/round-1
 ```
 
 | VM-loop fixture | evmz | evmone-base | evmone-adv | EVM2 packed | base/evmz | EVM2/evmz |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Arithmetic loop | 0.092 ms | 0.102 ms | 0.335 ms | 0.232 ms | 1.11× | 2.52× |
-| Memory MSTORE loop | 0.096 ms | 0.084 ms | 0.254 ms | 0.175 ms | 0.87× | 1.82× |
-| Keccak loop | 2.656 ms | 3.530 ms | 3.635 ms | 2.594 ms | 1.33× | 0.98× |
-| Ten-thousand hashes | 0.840 ms | 0.772 ms | 1.705 ms | 1.711 ms | 0.92× | 2.04× |
-| Storage SLOAD loop | 0.153 ms | 0.592 ms | 0.642 ms | 0.454 ms | 3.87× | 2.97× |
-| Storage SSTORE loop | 0.162 ms | 0.870 ms | 0.879 ms | 0.923 ms | 5.37× | 5.70× |
-| LOG0 / 0-byte data | 0.042 ms | 0.030 ms | 0.085 ms | 0.086 ms | 0.71× | 2.05× |
-| LOG0 / 32-byte data | 0.061 ms | 0.034 ms | 0.080 ms | 0.087 ms | 0.55× | 1.43× |
-| LOG4 / 0-byte data | 0.087 ms | 0.068 ms | 0.147 ms | 0.110 ms | 0.78× | 1.27× |
-| LOG4 / 32-byte data | 0.081 ms | 0.083 ms | 0.148 ms | 0.110 ms | 1.03× | 1.35× |
-| ERC20 mint | 1.722 ms | 3.818 ms | 4.710 ms | 3.689 ms | 2.22× | 2.14× |
-| ERC20 transfer | 3.694 ms | 6.219 ms | 7.439 ms | 5.837 ms | 1.68× | 1.58× |
-| ERC20 approval+transfer | 3.398 ms | 4.959 ms | 5.980 ms | 4.445 ms | 1.46× | 1.31× |
-| Snailtracer | 19.898 ms | 59.461 ms | 79.433 ms | 34.356 ms | 2.99× | 1.73× |
+| Arithmetic loop | 0.092 ms | 0.094 ms | 0.327 ms | 0.232 ms | 1.03× | 2.52× |
+| Memory MSTORE loop | 0.090 ms | 0.092 ms | 0.256 ms | 0.175 ms | 1.02× | 1.94× |
+| Keccak loop | 2.682 ms | 2.644 ms | 2.570 ms | 2.616 ms | 0.99× | 0.98× |
+| Ten-thousand hashes | 0.815 ms | 0.743 ms | 1.634 ms | 1.712 ms | 0.91× | 2.10× |
+| Storage SLOAD loop | 0.152 ms | 0.329 ms | 0.374 ms | 0.457 ms | 2.16× | 3.00× |
+| Storage SSTORE loop | 0.168 ms | 0.589 ms | 0.630 ms | 0.932 ms | 3.52× | 5.57× |
+| LOG0 / 0-byte data | 0.039 ms | 0.030 ms | 0.081 ms | 0.085 ms | 0.76× | 2.19× |
+| LOG0 / 32-byte data | 0.064 ms | 0.033 ms | 0.080 ms | 0.089 ms | 0.51× | 1.39× |
+| LOG4 / 0-byte data | 0.079 ms | 0.069 ms | 0.148 ms | 0.107 ms | 0.87× | 1.36× |
+| LOG4 / 32-byte data | 0.078 ms | 0.075 ms | 0.149 ms | 0.110 ms | 0.96× | 1.42× |
+| ERC20 mint | 1.748 ms | 2.650 ms | 3.553 ms | 3.811 ms | 1.52× | 2.18× |
+| ERC20 transfer | 3.766 ms | 4.370 ms | 5.601 ms | 5.987 ms | 1.16× | 1.59× |
+| ERC20 approval+transfer | 3.478 ms | 3.608 ms | 4.583 ms | 4.549 ms | 1.04× | 1.31× |
+| Snailtracer | 20.402 ms | 47.854 ms | 68.301 ms | 35.014 ms | 2.35× | 1.72× |
+
+The transaction loop times one complete transaction per call, so it includes
+the fixed per-transaction cost that the VM-loop lane leaves out. Each cell is
+the median of 20 batches of 200,000 transactions after one untimed batch, from
+one run of:
+
+```sh
+zig build bench-tx-loop-compare -Dbench-optimize=fast \
+  -- --spec amsterdam --txs 200000 --repeats 20
+```
+
+| Transaction | Gas | evmz | evmz, no code cache | EVM2 packed | EVM2/evmz |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ETH transfer | 21,000 | 484 ns | 481 ns | 595 ns | 1.23× |
+| Call to `STOP` | 15,000 | 457 ns | 492 ns | 539 ns | 1.18× |
+| ERC20 transfer | 42,488 | 1,479 ns | 2,039 ns | 1,892 ns | 1.28× |
+
+Evmone is left out of this table because its transaction entry point times
+more work; see [Transaction loop runner](#transaction-loop-runner).
 
 ### AMD EPYC Genoa / Linux x86-64
 
@@ -309,6 +331,25 @@ code in a pool, which block execution installs by default and this runner
 installs too; `--no-code-cache` removes it and prepares the callee's code on
 every transaction.
 
+The evmone row is not like-for-like on transactions that emit a log. Evmone's
+transition also builds the receipt's logs bloom, four Keccak-256 calls for a
+log with three topics, which `evmz` and EVM2 leave to their block layer and
+this lane does not time. Both transfer cases emit such a log: the ERC20
+`Transfer` event, and from Amsterdam the EIP-7708 log of the ETH transfer.
+
+`zig build tx-loop-compare` runs every case on every engine, including an
+`evmz-no-code-cache` row, and fails when `gas_per_tx` differs between engines
+on a case. It writes the per-batch `rows.csv`, the per-engine medians in
+`summary.csv` and `summary.md`, and each runner's raw output under ignored
+`zig-out/tx-loop-compare/`. The `Benchmark` workflow runs it as a second job
+next to the VM-loop comparison.
+
+```sh
+cd bench
+zig build tx-loop-compare
+zig build tx-loop-compare -- --case erc20-transfer --engine evmz --engine evm2 --repeats 20
+```
+
 Evmone ships no block executor, so its row measures the state-test harness, not
 a production path. Every transaction builds a fresh `state::State` over a
 `std::map` world state, copies the callee's code out of it, analyzes that code,
@@ -331,25 +372,6 @@ initialization. It uses the null host and fails if a case touches host callbacks
 The default comparison mode is native release for the Rust sidecar: Zig uses
 `fast`, evmone is compiled into the Zig benchmark binary with the same
 optimization mode. EVM2 uses Cargo `--release` with
-The evmone row is not like-for-like on transactions that emit a log. Evmone's
-transition also builds the receipt's logs bloom, four Keccak-256 calls for a
-log with three topics, which `evmz` and EVM2 leave to their block layer and
-this lane does not time. Both transfer cases emit such a log: the ERC20
-`Transfer` event, and from Amsterdam the EIP-7708 log of the ETH transfer.
-
-`zig build tx-loop-compare` runs every case on every engine, including an
-`evmz-no-code-cache` row, and fails when `gas_per_tx` differs between engines
-on a case. It writes the per-batch `rows.csv`, the per-engine medians in
-`summary.csv` and `summary.md`, and each runner's raw output under ignored
-`zig-out/tx-loop-compare/`. The `Benchmark` workflow runs it as a second job
-next to the VM-loop comparison.
-
-```sh
-cd bench
-zig build tx-loop-compare
-zig build tx-loop-compare -- --case erc20-transfer --engine evmz --engine evm2 --repeats 20
-```
-
 `RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=no"`, fat LTO, and one
 codegen unit.
 
