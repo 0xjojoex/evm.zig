@@ -369,11 +369,6 @@ fn addEvmoneVm(
         "-fno-rtti",
         "-DPROJECT_VERSION=\"0.25.0\"",
     };
-    const c_flags = &[_][]const u8{
-        "-Wall",
-        "-Wextra",
-        "-fomit-frame-pointer",
-    };
     const evmone_sources = &[_][]const u8{
         "lib/evmone/advanced_analysis.cpp",
         "lib/evmone/advanced_execution.cpp",
@@ -391,7 +386,10 @@ fn addEvmoneVm(
     for (evmone_sources) |source| {
         module.addCSourceFile(.{ .file = evmone_dep.path(source), .flags = cxx_flags });
     }
-    module.addCSourceFile(.{ .file = evmone_dep.path("lib/evmone_precompiles/keccak.c"), .flags = c_flags });
+    module.addCSourceFile(.{
+        .file = evmone_dep.path("lib/evmone_precompiles/keccak.cpp"),
+        .flags = cxx_flags,
+    });
 }
 
 /// Evmone's x86 Keccak selector uses GCC CPU-detection symbols absent from Zig's compiler runtime.
