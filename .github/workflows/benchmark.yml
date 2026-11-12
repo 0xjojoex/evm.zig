@@ -28,7 +28,7 @@ on:
         required: false
         default: ""
       engines:
-        description: "Engine set: all, evmz, evmone, evm2, or comma-separated engine names"
+        description: "Engine set: all, evmz, evmone, evm2, or comma-separated engine names (the transaction loop runs evmone only when named)"
         required: true
         default: "all"
       tx_loop_txs:
