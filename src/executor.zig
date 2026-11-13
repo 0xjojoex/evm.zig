@@ -1916,8 +1916,16 @@ pub fn ExecutorType(
                 else => return err,
             };
             defer if (result.output_data.len != 0) scratch.allocator.free(result.output_data);
-            const output = try self.retainNativeOutput(result.output_data);
-            const status: evmz.TxStatus = switch (result.status) {
+            var checked = result;
+            if (comptime spec.precompile.ecrecover_account_check) |check| {
+                if (evmz.precompile.Exact(spec.precompile).builtin(entry) == .ecrecover and
+                    checked.status == .success and checked.output_data.len == 32)
+                {
+                    try self.checkRecoveredAccount(check, &checked);
+                }
+            }
+            const output = try self.retainNativeOutput(checked.output_data);
+            const status: evmz.TxStatus = switch (checked.status) {
                 .success => .success,
                 .failure => .invalid,
                 .out_of_gas => .out_of_gas,
@@ -1933,10 +1941,39 @@ pub fn ExecutorType(
                     },
                 },
                 .output_data = output,
-                .gas_left = if (status == .success) result.gas_left else 0,
+                .gas_left = if (status == .success) checked.gas_left else 0,
                 .gas_refund = 0,
                 .gas_reservoir = msg.gas_reservoir,
             };
+        }
+
+        /// EIP-8151: charge for the recovered account, then warm it, record
+        /// the access for the block access list, and read its code. Code
+        /// that is neither empty nor an EIP-7702 delegation withholds the
+        /// address, leaving the output empty as for a failed recovery. A
+        /// charge the call cannot pay is out of gas, and the account is
+        /// neither warmed, recorded, nor read. The caller's precompile
+        /// checkpoint keeps the warmth only when the call succeeds.
+        fn checkRecoveredAccount(
+            self: *Executor,
+            comptime check: evmz.precompile.EcrecoverAccountCheck,
+            result: *evmz.precompile.Result,
+        ) !void {
+            const recovered_address: Address = .fromBytes(result.output_data[12..32].*);
+            const recovered: AddressWord = .fromAddress(recovered_address);
+            const warm = nativeTargetActive(recovered_address) or
+                self.state.isAccountWarm(recovered);
+            const access_gas = if (warm) check.warm_access_gas else check.cold_access_gas;
+            const cost = access_gas + check.code_read_gas;
+            if (result.gas_left < cost) {
+                result.* = .{ .status = .out_of_gas, .output_data = &.{}, .gas_left = 0 };
+                return;
+            }
+            result.gas_left -= cost;
+            if (!warm) try self.state.warmAccount(recovered);
+            try self.traceAccountAccess(recovered_address);
+            const code = try self.state.getCode(recovered);
+            if (code.len != 0 and eip7702.delegationTarget(code) == null) result.output_data = &.{};
         }
 
         fn retainNativeOutput(self: *Executor, output_data: []u8) ![]u8 {

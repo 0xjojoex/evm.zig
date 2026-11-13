@@ -91,6 +91,14 @@ pub const Config = struct {
     input_size_limit: InputSizeLimits = .initFill(null),
 };
 
+/// Gas the EIP-8151 recovered-account check charges on top of ecRecover's
+/// base cost: one account access, warm or cold, plus one code read.
+pub const EcrecoverAccountCheck = struct {
+    cold_access_gas: i64,
+    warm_access_gas: i64,
+    code_read_gas: i64,
+};
+
 /// Sentinel for a specification without chain-custom precompiles.
 pub const NoCustomPrecompiles = struct {};
 
@@ -108,6 +116,11 @@ pub const NoCustomPrecompiles = struct {};
 pub const Spec = struct {
     config: Config,
     custom: type = NoCustomPrecompiles,
+    /// EIP-8151: after a successful recovery the executor charges for the
+    /// recovered account and withholds it when its code is neither empty nor
+    /// an EIP-7702 delegation. Recovery itself stays a pure function of the
+    /// input; null skips the check.
+    ecrecover_account_check: ?EcrecoverAccountCheck = null,
 
     pub fn resolve(comptime self: Spec, target: Address) ?Exact(self).Entry {
         return Exact(self).resolve(target);
@@ -145,6 +158,15 @@ pub fn Exact(comptime spec: Spec) type {
                 return .{ .builtin = resolveBuiltin(target) orelse return null };
             }
             return resolveBuiltin(target);
+        }
+
+        /// The catalog contract an entry runs, or null for a custom entry.
+        pub fn builtin(entry: Entry) ?Contract {
+            if (has_custom) return switch (entry) {
+                .builtin => |contract| contract,
+                .custom => null,
+            };
+            return entry;
         }
 
         fn resolveBuiltin(target: Address) ?Contract {

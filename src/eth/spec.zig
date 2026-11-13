@@ -20,6 +20,7 @@ const eip7825 = @import("eip/7825.zig");
 const eip7976 = @import("eip/7976.zig");
 const eip8037 = @import("eip/8037.zig");
 const eip8038 = @import("eip/8038.zig");
+const eip8151 = @import("eip/8151.zig");
 const eip8250 = @import("eip/8250.zig");
 const eip8282 = @import("eip/8282.zig");
 const eth_gas = @import("gas.zig");
@@ -885,7 +886,8 @@ pub const amsterdam = osaka.extend(.{
 /// Hegotá, in development: Amsterdam plus the EIPs bogota-devnet-2 runs. Each
 /// EIP is its own patch, so dropping one drops one line here.
 pub const bogota = amsterdam
-    .extend(eip8141_frame_transactions);
+    .extend(eip8141_frame_transactions)
+    .extend(eip8151_restricted_ecrecover);
 
 /// EIP-8141 frame transactions with EIP-8250 keyed nonces.
 const eip8141_frame_transactions: Spec.Patch = .{
@@ -894,6 +896,16 @@ const eip8141_frame_transactions: Spec.Patch = .{
         .frame = .{ .replace = eip8250.params },
     },
     .instruction = eth_instruction.bogota,
+};
+
+/// EIP-8151: ecRecover charges for the recovered account and withholds an
+/// address whose code is neither empty nor an EIP-7702 delegation.
+const eip8151_restricted_ecrecover: Spec.Patch = .{
+    .precompile = precompile: {
+        var value = amsterdam.precompile;
+        value.ecrecover_account_check = eip8151.account_check;
+        break :precompile value;
+    },
 };
 
 pub fn specAt(comptime revision: Revision) Spec {
