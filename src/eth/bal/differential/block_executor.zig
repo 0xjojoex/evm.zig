@@ -81,6 +81,15 @@ pub fn Operations(
             receipt.mergeLogsBloom(target, source);
         }
 
+        pub fn applyCandidateForkActivation(
+            executor: *Engine.Executor,
+            execution_context: execution.ExecutionContext,
+            header: BlockHeader,
+            observer: anytype,
+        ) !void {
+            try block_stf.applyForkActivation(Engine, executor, execution_context, header, observer);
+        }
+
         pub fn applyCandidateWithdrawals(
             executor: *Engine.Executor,
             execution_context: execution.ExecutionContext,

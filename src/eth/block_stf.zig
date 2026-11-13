@@ -1224,6 +1224,14 @@ fn executeBlock(
 
     if (input.block_header) |header| {
         observation_sink.block_access_index = 0;
+        const activation_result = if (observe_state)
+            applyForkActivation(Engine, executor, lifecycleExecutionContext(input.env), header, &observation_sink)
+        else
+            applyForkActivation(Engine, executor, lifecycleExecutionContext(input.env), header, {});
+        activation_result catch |err| return switch (Executor.errors.normalize(err)) {
+            error.InvalidWitness => .{ .status = .invalid_witness },
+            else => |normalized| normalized,
+        };
         const context: Executor.system_contracts.BeforeBlockContext = .{
             .number = input.env.number,
             .timestamp = input.env.timestamp,
@@ -1536,6 +1544,36 @@ pub fn decodeRawTransactions(
 }
 
 const withdrawal_gwei_in_wei: u256 = 1_000_000_000;
+
+/// Run the fork block's one-time state transitions the spec enables, before
+/// the block's system calls and at block access index zero. Currently only
+/// EIP-8253, which sets each listed account's nonce to one and leaves its
+/// balance, code, and storage alone; a missing account is created.
+///
+/// Internal to `eth/`: shared with the BAL candidate lane. `observer` selects
+/// the instrumentation at comptime: a state-observation collector, or `{}`
+/// for unobserved execution.
+pub fn applyForkActivation(
+    comptime Engine: type,
+    executor: anytype,
+    execution_context: execution.ExecutionContext,
+    header: BlockHeader,
+    observer: anytype,
+) !void {
+    if (comptime !Engine.spec.block.bumps_zero_nonce_storage_accounts) return;
+    const activation = header.fork_activation orelse return;
+    const accounts = activation.zero_nonce_storage_accounts;
+    if (accounts.len == 0) return;
+    const observed = comptime @TypeOf(observer) != void;
+    const scope = if (comptime observed) executor.observe(observer) else executor;
+    try scope.beginStateTransition(execution_context);
+    errdefer executor.discardStateTransition();
+    for (accounts) |account| {
+        if (comptime observed) try executor.observeAccountAccess(account);
+        try executor.setNonce(account, 1);
+    }
+    try scope.commitTransaction();
+}
 
 /// Internal to `eth/`: shared with the BAL candidate lane. `observer` selects
 /// the instrumentation at comptime: a state-observation collector, or `{}`

@@ -91,6 +91,13 @@ Added
   schedule. `fixtures.Network` parses the name, and `fixtures.parseFork` keeps
   EEST's fork spelling; `BogotaBPOIncrease` and `BogotaBPODecrease` map to
   Bogotá.
+- EIP-8253 in `eth.bogota`: on the fork block, before the block's system calls
+  and at block access index zero, each listed zero-nonce storage account gets
+  nonce one. `BlockSpec.bumps_zero_nonce_storage_accounts` enables it, and the
+  caller marks the fork block with `BeforeBlockContext.fork_activation`, which
+  carries the chain's account list. Blockchain fixtures pass
+  `config.zeroNonceStorageAccounts` on the first block past a transition
+  boundary.
 - EIP-8141 frame transactions (type `0x06`, `TxKind.frame`) for specs whose
   `TransactionSpec.active_kinds` contains `.frame` and whose
   `TransactionSpec.frame` carries `transaction.frames.Params`; specs extended

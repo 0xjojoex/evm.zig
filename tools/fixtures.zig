@@ -96,7 +96,7 @@ pub fn parseFixtureConfig(
 ) !FixtureConfig {
     const config_value = fixture.get("config") orelse return .{};
     const config = asObject(config_value) orelse return error.MalformedFixture;
-    try rejectUnknownKeys(&config, &.{ "network", "chainid", "chainId", "blobSchedule" });
+    try rejectUnknownKeys(&config, &.{ "network", "chainid", "chainId", "blobSchedule", "zeroNonceStorageAccounts" });
 
     var result = FixtureConfig{
         .chain_id = if (config.get("chainid")) |value|
@@ -117,6 +117,18 @@ pub fn parseFixtureConfig(
         result.blob_params = try parseBlobParams(value);
     }
     return result;
+}
+
+/// The chain's EIP-8253 zero-nonce storage accounts, `config.zeroNonceStorageAccounts`.
+/// A fixture without the key lists none.
+pub fn zeroNonceStorageAccounts(allocator: std.mem.Allocator, fixture: *const std.json.ObjectMap) ![]Address {
+    const config = asObject(fixture.get("config") orelse return &.{}) orelse return error.MalformedFixture;
+    const list = asArray(config.get("zeroNonceStorageAccounts") orelse return &.{}) orelse
+        return error.MalformedFixture;
+    const accounts = try allocator.alloc(Address, list.items.len);
+    errdefer allocator.free(accounts);
+    for (list.items, accounts) |value, *account| account.* = try parseAddressFromValue(value);
+    return accounts;
 }
 
 /// EEST ships the schedule cumulatively, one entry per fork name, and the

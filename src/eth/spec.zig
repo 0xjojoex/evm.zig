@@ -651,6 +651,7 @@ pub const frontier: Spec = .{
         .afterTransaction = semantics.noAfterTransaction,
         .finalizeBlock = semantics.noFinalize,
         .block_access_list = false,
+        .bumps_zero_nonce_storage_accounts = false,
     },
     .call = .{
         .base_gas = 40,
@@ -896,7 +897,8 @@ pub const amsterdam = osaka.extend(.{
 /// EIP is its own patch, so dropping one drops one line here.
 pub const bogota = amsterdam
     .extend(eip8141_frame_transactions)
-    .extend(eip4758_sendall);
+    .extend(eip4758_sendall)
+    .extend(eip8253_zero_nonce_storage_accounts);
 
 /// EIP-8141 frame transactions with EIP-8250 keyed nonces.
 const eip8141_frame_transactions: Spec.Patch = .{
@@ -914,6 +916,12 @@ const eip4758_sendall: Spec.Patch = .{
         .policy = semantics.sendAllPolicy,
         .finalization = semantics.noSelfDestructFinalization,
     },
+};
+
+/// EIP-8253: the fork block sets the nonce of the chain's zero-nonce storage
+/// accounts to one, so no creation can land on their storage.
+const eip8253_zero_nonce_storage_accounts: Spec.Patch = .{
+    .block = .{ .bumps_zero_nonce_storage_accounts = true },
 };
 
 pub fn specAt(comptime revision: Revision) Spec {

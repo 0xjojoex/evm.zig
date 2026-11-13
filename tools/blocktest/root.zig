@@ -57,11 +57,13 @@ pub const Session = struct {
     }
 
     pub fn apply(self: *Session, comptime trace: bool, source: BlockSource, entry: *const JsonObject, capture: ?block_stf.ExecutionCapture) !block_stf.Result {
-        const fork = if (self.network.to == null)
-            self.network.from
-        else
-            self.network.forkAt(try blockTimestamp(self.allocator, source, entry));
-        return runBlock(trace, self.allocator, fork, source, &self.fixture_object, entry, &self.store, &self.block_hashes, &self.parent, capture);
+        if (self.network.to == null) {
+            return runBlock(trace, self.allocator, self.network.from, false, source, &self.fixture_object, entry, &self.store, &self.block_hashes, &self.parent, capture);
+        }
+        const fork = self.network.forkAt(try blockTimestamp(self.allocator, source, entry));
+        // The fork block is the first block past the boundary: its parent ran the earlier fork.
+        const fork_block = !std.mem.eql(u8, self.network.forkAt(self.parent.timestamp).name, fork.name);
+        return runBlock(trace, self.allocator, fork, fork_block, source, &self.fixture_object, entry, &self.store, &self.block_hashes, &self.parent, capture);
     }
 
     pub fn stateRoot(self: *Session) ![32]u8 {
@@ -93,6 +95,7 @@ fn runBlock(
     comptime trace: bool,
     allocator: std.mem.Allocator,
     fork: fixture_common.Fork,
+    fork_block: bool,
     source: BlockSource,
     fixture: *const JsonObject,
     entry: *const JsonObject,
@@ -111,6 +114,7 @@ fn runBlock(
                     allocator,
                     fixture,
                     fork.name,
+                    fork_block,
                     entry,
                     store,
                     block_hashes,
@@ -123,6 +127,7 @@ fn runBlock(
                     allocator,
                     fixture,
                     fork.name,
+                    fork_block,
                     entry,
                     store,
                     block_hashes,
@@ -140,6 +145,7 @@ fn runPayloadExact(
     allocator: std.mem.Allocator,
     fixture: *const JsonObject,
     fork_name: []const u8,
+    fork_block: bool,
     entry: *const JsonObject,
     store: *evmz.state.MemoryStore,
     block_hashes: *FixtureBlockHashes,
@@ -179,6 +185,9 @@ fn runPayloadExact(
         .timestamp = try u64Field(&payload, "timestamp"),
         .parent_hash = payload_parent_hash,
         .parent_beacon_block_root = try parentBeaconBlockRoot(params),
+        .fork_activation = if (fork_block) .{
+            .zero_nonce_storage_accounts = try fixture_common.zeroNonceStorageAccounts(scratch, fixture),
+        } else null,
     };
 
     // Reserve before execution so committing the head cannot allocate.
@@ -251,6 +260,7 @@ fn runBlockBodyExact(
     allocator: std.mem.Allocator,
     fixture: *const JsonObject,
     fork_name: []const u8,
+    fork_block: bool,
     entry: *const JsonObject,
     store: *evmz.state.MemoryStore,
     block_hashes: *FixtureBlockHashes,
@@ -285,6 +295,9 @@ fn runBlockBodyExact(
         .timestamp = header.timestamp,
         .parent_hash = header.parent_hash,
         .parent_beacon_block_root = header.parent_beacon_block_root,
+        .fork_activation = if (fork_block) .{
+            .zero_nonce_storage_accounts = try fixture_common.zeroNonceStorageAccounts(scratch, fixture),
+        } else null,
     };
 
     // Reserve before execution so committing the head cannot allocate.
