@@ -665,6 +665,74 @@ test "BlockSTF credits withdrawals before request contracts forward their balanc
     }
 }
 
+test "BlockSTF Bogota fork block sets the nonce of listed zero-nonce storage accounts to one" {
+    const StfBogota = t.BlockStf(.bogota) orelse return error.SkipZigTest;
+    const listed = address.addr(0x8253);
+    const missing = address.addr(0x8254);
+    const unlisted = address.addr(0x8255);
+    const parent_hash: [32]u8 = @splat(0x11);
+    // The checked request contracts must hold code; STOP returns no requests.
+    const request_calls = eth_spec.bogota.block.finalizeBlock(.{
+        .number = 1,
+        .timestamp = 1,
+        .transaction_count = 0,
+        .gas_used = 0,
+        .block_gas = 0,
+        .state_gas = 0,
+    });
+    for ([_]bool{ false, true }) |fork_block| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        var store = state.MemoryStore.init(scratch);
+        var expected = state.MemoryStore.init(scratch);
+        for ([_]*state.MemoryStore{ &store, &expected }) |target| {
+            for ([_]address.Address{ listed, unlisted }) |storage_account| {
+                const account = try target.getOrCreateAccount(storage_account);
+                account.account.balance = 5;
+                try account.storage.put(1, 9);
+            }
+            for (request_calls.slice()) |call|
+                try (try target.getOrCreateAccount(call.call.recipient)).setCode(&.{0x00});
+        }
+        // Only the nonce moves; a listed account missing from state is created.
+        if (fork_block) {
+            (try expected.getOrCreateAccount(listed)).account.nonce = 1;
+            (try expected.getOrCreateAccount(missing)).account.nonce = 1;
+        }
+        const expected_root = try expected.stateRoot(scratch);
+        const result = try StfBogota.applyAssumeDecoded(scratch, .{
+            .env = .{ .number = 1, .timestamp = 1, .gas_limit = 30_000_000 },
+            .block_header = .{
+                .number = 1,
+                .timestamp = 1,
+                .parent_hash = parent_hash,
+                .parent_beacon_block_root = @splat(0),
+                .fork_activation = if (fork_block) .{ .zero_nonce_storage_accounts = &.{ listed, missing } } else null,
+            },
+            .parent_header = .{
+                .hash = parent_hash,
+                .number = 0,
+                .timestamp = 0,
+                .gas_limit = 30_000_000,
+                .gas_used = 0,
+                .base_fee_per_gas = 0,
+            },
+            .state_backend = .fromMemoryStore(&store),
+            .transactions = &.{},
+            .root_checks = testRootChecksWithWithdrawals(
+                expected_root,
+                trie.empty_root_hash,
+                trie.empty_root_hash,
+                trie.empty_root_hash,
+            ),
+            .header_claims = .{ .requests_hash = empty_requests_hash },
+        });
+        try std.testing.expectEqual(Status.valid, result.status);
+        try std.testing.expectEqual(expected_root, result.state_root);
+    }
+}
+
 test "BlockSTF applies Cancun block-start system contract" {
     const StfCancun = t.BlockStf(.cancun) orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

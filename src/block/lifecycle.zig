@@ -14,6 +14,17 @@ pub const BeforeBlockContext = struct {
     timestamp: u64,
     parent_hash: ?[32]u8 = null,
     parent_beacon_block_root: ?[32]u8 = null,
+    /// Set on the fork block: the first block of the executing spec's fork,
+    /// whose parent ran an earlier fork. A chain that starts inside the fork
+    /// has no fork block.
+    fork_activation: ?ForkActivation = null,
+};
+
+/// Chain configuration that a fork's one-time state transitions read on its
+/// fork block. Each transition runs only when the spec enables it.
+pub const ForkActivation = struct {
+    /// EIP-8253: accounts whose nonce the fork block sets to one.
+    zero_nonce_storage_accounts: []const Address = &.{},
 };
 
 pub const BlockHookInput = union(enum) {
