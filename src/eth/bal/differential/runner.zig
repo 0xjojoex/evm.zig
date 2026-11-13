@@ -152,6 +152,12 @@ pub fn Runner(comptime Engine: type, comptime Operations: type) type {
                 .block_access_index = 0,
             };
             if (header) |context| {
+                try Operations.applyCandidateForkActivation(
+                    &execution.executor,
+                    self.lifecycle_execution_context,
+                    context,
+                    &observation_collector,
+                );
                 const before_calls = Engine.spec.block.beforeBlock(context);
                 try Executor.system_contracts.applyBeforeBlockObserved(
                     &execution.executor,
