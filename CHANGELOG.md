@@ -79,6 +79,9 @@ Added
   approval consumes them as protocol bookkeeping, charging first-use state gas
   from the approving frame's pool, and intrinsic gas prices the nonce calldata
   and each key's slot access. `Transaction` gains `nonce_keys`.
+- EIP-4758 SENDALL in `eth.bogota`: SELFDESTRUCT moves the balance to a
+  different beneficiary and deletes nothing, including an account created in
+  the same transaction. Pricing is unchanged.
 - EEST state and transaction fixtures for `Bogota` load: the fixture tools parse
   `frames`, `signatures`, `maxFee`, and `nonceKeys`, and a frame envelope that
   fails to decode maps to EEST's frame exception names.

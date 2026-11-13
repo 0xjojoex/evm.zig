@@ -1035,7 +1035,17 @@ test "latest transaction SELFDESTRUCT preserves existing storage and self-benefi
     try selfDestructTransition(.latest, false);
 }
 
-fn createdSelfDestructTransition(comptime revision: evmz.eth.Revision, preserves_balance: bool) !void {
+/// What remains of an account created and self-destructed in one transaction.
+const CreatedSelfDestructOutcome = enum {
+    /// EIP-6780: the account is deleted.
+    deleted,
+    /// EIP-8037: storage, nonce, and code reset; the balance stays.
+    reset,
+    /// EIP-4758 SENDALL: nothing is cleared.
+    kept,
+};
+
+fn createdSelfDestructTransition(comptime revision: evmz.eth.Revision, outcome: CreatedSelfDestructOutcome) !void {
     const Vm = evmz.t.Vm(revision) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const target = address.create(sender, 0);
@@ -1052,20 +1062,26 @@ fn createdSelfDestructTransition(comptime revision: evmz.eth.Revision, preserves
         .tx = .{ .sender = sender, .gas_limit = 500_000, .input = &init_code },
     }));
     try std.testing.expectEqual(TxStatus.success, result.status);
-    if (preserves_balance) {
-        try std.testing.expectEqual(@as(u64, 0), (try executor.getAccount(target)).?.nonce);
-        try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(target)).len);
-    } else {
-        try std.testing.expect((try executor.getAccount(target)) == null);
+    switch (outcome) {
+        .deleted => try std.testing.expect((try executor.getAccount(target)) == null),
+        .reset, .kept => {
+            const nonce: u64 = if (outcome == .kept) 1 else 0;
+            try std.testing.expectEqual(nonce, (try executor.getAccount(target)).?.nonce);
+            try std.testing.expectEqual(@as(usize, 0), (try executor.getCode(target)).len);
+        },
     }
-    try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(target, 7));
-    try std.testing.expectEqual(@as(u256, if (preserves_balance) 7 else 0), try executor.getBalance(target));
+    try std.testing.expectEqual(@as(u256, if (outcome == .kept) 11 else 0), try executor.getStorage(target, 7));
+    try std.testing.expectEqual(@as(u256, if (outcome == .deleted) 0 else 7), try executor.getBalance(target));
 }
 
 test "Cancun transaction creation followed by SELFDESTRUCT deletes the new account" {
-    try createdSelfDestructTransition(.cancun, false);
+    try createdSelfDestructTransition(.cancun, .deleted);
 }
 
 test "latest transaction creation followed by SELFDESTRUCT resets storage and preserves balance" {
-    try createdSelfDestructTransition(.latest, true);
+    try createdSelfDestructTransition(.latest, .reset);
+}
+
+test "Bogota transaction creation followed by SENDALL keeps the new account" {
+    try createdSelfDestructTransition(.bogota, .kept);
 }
