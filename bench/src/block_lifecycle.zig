@@ -25,7 +25,39 @@ const Case = enum {
     noop,
     sstore_same,
     sstore_unique,
+    /// `ecrecover_calls` STATICCALLs to ecRecover with a valid signature: the
+    /// first recovers a cold account, the rest a warm one (EIP-8151).
+    ecrecover,
 };
+
+const ecrecover_calls = 16;
+/// hash, v = 28, r, s; recovers to an account without code.
+const ecrecover_input: [128]u8 = hexBytes(
+    "18c547e4f7b0f325ad1e56f57e26c745b09a3e503d86e00e5255ff7f715d3d1c" ++
+        "000000000000000000000000000000000000000000000000000000000000001c" ++
+        "73b1693892219d736caba55bdb67216e485557ea6b6af75f37096c9aa6a5a75f" ++
+        "eeb940b1d03b21e36b0e47e79769f095fe2ab855bd91e3a38756b7d75a9c4549",
+);
+/// CALLDATACOPY(0, 0, 128), then STATICCALL(GAS, 0x01, 0, 128, 128, 32)
+/// `ecrecover_calls` times, popping each result.
+const ecrecover_code = code: {
+    const copy_input = [_]u8{ 0x60, 0x80, 0x5f, 0x5f, 0x37 };
+    const call = [_]u8{ 0x60, 0x20, 0x60, 0x80, 0x60, 0x80, 0x5f, 0x60, 0x01, 0x5a, 0xfa, 0x50 };
+    var code: [copy_input.len + call.len * ecrecover_calls + 1]u8 = undefined;
+    @memcpy(code[0..copy_input.len], &copy_input);
+    for (0..ecrecover_calls) |i| {
+        const start = copy_input.len + i * call.len;
+        @memcpy(code[start..][0..call.len], &call);
+    }
+    code[code.len - 1] = 0x00;
+    break :code code;
+};
+
+fn hexBytes(comptime hex: []const u8) [hex.len / 2]u8 {
+    var bytes: [hex.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&bytes, hex) catch unreachable;
+    return bytes;
+}
 
 const RunResult = struct {
     elapsed_ns: u64,
@@ -310,10 +342,12 @@ fn contractCode(case: Case) []const u8 {
         .noop => &.{0x00},
         .sstore_same => &.{ 0x60, 0x2a, 0x60, 0x00, 0x55, 0x00 },
         .sstore_unique => &.{ 0x60, 0x01, 0x60, 0x00, 0x35, 0x55, 0x00 },
+        .ecrecover => &ecrecover_code,
     };
 }
 
 fn txInput(case: Case, index: usize, buffer: *[32]u8) []const u8 {
+    if (case == .ecrecover) return &ecrecover_input;
     if (case != .sstore_unique) return &.{};
 
     @memset(buffer, 0);
@@ -344,6 +378,7 @@ fn caseName(case: Case) []const u8 {
         .noop => "noop",
         .sstore_same => "sstore-same",
         .sstore_unique => "sstore-unique",
+        .ecrecover => "ecrecover",
     };
 }
 
@@ -373,7 +408,8 @@ fn printUsage() void {
         \\  zig build block-lifecycle -- [options]
         \\
         \\Options:
-        \\  --case <name>                noop, sstore-same, sstore-unique; default sstore-unique
+        \\  --case <name>                noop, sstore-same, sstore-unique, ecrecover;
+        \\                               default sstore-unique
         \\  --spec <name>                fork spec, default amsterdam
         \\  --repeats <n>                measured repeats, default 5
         \\  --warmups <n>                untimed warmups, default 1

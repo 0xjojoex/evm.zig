@@ -134,6 +134,13 @@ Added
   approval consumes them as protocol bookkeeping, charging first-use state gas
   from the approving frame's pool, and intrinsic gas prices the nonce calldata
   and each key's slot access. `Transaction` gains `nonce_keys`.
+- EIP-8151 in `eth.bogota` (`eth.eip8151`): after a successful recovery,
+  ecRecover charges a warm or cold access plus a code read for the recovered
+  account, warms it, records it for the block access list, and returns empty
+  output when its code is neither empty nor an EIP-7702 delegation.
+  `precompile.Spec.ecrecover_account_check` enables it; the executor applies
+  it, so the recovery itself stays a pure function of the input.
+  `precompile.Exact(spec).builtin` names the catalog contract of an entry.
 - EEST state and transaction fixtures for `Bogota` load: the fixture tools parse
   `frames`, `signatures`, `maxFee`, and `nonceKeys`, and a frame envelope that
   fails to decode maps to EEST's frame exception names.

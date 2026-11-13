@@ -37,4 +37,5 @@ test {
     _ = @import("./test/amsterdam/eip8038.zig");
     _ = @import("./test/amsterdam/transaction_preparation.zig");
     _ = @import("./test/bogota/eip8141.zig");
+    _ = @import("./test/bogota/eip8151.zig");
 }
