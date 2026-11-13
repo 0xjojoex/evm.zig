@@ -882,15 +882,19 @@ pub const amsterdam = osaka.extend(.{
     .instruction = eth_instruction.amsterdam,
 });
 
-/// Hegotá, in development: Amsterdam plus EIP-8141 frame transactions with
-/// EIP-8250 keyed nonces, as bogota-devnet-2 runs them.
-pub const bogota = amsterdam.extend(.{
+/// Hegotá, in development: Amsterdam plus the EIPs bogota-devnet-2 runs. Each
+/// EIP is its own patch, so dropping one drops one line here.
+pub const bogota = amsterdam
+    .extend(eip8141_frame_transactions);
+
+/// EIP-8141 frame transactions with EIP-8250 keyed nonces.
+const eip8141_frame_transactions: Spec.Patch = .{
     .transaction = .{
         .active_kinds = std.EnumSet(tx.TxKind).initMany(&.{ .legacy, .access_list, .dynamic_fee, .blob, .set_code, .frame }),
         .frame = .{ .replace = eip8250.params },
     },
     .instruction = eth_instruction.bogota,
-});
+};
 
 pub fn specAt(comptime revision: Revision) Spec {
     return switch (revision) {
