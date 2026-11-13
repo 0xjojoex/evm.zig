@@ -190,6 +190,10 @@ pub const BlockSpec = struct {
     /// revision-owned, per `block_stf.Bind`; `Bind` rejects at compile time any
     /// engine whose spec disagrees with its header lineage.
     block_access_list: bool,
+    /// EIP-8253: the fork block sets the nonce of each account in
+    /// `ForkActivation.zero_nonce_storage_accounts` to one, at block access
+    /// index zero before the `beforeBlock` system calls.
+    bumps_zero_nonce_storage_accounts: bool,
 
     pub const Patch = struct {
         beforeBlock: ?@FieldType(BlockSpec, "beforeBlock") = null,
@@ -197,6 +201,7 @@ pub const BlockSpec = struct {
         afterTransaction: ?@FieldType(BlockSpec, "afterTransaction") = null,
         finalizeBlock: ?@FieldType(BlockSpec, "finalizeBlock") = null,
         block_access_list: ?bool = null,
+        bumps_zero_nonce_storage_accounts: ?bool = null,
     };
 
     fn extend(comptime self: BlockSpec, comptime patch: Patch) BlockSpec {
