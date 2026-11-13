@@ -515,6 +515,16 @@ const semantics = struct {
         return if (created) .{ .clear_storage = true, .reset_account = true } else .{};
     }
 
+    /// EIP-4758 SENDALL: the balance moves to a different beneficiary and the
+    /// account is never marked, so nothing is deleted at transaction end.
+    fn sendAllPolicy(input: execution.SelfDestructPolicyInput) execution.SelfDestructPolicy {
+        return .{ .clear_balance = !input.same_address, .mark_selfdestructed = false };
+    }
+
+    fn noSelfDestructFinalization(_: bool) execution.SelfDestructFinalization {
+        return .{};
+    }
+
     fn noSelfDestructNewAccount(_: execution.SelfDestructNewAccountInput) execution.CallNewAccountGas {
         return .{};
     }
@@ -885,7 +895,8 @@ pub const amsterdam = osaka.extend(.{
 /// Hegotá, in development: Amsterdam plus the EIPs bogota-devnet-2 runs. Each
 /// EIP is its own patch, so dropping one drops one line here.
 pub const bogota = amsterdam
-    .extend(eip8141_frame_transactions);
+    .extend(eip8141_frame_transactions)
+    .extend(eip4758_sendall);
 
 /// EIP-8141 frame transactions with EIP-8250 keyed nonces.
 const eip8141_frame_transactions: Spec.Patch = .{
@@ -894,6 +905,15 @@ const eip8141_frame_transactions: Spec.Patch = .{
         .frame = .{ .replace = eip8250.params },
     },
     .instruction = eth_instruction.bogota,
+};
+
+/// EIP-4758: SELFDESTRUCT becomes SENDALL. Pricing is unchanged; the
+/// EIP-6780 same-transaction deletion is gone.
+const eip4758_sendall: Spec.Patch = .{
+    .self_destruct = .{
+        .policy = semantics.sendAllPolicy,
+        .finalization = semantics.noSelfDestructFinalization,
+    },
 };
 
 pub fn specAt(comptime revision: Revision) Spec {
