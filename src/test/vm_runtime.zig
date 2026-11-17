@@ -693,6 +693,95 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
     try std.testing.expectEqual(TxStatus.success, result.status);
     try std.testing.expect(result.gas.refunded > 0);
     try std.testing.expect(result.gas.block.total > result.gas.used);
+    // Clearing a slot spends no state gas and this call is far above the
+    // calldata floor, so block gas is the pre-refund spend and the gap to
+    // receipt gas is exactly the EVM refund -- not the unused gas in `refunded`.
+    try std.testing.expectEqual(
+        result.gas.block.total - result.gas.used,
+        result.gas.execution_refund,
+    );
+    try std.testing.expect(result.gas.execution_refund < result.gas.refunded);
+}
+
+test "transaction result reports how the root frame halted" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const FrameHalt = evmz.execution.FrameHalt;
+    const sender = addr(0xaaaa);
+    const contract = addr(0xbbbb);
+    const identity_precompile = addr(0x04);
+
+    const cases = [_]struct {
+        code: []const u8 = &.{},
+        /// Defaults to `contract`, which holds `code`.
+        to: ?evmz.Address = null,
+        status: TxStatus = .success,
+        frame_halt: ?FrameHalt,
+    }{
+        .{ .code = &evmz.t.bytecode(.{.STOP}), .frame_halt = .stop },
+        // Running past the last opcode is an implicit STOP.
+        .{ .code = &evmz.t.bytecode(.{.PUSH0}), .frame_halt = .stop },
+        .{ .code = &evmz.t.bytecode(.{ .PUSH0, .PUSH0, .RETURN }), .frame_halt = .returned },
+        .{ .code = &evmz.t.bytecode(.{ .PUSH0, .SELFDESTRUCT }), .frame_halt = .selfdestruct },
+        .{
+            .code = &evmz.t.bytecode(.{ .PUSH0, .PUSH0, .REVERT }),
+            .status = .revert,
+            .frame_halt = .revert,
+        },
+        .{ .code = &evmz.t.bytecode(.{.INVALID}), .status = .invalid, .frame_halt = .invalid_opcode },
+        .{ .code = &evmz.t.bytecode(.{.POP}), .status = .invalid, .frame_halt = .stack_underflow },
+        // A codeless root target is an empty frame that stops at once.
+        .{ .frame_halt = .stop },
+        // A precompile runs no bytecode frame.
+        .{ .to = identity_precompile, .frame_halt = null },
+    };
+
+    for (cases) |case| {
+        var memory = MemoryStore.init(std.testing.allocator);
+        defer memory.deinit();
+        try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
+        try evmz.t.seedStoreAccount(&memory, contract, .{ .code = case.code });
+
+        var executor = Latest.Executor.init(std.testing.allocator, .{
+            .state = .{ .reader = memory.reader() },
+        });
+        defer executor.deinit();
+
+        const result = try expectExecuted(try transact(Latest, &executor, .{
+            .env = .{ .gas_limit = 1_000_000 },
+            .tx = .{ .sender = sender, .to = case.to orelse contract, .gas_limit = 500_000 },
+        }));
+        try std.testing.expectEqual(case.status, result.status);
+        try std.testing.expectEqual(case.frame_halt, result.frame_halt);
+    }
+}
+
+test "transaction result reports why a create failed after its frame returned" {
+    const Latest = evmz.t.Vm(.latest).?;
+    const sender = addr(0xaaaa);
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    try evmz.t.seedStoreAccount(&memory, sender, .{ .balance = 1_000_000 });
+
+    var executor = Latest.Executor.init(std.testing.allocator, .{
+        .state = .{ .reader = memory.reader() },
+    });
+    defer executor.deinit();
+
+    // The frame returns one byte, 0xEF, as the contract's code.
+    const result = try expectExecuted(try transact(Latest, &executor, .{
+        .env = .{ .gas_limit = 1_000_000 },
+        .tx = .{
+            .sender = sender,
+            .input = &evmz.t.bytecode(.{
+                .PUSH1, 0xef, .PUSH0, .MSTORE8,
+                .PUSH1, 1,    .PUSH0, .RETURN,
+            }),
+            .gas_limit = 500_000,
+        },
+    }));
+    try std.testing.expect(result.status != .success);
+    try std.testing.expectEqual(evmz.execution.FrameHalt.returned, result.frame_halt.?);
+    try std.testing.expectEqual(evmz.execution.TerminalCause.invalid_code, result.cause);
 }
 
 test "Executor exposes borrowed logs after transaction retention" {

@@ -133,7 +133,9 @@ pub fn Runtime(comptime spec: ExactSpec) type {
                 const schedule = effectiveBlobSchedule(transaction.blob_schedule, input.blob_params) orelse
                     return .type_3_tx_max_blob_gas_allowance_exceeded;
                 if (input.blob_hashes.len > maxBlobCount(schedule)) return .type_3_tx_max_blob_gas_allowance_exceeded;
-                if (input.blob_hashes.len > maxBlobCountPerTransaction(schedule)) return .type_3_tx_blob_count_exceeded;
+                if (schedule.max_per_transaction) |limit| {
+                    if (input.blob_hashes.len > limit) return .type_3_tx_blob_count_exceeded;
+                }
             }
             return null;
         }
@@ -248,10 +250,6 @@ fn effectiveBlobSchedule(spec_schedule: ?blob.BlobSchedule, params: ?blob.BlobPa
 
 fn maxBlobCount(schedule: blob.BlobSchedule) usize {
     return std.math.lossyCast(usize, schedule.max);
-}
-
-fn maxBlobCountPerTransaction(schedule: blob.BlobSchedule) usize {
-    return std.math.lossyCast(usize, schedule.max_per_transaction);
 }
 
 fn blobGasForCount(spec_schedule: ?blob.BlobSchedule, blob_count: usize) ?u256 {
@@ -688,6 +686,50 @@ test "transaction validation rejects blob shape errors" {
         .blob_hashes = &ten_blob_hashes,
         .sender_balance = 10_000_000,
     }).?);
+}
+
+test "a transaction's blob limit follows the runtime maximum until EIP-7594 caps it" {
+    const eth_spec = @import("../eth/spec.zig");
+    const hashes: [32]u256 = @splat(@as(u256, 0x01) << 248);
+    const Case = struct {
+        fn validate(comptime spec: ExactSpec, max: u64, blob_count: u64) ?ValidationError {
+            const schedule = spec.transaction.blob_schedule.?;
+            return testRuntime(spec).validate(.{
+                .kind = .blob,
+                .gas_limit = 21_000,
+                .max_fee_per_gas = 1,
+                .max_fee_per_blob_gas = 1,
+                .blob_params = .{
+                    .target = schedule.target,
+                    .max = max,
+                    .base_fee_update_fraction = schedule.base_fee_update_fraction,
+                },
+                .blob_hashes = hashes[0..@intCast(blob_count)],
+                .sender_balance = 100_000_000,
+            });
+        }
+    };
+
+    // Before Osaka a transaction may fill the block, so a host that raises the block's maximum
+    // above the fork's raises the transaction's limit with it.
+    inline for (.{ eth_spec.cancun, eth_spec.prague }) |spec| {
+        const fork_max = spec.transaction.blob_schedule.?.max;
+        const raised = fork_max + 3;
+        try std.testing.expectEqual(@as(?ValidationError, null), Case.validate(spec, raised, fork_max + 1));
+        try std.testing.expectEqual(@as(?ValidationError, null), Case.validate(spec, raised, raised));
+        try std.testing.expectEqual(
+            ValidationError.type_3_tx_max_blob_gas_allowance_exceeded,
+            Case.validate(spec, raised, raised + 1).?,
+        );
+    }
+
+    // From Osaka the cap is a constant of the fork and a larger block does not move it.
+    const cap = eth_spec.osaka.transaction.blob_schedule.?.max_per_transaction.?;
+    try std.testing.expectEqual(@as(?ValidationError, null), Case.validate(eth_spec.osaka, cap + 9, cap));
+    try std.testing.expectEqual(
+        ValidationError.type_3_tx_blob_count_exceeded,
+        Case.validate(eth_spec.osaka, cap + 9, cap + 1).?,
+    );
 }
 
 test "transaction validation rejects set-code shape errors" {

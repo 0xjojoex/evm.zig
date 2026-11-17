@@ -96,10 +96,24 @@ pub const BlockGas = struct {
 /// `used` is the receipt/cumulative-gas value. `block` is the contribution to
 /// block/header accounting, which may differ from receipt gas after refunds or
 /// EIP-8037 state-gas splitting.
+///
+/// The two refund fields answer different questions. `execution_refund` is
+/// what the EVM earned back (SSTORE clears, EIP-7702 existing-account
+/// refunds); `refunded` is everything the payer did not pay for, which is
+/// mostly gas the transaction never spent.
 pub const ResultGas = struct {
-    /// Final receipt gas used after refunds/floor rules.
+    /// Gas spent before refunds and floor rules: the gas limit minus what
+    /// execution left, both the regular gas and the EIP-8037 reservoir.
+    spent: u64 = 0,
+    /// Final receipt gas used after refunds/floor rules:
+    /// `max(spent - execution_refund, floor)`.
     used: u64 = 0,
-    /// Gas refunded to the sender.
+    /// The EVM refund counter after the fork's refund cap: `tx_gas_refund` in
+    /// EIP-3529 terms. The calldata floor is applied afterwards and does not
+    /// zero this field, so `used + execution_refund` equals `spent` only when
+    /// the floor did not raise `used`.
+    execution_refund: u64 = 0,
+    /// Unused gas returned to the payer: the gas limit minus `used`.
     refunded: u64 = 0,
     /// Block/session accounting contribution.
     block: BlockGas = .{},
@@ -255,7 +269,9 @@ fn calculateDefaultCosts(
 
     return .{
         .gas = .{
+            .spent = pre_refund_gas_used,
             .used = gas_used,
+            .execution_refund = refund_gas,
             .refunded = sender_refunded_gas,
             .block = block_gas,
         },
@@ -345,7 +361,14 @@ test "settlement cost vectors follow fork and exact-spec policies" {
             .plan = refund_plan,
             .result = refund_result,
             .expected = DefaultCosts{
-                .gas = .{ .used = 48, .refunded = 52, .block = .{ .total = 48, .regular = 48 } },
+                // 60 spent, capped at 60 / 5.
+                .gas = .{
+                    .spent = 60,
+                    .used = 48,
+                    .execution_refund = 12,
+                    .refunded = 52,
+                    .block = .{ .total = 48, .regular = 48 },
+                },
                 .payer_refund = 260,
                 .fee_payment = 96,
             },
@@ -355,7 +378,14 @@ test "settlement cost vectors follow fork and exact-spec policies" {
             .plan = refund_plan,
             .result = refund_result,
             .expected = DefaultCosts{
-                .gas = .{ .used = 30, .refunded = 70, .block = .{ .total = 30, .regular = 30 } },
+                // 60 spent, capped at 60 / 2.
+                .gas = .{
+                    .spent = 60,
+                    .used = 30,
+                    .execution_refund = 30,
+                    .refunded = 70,
+                    .block = .{ .total = 30, .regular = 30 },
+                },
                 .payer_refund = 350,
                 .fee_payment = 60,
             },
@@ -377,7 +407,14 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .state_gas_spent = 7,
             },
             .expected = DefaultCosts{
-                .gas = .{ .used = 38, .refunded = 62, .block = .{ .total = 43, .regular = 43, .state = 7 } },
+                // 50 spent net of the reservoir, capped at 50 / 4.
+                .gas = .{
+                    .spent = 50,
+                    .used = 38,
+                    .execution_refund = 12,
+                    .refunded = 62,
+                    .block = .{ .total = 43, .regular = 43, .state = 7 },
+                },
                 .payer_refund = 310,
                 .fee_payment = 76,
             },
@@ -399,7 +436,15 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .state_gas_spent = 0,
             },
             .expected = DefaultCosts{
-                .gas = .{ .used = 21_040, .refunded = 60, .block = .{ .total = 21_040, .regular = 21_040 } },
+                // The counter is under the cap, and the floor then overrides it
+                // without zeroing it.
+                .gas = .{
+                    .spent = 21_016,
+                    .used = 21_040,
+                    .execution_refund = 20,
+                    .refunded = 60,
+                    .block = .{ .total = 21_040, .regular = 21_040 },
+                },
                 .payer_refund = 420,
                 .fee_payment = 0,
             },
@@ -421,7 +466,12 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .state_gas_spent = 70,
             },
             .expected = DefaultCosts{
-                .gas = .{ .used = 80, .refunded = 120, .block = .{ .total = 70, .regular = 30, .state = 70 } },
+                .gas = .{
+                    .spent = 80,
+                    .used = 80,
+                    .refunded = 120,
+                    .block = .{ .total = 70, .regular = 30, .state = 70 },
+                },
                 .payer_refund = 600,
                 .fee_payment = 160,
             },
@@ -431,7 +481,13 @@ test "settlement cost vectors follow fork and exact-spec policies" {
             .plan = refund_plan,
             .result = refund_result,
             .expected = DefaultCosts{
-                .gas = .{ .used = 48, .refunded = 52, .block = .{ .total = 60, .regular = 60 } },
+                .gas = .{
+                    .spent = 60,
+                    .used = 48,
+                    .execution_refund = 12,
+                    .refunded = 52,
+                    .block = .{ .total = 60, .regular = 60 },
+                },
                 .payer_refund = 260,
                 .fee_payment = 96,
             },
@@ -454,6 +510,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
             },
             .expected = DefaultCosts{
                 .gas = .{
+                    .spent = eth_tx_eip7825.max_transaction_gas_limit,
                     .used = eth_tx_eip7825.max_transaction_gas_limit,
                     .refunded = 120_000_000 - eth_tx_eip7825.max_transaction_gas_limit,
                     .block = .{
@@ -482,7 +539,13 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .state_gas_spent = 0,
             },
             .expected = DefaultCosts{
-                .gas = .{ .used = 283_776, .refunded = 22, .block = .{ .total = 283_776, .regular = 283_776 } },
+                // The floor raises `used` past what execution spent.
+                .gas = .{
+                    .spent = 283_798 - eth_tx_eip8037.new_account_state_gas,
+                    .used = 283_776,
+                    .refunded = 22,
+                    .block = .{ .total = 283_776, .regular = 283_776 },
+                },
                 .payer_refund = 220,
                 .fee_payment = 851_328,
             },

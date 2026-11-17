@@ -151,9 +151,23 @@ pub fn build(b: *std.Build) void {
         "micro-filter",
         "Only run benchmark micro tests whose names contain this filter",
     );
-    // Frame pointers cost ~3 instructions per tail-dispatch handler; bench
-    // builds already omit them, so keep shipped release artifacts identical.
-    const omit_frame_pointer = optimize != .debug;
+    const frame_pointers = b.option(
+        bool,
+        "frame-pointers",
+        "Keep frame pointers in native artifacts (default: debug and safe builds only)",
+    );
+    const c_api_forks = b.option(
+        CApiForks,
+        "c-api-forks",
+        "Fork revisions compiled into libevmz (default: the recent four)",
+    ) orelse .recent;
+    // Frame pointers cost ~3 instructions per tail-dispatch handler. A safe
+    // build exists to produce a readable crash, so it keeps them; fast and
+    // small builds omit them to match the benchmarked artifacts.
+    const omit_frame_pointer = !(frame_pointers orelse (optimize == .debug or optimize == .safe));
+    // Guest cycles are the cost on a zkVM, so every release guest omits them
+    // and `-Dframe-pointers` does not reach it.
+    const omit_guest_frame_pointer = optimize != .debug;
 
     const packages = createPackageModules(b, target, optimize, null, true);
     const native_evmz_mod = createEvmzModule(b, .{
@@ -172,7 +186,7 @@ pub fn build(b: *std.Build) void {
         .build_options = zkvm_build_options,
         .stateless_profile = stateless_profile_none_mod,
         .packages = packages,
-        .omit_frame_pointer = omit_frame_pointer,
+        .omit_frame_pointer = omit_guest_frame_pointer,
         .pic = if (pic) true else null,
         .exported = !is_native_profile,
     });
@@ -277,7 +291,12 @@ pub fn build(b: *std.Build) void {
     const statetest_tests = b.addTest(.{ .root_module = statetest_cli_mod });
     statetest_tests.use_llvm = true;
     const run_statetest_tests = b.addRunArtifact(statetest_tests);
-    b.step("statetest-test", "Test state-test tooling").dependOn(&run_statetest_tests.step);
+    const fixtures_tests = b.addTest(.{ .root_module = fixtures_mod });
+    fixtures_tests.use_llvm = true;
+    const run_fixtures_tests = b.addRunArtifact(fixtures_tests);
+    const statetest_test_step = b.step("statetest-test", "Test state-test tooling");
+    statetest_test_step.dependOn(&run_statetest_tests.step);
+    statetest_test_step.dependOn(&run_fixtures_tests.step);
 
     const blocktest_cli_mod = b.createModule(.{
         .root_source_file = b.path("tools/blocktest/main.zig"),
@@ -359,9 +378,20 @@ pub fn build(b: *std.Build) void {
         .libsecp256k1 = libsecp256k1_dep,
         .selected_profile = profile,
     });
+    const c_api_test_step = addCApi(b, .{
+        .target = target,
+        .optimize = optimize,
+        .evmz = native_evmz_mod,
+        .statetest = statetest_mod,
+        .forks = c_api_forks,
+        .omit_frame_pointer = omit_frame_pointer,
+        .pic = if (pic) true else null,
+        .blst_lib = native_precompile_deps.blst_lib,
+    });
     const ci_step = b.step("ci", "Run deterministic pull-request verification");
     ci_step.dependOn(&core_check.step);
     ci_step.dependOn(&run_statetest_tests.step);
+    ci_step.dependOn(&run_fixtures_tests.step);
     ci_step.dependOn(&run_t8n_tests.step);
     ci_step.dependOn(&cli.step);
     ci_step.dependOn(blocktest_test_step);
@@ -369,6 +399,7 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(tests.native_all);
     ci_step.dependOn(tests.zkvm_all);
     ci_step.dependOn(tests.packages);
+    ci_step.dependOn(c_api_test_step);
     ci_step.dependOn(check_guest_elf_tests);
     ci_step.dependOn(check_zisk_failure_status_tests);
     ci_step.dependOn(tidy_step);
@@ -535,7 +566,7 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_zisk_strip,
-        omit_frame_pointer,
+        omit_guest_frame_pointer,
         guest_zisk_profile_tags,
         guest_heap_bytes,
         guest_zisk_ram_bytes,
@@ -550,7 +581,7 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_sp1_strip,
-        omit_frame_pointer,
+        omit_guest_frame_pointer,
         false,
         guest_heap_bytes,
         null,
@@ -565,7 +596,7 @@ pub fn build(b: *std.Build) void {
         guest_input_path,
         guest_output_path,
         guest_openvm_strip,
-        omit_frame_pointer,
+        omit_guest_frame_pointer,
         false,
         guest_heap_bytes,
         null,
@@ -679,6 +710,10 @@ const KeccakBackend = enum { std, xkcp };
 // Membership is resolved in `src/t.zig`.
 const TestForks = enum { head, dev, all };
 
+/// Forks compiled into `libevmz`; `src/c_api.zig` resolves the preset. Each
+/// fork is one exact engine, so the default keeps the archive small.
+const CApiForks = enum { recent, all };
+
 /// Accelerated backends only exist for the architectures we build assembly for,
 /// and never under the zkVM profile.
 fn resolveNativeKeccak(
@@ -783,6 +818,116 @@ fn createEvmzModule(b: *std.Build, config: EvmzModuleConfig) *std.Build.Module {
     addNativeKeccak(module, config.xkcp);
     addNativeSecp256k1(module, config.libsecp256k1);
     return module;
+}
+
+const CApiConfig = struct {
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    evmz: *std.Build.Module,
+    /// The state-fixture parser, for the ABI's fixture-driven test.
+    statetest: *std.Build.Module,
+    forks: CApiForks,
+    omit_frame_pointer: bool,
+    pic: ?bool,
+    blst_lib: *std.Build.Step.Compile,
+};
+
+/// `libevmz`, the C session ABI declared in `include/evmz/evmz.h`.
+///
+/// `zig build c-api` installs the static archive, `libblst`, and the header.
+/// The archive holds evmz, compiler-rt, and every native provider except blst,
+/// which is its own archive: a host links `-levmz -lblst` plus a C++ runtime
+/// for the bn254 backend. Returns the step that tests the ABI.
+fn addCApi(b: *std.Build, config: CApiConfig) *std.Build.Step {
+    const header_path = b.path("include/evmz/evmz.h");
+    const options = b.addOptions();
+    options.addOption([]const u8, "forks", @tagName(config.forks));
+
+    // The implementation takes its types from the translated header, so the
+    // header stays the one definition of the ABI's layout.
+    const header: Translator = .init(b.dependency("translate_c", .{}), .{
+        .name = "evmz_h",
+        .c_source_file = header_path,
+        .target = config.target,
+        .optimize = config.optimize,
+    });
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = config.target,
+        .optimize = config.optimize,
+        .omit_frame_pointer = config.omit_frame_pointer,
+        .pic = config.pic,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "evmz", .module = config.evmz },
+            .{ .name = "evmz_h", .module = header.mod },
+            .{ .name = "statetest", .module = config.statetest },
+        },
+    });
+    module.addOptions("c_api_options", options);
+
+    const lib = b.addLibrary(.{
+        .name = "evmz",
+        .linkage = .static,
+        .root_module = module,
+    });
+    lib.use_llvm = true;
+    // A host links with its own toolchain, which supplies neither Zig's
+    // compiler-rt for the wide-integer arithmetic evmz emits nor the UBSan
+    // runtime the C dependencies call in a safe build.
+    lib.bundle_compiler_rt = true;
+    lib.bundle_ubsan_rt = true;
+    lib.installHeader(header_path, "evmz/evmz.h");
+
+    // A host's linker reads the archives, and Apple's rejects one Zig leaves
+    // unpadded, so they are installed through `tools/pad_archive.zig`. The
+    // artifact step itself installs only the header.
+    // https://codeberg.org/ziglang/zig/issues/30572
+    const pad_archive_mod = b.createModule(.{
+        .root_source_file = b.path("tools/pad_archive.zig"),
+        .target = b.graph.host,
+        .optimize = .safe,
+    });
+    const pad_archive = b.addExecutable(.{ .name = "pad-archive", .root_module = pad_archive_mod });
+    const pad_archive_tests = b.addTest(.{
+        .name = "pad-archive-test",
+        .root_module = pad_archive_mod,
+    });
+
+    const install_step = b.step("c-api", "Build and install libevmz and its C header");
+    install_step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .disabled }).step);
+    for ([_]*std.Build.Step.Compile{ lib, config.blst_lib }) |archive| {
+        const pad = b.addRunArtifact(pad_archive);
+        pad.addArtifactArg(archive);
+        const padded = pad.addOutputFileArg(archive.out_filename);
+        install_step.dependOn(&b.addInstallLibFile(padded, archive.out_filename).step);
+    }
+
+    const tests = b.addTest(.{
+        .name = "c-api-tests",
+        .root_module = module,
+        .test_runner = .{ .path = b.path("tools/test_runner.zig"), .mode = .simple },
+    });
+    tests.use_llvm = true;
+
+    // A C program proves the header parses as C and the archive links.
+    const smoke_mod = b.createModule(.{
+        .target = config.target,
+        .optimize = config.optimize,
+        .link_libc = true,
+    });
+    smoke_mod.addCSourceFile(.{
+        .file = b.path("tools/c_api_smoke.c"),
+        .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror" },
+    });
+    smoke_mod.linkLibrary(lib);
+    const smoke = b.addExecutable(.{ .name = "c-api-smoke", .root_module = smoke_mod });
+
+    const test_step = b.step("c-api-test", "Test the C session ABI");
+    test_step.dependOn(runTests(b, tests));
+    test_step.dependOn(&b.addRunArtifact(smoke).step);
+    test_step.dependOn(&b.addRunArtifact(pad_archive_tests).step);
+    return test_step;
 }
 
 /// Forward `zig build test -- <substring>` to the custom runner as runtime

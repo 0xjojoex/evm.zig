@@ -58,6 +58,19 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   and the output root change. Witness trie reads and deletion collapses now reject
   a node that does not fit a 32-byte secured key wherever they reach it.
 - Updated the execution fixture corpus to `tests@v21.0.1`.
+- `zig build c-api` installs `libevmz.a`, `libblst.a`, and
+  `include/evmz/evmz.h`: a C session ABI (version 3) that executes transactions
+  and system calls against state the host serves through callbacks, with an
+  owned result per execution that the host accepts or discards. It is
+  experimental and outside the compatibility surface. `-Dc-api-forks=recent|all`
+  picks the compiled forks (default `recent`: Cancun, Prague, `.stable`,
+  `.latest`). A host links `-levmz -lblst -lc++`; `zig build c-api-test` runs
+  its tests, and with `EVMZ_STATE_FIXTURES=<directory>` runs a tree of EEST
+  state fixtures through the ABI.
+- Native artifacts keep frame pointers in `debug` and `safe` builds and omit
+  them in `fast` and `small`; `safe` builds used to omit them.
+  `-Dframe-pointers=<bool>` overrides the default. zkVM guests still omit them
+  in every release mode.
 
 ### EVM
 
@@ -74,9 +87,27 @@ Added
 - `CompileOptions.transaction_journal`: an embedding-owned journal whose
   checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
   with it. See `examples/transaction_journal.zig`.
+- `TxExecutionResult.frame_halt`: how the root frame halted, or null when no
+  root frame ran (a precompile target, or a transaction included without
+  executing).
+- `TxExecutionResult.cause`: why the execution ended with its status, which
+  `frame_halt` cannot say for a create that fails after its frame returned.
+- `ResultGas.execution_refund`: the EVM refund counter after the fork's refund
+  cap. `refunded` remains the unused gas returned to the payer.
+- `ResultGas.spent`: the gas spent before refunds and floor rules. When the
+  calldata floor sets `used`, `used + execution_refund` is more than this.
 
 Changed
 
+- `execution.FrameHalt.success` is split into `.stop`, `.returned`, and
+  `.selfdestruct`. Replace a match on `.success` with all three, or compare
+  `halt.status() == .success`.
+- `transaction.AuthorizationTuple` is `transaction.RecoveredAuthorization` and
+  carries only `chain_id`, `target`, `signer`, and `nonce`. The executor no
+  longer re-checks signature scalar ranges, so an edge that builds
+  authorizations from raw signatures must call
+  `eip7702.authorizationSignatureShapeValid`, drop a failing tuple, and still
+  count it in `authorization_count`. The RLP decoder already does.
 - libsecp256k1 is the only native secp256k1 provider and is always fetched
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the
@@ -99,6 +130,12 @@ Changed
   and drops refunds like a failed bytecode frame. `@TypeOf(ctx).spec` is the
   executor's own spec, so native pricing follows `Spec.extend` overrides.
 - System-call entry rejects native targets with `NativeSystemCallUnsupported`.
+- `transaction.blob.BlobSchedule.max_per_transaction` is `?u64`, and null on
+  Cancun and Prague, where a transaction may carry as many blobs as the block.
+  A runtime `BlobParams.max` above the fork's own now raises the transaction's
+  limit with it on those forks; the limit used to stay at 6 and 9. From Osaka
+  the EIP-7594 cap is unchanged. A custom spec that set the field to its
+  `max` can pass `null`.
 
 Removed
 

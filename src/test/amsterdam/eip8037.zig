@@ -82,7 +82,7 @@ test "Amsterdam transaction program applies EIP-7702 authorization" {
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
     try evmz.t.seedExecutorAccount(&executor, authority, .{});
 
-    const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
+    const authorization_list = [_]transaction.RecoveredAuthorization{evmz.t.testAuthorization(authority, target)};
     const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.transact(&executor, .{
         .env = .{ .gas_limit = 300_000, .coinbase = execution_context.block.coinbase },
         .tx = .{
@@ -114,7 +114,7 @@ test "Amsterdam repeated authorizations share authority history" {
 
     var second = evmz.t.testAuthorization(authority, final_target);
     second.nonce = 1;
-    const authorization_list = [_]transaction.AuthorizationTuple{
+    const authorization_list = [_]transaction.RecoveredAuthorization{
         evmz.t.testAuthorization(authority, first_target),
         second,
     };
@@ -152,7 +152,7 @@ test "Amsterdam invalid loaded authorization authority is a semantic access" {
     try evmz.t.seedExecutorAccount(&executor, sender, .{ .balance = 1_000_000 });
     try evmz.t.seedExecutorAccount(&executor, authority, .{ .nonce = 1 });
 
-    const authorization_list = [_]transaction.AuthorizationTuple{evmz.t.testAuthorization(authority, target)};
+    const authorization_list = [_]transaction.RecoveredAuthorization{evmz.t.testAuthorization(authority, target)};
     const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.observe(&executor).transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{
@@ -197,7 +197,7 @@ test "Amsterdam wrong-chain authorization authority is never accessed" {
 
     var wrong_chain = evmz.t.testAuthorization(authority, target);
     wrong_chain.chain_id = 0xdead;
-    const authorization_list = [_]transaction.AuthorizationTuple{wrong_chain};
+    const authorization_list = [_]transaction.RecoveredAuthorization{wrong_chain};
     const executed = try evmz.t.expectExecuted(try evmz.Evm.Advanced.observe(&executor).transact(.{
         .env = .{ .gas_limit = 300_000 },
         .tx = .{

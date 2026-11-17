@@ -12,7 +12,9 @@ pub const BlobParams = struct {
 pub const BlobSchedule = struct {
     target: u64,
     max: u64,
-    max_per_transaction: u64,
+    /// EIP-7594 cap on the blobs of one transaction. Null before Osaka, where a transaction may
+    /// carry as many blobs as the block, so the limit follows `max` and runtime `BlobParams`.
+    max_per_transaction: ?u64,
     gas_per_blob: u64,
     min_base_fee: u256,
     execution_base_cost: u64,
@@ -98,7 +100,7 @@ test "transaction blob fee helpers" {
     try std.testing.expectEqual(@as(u64, 6), cancun.max);
     try std.testing.expectEqual(eth.transaction.cancun_blob_base_fee_update_fraction, cancun.base_fee_update_fraction);
     try std.testing.expectEqual(@as(u64, 9), osaka.max);
-    try std.testing.expectEqual(@as(u64, 6), osaka.max_per_transaction);
+    try std.testing.expectEqual(@as(?u64, 6), osaka.max_per_transaction);
     try std.testing.expectEqual(eth.transaction.prague_blob_base_fee_update_fraction, osaka.base_fee_update_fraction);
     try std.testing.expectEqual(@as(u64, 14), amsterdam.target);
     try std.testing.expectEqual(@as(u64, 21), amsterdam.max);

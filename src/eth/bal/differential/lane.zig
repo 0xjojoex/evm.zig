@@ -252,6 +252,8 @@ pub fn Lane(comptime Engine: type) type {
 
 fn executionResultEqual(expected: vm.TxExecutionResult, actual: vm.TxExecutionResult) bool {
     return expected.status == actual.status and
+        expected.frame_halt == actual.frame_halt and
+        expected.cause == actual.cause and
         std.meta.eql(expected.gas, actual.gas) and
         std.mem.eql(u8, expected.output, actual.output) and
         std.meta.eql(expected.created_address, actual.created_address);
