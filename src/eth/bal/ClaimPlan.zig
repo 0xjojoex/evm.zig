@@ -4,6 +4,10 @@
 //! stay separate from Keccak trie metadata and `u32` trie-order handles.
 //! Claimed values remain borrowed by the original BAL; this plan owns only
 //! identity and ordering metadata.
+//!
+//! Experimental: the trie-key and trie-order accessors are the MPT's Keccak
+//! keys and per-account storage order, and move to the state commitment once
+//! more than one is supported.
 
 const std = @import("std");
 

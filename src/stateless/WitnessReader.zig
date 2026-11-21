@@ -1,6 +1,9 @@
 //! `StateReader` adapter over Merkle Patricia Trie witness nodes, authenticated
 //! into a catalog at construction. Both execution-state lanes read through it
 //! and commit through `eth.commit` against the same catalog.
+//!
+//! Experimental: the witness lane is MPT-specific today and follows the state
+//! commitment once more than one is supported.
 const std = @import("std");
 
 const address = @import("../address.zig");

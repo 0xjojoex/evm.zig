@@ -2,6 +2,13 @@
 //! and hashed-key updates. Post-state roots from execution
 //! changes live in `eth.commit`.
 //! This is not a persistent trie database or a complete general-purpose MPT library.
+//!
+//! The ordered roots (`orderedTrieRoot`, `transactionRoot`, `receiptRoot`,
+//! `withdrawalsRoot`) and what they are built from (`root`, `Pair`,
+//! `withdrawalValue`, `empty_root_hash`, `Error`) do not depend on the state
+//! commitment. Everything else here is the state trie, experimental and with no
+//! compatibility promise: it moves behind the state commitment once EIP-8297's
+//! binary tree is supported.
 
 const std = @import("std");
 

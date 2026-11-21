@@ -5,6 +5,9 @@
 //! the claim plan itself; the open lane and detached deltas project through
 //! `SortedChanges`. Either way the trie walks pre-sorted fixed keys and never
 //! reconstructs identity from address/slot change records.
+//!
+//! Experimental: this is the MPT commit step of the witness lane, and its
+//! shape follows the state commitment once more than one is supported.
 
 const std = @import("std");
 

@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// An Ethereum execution rule set. The state commitment is not part of it and
+/// is selected separately: Amsterdam rules over EIP-8297's binary tree (the
+/// `BinaryTree` fixture network) are still `.amsterdam`, so a commitment
+/// change never adds a value here. Gas repricing that came with a commitment
+/// would, as an ordinary new rule set.
 pub const Revision = enum(u8) {
     frontier = 0,
     frontier_thawing,
