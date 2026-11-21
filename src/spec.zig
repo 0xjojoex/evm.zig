@@ -337,7 +337,8 @@ pub const SelfDestructSpec = struct {
 };
 
 /// One complete exact EVM specification: every semantic the engine consults,
-/// as a single comptime value.
+/// as a single comptime value. The state commitment (MPT or EIP-8297's binary
+/// tree) is invisible to the EVM and so is deliberately not a field here.
 pub const Spec = struct {
     transaction: TransactionSpec,
     settlement: SettlementSpec,

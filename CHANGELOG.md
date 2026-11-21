@@ -136,6 +136,20 @@ Changed
   limit with it on those forks; the limit used to stay at 6 and 9. From Osaka
   the EIP-7594 cap is unchanged. A custom spec that set the field to its
   `max` can pass `null`.
+- `eth.block_stf.CommitOutput.mpt_nodes` (also `stateless.CommitOutput`) is
+  `nodes`, so the field name does not change when another state commitment,
+  such as EIP-8297's binary tree, is supported. Its type stays
+  `eth.trie.NodeUpdates` for now.
+- `stateless.ValidatorWithOptions` and `stateless.RevisionValidatorWithOptions`
+  take `stateless.CompileOptions` instead of `executor.CompileOptions`; pass
+  `.{ .vm = options }`. Validator-level choices, such as the state commitment,
+  can then be added without changing the signature.
+- The MPT witness lane is documented as experimental, with no compatibility
+  promise: the state-trie parts of `eth.trie`, `eth.commit`,
+  `stateless.WitnessReader`, `Backend.fromWitness`, the type of
+  `eth.block_stf.CommitOutput.nodes`, and the trie-key accessors of
+  `eth.bal.ClaimPlan`. The ordered roots in `eth.trie` and the stateless
+  validator entry points are unaffected.
 
 Removed
 

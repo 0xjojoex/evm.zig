@@ -60,9 +60,19 @@ pub const Options = struct {
     precheck_block_access_list_state: bool = false,
     /// Optional expected-vs-observed BAL diagnostics.
     bal_differential: ?*block_stf.BalDifferentialReport = null,
-    /// Optional accepted block-final delta and MPT node updates. Validation
-    /// clears it on entry and populates it only after every claim matches.
+    /// Optional accepted block-final delta and commitment node updates.
+    /// Validation clears it on entry and populates it only after every claim
+    /// matches.
     commit_output: ?*CommitOutput = null,
+};
+
+/// Comptime configuration of a stateless validator, distinct from the
+/// per-call `stateless.ValidationOptions`. A struct rather than bare
+/// `executor.CompileOptions` so that validator-level choices, such as the state
+/// commitment, can be added without changing the signature.
+pub const CompileOptions = struct {
+    /// Compile options of the VM the validator binds.
+    vm: Vm.CompileOptions = .{},
 };
 
 /// Compile the production stateless validator from one complete specification.
@@ -74,10 +84,10 @@ pub fn Validator(comptime spec: Spec) type {
 
 pub fn ValidatorWithOptions(
     comptime spec: Spec,
-    comptime options: Vm.CompileOptions,
+    comptime options: CompileOptions,
 ) type {
     requireAmsterdamSpec(spec);
-    const ExactVm = Vm.BalVmWithOptions(spec, options);
+    const ExactVm = Vm.BalVmWithOptions(spec, options.vm);
     return ValidatorType(block_stf.Bind(.amsterdam, ExactVm));
 }
 
@@ -100,7 +110,7 @@ pub fn RevisionValidator(comptime revision: Revision) type {
 
 pub fn RevisionValidatorWithOptions(
     comptime revision: Revision,
-    comptime options: Vm.CompileOptions,
+    comptime options: CompileOptions,
 ) type {
     switch (revision) {
         .prague, .osaka => {},
@@ -108,7 +118,7 @@ pub fn RevisionValidatorWithOptions(
     }
     return ValidatorType(block_stf.Bind(
         revision,
-        Vm.VmWithOptions(eth_spec.specAt(revision), options),
+        Vm.VmWithOptions(eth_spec.specAt(revision), options.vm),
     ));
 }
 
@@ -121,6 +131,8 @@ fn requireAmsterdamSpec(comptime spec: Spec) void {
 fn ValidatorType(comptime ExactBlockStf: type) type {
     return struct {
         pub const fork = ExactBlockStf.fork;
+        /// The bound VM's options (`CompileOptions.vm`), as `block_stf.Bind`
+        /// reads them back.
         pub const compile_options = ExactBlockStf.compile_options;
         pub const BlockStf = ExactBlockStf;
 
@@ -658,7 +670,9 @@ test "stateless block errors preserve witness and body taxonomy" {
 test "revision stateless validator binds matching tracked specs" {
     const Prague = RevisionValidator(.prague);
     const Osaka = RevisionValidator(.osaka);
-    const CapturingPrague = RevisionValidatorWithOptions(.prague, .{ .step_capture = true });
+    const CapturingPrague = RevisionValidatorWithOptions(.prague, .{
+        .vm = .{ .step_capture = true },
+    });
 
     comptime {
         std.debug.assert(Prague.fork == .prague);
@@ -690,7 +704,7 @@ test "shape rejection clears reused commit output" {
         .block_hash = @as([32]u8, @splat(0)),
     };
     var output: CommitOutput = .{
-        .mpt_nodes = trie.NodeUpdates.init(std.testing.allocator),
+        .nodes = trie.NodeUpdates.init(std.testing.allocator),
     };
     defer output.deinit();
 
@@ -702,7 +716,7 @@ test "shape rejection clears reused commit output" {
 
     try std.testing.expectEqual(block_stf.Status.invalid_block_body, result.status);
     try std.testing.expect(output.delta == null);
-    try std.testing.expect(output.mpt_nodes == null);
+    try std.testing.expect(output.nodes == null);
 }
 
 test "stateless BAL witness precheck is an explicit Amsterdam option" {

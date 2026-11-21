@@ -33,7 +33,11 @@ Pre-release (`0.0.0`, unaudited; APIs may change between commits).
   prerelease), stateless block validation from execution witnesses, and RV64
   stateless validator guests for ZisK, SP1, and OpenVM.
 - **Experimental:** Block Access List (`BalVm` / `ClosedWorld`) validation and
-  parallel verification, custom transaction/block hooks, and the C header slot.
+  parallel verification, custom transaction/block hooks, the C header slot, and
+  the MPT witness lane (`eth.commit`, the state-trie parts of `eth.trie`,
+  `stateless.WitnessReader`, `Backend.fromWitness`), which will follow the state
+  commitment once EIP-8297's binary tree is supported. The stateless validator
+  entry points are not affected.
 
 ## Install
 

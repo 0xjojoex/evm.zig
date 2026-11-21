@@ -41,16 +41,19 @@ const StateDelta = @import("../state/StateDelta.zig");
 const commit = @import("commit.zig");
 
 /// Optional accepted block-final output, detached from execution: the owned
-/// semantic delta plus, on witness backends, the content-addressed dirty MPT
-/// nodes produced while deriving the accepted root. External backends own
-/// their commitment, so they never populate `mpt_nodes`.
+/// semantic delta plus, on witness backends, the content-addressed dirty nodes
+/// of the state commitment produced while deriving the accepted root. External
+/// backends own their commitment, so they never populate `nodes`.
 pub const CommitOutput = struct {
     delta: ?StateDelta = null,
-    mpt_nodes: ?trie.NodeUpdates = null,
+    /// Dirty commitment nodes. Experimental: the field name is
+    /// commitment-neutral, but its type follows the state commitment and is
+    /// the MPT's `trie.NodeUpdates` until another commitment lands.
+    nodes: ?trie.NodeUpdates = null,
 
     /// Release output with the allocator supplied to block validation.
     pub fn deinit(self: *CommitOutput) void {
-        if (self.mpt_nodes) |*nodes| nodes.deinit();
+        if (self.nodes) |*nodes| nodes.deinit();
         if (self.delta) |*delta| delta.deinit();
         self.* = .{};
     }
@@ -985,7 +988,7 @@ fn BlockRun(comptime Engine: type) type {
             try self.state_backend.commit(if (self.delta) |*value| value.view() else null);
             self.committed = true;
             if (output) |target| {
-                target.* = .{ .delta = self.delta, .mpt_nodes = self.node_updates };
+                target.* = .{ .delta = self.delta, .nodes = self.node_updates };
                 self.delta = null;
                 self.node_updates = null;
             }

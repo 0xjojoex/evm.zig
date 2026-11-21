@@ -30,6 +30,9 @@ pub const Backend = union(enum) {
 
     /// Authenticate `state_root` over the witness nodes. `allocator` and the
     /// byte slices must outlive the returned block-lifetime backend.
+    ///
+    /// Experimental: `nodes` are MPT nodes; the witness arm follows the state
+    /// commitment once more than one is supported.
     pub fn fromWitness(
         allocator: std.mem.Allocator,
         state_root: [32]u8,
