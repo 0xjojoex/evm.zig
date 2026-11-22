@@ -20,6 +20,7 @@ const eip7825 = @import("eip/7825.zig");
 const eip7976 = @import("eip/7976.zig");
 const eip8037 = @import("eip/8037.zig");
 const eip8038 = @import("eip/8038.zig");
+const eip8151 = @import("eip/8151.zig");
 const eip8250 = @import("eip/8250.zig");
 const eip8282 = @import("eip/8282.zig");
 const eth_gas = @import("gas.zig");
@@ -898,7 +899,8 @@ pub const amsterdam = osaka.extend(.{
 pub const bogota = amsterdam
     .extend(eip8141_frame_transactions)
     .extend(eip4758_sendall)
-    .extend(eip8253_zero_nonce_storage_accounts);
+    .extend(eip8253_zero_nonce_storage_accounts)
+    .extend(eip8151_restricted_ecrecover);
 
 /// EIP-8141 frame transactions with EIP-8250 keyed nonces.
 const eip8141_frame_transactions: Spec.Patch = .{
@@ -922,6 +924,16 @@ const eip4758_sendall: Spec.Patch = .{
 /// accounts to one, so no creation can land on their storage.
 const eip8253_zero_nonce_storage_accounts: Spec.Patch = .{
     .block = .{ .bumps_zero_nonce_storage_accounts = true },
+};
+
+/// EIP-8151: ecRecover charges for the recovered account and withholds an
+/// address whose code is neither empty nor an EIP-7702 delegation.
+const eip8151_restricted_ecrecover: Spec.Patch = .{
+    .precompile = precompile: {
+        var value = amsterdam.precompile;
+        value.ecrecover_account_check = eip8151.account_check;
+        break :precompile value;
+    },
 };
 
 pub fn specAt(comptime revision: Revision) Spec {
