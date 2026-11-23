@@ -260,6 +260,11 @@ pub fn checkChangesView(comptime View: type) void {
 /// records itself through `parentAccount(id)` (a closed world authenticated at
 /// admission) or the committer resolves parents from the witness by
 /// `accountTrieKey(id)`.
+///
+/// Experimental, as part of the MPT witness lane: the trie order, the
+/// `[32]u8` trie keys, per-account storage order, and the parent record are
+/// the MPT's, and the contract follows the state commitment once more than one
+/// is supported.
 pub fn checkCommitView(comptime Commit: type) void {
     comptime {
         if (!@hasDecl(Commit, "authenticated_parents")) @compileError(
