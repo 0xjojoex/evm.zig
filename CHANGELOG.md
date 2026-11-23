@@ -116,6 +116,11 @@ Changed
   authorizations from raw signatures must call
   `eip7702.authorizationSignatureShapeValid`, drop a failing tuple, and still
   count it in `authorization_count`. The RLP decoder already does.
+- `state.OpenWorld` no longer hashes parent code a second time when it first
+  caches it. The recheck now runs only in `debug` and `safe` builds: the
+  reader, or `seedAccount`, has already checked the hash. `fast` and `small`
+  builds used to pay for one keccak of the full code, per contract, on its
+  first load in each world.
 - libsecp256k1 is the only native secp256k1 provider and is always fetched
   for native builds. `-Dnative-secp256k1` is removed; the std recovery path
   survives only as a test oracle. Native builds already compile C for the
