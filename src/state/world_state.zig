@@ -711,6 +711,9 @@ pub fn WorldState(comptime World: type) type {
             }
         };
 
+        /// Experimental, with `state.checkCommitView`: the trie-shaped methods
+        /// below, and the `World` methods they forward to, follow the state
+        /// commitment once more than one is supported.
         pub const CommitView = struct {
             state: *const State,
 

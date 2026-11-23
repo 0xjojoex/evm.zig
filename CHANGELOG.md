@@ -147,8 +147,10 @@ Changed
 - The MPT witness lane is documented as experimental, with no compatibility
   promise: the state-trie parts of `eth.trie`, `eth.commit`,
   `stateless.WitnessReader`, `Backend.fromWitness`, the type of
-  `eth.block_stf.CommitOutput.nodes`, and the trie-key accessors of
-  `eth.bal.ClaimPlan`. The ordered roots in `eth.trie` and the stateless
+  `eth.block_stf.CommitOutput.nodes`, the trie-key accessors of
+  `eth.bal.ClaimPlan`, and the commit-view contract (`state.checkCommitView`
+  and `WorldState.CommitView`: trie order, `accountTrieKey`, `storageTrieKey`,
+  `parentAccount`). The ordered roots in `eth.trie` and the stateless
   validator entry points are unaffected.
 
 Removed
