@@ -324,7 +324,13 @@ pub const CodeCache = struct {
 };
 
 fn cacheCode(self: *OpenWorld, code_hash: CodeHash, code_bytes: []const u8) ![]const u8 {
-    std.debug.assert(std.mem.eql(u8, &crypto.keccak256(code_bytes), &code_hash));
+    // Both callers already checked the hash: `seedAccount` itself, and
+    // `loadCode` through `Reader.loadCode` or a reader that validates its own
+    // code. An unsafe build still evaluates an `assert` argument, so the
+    // recheck is gated rather than paying a keccak per first load.
+    if (std.debug.runtime_safety) {
+        std.debug.assert(std.mem.eql(u8, &crypto.keccak256(code_bytes), &code_hash));
+    }
     if (std.mem.eql(u8, &code_hash, &crypto.keccak256_empty)) return &.{};
     if (self.code.entries.get(code_hash)) |entry| return entry.slice(&self.code);
     std.debug.assert(code_bytes.len <= std.math.maxInt(u32));
