@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-const default_execution_input = "tests@v21.0.2";
+const default_execution_input = "tests@v21.0.3";
 const default_zkevm_input = "tests-zkevm@v21.0.7";
 
 const direct_selection =

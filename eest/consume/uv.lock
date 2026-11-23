@@ -598,7 +598,7 @@ wheels = [
 [[package]]
 name = "ethereum-execution"
 version = "2.19.0"
-source = { git = "https://github.com/ethereum/execution-specs?rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e#e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" }
+source = { git = "https://github.com/ethereum/execution-specs?rev=391d8a05d5cb182542ac7e7330c858b6ee03f990#391d8a05d5cb182542ac7e7330c858b6ee03f990" }
 dependencies = [
     { name = "cryptography" },
     { name = "ethereum-rlp" },
@@ -614,11 +614,12 @@ dependencies = [
 [[package]]
 name = "ethereum-execution-testing"
 version = "1.0.0"
-source = { git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e#e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" }
+source = { git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=391d8a05d5cb182542ac7e7330c858b6ee03f990#391d8a05d5cb182542ac7e7330c858b6ee03f990" }
 dependencies = [
     { name = "ckzg" },
     { name = "click" },
     { name = "colorlog" },
+    { name = "cryptography" },
     { name = "eth-abi" },
     { name = "eth-remerkleable" },
     { name = "ethereum-execution" },
@@ -631,6 +632,7 @@ dependencies = [
     { name = "jinja2" },
     { name = "joblib" },
     { name = "platformdirs" },
+    { name = "pycryptodome" },
     { name = "pydantic" },
     { name = "pyjwt" },
     { name = "pytest" },
@@ -704,8 +706,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ethereum-execution", git = "https://github.com/ethereum/execution-specs?rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" },
-    { name = "ethereum-execution-testing", git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=e27f097ec7b3e6e8ee9c2c1873c183e8f7da7a6e" },
+    { name = "ethereum-execution", git = "https://github.com/ethereum/execution-specs?rev=391d8a05d5cb182542ac7e7330c858b6ee03f990" },
+    { name = "ethereum-execution-testing", git = "https://github.com/ethereum/execution-specs?subdirectory=packages%2Ftesting&rev=391d8a05d5cb182542ac7e7330c858b6ee03f990" },
 ]
 
 [[package]]

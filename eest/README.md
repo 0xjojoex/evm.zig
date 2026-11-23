@@ -8,7 +8,7 @@ pytest execution; this package provides the `evmz-eest` and
 
 | Suite | Default corpus | Command (from repo root) |
 | --- | --- | --- |
-| Execution (`state_test`, `blockchain_test`, `transaction_test`) | `tests@v21.0.2` | `zig build -Doptimize=fast eest-consume -- --no-html -n 4` |
+| Execution (`state_test`, `blockchain_test`, `transaction_test`) | `tests@v21.0.3` | `zig build -Doptimize=fast eest-consume -- --no-html -n 4` |
 | Stateless zkEVM (native BlockSTF + witness oracle) | `tests-zkevm@v21.0.7` | `zig build -Doptimize=fast zkevm-consume -- --no-html -n 4` |
 | Resolve zkEVM corpus manifest for guest/mutation lanes | `tests-zkevm@v21.0.7` | `zig build zkevm-resolve` |
 | Stateless zkEVM on zkVM guest (`zisk`, `sp1`, `openvm`) | manifest | `zig build zkevm -- --corpus-manifest .zig-cache/eest-consume/zkevm-corpus.json ...` |
@@ -25,7 +25,7 @@ pytest execution; this package provides the `evmz-eest` and
 zig build -Doptimize=fast eest-consume -- --no-html -n 4
 ```
 
-The default corpus is `tests@v21.0.2`, pinned in `eest/build.zig`. Override it
+The default corpus is `tests@v21.0.3`, pinned in `eest/build.zig`. Override it
 with `--input`:
 
 ```sh
