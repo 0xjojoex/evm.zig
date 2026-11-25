@@ -33,11 +33,13 @@ Pre-release (`0.0.0`, unaudited; APIs may change between commits).
   prerelease), stateless block validation from execution witnesses, and RV64
   stateless validator guests for ZisK, SP1, and OpenVM.
 - **Experimental:** Block Access List (`BalVm` / `ClosedWorld`) validation and
-  parallel verification, custom transaction/block hooks, the C header slot, and
-  the MPT witness lane (`eth.commit`, the state-trie parts of `eth.trie`,
-  `stateless.WitnessReader`, `Backend.fromWitness`), which will follow the state
-  commitment once EIP-8297's binary tree is supported. The stateless validator
-  entry points are not affected.
+  parallel verification, custom transaction/block hooks, the C API
+  ([`include/evmz/evmz.h`](include/evmz/evmz.h); a host must match
+  `evmz_abi_version()` exactly), and the MPT witness lane (`eth.commit`, the
+  state-trie parts of `eth.trie`, `stateless.WitnessReader`,
+  `Backend.fromWitness`), which will follow the state commitment once EIP-8297's
+  binary tree is supported. The stateless validator entry points are not
+  affected.
 
 ## Install
 
@@ -53,14 +55,33 @@ Import the modules you need in `build.zig`:
 const evmz = b.dependency("evmz", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("evmz", evmz.module("evmz"));
 exe.root_module.addImport("rlp", evmz.module("rlp")); // also: "mpt", "ssz"
+exe.use_llvm = true; // Zig 0.17.1, x86_64 Linux Debug builds; see below
 ```
 
-| Build option | Default | Effect |
+When targeting x86_64 Linux, set `use_llvm = true` on every executable and
+`addTest` that imports `evmz`. In Debug, Zig 0.17.1 uses its self-hosted
+backend and ELF linker there by default, and that linker crashes (SEGV) on
+evmz's native precompile object (Zig issue 36588, open). `fast` and `small`
+builds already use LLVM and are not affected. The `rlp`, `mpt`, and `ssz`
+modules alone (`.core = false`) do not need it.
+
+These are the public build options. Pass them to `b.dependency` spelt exactly
+as below: for an option the package does not declare, Zig 0.17.1 logs
+`error: invalid option` but still finishes the build, so a misspelt name falls
+back to its default and the build succeeds.
+
+| Option | Default | Effect |
 | --- | --- | --- |
+| `.target` | the host | Target to build evmz for; forward your own |
+| `.optimize` | `.debug` | Optimization mode for evmz's modules. Forward your own: evmz's exported modules keep the mode they were built with, so without it evmz builds as Debug inside your `fast` build |
 | `.core = false` | `true` | Export only pure-Zig `rlp`, `mpt`, and `ssz` without fetching C/C++ crypto dependencies |
 | `.profile = .zkvm` | `.native` | Route crypto and precompiles through the `zkvm_accelerators.h` C ABI |
 | `.@"native-keccak" = .std` | `.xkcp` | Use `std` Keccak instead of XKCP assembly (`x86_64`, `aarch64`, `riscv64`) |
+| `.@"stateless-schema" = &.{"0x1501"}` | every known schema | Stateless wire schema ids compiled into the guest input router |
 | `.pic = true` | `false` | Build position-independent code |
+
+Kebab-case names need Zig's quoted identifier syntax, as in `.@"native-keccak"`.
+[`examples/consumer/`](examples/consumer/) is a minimal downstream package.
 
 ## Quick start
 
@@ -117,8 +138,8 @@ Each tier strips outer protocol concerns before calling the next:
 | Bytecode | `Vm.Interpreter` | Single call-frame bytecode execution |
 | Message | `Vm.Executor.executeMessage` | Root `call \| create` execution, child frames, and state journaling |
 | Transaction | `Vm.transact` | Envelope validation, nonce/fee accounting, warm sets, and receipts |
-| Block | `block.Stf` | System calls, ordered transactions, withdrawals, and requests |
-| Stateless | `stateless.Exact(fork)` | Witness verification and post-state / receipts root computation |
+| Block | `eth.block_stf.Exact(revision)` | System calls, ordered transactions, withdrawals, and requests |
+| Stateless | `stateless.Validator(spec)`, `stateless.RevisionValidator(revision)` | Witness verification and post-state / receipts root computation |
 | Guest | [`guest/`](guest/README.md) | Stateless validator compiled to RV64 ELFs for ZisK, SP1, and OpenVM |
 
 ## Customizing specifications
@@ -155,9 +176,12 @@ native contracts, and block hooks:
 post-state and receipts roots:
 
 ```zig
-const Validator = evmz.stateless.Exact(.amsterdam);
+const Validator = evmz.stateless.Validator(evmz.eth.amsterdam);
 const result = try Validator.validate(allocator, input);
 ```
+
+`Validator` takes an Amsterdam-based specification. For Prague and Osaka blocks,
+use `evmz.stateless.RevisionValidator(.prague)` or `RevisionValidator(.osaka)`.
 
 Test the zkVM accelerator path natively on the host without an RV64 toolchain,
 or build the RV64 guest ELFs:

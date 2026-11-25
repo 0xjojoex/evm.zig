@@ -47,6 +47,9 @@ pub fn build(b: *std.Build) void {
             .name = example.name,
             .root_module = exampleModule(b, example.path, target, optimize, evmz_mod),
         });
+        // Zig 0.17.1's self-hosted ELF linker crashes on evmz's native
+        // precompile object; see the README's Install section.
+        executable.use_llvm = true;
         b.default_step.dependOn(&executable.step);
         const run = b.addRunArtifact(executable);
         run.addPassthruArgs();
