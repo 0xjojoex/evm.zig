@@ -62,11 +62,19 @@ Releases follow [the release policy](https://github.com/0xjojoex/evm.zig/blob/ma
   `include/evmz/evmz.h`: a C session ABI (version 3) that executes transactions
   and system calls against state the host serves through callbacks, with an
   owned result per execution that the host accepts or discards. It is
-  experimental and outside the compatibility surface. `-Dc-api-forks=recent|all`
-  picks the compiled forks (default `recent`: Cancun, Prague, `.stable`,
+  experimental and outside the compatibility surface. `-Dc-api-revisions=recent|all`
+  picks the compiled revisions (default `recent`: Cancun, Prague, `.stable`,
   `.latest`). A host links `-levmz -lblst -lc++`; `zig build c-api-test` runs
   its tests, and with `EVMZ_STATE_FIXTURES=<directory>` runs a tree of EEST
-  state fixtures through the ABI.
+  state fixtures through the ABI. CI runs `c-api-test` on Linux and macOS.
+- The C API names a hard fork a revision: `EVMZ_REVISION_*`,
+  `EVMZ_UNSUPPORTED_REVISION`, `evmz_revision_supported`, and the
+  `-Dc-api-revisions` build option replace `EVMZ_FORK_*`,
+  `EVMZ_UNSUPPORTED_FORK`, `evmz_fork_supported`, and `-Dc-api-forks`, with the
+  same numbers. `EVMZ_REJECTION_TYPE_*_TX_PRE_FORK` keeps its name.
+- `evmz_session_execute` returns `EVMZ_INVALID_ARGUMENT` for a typed
+  transaction with `has_chain_id == 0`; only a legacy transaction may be
+  unprotected.
 - Native artifacts keep frame pointers in `debug` and `safe` builds and omit
   them in `fast` and `small`; `safe` builds used to omit them.
   `-Dframe-pointers=<bool>` overrides the default. zkVM guests still omit them

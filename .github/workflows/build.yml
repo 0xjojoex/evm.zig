@@ -62,6 +62,43 @@ jobs:
       - name: Run zkVM-profile semantic tests
         run: zig build test-evmz-zkvm-all -j2 --summary all
 
+  c-api-test:
+    name: C API tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS links the padded archives with Apple's linker.
+        os: [ubuntu-24.04, macos-15]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
+          cache-key: c-api-${{ matrix.os }}
+
+      - name: Run C API tests
+        run: zig build c-api-test -Dc-api-revisions=all -j2 --summary all
+
+      # c-api-test links with Zig's linker; a host links the installed,
+      # padded archives with its own toolchain.
+      - name: Link the installed archives with Apple's toolchain
+        if: runner.os == 'macOS'
+        run: |
+          zig build c-api --prefix "$RUNNER_TEMP/evmz" -j2
+          cc -std=c99 -Wall -Wextra -Wpedantic -Werror tools/c_api_smoke.c \
+            -I"$RUNNER_TEMP/evmz/include" -L"$RUNNER_TEMP/evmz/lib" \
+            -levmz -lblst -lc++ -o "$RUNNER_TEMP/c-api-smoke"
+          "$RUNNER_TEMP/c-api-smoke"
+
   fuzz:
     name: Fuzz pure-Zig units
     runs-on: ubuntu-24.04

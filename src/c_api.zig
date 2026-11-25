@@ -38,7 +38,7 @@ const gpa: Allocator = if (builtin.is_test) std.testing.allocator else std.heap.
 const Status = c.evmz_status;
 const ok: Status = c.EVMZ_OK;
 const invalid_argument: Status = c.EVMZ_INVALID_ARGUMENT;
-const unsupported_fork: Status = c.EVMZ_UNSUPPORTED_FORK;
+const unsupported_revision: Status = c.EVMZ_UNSUPPORTED_REVISION;
 const pending_result: Status = c.EVMZ_PENDING_RESULT;
 const no_pending_result: Status = c.EVMZ_NO_PENDING_RESULT;
 const host_failure: Status = c.EVMZ_HOST_FAILURE;
@@ -49,16 +49,16 @@ const reentrant_call: Status = c.EVMZ_REENTRANT_CALL;
 /// The most gas the engine counts: it keeps a frame's gas in an `i64`.
 const max_gas: u64 = std.math.maxInt(i64);
 
-/// Forks compiled into this library, chosen by `-Dc-api-forks`. Each one is a
+/// Revisions compiled into this library, chosen by `-Dc-api-revisions`. Each one is a
 /// complete engine, so the preset is the archive's size.
-const forks: []const Revision = resolveForks();
+const revisions: []const Revision = resolveRevisions();
 
-fn resolveForks() []const Revision {
-    const preset = options.forks;
+fn resolveRevisions() []const Revision {
+    const preset = options.revisions;
     if (std.mem.eql(u8, preset, "all")) return std.enums.values(Revision);
     if (std.mem.eql(u8, preset, "recent"))
         return &.{ .cancun, .prague, Revision.stable, Revision.latest };
-    @compileError("unknown c-api-forks preset '" ++ preset ++ "'");
+    @compileError("unknown c-api-revisions preset '" ++ preset ++ "'");
 }
 
 // ---- Header numbering ------------------------------------------------------
@@ -91,7 +91,7 @@ const account_effect_mask: u8 = blk: {
 comptime {
     @setEvalBranchQuota(20_000);
     for (std.enums.values(Revision)) |revision|
-        std.debug.assert(headerConstant("EVMZ_FORK_", @tagName(revision)) == @backingInt(revision));
+        std.debug.assert(headerConstant("EVMZ_REVISION_", @tagName(revision)) == @backingInt(revision));
     for (std.enums.values(evmz.transaction.TxKind)) |kind|
         std.debug.assert(headerConstant("EVMZ_TX_", @tagName(kind)) == @backingInt(kind));
     for (std.enums.values(evmz.TxStatus)) |status|
@@ -253,6 +253,9 @@ fn transactionFromC(
     const kind = std.enums.fromInt(evmz.transaction.TxKind, tx.kind) orelse
         return error.InvalidArgument;
     const fields = TransactionFields.of(kind);
+    // Only a legacy transaction may be unprotected; every typed envelope signs
+    // its chain id.
+    if (kind != .legacy and tx.has_chain_id == 0) return error.InvalidArgument;
     if (!fields.access_list and tx.access_list_len != 0) return error.InvalidArgument;
     if (!fields.blobs and tx.blob_hashes_len != 0) return error.InvalidArgument;
     if (!fields.authorizations and tx.authorization_list_len != 0) return error.InvalidArgument;
@@ -812,14 +815,14 @@ export fn evmz_build_optimize() u32 {
     };
 }
 
-fn compiledFork(fork: u32) ?Revision {
-    const tag = std.math.cast(@typeInfo(Revision).@"enum".tag_type, fork) orelse return null;
+fn compiledRevision(number: u32) ?Revision {
+    const tag = std.math.cast(@typeInfo(Revision).@"enum".tag_type, number) orelse return null;
     const revision = std.enums.fromInt(Revision, tag) orelse return null;
-    return if (std.mem.findScalar(Revision, forks, revision) != null) revision else null;
+    return if (std.mem.findScalar(Revision, revisions, revision) != null) revision else null;
 }
 
-export fn evmz_fork_supported(fork: u32) c_int {
-    return @intFromBool(compiledFork(fork) != null);
+export fn evmz_revision_supported(revision: u32) c_int {
+    return @intFromBool(compiledRevision(revision) != null);
 }
 
 export fn evmz_code_sink_set(sink: ?*c.evmz_code_sink, ptr: [*c]const u8, len: usize) Status {
@@ -845,7 +848,7 @@ export fn evmz_result_destroy(result: ?*c.evmz_result) void {
 }
 
 export fn evmz_session_create(
-    fork: u32,
+    revision_number: u32,
     host: [*c]const c.evmz_host,
     out: [*c]?*c.evmz_session,
 ) Status {
@@ -856,15 +859,15 @@ export fn evmz_session_create(
     if (host_pointer.load_account == null or host_pointer.load_code == null or
         host_pointer.get_storage == null) return invalid_argument;
 
-    const revision = compiledFork(fork) orelse return unsupported_fork;
-    inline for (forks) |compiled| {
+    const revision = compiledRevision(revision_number) orelse return unsupported_revision;
+    inline for (revisions) |compiled| {
         if (revision == compiled) {
             const session = ForkSession(compiled).create(host_pointer.*) catch return out_of_memory;
             out_pointer.* = session.handle();
             return ok;
         }
     }
-    return unsupported_fork;
+    return unsupported_revision;
 }
 
 export fn evmz_session_destroy(session: ?*c.evmz_session) void {
@@ -960,7 +963,7 @@ export fn evmz_session_reset(session: ?*c.evmz_session) Status {
 comptime {
     for (.{
         "evmz_abi_version",                 "evmz_capabilities",
-        "evmz_build_optimize",              "evmz_fork_supported",
+        "evmz_build_optimize",              "evmz_revision_supported",
         "evmz_code_sink_set",               "evmz_result_get_data",
         "evmz_result_destroy",              "evmz_session_create",
         "evmz_session_destroy",             "evmz_session_execute",
@@ -1504,14 +1507,14 @@ test "every compiled fork runs a transfer and no other fork opens a session" {
         try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 1_000_000 });
 
         const fork: u32 = @backingInt(revision);
-        const compiled = std.mem.findScalar(Revision, forks, revision) != null;
-        try testing.expectEqual(@as(c_int, @intFromBool(compiled)), evmz_fork_supported(fork));
+        const compiled = std.mem.findScalar(Revision, revisions, revision) != null;
+        try testing.expectEqual(@as(c_int, @intFromBool(compiled)), evmz_revision_supported(fork));
 
         var session: ?*c.evmz_session = null;
         const status = evmz_session_create(fork, &host.host(), &session);
         defer evmz_session_destroy(session);
         if (!compiled) {
-            try testing.expectEqual(unsupported_fork, status);
+            try testing.expectEqual(unsupported_revision, status);
             try testing.expect(session == null);
             continue;
         }
@@ -1530,9 +1533,9 @@ test "every compiled fork runs a transfer and no other fork opens a session" {
     var host: TestHost = .init();
     defer host.deinit();
     var session: ?*c.evmz_session = null;
-    try testing.expectEqual(0, evmz_fork_supported(unknown));
-    try testing.expectEqual(0, evmz_fork_supported(std.math.maxInt(u32)));
-    try testing.expectEqual(unsupported_fork, evmz_session_create(unknown, &host.host(), &session));
+    try testing.expectEqual(0, evmz_revision_supported(unknown));
+    try testing.expectEqual(0, evmz_revision_supported(std.math.maxInt(u32)));
+    try testing.expectEqual(unsupported_revision, evmz_session_create(unknown, &host.host(), &session));
     try testing.expect(session == null);
 }
 
@@ -1640,7 +1643,7 @@ test "the gas spent before refunds is reported when the calldata floor sets the 
 }
 
 test "opcode 0x44 reads the difficulty before the Merge and prev_randao from it on" {
-    for (forks) |revision| {
+    for (revisions) |revision| {
         var host: TestHost = .init();
         defer host.deinit();
         try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 1_000_000 });
@@ -1682,6 +1685,7 @@ test "the blob limit of a block is the one the environment's blob params carry" 
     const tx: Transaction = .{
         .kind = .blob,
         .sender = fixture.sender,
+        .chain_id = fixture.env.chain_id,
         .to = fixture.recipient,
         .gas_limit = fixture.gas_limit,
         .max_fee_per_gas = 1,
@@ -2044,6 +2048,8 @@ test "a transaction field its kind does not have is refused" {
             var tx = std.mem.zeroes(c.evmz_transaction);
             tx.kind = kind;
             tx.sender = cAddress(fixture.sender);
+            tx.has_chain_id = 1;
+            tx.chain_id = bytes32(fixture.env.chain_id);
             tx.has_to = 1;
             tx.to = cAddress(fixture.recipient);
             tx.gas_limit = fixture.gas_limit;
@@ -2087,6 +2093,7 @@ test "a transaction field its kind does not have is refused" {
         try testing.expectEqual(ok, try executeTransaction(session, fixture.env, null, .{
             .kind = .dynamic_fee,
             .sender = fixture.sender,
+            .chain_id = fixture.env.chain_id,
             .to = fixture.recipient,
             .gas_limit = fixture.gas_limit,
             .gas_price = 1,
@@ -2098,6 +2105,37 @@ test "a transaction field its kind does not have is refused" {
             dataOf(out.?).outcome,
         );
         if (has_max_fee) try testing.expectEqual(ok, evmz_session_discard(session));
+    }
+}
+
+test "only a legacy transaction may leave out its chain id" {
+    var host: TestHost = .init();
+    defer host.deinit();
+    try evmz.t.seedStoreAccount(&host.memory, fixture.sender, .{ .balance = 1_000_000 });
+    const session = try host.createSession(fixture.fork);
+    defer evmz_session_destroy(session);
+
+    const env = cEnv(fixture.env);
+    for ([_]u32{
+        c.EVMZ_TX_LEGACY, c.EVMZ_TX_ACCESS_LIST, c.EVMZ_TX_DYNAMIC_FEE,
+        c.EVMZ_TX_BLOB,   c.EVMZ_TX_SET_CODE,
+    }) |kind| {
+        var tx = std.mem.zeroes(c.evmz_transaction);
+        tx.kind = kind;
+        tx.sender = cAddress(fixture.sender);
+        tx.has_to = 1;
+        tx.to = cAddress(fixture.recipient);
+        tx.gas_limit = fixture.gas_limit;
+        errdefer std.debug.print("kind {d}\n", .{kind});
+        if (kind == c.EVMZ_TX_LEGACY) {
+            var out: ?*c.evmz_result = null;
+            try testing.expectEqual(ok, evmz_session_execute(session, &env, null, &tx, &out));
+            defer evmz_result_destroy(out);
+            try expectCode(c.EVMZ_OUTCOME_EXECUTED, dataOf(out.?).outcome);
+            try testing.expectEqual(ok, evmz_session_discard(session));
+        } else {
+            try testing.expectEqual(invalid_argument, try executeRefused(session, &env, &tx));
+        }
     }
 }
 
@@ -2160,7 +2198,7 @@ test "gas above what the engine counts is refused, not clamped" {
 // last one that runs a transaction this large.
 test "a transaction with the most gas the engine counts is charged what a small one is" {
     const fork: u32 = @backingInt(Revision.prague);
-    if (compiledFork(fork) == null) return error.SkipZigTest;
+    if (compiledRevision(fork) == null) return error.SkipZigTest;
 
     var used: [2]u64 = undefined;
     for (&used, [_]u64{ fixture.gas_limit, max_gas }) |*target, gas_limit| {
@@ -2304,6 +2342,7 @@ test "access lists and authorizations reach the engine" {
     const plain = try executeAccepted(&host, session, fixture.env, .{
         .kind = .access_list,
         .sender = fixture.sender,
+        .chain_id = fixture.env.chain_id,
         .to = evmz.addr(0xb1),
         .value = 1,
         .gas_limit = fixture.gas_limit,
@@ -2312,6 +2351,7 @@ test "access lists and authorizations reach the engine" {
     const listed = try executeAccepted(&host, session, fixture.env, .{
         .kind = .access_list,
         .sender = fixture.sender,
+        .chain_id = fixture.env.chain_id,
         .to = evmz.addr(0xb2),
         .value = 1,
         .gas_limit = fixture.gas_limit,
@@ -2326,6 +2366,7 @@ test "access lists and authorizations reach the engine" {
     const delegated = try executeAccepted(&host, session, fixture.env, .{
         .kind = .set_code,
         .sender = fixture.sender,
+        .chain_id = fixture.env.chain_id,
         .to = authority,
         .gas_limit = fixture.gas_limit,
         .max_fee_per_gas = 1,
@@ -2386,6 +2427,7 @@ test "nothing a transaction points at is read after execute returns" {
         var tx = try cTransaction(arena.allocator(), .{
             .kind = .set_code,
             .sender = fixture.sender,
+            .chain_id = fixture.env.chain_id,
             .to = authority,
             .gas_limit = fixture.gas_limit,
             .max_fee_per_gas = 1,
@@ -2823,7 +2865,7 @@ fn runStateVector(
 }
 
 // Every EEST state fixture under the directory `EVMZ_STATE_FIXTURES` names,
-// for the forks this library was built with. Skipped when it is unset.
+// for the revisions this library was built with. Skipped when it is unset.
 test "state fixtures reach their post-state through the C ABI" {
     const root_path = std.mem.span(std.c.getenv("EVMZ_STATE_FIXTURES") orelse
         return error.SkipZigTest);
@@ -2857,7 +2899,7 @@ test "state fixtures reach their post-state through the C ABI" {
                 const revision = json.parseStateFork(fork_name) orelse return error.MalformedFixture;
                 for (vectors.items, 0..) |vector, index| {
                     const post = json.asObject(vector) orelse return error.MalformedFixture;
-                    const verdict: StateVector = if (compiledFork(@backingInt(revision)) == null)
+                    const verdict: StateVector = if (compiledRevision(@backingInt(revision)) == null)
                         .fork_not_built
                     else switch (revision) {
                         inline else => |exact| try runStateVector(exact, &document, &post, fork_name),

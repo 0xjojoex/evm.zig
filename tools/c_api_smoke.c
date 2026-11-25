@@ -104,9 +104,9 @@ int main(void) {
     CHECK(evmz_abi_version() == EVMZ_ABI_VERSION);
     CHECK(evmz_build_optimize() <= EVMZ_OPTIMIZE_RELEASE_SMALL);
     CHECK((evmz_capabilities() & EVMZ_CAPABILITY_SYSTEM_CALL) != 0);
-    /* Every fork preset contains Prague. */
-    CHECK(evmz_fork_supported(EVMZ_FORK_PRAGUE) == 1);
-    CHECK(evmz_fork_supported(UINT32_MAX) == 0);
+    /* Every revision preset contains Prague. */
+    CHECK(evmz_revision_supported(EVMZ_REVISION_PRAGUE) == 1);
+    CHECK(evmz_revision_supported(UINT32_MAX) == 0);
 
     memset(&state, 0, sizeof state);
     state.addresses[SENDER].bytes[19] = 0xaa;
@@ -125,10 +125,10 @@ int main(void) {
     host.load_code = load_code;
     host.get_storage = get_storage;
 
-    CHECK(evmz_session_create(EVMZ_FORK_AMSTERDAM + 1, &host, &session) ==
-          EVMZ_UNSUPPORTED_FORK);
+    CHECK(evmz_session_create(EVMZ_REVISION_AMSTERDAM + 1, &host, &session) ==
+          EVMZ_UNSUPPORTED_REVISION);
     CHECK(session == NULL);
-    CHECK(evmz_session_create(EVMZ_FORK_PRAGUE, &host, &session) == EVMZ_OK);
+    CHECK(evmz_session_create(EVMZ_REVISION_PRAGUE, &host, &session) == EVMZ_OK);
     CHECK(session != NULL);
 
     memset(&env, 0, sizeof env);
