@@ -156,10 +156,10 @@ pub fn build(b: *std.Build) void {
         "frame-pointers",
         "Keep frame pointers in native artifacts (default: debug and safe builds only)",
     );
-    const c_api_forks = b.option(
-        CApiForks,
-        "c-api-forks",
-        "Fork revisions compiled into libevmz (default: the recent four)",
+    const c_api_revisions = b.option(
+        CApiRevisions,
+        "c-api-revisions",
+        "Revisions compiled into libevmz (default: the recent four)",
     ) orelse .recent;
     // Frame pointers cost ~3 instructions per tail-dispatch handler. A safe
     // build exists to produce a readable crash, so it keeps them; fast and
@@ -383,7 +383,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .evmz = native_evmz_mod,
         .statetest = statetest_mod,
-        .forks = c_api_forks,
+        .revisions = c_api_revisions,
         .omit_frame_pointer = omit_frame_pointer,
         .pic = if (pic) true else null,
         .blst_lib = native_precompile_deps.blst_lib,
@@ -710,9 +710,9 @@ const KeccakBackend = enum { std, xkcp };
 // Membership is resolved in `src/t.zig`.
 const TestForks = enum { head, dev, all };
 
-/// Forks compiled into `libevmz`; `src/c_api.zig` resolves the preset. Each
-/// fork is one exact engine, so the default keeps the archive small.
-const CApiForks = enum { recent, all };
+/// Revisions compiled into `libevmz`; `src/c_api.zig` resolves the preset.
+/// Each revision is one exact engine, so the default keeps the archive small.
+const CApiRevisions = enum { recent, all };
 
 /// Accelerated backends only exist for the architectures we build assembly for,
 /// and never under the zkVM profile.
@@ -826,7 +826,7 @@ const CApiConfig = struct {
     evmz: *std.Build.Module,
     /// The state-fixture parser, for the ABI's fixture-driven test.
     statetest: *std.Build.Module,
-    forks: CApiForks,
+    revisions: CApiRevisions,
     omit_frame_pointer: bool,
     pic: ?bool,
     blst_lib: *std.Build.Step.Compile,
@@ -841,7 +841,7 @@ const CApiConfig = struct {
 fn addCApi(b: *std.Build, config: CApiConfig) *std.Build.Step {
     const header_path = b.path("include/evmz/evmz.h");
     const options = b.addOptions();
-    options.addOption([]const u8, "forks", @tagName(config.forks));
+    options.addOption([]const u8, "revisions", @tagName(config.revisions));
 
     // The implementation takes its types from the translated header, so the
     // header stays the one definition of the ABI's layout.

@@ -4,7 +4,7 @@
 /*
  * evmz C API: the interactive session ABI.
  *
- * A session executes transactions for one fork against state the host owns.
+ * A session executes transactions for one revision against state the host owns.
  * The host answers reads through callbacks; evmz keeps the speculative overlay
  * and hands every transaction back as an owned result the host accepts or
  * discards.
@@ -72,8 +72,8 @@ enum {
      * gas amount its field refuses.
      */
     EVMZ_INVALID_ARGUMENT = 1,
-    /* The fork number is unknown or was not compiled into this library. */
-    EVMZ_UNSUPPORTED_FORK = 2,
+    /* The revision number is unknown or was not compiled into this library. */
+    EVMZ_UNSUPPORTED_REVISION = 2,
     /* The session holds a pending result; accept or discard it first. */
     EVMZ_PENDING_RESULT = 3,
     /* Accept or discard was called with no pending result. */
@@ -89,29 +89,29 @@ enum {
 
 /* ---- Build identity ---------------------------------------------------- */
 
-/* Append-only numbering. A fork is usable only if `evmz_fork_supported`. */
+/* Append-only numbering. Usable only if `evmz_revision_supported`. */
 enum {
-    EVMZ_FORK_FRONTIER = 0,
-    EVMZ_FORK_FRONTIER_THAWING = 1,
-    EVMZ_FORK_HOMESTEAD = 2,
-    EVMZ_FORK_DAO_FORK = 3,
-    EVMZ_FORK_TANGERINE_WHISTLE = 4,
-    EVMZ_FORK_SPURIOUS_DRAGON = 5,
-    EVMZ_FORK_BYZANTIUM = 6,
-    EVMZ_FORK_CONSTANTINOPLE = 7,
-    EVMZ_FORK_PETERSBURG = 8,
-    EVMZ_FORK_ISTANBUL = 9,
-    EVMZ_FORK_MUIR_GLACIER = 10,
-    EVMZ_FORK_BERLIN = 11,
-    EVMZ_FORK_LONDON = 12,
-    EVMZ_FORK_ARROW_GLACIER = 13,
-    EVMZ_FORK_GRAY_GLACIER = 14,
-    EVMZ_FORK_MERGE = 15,
-    EVMZ_FORK_SHANGHAI = 16,
-    EVMZ_FORK_CANCUN = 17,
-    EVMZ_FORK_PRAGUE = 18,
-    EVMZ_FORK_OSAKA = 19,
-    EVMZ_FORK_AMSTERDAM = 20
+    EVMZ_REVISION_FRONTIER = 0,
+    EVMZ_REVISION_FRONTIER_THAWING = 1,
+    EVMZ_REVISION_HOMESTEAD = 2,
+    EVMZ_REVISION_DAO_FORK = 3,
+    EVMZ_REVISION_TANGERINE_WHISTLE = 4,
+    EVMZ_REVISION_SPURIOUS_DRAGON = 5,
+    EVMZ_REVISION_BYZANTIUM = 6,
+    EVMZ_REVISION_CONSTANTINOPLE = 7,
+    EVMZ_REVISION_PETERSBURG = 8,
+    EVMZ_REVISION_ISTANBUL = 9,
+    EVMZ_REVISION_MUIR_GLACIER = 10,
+    EVMZ_REVISION_BERLIN = 11,
+    EVMZ_REVISION_LONDON = 12,
+    EVMZ_REVISION_ARROW_GLACIER = 13,
+    EVMZ_REVISION_GRAY_GLACIER = 14,
+    EVMZ_REVISION_MERGE = 15,
+    EVMZ_REVISION_SHANGHAI = 16,
+    EVMZ_REVISION_CANCUN = 17,
+    EVMZ_REVISION_PRAGUE = 18,
+    EVMZ_REVISION_OSAKA = 19,
+    EVMZ_REVISION_AMSTERDAM = 20
 };
 
 enum {
@@ -135,8 +135,8 @@ uint32_t evmz_abi_version(void);
 uint64_t evmz_capabilities(void);
 /* The optimize mode this library was built in: one of EVMZ_OPTIMIZE_*. */
 uint32_t evmz_build_optimize(void);
-/* 1 when `fork` was compiled into this library, otherwise 0. */
-int evmz_fork_supported(uint32_t fork);
+/* 1 when `revision` was compiled into this library, otherwise 0. */
+int evmz_revision_supported(uint32_t revision);
 
 /* ---- Values ------------------------------------------------------------ */
 
@@ -323,7 +323,10 @@ typedef struct evmz_transaction {
     /* One of EVMZ_TX_*. */
     uint32_t kind;
     evmz_address sender;
-    /* Absent for an unprotected legacy transaction. */
+    /*
+     * Absent only for an unprotected legacy transaction. Every other kind
+     * without it returns EVMZ_INVALID_ARGUMENT.
+     */
     uint8_t has_chain_id;
     evmz_bytes32 chain_id;
     /* Absent skips the nonce check. */
@@ -614,7 +617,7 @@ typedef struct evmz_session evmz_session;
  * and whatever `host->context` points at stay valid until
  * `evmz_session_destroy` returns.
  */
-evmz_status evmz_session_create(uint32_t fork, const evmz_host *host, evmz_session **out);
+evmz_status evmz_session_create(uint32_t revision, const evmz_host *host, evmz_session **out);
 /*
  * Discards a pending result. NULL is a no-op, and so is a call from one of the
  * session's own callbacks.
