@@ -147,6 +147,9 @@ Added
 - EEST state and transaction fixtures for `Bogota` load: the fixture tools parse
   `frames`, `signatures`, `maxFee`, and `nonceKeys`, and a frame envelope that
   fails to decode maps to EEST's frame exception names.
+- The C header numbers Bogotá: `EVMZ_REVISION_BOGOTA`, `EVMZ_TX_FRAME`, and
+  the `EVMZ_REJECTION_TYPE_6_*` rejections. `evmz_transaction` has no frame
+  fields yet, so a frame transaction is `EVMZ_INVALID_ARGUMENT`.
 - Blockchain fixtures on `AmsterdamToBogotaAtTime15k` run, and
   `fixtures.parseFork` maps `BogotaBPOIncrease` and `BogotaBPODecrease` to
   Bogotá.

@@ -111,7 +111,8 @@ enum {
     EVMZ_REVISION_CANCUN = 17,
     EVMZ_REVISION_PRAGUE = 18,
     EVMZ_REVISION_OSAKA = 19,
-    EVMZ_REVISION_AMSTERDAM = 20
+    EVMZ_REVISION_AMSTERDAM = 20,
+    EVMZ_REVISION_BOGOTA = 21
 };
 
 enum {
@@ -282,7 +283,10 @@ enum {
     EVMZ_TX_ACCESS_LIST = 1,
     EVMZ_TX_DYNAMIC_FEE = 2,
     EVMZ_TX_BLOB = 3,
-    EVMZ_TX_SET_CODE = 4
+    EVMZ_TX_SET_CODE = 4,
+    /* EIP-8141 frame transaction. Numbered only: `evmz_transaction` has no
+       frame fields yet, so a transaction of this kind is EVMZ_INVALID_ARGUMENT. */
+    EVMZ_TX_FRAME = 5
 };
 
 typedef struct evmz_access_list_entry {
@@ -415,7 +419,11 @@ enum {
     EVMZ_REJECTION_SENDER_NOT_EOA = 22,
     EVMZ_REJECTION_TYPE_4_EMPTY_AUTHORIZATION_LIST = 23,
     EVMZ_REJECTION_TYPE_4_TX_CONTRACT_CREATION = 24,
-    EVMZ_REJECTION_INVALID_CHAIN_ID = 25
+    EVMZ_REJECTION_INVALID_CHAIN_ID = 25,
+    EVMZ_REJECTION_TYPE_6_TX_PRE_FORK = 26,
+    EVMZ_REJECTION_TYPE_6_INVALID_FRAME_FORMAT = 27,
+    EVMZ_REJECTION_TYPE_6_INVALID_SIGNATURE = 28,
+    EVMZ_REJECTION_TYPE_6_INVALID_FRAME_EXECUTION = 29
 };
 
 /* evmz_result_data.status, valid when the outcome is EXECUTED. */

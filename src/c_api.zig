@@ -225,7 +225,7 @@ const TransactionFields = struct {
             .access_list = kind != .legacy,
             .fee_market = switch (kind) {
                 .legacy, .access_list => false,
-                .dynamic_fee, .blob, .set_code => true,
+                .dynamic_fee, .blob, .set_code, .frame => true,
             },
             .blobs = kind == .blob,
             .authorizations = kind == .set_code,
@@ -252,6 +252,8 @@ fn transactionFromC(
 ) (InputError || Allocator.Error)!Transaction {
     const kind = std.enums.fromInt(evmz.transaction.TxKind, tx.kind) orelse
         return error.InvalidArgument;
+    // The header has no frame fields yet.
+    if (kind == .frame) return error.InvalidArgument;
     const fields = TransactionFields.of(kind);
     // Only a legacy transaction may be unprotected; every typed envelope signs
     // its chain id.
@@ -1529,7 +1531,8 @@ test "every compiled fork runs a transfer and no other fork opens a session" {
         try testing.expectEqual(7, word(accountRow(data, fixture.recipient).?.current.balance));
     }
 
-    const unknown: u32 = @as(u32, @backingInt(Revision.latest)) + 1;
+    const all_revisions = std.enums.values(Revision);
+    const unknown: u32 = @as(u32, @backingInt(all_revisions[all_revisions.len - 1])) + 1;
     var host: TestHost = .init();
     defer host.deinit();
     var session: ?*c.evmz_session = null;

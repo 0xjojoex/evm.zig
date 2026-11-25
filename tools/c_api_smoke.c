@@ -125,7 +125,7 @@ int main(void) {
     host.load_code = load_code;
     host.get_storage = get_storage;
 
-    CHECK(evmz_session_create(EVMZ_REVISION_AMSTERDAM + 1, &host, &session) ==
+    CHECK(evmz_session_create(EVMZ_REVISION_BOGOTA + 1, &host, &session) ==
           EVMZ_UNSUPPORTED_REVISION);
     CHECK(session == NULL);
     CHECK(evmz_session_create(EVMZ_REVISION_PRAGUE, &host, &session) == EVMZ_OK);
