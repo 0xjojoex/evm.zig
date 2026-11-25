@@ -1,0 +1,16 @@
+.{
+    .name = .evmz_consumer,
+    .version = "0.0.0",
+    .fingerprint = 0x1566a35c1c43f438,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .evmz = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+    },
+}

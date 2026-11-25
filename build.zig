@@ -1681,7 +1681,7 @@ fn addCheckZiskFailureStatus(b: *std.Build) *std.Build.Step {
 fn addFmtCheck(b: *std.Build) *std.Build.Step {
     const fmt = b.addFmt(.{
         .paths = &.{ b.path("build.zig"), b.path("src"), b.path("pkg"), b.path("guest"), b.path("tools"), b.path("examples"), b.path("eest"), b.path("bench") },
-        .exclude_paths = &.{ b.path("pkg/mpt/zig-pkg"), b.path("pkg/rlp/zig-pkg"), b.path("pkg/ssz/zig-pkg"), b.path("pkg/ssz/bench/zig-pkg"), b.path("examples/zig-pkg"), b.path("eest/zig-pkg"), b.path("bench/zig-pkg") },
+        .exclude_paths = &.{ b.path("pkg/mpt/zig-pkg"), b.path("pkg/rlp/zig-pkg"), b.path("pkg/ssz/zig-pkg"), b.path("pkg/ssz/bench/zig-pkg"), b.path("examples/zig-pkg"), b.path("examples/consumer/zig-pkg"), b.path("eest/zig-pkg"), b.path("bench/zig-pkg") },
         .check = true,
     });
     const step = b.step("fmt-check", "Check Zig source formatting");

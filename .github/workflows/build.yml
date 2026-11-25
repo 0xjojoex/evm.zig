@@ -90,6 +90,49 @@ jobs:
       - name: Fuzz MPT
         run: zig build fuzz-mpt --fuzz=25K --summary all
 
+  consumer:
+    name: Downstream consumer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+          use-cache: ${{ github.event_name != 'pull_request' }}
+          cache-size-limit: 512
+          cache-key: consumer
+
+      # `fast` uses LLVM by default, so this needs no workaround.
+      - name: Run the quick start (fast)
+        working-directory: examples/consumer
+        run: zig build run -Doptimize=fast --summary all
+
+      - name: Build and test the examples (Debug, use_llvm)
+        working-directory: examples
+        run: zig build install test -j2 --summary all
+
+      # Zig 0.17.1's self-hosted ELF linker crashes (SEGV) on evmz's native
+      # precompile object (Zig issue 36588), so this step is expected to fail
+      # until that is fixed.
+      # It stays non-blocking so the step's outcome shows when a Zig update fixes
+      # the crash or a change breaks the default backend some other way.
+      - name: Run the quick start (Debug, default backend)
+        id: default-backend
+        continue-on-error: true
+        working-directory: examples/consumer
+        run: zig build run --summary all
+
+      - name: Report the default backend result
+        if: steps.default-backend.outcome == 'failure'
+        run: >-
+          echo "::warning title=Default backend::The quick start fails on Zig's
+          default Debug backend; consumers need use_llvm = true (see README)."
+
   cross-compile:
     name: Cross compile ${{ matrix.target }}
     runs-on: ubuntu-24.04
