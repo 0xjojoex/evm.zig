@@ -81,9 +81,10 @@ release.
     `execution.NativeContractCall`, `NativeContractChildRequest`,
     `NativeContractLedger`, `NativeContractStep` and `NoNativeContracts`;
     the Executor's `NativeContext`; and `precompile.Spec.custom`.
+  - `transaction.signed`, the signed EIP-2718 envelope codec.
 - **Internal:** everything else, including `state.sparse_hash_map` and
-  `stateless.testing`. Internal
-  declarations may change or disappear in any release.
+  `stateless.testing`. Internal declarations may change or disappear in any
+  release.
 
 ## Package versioning
 
