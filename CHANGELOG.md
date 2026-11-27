@@ -100,6 +100,13 @@ Added
   replaced (`state`) or patched (`stateDiff`). Overrides are parent values, so
   the state machine treats them as where execution started. Experimental, with
   no compatibility promise.
+- `transaction.signed`: signed EIP-2718 envelopes for every transaction kind
+  (legacy with its encoded `v`, access list, dynamic fee, blob without the
+  sidecar, and set code with each authorization's signature).
+  `Envelope.encode`/`encodeAlloc` write the canonical bytes whose keccak is the
+  transaction hash, and `Envelope.decodeAlloc` reads them back with every
+  signature kept, which `transaction.raw` drops. Experimental, with no
+  compatibility promise.
 - `CompileOptions.transaction_journal`: an embedding-owned journal whose
   checkpoints pair with EVM checkpoints, so state kept outside the EVM rolls back
   with it. See `examples/transaction_journal.zig`.
