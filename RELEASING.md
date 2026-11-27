@@ -81,7 +81,8 @@ release.
     `execution.NativeContractCall`, `NativeContractChildRequest`,
     `NativeContractLedger`, `NativeContractStep` and `NoNativeContracts`;
     the Executor's `NativeContext`; and `precompile.Spec.custom`.
-- **Internal:** everything else, including `state.sparse_hash_map`. Internal
+- **Internal:** everything else, including `state.sparse_hash_map` and
+  `stateless.testing`. Internal
   declarations may change or disappear in any release.
 
 ## Package versioning
