@@ -61,7 +61,7 @@ pub const CounterJournal = struct {
         self.revertTo(self.checkpoints[self.checkpoints_len]);
     }
 
-    pub fn retainTransaction(self: *CounterJournal) void {
+    pub fn acceptTransaction(self: *CounterJournal) void {
         std.debug.assert(self.transaction_start.? == 0);
         std.debug.assert(self.checkpoints_len == 0);
         self.undo_len = 0;
@@ -224,7 +224,7 @@ pub const CounterBlock = struct {
             .executed => |executed_value| blk: {
                 var executed = executed_value;
                 defer executed.discardIfCurrent();
-                break :blk .{ .included = executed.retainResult() };
+                break :blk .{ .included = executed.acceptResult() };
             },
         };
     }

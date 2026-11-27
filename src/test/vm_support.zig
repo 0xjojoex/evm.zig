@@ -1,12 +1,12 @@
 pub const evmz = @import("../evm.zig");
 pub const address = @import("../address.zig");
 pub const executor_module = @import("../executor.zig");
-pub const interpreter_module = @import("../Interpreter.zig");
+pub const interpreter_module = @import("../interpreter.zig");
 pub const system = @import("../eth/system.zig");
 pub const transaction = @import("../transaction.zig");
 const vm_module = @import("../vm.zig");
 
-pub const Default = evmz.Evm;
+pub const Default = evmz.t.Vm(.latest).?;
 pub const EthValidationError = Default.Rejection;
 pub const addr = address.addr;
 pub const BlockHashSource = vm_module.BlockHashSource;
@@ -31,7 +31,7 @@ pub fn transact(
 pub fn expectExecuted(result: anytype) !TxExecutionResult {
     if (comptime @hasField(@TypeOf(result), "executed")) {
         return switch (result) {
-            .executed => |executed| executed.retainResult(),
+            .executed => |executed| executed.acceptResult(),
             .rejected => error.UnexpectedRejection,
         };
     }

@@ -123,7 +123,8 @@ pub fn runBasicFixture(allocator: std.mem.Allocator) !BasicProof {
     const contract_account = try memory.getOrCreateAccount(contract);
     try contract_account.setCode(&bytecode);
 
-    var vm = evmz.Evm.init(allocator, .{
+    // Pinned to the newest fork so the guest does not change when `Evm` moves.
+    var vm = evmz.Vm(evmz.eth.latest).init(allocator, .{
         .state = .{ .reader = memory.reader() },
     });
     defer vm.deinit();

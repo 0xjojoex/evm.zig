@@ -2,7 +2,7 @@ const std = @import("std");
 
 const evmz = @import("../evm.zig");
 const Spec = @import("../spec.zig").Spec;
-const Interpreter = @import("../Interpreter.zig");
+const Interpreter = @import("../interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Stack = @import("../Stack.zig");
 const Memory = @import("../Memory.zig");

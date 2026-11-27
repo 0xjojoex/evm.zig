@@ -462,7 +462,7 @@ pub fn ExecutorType(
         /// This low-level API does not finalize or resolve the transition. A
         /// caller must open `checkpoint()` before dispatch and resolve it before
         /// closing the scope. Retained execution requires `commitTransaction` or
-        /// `finalizeExecution` followed by `retainStateTransition`; failure cleanup uses
+        /// `finalizeExecution` followed by `acceptStateTransition`; failure cleanup uses
         /// `discardStateTransition`.
         /// The scope warms the sender and recipient. Family-required additions,
         /// such as Ethereum's coinbase rule, belong in `beginMessageScope` init.
@@ -592,17 +592,17 @@ pub fn ExecutorType(
             try self.resolveManualTransaction(observer);
         }
 
-        /// Retain the current manual state transition exactly as it stands.
+        /// Accept the current manual state transition exactly as it stands.
         ///
         /// Lifecycle rows left by dispatch must be finalized or rolled back first;
         /// State asserts that at seal. State-only transitions need no finalization.
-        /// Use `commitTransaction` to finalize and retain in one step, or
+        /// Use `commitTransaction` to finalize and accept in one step, or
         /// `discardStateTransition` for failure cleanup.
-        pub fn retainStateTransition(self: *Executor) void {
-            self.retainStateTransitionWithObserver({}) catch unreachable;
+        pub fn acceptStateTransition(self: *Executor) void {
+            self.acceptStateTransitionWithObserver({}) catch unreachable;
         }
 
-        fn retainStateTransitionWithObserver(self: *Executor, observer: anytype) !void {
+        fn acceptStateTransitionWithObserver(self: *Executor, observer: anytype) !void {
             std.debug.assert(!self.state.hasOpenCheckpoint());
             std.debug.assert(!self.hasCurrentTransaction());
             if (self.execution_context == null) return;
@@ -642,8 +642,8 @@ pub fn ExecutorType(
                     self.closeManualTransactionLifetime();
                     return err;
                 };
-            self.state.retainAttempt(state_attempt_id);
-            if (comptime transaction_journal_enabled) self.transaction_journal.retainTransaction();
+            self.state.acceptAttempt(state_attempt_id);
+            if (comptime transaction_journal_enabled) self.transaction_journal.acceptTransaction();
             self.closeManualTransactionLifetime();
         }
 
@@ -734,16 +734,16 @@ pub fn ExecutorType(
                 /// Accept this transaction's sealed state into the Executor branch.
                 ///
                 /// The value and all copies become stale after this call.
-                pub fn retain(self: Execution) void {
+                pub fn accept(self: Execution) void {
                     _ = self.state();
-                    self.executor.state.retainAttempt(self.executor.attempt.?.id);
-                    if (comptime transaction_journal_enabled) self.executor.transaction_journal.retainTransaction();
+                    self.executor.state.acceptAttempt(self.executor.attempt.?.id);
+                    if (comptime transaction_journal_enabled) self.executor.transaction_journal.acceptTransaction();
                     self.executor.finishCurrentTransaction(false);
                 }
 
-                /// Retain state and return the family output by value.
-                pub fn retainResult(self: Execution) Output {
-                    self.retain();
+                /// Accept state and return the family output by value.
+                pub fn acceptResult(self: Execution) Output {
+                    self.accept();
                     return self.output_value;
                 }
 
@@ -2305,11 +2305,11 @@ pub fn ExecutorType(
             const result = try self.executeMessage(message, gas);
             if (!result.isSuccess()) {
                 pre_execution.restore();
-                try self.retainStateTransitionWithObserver(observer);
+                try self.acceptStateTransitionWithObserver(observer);
             } else {
                 try self.finalizeExecution();
                 pre_execution.commit();
-                try self.retainStateTransitionWithObserver(observer);
+                try self.acceptStateTransitionWithObserver(observer);
             }
             return result;
         }
@@ -2811,7 +2811,7 @@ pub fn ExecutorType(
 
             if (!host_result.isSuccess()) {
                 execution_checkpoint.restore();
-                try self.retainStateTransitionWithObserver(observer);
+                try self.acceptStateTransitionWithObserver(observer);
             } else {
                 execution_checkpoint.commit();
                 try self.commitTransactionWithObserver(observer);
@@ -2843,8 +2843,8 @@ pub fn ExecutorType(
                     try self.executor.commitTransactionWithObserver(self.observer);
                 }
 
-                pub fn retainStateTransition(self: @This()) !void {
-                    try self.executor.retainStateTransitionWithObserver(self.observer);
+                pub fn acceptStateTransition(self: @This()) !void {
+                    try self.executor.acceptStateTransitionWithObserver(self.observer);
                 }
 
                 pub fn executeStandalone(self: @This(), request: ExecutionRequest, scope_init: ExecutionScopeInit) !Result {

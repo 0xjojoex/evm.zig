@@ -138,7 +138,7 @@ fn Runner(comptime Engine: type) type {
                 .gas_used = result.gas.used,
                 .created = result.created_address,
             };
-            executed.retain();
+            executed.accept();
             self.nonce += 1;
             return receipt;
         }

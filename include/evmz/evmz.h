@@ -494,7 +494,7 @@ typedef struct evmz_gas {
      */
     uint64_t execution_refund;
     /* Unused gas returned to the payer: the gas limit minus `used`. */
-    uint64_t refunded;
+    uint64_t returned;
     /* This transaction's contribution to `evmz_block_progress.block_gas`. */
     evmz_block_gas block;
 } evmz_gas;

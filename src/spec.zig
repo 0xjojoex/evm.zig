@@ -371,6 +371,7 @@ pub const Spec = struct {
     /// Native-contract type: its compile-time address set and code, executed
     /// on an embedding-bound instance (`execution/native_contract.zig`). Separate
     /// from precompiles, which are terminal and cannot reenter the EVM.
+    /// Experimental: this hook and its protocol may change in any release.
     native_contract: type,
 
     pub const Patch = struct {

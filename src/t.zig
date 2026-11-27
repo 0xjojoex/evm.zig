@@ -483,7 +483,7 @@ pub fn seedStoreAccount(store: anytype, address: Address, seed: MemoryAccountSee
     if (seed.code.len != 0) try account.setCode(seed.code);
 }
 
-pub fn expectExecuted(outcome: evmz.Evm.Outcome) !evmz.Evm.Executed {
+pub fn expectExecuted(outcome: anytype) !@FieldType(@TypeOf(outcome), "executed") {
     return switch (outcome) {
         .executed => |executed| executed,
         .rejected => error.UnexpectedRejection,
@@ -500,7 +500,7 @@ pub fn testAuthorization(signer: Address, target: Address) evmz.transaction.Reco
 }
 
 pub const BytecodeResult = struct {
-    status: evmz.Interpreter.Status,
+    status: evmz.execution.Status,
     gas_left: i64,
     gas_refund: i64,
     stack_top: ?u256,
@@ -527,7 +527,7 @@ pub fn runBytecodeWithHost(host: *Host, msg: *const Host.Message, execution_cont
     };
 }
 
-pub fn expectBytecodeStatusByRevision(comptime items: anytype, comptime revision: evmz.eth.Revision, expected: evmz.Interpreter.Status) !void {
+pub fn expectBytecodeStatusByRevision(comptime items: anytype, comptime revision: evmz.eth.Revision, expected: evmz.execution.Status) !void {
     const bytecode_bytes = bytecode(items);
     var mock_host = MockHost.init(std.testing.allocator, null);
     defer mock_host.deinit();
@@ -538,7 +538,7 @@ pub fn expectBytecodeStatusByRevision(comptime items: anytype, comptime revision
     try std.testing.expectEqual(expected, result.status);
 }
 
-pub fn expectLatestForkBytecodeStatus(comptime items: anytype, expected: evmz.Interpreter.Status) !void {
+pub fn expectLatestForkBytecodeStatus(comptime items: anytype, expected: evmz.execution.Status) !void {
     try expectBytecodeStatusByRevision(items, .latest, expected);
 }
 
@@ -550,7 +550,7 @@ pub fn expectBytecodeStackTopByRevision(comptime items: anytype, comptime revisi
     const msg = defaultMessage();
 
     const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &bytecode_bytes, revision);
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status);
     try std.testing.expectEqual(expected, result.stack_top.?);
 }
 
@@ -572,7 +572,7 @@ pub fn expectStackByRevision(code: []const u8, comptime revision: evmz.eth.Revis
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status());
     try std.testing.expectEqualSlices(u256, expected, interpreter.call_frame.stack.asSlice());
 }
 
@@ -614,7 +614,7 @@ test "ORIGIN and GASPRICE read the borrowed transaction context" {
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status());
     try std.testing.expectEqualSlices(u256, &.{ 0, 0 }, interpreter.call_frame.stack.asSlice());
 }
 
@@ -651,7 +651,7 @@ test "SLOTNUM pushes the transaction context slot number" {
     const code = bytecode(.{.SLOTNUM});
 
     const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .amsterdam);
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status);
     try std.testing.expectEqual(@as(u256, 0x123456789abcdef0), result.stack_top.?);
 }
 
@@ -672,7 +672,7 @@ fn expectBlockhash(number: u16, expected: u256, expected_reads: u64) !void {
     };
 
     const result = try runBytecodeWithHost(&host, &msg, &mock_host.execution_context, &code, .latest);
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status);
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status);
     try std.testing.expectEqual(expected, result.stack_top.?);
     try std.testing.expectEqual(expected_reads, mock_host.block_hash_reads);
     if (expected_reads > 0) {

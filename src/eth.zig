@@ -60,12 +60,14 @@ pub const cancun = spec.cancun;
 pub const prague = spec.prague;
 pub const osaka = spec.osaka;
 pub const amsterdam = spec.amsterdam;
+/// The latest fork live on Ethereum mainnet.
+pub const stable = spec.stable;
+/// The newest fork evmz implements; may still be a devnet fork.
 pub const latest = spec.latest;
 pub const specAt = spec.specAt;
 
 pub const ExecutionHeader = header.ExecutionHeader;
 pub const Withdrawal = @import("eth/Withdrawal.zig");
-pub const BlockSTF = block_stf;
 
 pub const system_address = system.system_address;
 pub const beacon_roots_address = system.beacon_roots_address;

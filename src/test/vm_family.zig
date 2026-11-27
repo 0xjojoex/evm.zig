@@ -16,8 +16,8 @@ test "worlds analyze as complete VM products" {
     analyzeEngineProduct(Open);
     analyzeEngineProduct(Closed);
 
-    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.latest, Open));
-    std.testing.refAllDecls(evmz.eth.BlockSTF.Bind(.latest, Closed));
+    std.testing.refAllDecls(evmz.eth.block_stf.Bind(.latest, Open));
+    std.testing.refAllDecls(evmz.eth.block_stf.Bind(.latest, Closed));
 }
 
 test "exact Engine derives one coherent transaction authoring chain" {
@@ -55,8 +55,8 @@ test "exact Engine derives one coherent transaction authoring chain" {
 test "BlockSTF combines spec and world capabilities" {
     const Open = evmz.t.Vm(.latest).?;
     const Closed = evmz.VmType(Open.spec, evmz.eth.bal.ClosedWorld, .{});
-    const OpenBlockStf = evmz.eth.BlockSTF.Bind(.latest, Open);
-    const ClosedBlockStf = evmz.eth.BlockSTF.Bind(.latest, Closed);
+    const OpenBlockStf = evmz.eth.block_stf.Bind(.latest, Open);
+    const ClosedBlockStf = evmz.eth.block_stf.Bind(.latest, Closed);
 
     comptime {
         std.debug.assert(Open.World.options.grows_on_touch);
@@ -128,7 +128,7 @@ test "hand-written multi-variant family dispatches through ProgramType" {
     const outcome = try Program.transact(&executor, .{ .tx = .{ .small = 7 } });
     const output = switch (outcome) {
         .rejected => return error.UnexpectedRejection,
-        .executed => |executed| executed.retainResult(),
+        .executed => |executed| executed.acceptResult(),
     };
     try std.testing.expectEqual(@as(u32, 7), output.small);
     try std.testing.expect(!executor.hasCurrentTransaction());
@@ -144,7 +144,7 @@ test "hand-written multi-variant family dispatches through ProgramType" {
     const executed_large = try Program.transact(&executor, .{ .tx = .{ .large = 300 } });
     switch (executed_large) {
         .rejected => return error.UnexpectedRejection,
-        .executed => |executed| try std.testing.expect(executed.retainResult().large),
+        .executed => |executed| try std.testing.expect(executed.acceptResult().large),
     }
 }
 
@@ -222,7 +222,7 @@ test "family widens the prepared settlement plan with a storage-priced fee" {
     });
     const result = switch (outcome) {
         .rejected => return error.UnexpectedRejection,
-        .executed => |executed| executed.retainResult(),
+        .executed => |executed| executed.acceptResult(),
     };
 
     // The widened debit stays deducted: settlement refunds unused gas at the

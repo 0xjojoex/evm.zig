@@ -779,7 +779,7 @@ test "deploys runtime and runs empty bytecode under null host" {
     );
     try std.testing.expectEqual(@as(u64, 0), run_host.counters.total());
 
-    const Runner = ExecutorRuntimeRunner(evmz.Evm);
+    const Runner = ExecutorRuntimeRunner(evmz.Vm(evmz.eth.latest));
     var executor_runner = try Runner.init(std.testing.allocator, runtime, null);
     defer executor_runner.deinit();
     _ = try executor_runner.timeRuntimeCall(&.{}, defaultGasLimit());

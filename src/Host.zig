@@ -48,7 +48,7 @@ pub const StorageStoreResult = struct {
 /// data the host alone consumes.
 ///
 /// Address fields are `align(8)` for their by-value field copies on the call
-/// path. The layout this pins is asserted in `Interpreter.zig`.
+/// path. The layout this pins is asserted in `interpreter.zig`.
 pub const Message = struct {
     /// This frame's own depth; the parent increments before constructing.
     /// `max_call_depth` is enforced against the parent's depth.

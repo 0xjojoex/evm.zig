@@ -12,9 +12,11 @@ const debug = evmz.debug;
 const Address = evmz.Address;
 const Host = evmz.Host;
 const Status = evmz.execution.Status;
-const Executor = evmz.Evm.Executor;
-const Session = debug.SessionType(evmz.Evm);
-const instruction_spec = evmz.Evm.spec.instruction;
+/// The debugger runs the newest fork evmz implements.
+const Latest = evmz.Vm(evmz.eth.latest);
+const Executor = Latest.Executor;
+const Session = debug.SessionType(Latest);
+const instruction_spec = Latest.spec.instruction;
 const disassemble = evmz.instruction.disassemble;
 
 const Words = std.mem.TokenIterator(u8, .any);
@@ -265,7 +267,11 @@ const Repl = struct {
 
         self.unload();
         try self.executor.beginTransaction(
-            evmz.t.defaultExecutionContext(sender, gas),
+            .{
+                .chain = .{ .chain_id = 1 },
+                .block = .{ .gas_limit = gas },
+                .transaction = .{ .origin = sender },
+            },
             sender,
             recipient,
         );

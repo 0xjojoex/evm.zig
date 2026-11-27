@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
-const Interpreter = @import("../../Interpreter.zig");
+const Interpreter = @import("../../interpreter.zig");
 
 test "BALANCE cold account access gas comes from the exact spec" {
     if (comptime !evmz.t.forkEnabled(.frontier)) return error.SkipZigTest;
@@ -105,7 +105,7 @@ test "EXTCODECOPY writes directly and zero pads missing code bytes" {
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status());
     try std.testing.expectEqualSlices(u8, &.{ 0xbb, 0xcc, 0x00, 0x00 }, interpreter.call_frame.memory.readBytes(0, 4));
 }
 

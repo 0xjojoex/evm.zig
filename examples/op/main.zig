@@ -647,7 +647,7 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                             .output = view.output.*,
                             .cumulative_transactions = transaction_count,
                         };
-                        executed.retain();
+                        executed.accept();
                         self.transaction_count = transaction_count;
                         break :blk .{ .included = included };
                     },
@@ -704,7 +704,7 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                 .tx = .{ .deposit = transaction_value },
             })) {
                 .rejected => unreachable,
-                .executed => |executed| switch (executed.retainResult()) {
+                .executed => |executed| switch (executed.acceptResult()) {
                     .deposit => |deposit| deposit,
                     .ethereum => unreachable,
                 },
@@ -721,7 +721,7 @@ pub fn OpVm(comptime op_spec: OpSpec) type {
                 .tx = .{ .ethereum = transaction_value },
             })) {
                 .rejected => |reason| .{ .rejected = reason },
-                .executed => |executed| switch (executed.retainResult()) {
+                .executed => |executed| switch (executed.acceptResult()) {
                     .ethereum => |ethereum| .{ .completed = ethereum },
                     .deposit => unreachable,
                 },
@@ -847,7 +847,7 @@ test "successful deposit preserves mint and advances nonce" {
         .executed => |result| result,
         .rejected => unreachable,
     };
-    const result = executed.retainResult().deposit;
+    const result = executed.acceptResult().deposit;
 
     try std.testing.expectEqual(evmz.TxStatus.success, result.status);
     try std.testing.expectEqual(@as(u64, 0), result.deposit_nonce);
@@ -876,7 +876,7 @@ test "reverted deposit keeps mint and nonce but rolls back EVM writes" {
         } },
     });
 
-    const result = outcome.executed.retainResult().deposit;
+    const result = outcome.executed.acceptResult().deposit;
 
     // A revert is not a failed deposit: it reports actual gas used.
     try std.testing.expectEqual(evmz.TxStatus.revert, result.status);
@@ -904,7 +904,7 @@ test "insufficient-value deposit becomes an included failure after mint" {
         } },
     });
 
-    const result = outcome.executed.retainResult().deposit;
+    const result = outcome.executed.acceptResult().deposit;
 
     try std.testing.expectEqual(evmz.TxStatus.invalid, result.status);
     try std.testing.expect(result.failed_deposit);
@@ -929,7 +929,7 @@ test "intrinsic-gas failure is included after mint with one nonce increment" {
         } },
     });
 
-    const result = outcome.executed.retainResult().deposit;
+    const result = outcome.executed.acceptResult().deposit;
 
     try std.testing.expectEqual(evmz.TxStatus.invalid, result.status);
     try std.testing.expect(result.failed_deposit);
@@ -957,7 +957,7 @@ test "halted deposit is included as failed with the full limit consumed" {
         } },
     });
 
-    const result = outcome.executed.retainResult().deposit;
+    const result = outcome.executed.acceptResult().deposit;
 
     try std.testing.expectEqual(evmz.TxStatus.out_of_gas, result.status);
     try std.testing.expect(result.failed_deposit);
@@ -984,7 +984,7 @@ test "create deposit derives address from the pre-execution deposit nonce" {
         },
     });
 
-    const result = outcome.executed.retainResult().deposit;
+    const result = outcome.executed.acceptResult().deposit;
 
     try std.testing.expectEqual(evmz.TxStatus.success, result.status);
     try std.testing.expectEqual(address.create(sender, 0), result.created_address.?);
@@ -1187,14 +1187,14 @@ test "OP family ingress owns execution environment normalization" {
     const delta_outcome = try delta.transact(
         .{ .env = inherited, .tx = tx },
     );
-    delta_outcome.executed.retain();
+    delta_outcome.executed.accept();
 
     var ecotone = Ecotone.init(std.testing.allocator, .{});
     defer ecotone.deinit();
     const ecotone_outcome = try ecotone.transact(
         .{ .env = inherited, .tx = tx },
     );
-    ecotone_outcome.executed.retain();
+    ecotone_outcome.executed.accept();
 
     try std.testing.expectEqual(@as(u256, 99), executionEnv(delta_spec.engine, inherited).blob_base_fee);
     try std.testing.expectEqual(@as(u256, 1), executionEnv(ecotone_spec.engine, inherited).blob_base_fee);
@@ -1258,7 +1258,7 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
                 .pricing = .system,
             } },
         });
-        const ethereum_output = outcome.executed.retainResult().ethereum;
+        const ethereum_output = outcome.executed.acceptResult().ethereum;
         try std.testing.expectEqual(evmz.TxStatus.success, ethereum_output.execution.status);
         try expectWordOne(ethereum_output.execution.output);
     }
@@ -1276,7 +1276,7 @@ test "Ecotone resolves BLOBBASEFEE to one for Ethereum and deposit transactions"
                 .gas_limit = 100_000,
             } },
         });
-        const deposit_output = outcome.executed.retainResult().deposit;
+        const deposit_output = outcome.executed.acceptResult().deposit;
         try std.testing.expectEqual(evmz.TxStatus.success, deposit_output.status);
         try expectWordOne(deposit_output.output);
     }
@@ -1508,7 +1508,7 @@ test "deposit transition uses its exact spec value" {
         } },
     });
 
-    try std.testing.expectEqual(evmz.TxStatus.invalid, result.executed.retainResult().deposit.status);
+    try std.testing.expectEqual(evmz.TxStatus.invalid, result.executed.acceptResult().deposit.status);
 }
 
 test "unresolved Ethereum transaction keeps exclusive state ownership" {
@@ -1571,7 +1571,7 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
             .pricing = .system,
         } },
     });
-    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_1.executed.retainResult().ethereum.execution.status);
+    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_1.executed.acceptResult().ethereum.execution.status);
 
     const deposit = try vm.transact(.{
         .env = env,
@@ -1584,7 +1584,7 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
             .gas_limit = 100_000,
         } },
     });
-    const deposit_result = deposit.executed.retainResult().deposit;
+    const deposit_result = deposit.executed.acceptResult().deposit;
     try std.testing.expectEqual(evmz.TxStatus.success, deposit_result.status);
     try std.testing.expectEqual(@as(u64, 1), deposit_result.deposit_nonce);
 
@@ -1602,7 +1602,7 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
             },
         },
     });
-    const reverted_deposit_result = reverted_deposit.executed.retainResult().deposit;
+    const reverted_deposit_result = reverted_deposit.executed.acceptResult().deposit;
     try std.testing.expectEqual(evmz.TxStatus.revert, reverted_deposit_result.status);
     try std.testing.expectEqual(@as(u64, 2), reverted_deposit_result.deposit_nonce);
 
@@ -1619,7 +1619,7 @@ test "one OP transaction program alternates Ethereum and deposit variants on one
             .pricing = .system,
         } },
     });
-    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_2.executed.retainResult().ethereum.execution.status);
+    try std.testing.expectEqual(evmz.TxStatus.success, ethereum_2.executed.acceptResult().ethereum.execution.status);
 
     const sender_account = (try vm.executor.getAccount(sender)).?;
     try std.testing.expectEqual(@as(u64, 4), sender_account.nonce);

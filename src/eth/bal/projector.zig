@@ -555,7 +555,7 @@ test "block builder coalesces transitions at one access index" {
     var first_transition = try materialize(state.pendingView().observations(), allocator);
     defer first_transition.deinit(allocator);
     try reference_builder.appendTransition(first_transition, 3);
-    state.retainAttempt(first);
+    state.acceptAttempt(first);
 
     const second = state.beginObservedAttempt();
     state.openSession();
@@ -566,7 +566,7 @@ test "block builder coalesces transitions at one access index" {
     var second_transition = try materialize(state.pendingView().observations(), allocator);
     defer second_transition.deinit(allocator);
     try reference_builder.appendTransition(second_transition, 3);
-    state.retainAttempt(second);
+    state.acceptAttempt(second);
 
     var result = try builder.finish();
     defer result.deinit(allocator);

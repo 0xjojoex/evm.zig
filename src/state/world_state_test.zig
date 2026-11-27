@@ -209,7 +209,7 @@ test "execution original refreshes across sessions while transaction original re
     state.closeSession();
 
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     try std.testing.expectEqual(@as(u256, 11), try state.getStorage(word(1), 2));
 }
 
@@ -271,7 +271,7 @@ test "retained account writes advance accepted state" {
     try state.setNonce(word(1), 8);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
 
     try std.testing.expectEqual(@as(u256, 99), try state.getBalance(word(1)));
     try std.testing.expectEqual(@as(u64, 8), try state.getNonce(word(1)));
@@ -299,7 +299,7 @@ test "retain folds rows without allocation" {
     state.sealAttempt(attempt);
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
 
     try std.testing.expect(!failing_allocator.has_induced_failure);
     try std.testing.expectEqual(@as(u256, 99), try state.getBalance(word(1)));
@@ -524,7 +524,7 @@ test "rolled back code cannot satisfy another account in a later transaction" {
     state.revertToCheckpoint(checkpoint);
     state.closeSession();
     state.sealAttempt(first);
-    state.retainAttempt(first);
+    state.acceptAttempt(first);
 
     const second = state.beginAttempt();
     state.openSession();
@@ -559,7 +559,7 @@ test "discarded code is reintroduced by a retained branch and then cleared" {
     try state.setCode(word(1), &replacement_code);
     state.closeSession();
     state.sealAttempt(retained);
-    state.retainAttempt(retained);
+    state.acceptAttempt(retained);
     try std.testing.expect(state.acceptedView().changes().introducedCode(replacement_hash) != null);
     try std.testing.expectEqualSlices(u8, &replacement_code, try state.getCode(word(1)));
     try std.testing.expect(try state.accountHasCode(word(1)));
@@ -569,7 +569,7 @@ test "discarded code is reintroduced by a retained branch and then cleared" {
     try state.clearCode(word(1));
     state.closeSession();
     state.sealAttempt(cleared);
-    state.retainAttempt(cleared);
+    state.acceptAttempt(cleared);
     try std.testing.expectEqualSlices(u8, &.{}, try state.getCode(word(1)));
     try std.testing.expect(!try state.accountHasCode(word(1)));
 }
@@ -592,7 +592,7 @@ test "seeded parent code is not an introduction when written back" {
     state.sealAttempt(attempt);
     try std.testing.expect(state.pendingView().changes().introducedCode(code_hash) == null);
     try std.testing.expectEqualSlices(u8, &code, state.pendingView().observations().code(code_hash).?.bytes);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     try std.testing.expectEqual(@as(usize, 0), state.code.introducedLen());
 }
 
@@ -620,7 +620,7 @@ test "pending and accepted views expose the sealed transaction" {
     try std.testing.expectEqualSlices(u256, &topics, event_log.topics);
     try std.testing.expectEqualSlices(u8, &.{0xaa}, event_log.data);
 
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     const accepted = state.acceptedView();
     try std.testing.expect(accepted.hasChanges());
     try std.testing.expectEqual(@as(usize, 1), state.logView().len());
@@ -638,7 +638,7 @@ test "selfdestruct finalization deletes account and masks accepted storage" {
     try std.testing.expectEqual(.modified, try state.setStorage(word(1), 2, 9));
     state.closeSession();
     state.sealAttempt(written);
-    state.retainAttempt(written);
+    state.acceptAttempt(written);
     const accepted = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 1), accepted.storage_writes.len());
     try std.testing.expectEqual(addr(1), accepted.storage_writes.at(0).address);
@@ -676,7 +676,7 @@ test "selfdestruct finalization deletes account and masks accepted storage" {
     } });
     state.closeSession();
     state.sealAttempt(destroyed);
-    state.retainAttempt(destroyed);
+    state.acceptAttempt(destroyed);
 
     try std.testing.expect(state.cachedAccount(word(1)) == null);
     try std.testing.expectEqual(@as(u256, 0), try state.getStorage(word(1), 2));
@@ -708,7 +708,7 @@ test "slot first materialized after an accepted wipe starts from zero" {
     try state.finalizeLifecycle(.{ .existing_account = .{ .clear_storage = true } });
     state.closeSession();
     state.sealAttempt(destroyed);
-    state.retainAttempt(destroyed);
+    state.acceptAttempt(destroyed);
     try std.testing.expect(state.world.findStorage(row(&state, addr(1)), 2) == null);
 
     const attempt = state.beginObservedAttempt();
@@ -723,7 +723,7 @@ test "slot first materialized after an accepted wipe starts from zero" {
     const record = state.pendingView().observations().storage.at(0);
     try std.testing.expectEqual(@as(u256, 0), record.original);
     try std.testing.expectEqual(@as(u256, 5), record.current);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_writes.len());
 }
 
@@ -752,7 +752,7 @@ test "Cancun existing-account selfdestruct only clears lifecycle marker" {
 
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     try std.testing.expectEqual(@as(u256, 10), try state.getBalance(word(1)));
     try std.testing.expectEqual(@as(u256, 7), try state.getStorage(word(1), 2));
 }
@@ -791,14 +791,14 @@ test "created-account finalization removes an empty reset account" {
 
     state.closeSession();
     state.sealAttempt(created);
-    state.retainAttempt(created);
+    state.acceptAttempt(created);
 
     const rewritten = state.beginAttempt();
     state.openSession();
     try std.testing.expectEqual(.added, try state.setStorage(word(2), 7, 11));
     state.closeSession();
     state.sealAttempt(rewritten);
-    state.retainAttempt(rewritten);
+    state.acceptAttempt(rewritten);
 
     try std.testing.expectEqual(@as(u256, 11), try state.getStorage(word(2), 7));
     try std.testing.expectEqual(@as(u256, 0), try state.getStorage(word(2), 8));
@@ -999,7 +999,7 @@ test "pending changes are transaction local and accepted changes accumulate" {
     _ = try state.setStorage(word(1), 1, 111);
     state.closeSession();
     state.sealAttempt(first);
-    state.retainAttempt(first);
+    state.acceptAttempt(first);
 
     const accepted_first = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 1), accepted_first.accounts.len());
@@ -1027,7 +1027,7 @@ test "pending changes are transaction local and accepted changes accumulate" {
     try std.testing.expectEqual(@as(u32, 1), accepted_pending.accounts.len());
     try std.testing.expectEqual(addr(1), accepted_pending.accounts.at(0).address);
 
-    state.retainAttempt(second);
+    state.acceptAttempt(second);
     const accepted_second = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 2), accepted_second.accounts.len());
     try std.testing.expectEqual(@as(u32, 2), accepted_second.storage_writes.len());
@@ -1046,7 +1046,7 @@ test "first storage undo preserves accepted baseline across scopes and attempts"
     _ = try state.setStorage(word(1), 2, 22);
     state.closeSession();
     state.sealAttempt(first);
-    state.retainAttempt(first);
+    state.acceptAttempt(first);
 
     const second = state.beginAttempt();
     state.openSession();
@@ -1108,7 +1108,7 @@ test "checkpoint rollback truncates dense change ids" {
     try std.testing.expectEqual(@as(u32, 1), changes.storage_writes.len());
     try std.testing.expectEqual(addr(2), changes.storage_writes.at(0).address);
 
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     const accepted = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 1), accepted.accounts.len());
     try std.testing.expectEqual(@as(u32, 1), accepted.storage_writes.len());
@@ -1133,7 +1133,7 @@ test "accepted branch snapshot restores cumulative state and drops later rows" {
     });
     state.closeSession();
     state.sealAttempt(baseline);
-    state.retainAttempt(baseline);
+    state.acceptAttempt(baseline);
 
     var snapshot = try state.branchSnapshot();
     defer snapshot.deinit();
@@ -1155,7 +1155,7 @@ test "accepted branch snapshot restores cumulative state and drops later rows" {
     } });
     state.closeSession();
     state.sealAttempt(destroyed);
-    state.retainAttempt(destroyed);
+    state.acceptAttempt(destroyed);
     try std.testing.expect(state.cachedAccount(word(1)) == null);
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_wipes.len());
 
@@ -1176,7 +1176,7 @@ test "accepted branch snapshot restores cumulative state and drops later rows" {
     _ = try state.setStorage(word(2), 9, 99);
     state.closeSession();
     state.sealAttempt(later);
-    state.retainAttempt(later);
+    state.acceptAttempt(later);
     try std.testing.expectEqual(@as(u256, 33), try state.getBalance(word(2)));
     try std.testing.expectEqual(@as(u32, 2), state.world.accountCount());
 
@@ -1213,7 +1213,7 @@ test "branch restoration discards the active attempt and preserves identity prog
         try std.testing.expect(next != abandoned);
         try state.setBalance(word(1), 22);
         state.sealAttempt(next);
-        state.retainAttempt(next);
+        state.acceptAttempt(next);
         try std.testing.expectEqual(@as(u256, 22), try state.getBalance(word(1)));
     }
 }
@@ -1229,7 +1229,7 @@ test "accepted branch snapshot clone failure leaves current state unchanged" {
     try state.setBalance(word(1), 11);
     state.closeSession();
     state.sealAttempt(baseline);
-    state.retainAttempt(baseline);
+    state.acceptAttempt(baseline);
     var snapshot = try state.branchSnapshot();
     defer snapshot.deinit();
 
@@ -1238,7 +1238,7 @@ test "accepted branch snapshot clone failure leaves current state unchanged" {
     try state.setBalance(word(1), 22);
     state.closeSession();
     state.sealAttempt(later);
-    state.retainAttempt(later);
+    state.acceptAttempt(later);
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
     try std.testing.expectError(error.OutOfMemory, snapshot.clone());
@@ -1263,7 +1263,7 @@ test "accepted branch restore does not allocate after capture" {
     try state.setBalance(word(1), 11);
     state.closeSession();
     state.sealAttempt(baseline);
-    state.retainAttempt(baseline);
+    state.acceptAttempt(baseline);
     var snapshot = try state.branchSnapshot();
     defer snapshot.deinit();
 
@@ -1273,7 +1273,7 @@ test "accepted branch restore does not allocate after capture" {
     try state.setBalance(word(2), 5);
     state.closeSession();
     state.sealAttempt(later);
-    state.retainAttempt(later);
+    state.acceptAttempt(later);
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
     state.restoreBranch(&snapshot);
@@ -1293,7 +1293,7 @@ test "discard accepted resets the world and invalidates earlier snapshots" {
     try state.setCode(word(1), &.{0xaa});
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     try std.testing.expect(state.acceptedView().hasChanges());
 
     state.discardAccepted();
@@ -1316,7 +1316,7 @@ test "discard accepted rewinds the clock with the rows" {
     try std.testing.expect(state.isAccountWarm(word(1)));
     state.closeSession();
     state.sealAttempt(first);
-    state.retainAttempt(first);
+    state.acceptAttempt(first);
     try std.testing.expect(state.clock != 0);
 
     state.discardAccepted();
@@ -1341,7 +1341,7 @@ test "seeding advances the epoch without rewinding the clock" {
     try state.warmAccount(word(1));
     state.closeSession();
     state.sealAttempt(first);
-    state.retainAttempt(first);
+    state.acceptAttempt(first);
 
     // Retain keeps the row and its warm stamp. Seeding another account bumps
     // the epoch for snapshots but must not reissue `first`: a rewound clock
@@ -1408,7 +1408,7 @@ test "open state transaction cleans every allocation failure" {
             try state.finalizeLifecycle(.{ .existing_account = .{ .delete_account = true, .clear_storage = true } });
             state.closeSession();
             state.sealAttempt(attempt);
-            state.retainAttempt(attempt);
+            state.acceptAttempt(attempt);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
@@ -1460,7 +1460,7 @@ test "accepted branch snapshot restores compacted storage change ids" {
     try std.testing.expectEqual(.added, try state.setStorage(word(2), 2, 22));
     state.closeSession();
     state.sealAttempt(baseline);
-    state.retainAttempt(baseline);
+    state.acceptAttempt(baseline);
 
     var snapshot = try state.branchSnapshot();
     defer snapshot.deinit();
@@ -1479,7 +1479,7 @@ test "accepted branch snapshot restores compacted storage change ids" {
     try state.finalizeLifecycle(.{ .existing_account = .{ .clear_storage = true } });
     state.closeSession();
     state.sealAttempt(wiped);
-    state.retainAttempt(wiped);
+    state.acceptAttempt(wiped);
 
     state.restoreBranch(&snapshot);
     const changes = state.acceptedView().changes();
@@ -1501,7 +1501,7 @@ test "scope revert compaction keeps the accepted prefix and deduplicates the att
     _ = try state.setStorage(word(1), 1, 11);
     state.closeSession();
     state.sealAttempt(accepted);
-    state.retainAttempt(accepted);
+    state.acceptAttempt(accepted);
 
     const reverted = state.beginAttempt();
     state.openSession();
@@ -1518,7 +1518,7 @@ test "scope revert compaction keeps the accepted prefix and deduplicates the att
     _ = try state.setStorage(word(2), 2, 22);
     state.closeSession();
     state.sealAttempt(reverted);
-    state.retainAttempt(reverted);
+    state.acceptAttempt(reverted);
 
     const changes = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 2), changes.accounts.len());
@@ -1561,7 +1561,7 @@ test "warm-only keys avoid parent I/O and preserve warmth through later row roll
     try std.testing.expectEqual(.warm, (try state.loadStorage(word(1), 2)).access_status);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
 
     _ = state.beginAttempt();
     state.openSession();
@@ -1651,7 +1651,7 @@ test "branch snapshot capture and clone clean every allocation failure" {
             try state.finalizeLifecycle(.{});
             state.closeSession();
             state.sealAttempt(attempt);
-            state.retainAttempt(attempt);
+            state.acceptAttempt(attempt);
             var snapshot = try state.branchSnapshot();
             defer snapshot.deinit();
             var cloned = try snapshot.clone();
@@ -1760,7 +1760,7 @@ test "contract initialization after accepted deletion observes the current incar
         try state.finalizeLifecycle(.{ .created_account = .{ .clear_storage = true, .delete_account = true } });
         state.closeSession();
         state.sealAttempt(first);
-        state.retainAttempt(first);
+        state.acceptAttempt(first);
 
         const next = state.beginObservedAttempt();
         defer abandon(&state);

@@ -56,7 +56,7 @@ test "account dirtiness follows surviving account and storage changes" {
             try std.testing.expect(storage_commit.accountDirty(@fromBackingInt(@intCast(0))));
             try std.testing.expect(!storage_commit.accountChanged(@fromBackingInt(@intCast(0))));
             try std.testing.expect(storage_commit.accountStorageDirty(@fromBackingInt(@intCast(0))));
-            state.retainAttempt(storage_attempt);
+            state.acceptAttempt(storage_attempt);
             try std.testing.expect(state.acceptedView().commit().accountDirty(@fromBackingInt(@intCast(0))));
             state.restoreBranch(&snapshot);
             try std.testing.expect(!state.acceptedView().commit().accountDirty(@fromBackingInt(@intCast(0))));
@@ -149,7 +149,7 @@ test "sealed dense views retain effects and observations with distinct lifetimes
     try std.testing.expectEqual(@as(u256, 1), pending.logs().get(0).topics[0]);
     try std.testing.expectEqual(@as(u8, 2), pending.logs().get(0).data[0]);
 
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     try std.testing.expectEqual(@as(usize, 1), state.logView().len());
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().accounts.len());
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_writes.len());
@@ -192,7 +192,7 @@ test "claim state introduced code is reclaimed across rollback and discard" {
     try state.finalizeLifecycle(.{});
     state.closeSession();
     state.sealAttempt(first_attempt);
-    state.retainAttempt(first_attempt);
+    state.acceptAttempt(first_attempt);
     try std.testing.expectEqual(@as(usize, 1), state.code.introducedLen());
 
     const second_code = [_]u8{ 0x60, 0x02 };
@@ -253,7 +253,7 @@ test "claim state introduced code is reclaimed across rollback and discard" {
     try state.setCode(.fromAddress(targets[1]), &second_code);
     state.sealAttempt(retained);
     try std.testing.expect(state.pendingView().changes().introducedCode(second_hash) != null);
-    state.retainAttempt(retained);
+    state.acceptAttempt(retained);
     try std.testing.expect(state.acceptedView().changes().introducedCode(second_hash) != null);
 
     // Reusing accepted code does not introduce it again in the next attempt.
@@ -282,7 +282,7 @@ test "discarding accepted dense state reclaims code for a clean retry" {
     try state.setCode(.fromAddress(target), &code);
     state.closeSession();
     state.sealAttempt(first);
-    state.retainAttempt(first);
+    state.acceptAttempt(first);
     try std.testing.expect(state.acceptedView().changes().introducedCode(code_hash) != null);
 
     state.discardAccepted();
@@ -294,7 +294,7 @@ test "discarding accepted dense state reclaims code for a clean retry" {
     try state.setCode(.fromAddress(target), &code);
     state.closeSession();
     state.sealAttempt(retry);
-    state.retainAttempt(retry);
+    state.acceptAttempt(retry);
     try std.testing.expectEqual(@as(usize, 1), state.code.introducedLen());
     try std.testing.expectEqualSlices(
         u8,
@@ -319,7 +319,7 @@ test "claim state branch restore preserves retained logs" {
     try state.emitLog(.{ .address = target, .topics = &original_topics, .data = &original_data });
     state.closeSession();
     state.sealAttempt(accepted);
-    state.retainAttempt(accepted);
+    state.acceptAttempt(accepted);
 
     var snapshot = try state.branchSnapshot();
     defer snapshot.deinit();
@@ -333,7 +333,7 @@ test "claim state branch restore preserves retained logs" {
     try state.emitLog(.{ .address = target, .topics = &replacement_topics, .data = &replacement_data });
     state.closeSession();
     state.sealAttempt(replacement);
-    state.retainAttempt(replacement);
+    state.acceptAttempt(replacement);
     state.restoreBranch(&restore_value);
 
     const restored = state.logView();
@@ -366,7 +366,7 @@ test "introduced code satisfies a later optional witness code read" {
     try state.setCode(.fromAddress(created), &code);
     state.closeSession();
     state.sealAttempt(introduced);
-    state.retainAttempt(introduced);
+    state.acceptAttempt(introduced);
 
     const read = state.beginObservedAttempt();
     state.openSession();
@@ -456,7 +456,7 @@ test "sealed discard preserves prior accepted storage projection" {
     _ = try state.setStorage(.fromAddress(target), 7, 9);
     state.closeSession();
     state.sealAttempt(accepted_attempt);
-    state.retainAttempt(accepted_attempt);
+    state.acceptAttempt(accepted_attempt);
     try std.testing.expectEqual(@as(u32, 0), state.acceptedView().changes().accounts.len());
     try std.testing.expectEqual(@as(u32, 1), state.acceptedView().changes().storage_writes.len());
     try std.testing.expectEqual(@as(u256, 9), state.acceptedView().changes().storage_writes.at(0).value);
@@ -466,7 +466,7 @@ test "sealed discard preserves prior accepted storage projection" {
     try state.setBalance(.fromAddress(target), 12);
     state.closeSession();
     state.sealAttempt(account_attempt);
-    state.retainAttempt(account_attempt);
+    state.acceptAttempt(account_attempt);
 
     const rejected_attempt = state.beginObservedAttempt();
     state.openSession();
@@ -534,7 +534,7 @@ test "storage wipe projections deduplicate scope reverts" {
     try std.testing.expectEqual(@as(u32, 0), pending.accepted().changes().storage_wipes.len());
     try std.testing.expectEqual(@as(u32, 1), pending.changes().storage_wipes.len());
     try std.testing.expectEqual(target, pending.changes().storage_wipes.at(0));
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
 
     const accepted = state.acceptedView().changes().storage_wipes;
     try std.testing.expectEqual(@as(u32, 1), accepted.len());
@@ -602,7 +602,7 @@ test "claim state commit reclaims independent storage roots and error scopes" {
     _ = try state.setStorage(.fromAddress(targets[1]), slots[1], 5);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
 
     const accepted = state.acceptedView();
     const wrong_root: [32]u8 = @splat(0x42);
@@ -706,7 +706,7 @@ fn expectDenseCommitMatchesIndependentRoot(case: DenseCommitCase) !void {
         try state.finalizeLifecycle(.{ .existing_account = .{ .delete_account = true, .clear_storage = true } });
         state.closeSession();
         state.sealAttempt(deleted);
-        state.retainAttempt(deleted);
+        state.acceptAttempt(deleted);
     }
 
     const attempt = state.beginObservedAttempt();
@@ -740,7 +740,7 @@ fn expectDenseCommitMatchesIndependentRoot(case: DenseCommitCase) !void {
     try state.finalizeLifecycle(.{});
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
 
     const accepted = state.acceptedView();
     var commit_buffer: [64 * 1024]u8 = undefined;
@@ -860,7 +860,7 @@ test "closed branch snapshot restores compacted storage changes and commit value
     _ = try state.setStorage(.fromAddress(address.addr(2)), 2, 22);
     state.closeSession();
     state.sealAttempt(baseline);
-    state.retainAttempt(baseline);
+    state.acceptAttempt(baseline);
     var snapshot = try state.branchSnapshot();
     defer snapshot.deinit();
 
@@ -878,7 +878,7 @@ test "closed branch snapshot restores compacted storage changes and commit value
     try state.finalizeLifecycle(.{ .existing_account = .{ .clear_storage = true } });
     state.closeSession();
     state.sealAttempt(wiped);
-    state.retainAttempt(wiped);
+    state.acceptAttempt(wiped);
     var cloned = try snapshot.clone();
     defer cloned.deinit();
     state.restoreBranch(&cloned);

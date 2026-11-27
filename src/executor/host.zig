@@ -21,6 +21,7 @@ pub fn Callbacks(
         /// Executor handle for one native entry: the journaled paths `Host` uses,
         /// with mutation rejected in a static entry and no call, since children
         /// are requested through the returned step. Entry-scoped; never retain it.
+        /// Experimental, like the native-contract protocol it serves.
         pub const NativeContext = struct {
             /// The executor's own spec. Price EVM-like effects from it, so they
             /// never disagree with the executor, including `Spec.extend` overrides.

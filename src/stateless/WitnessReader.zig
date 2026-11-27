@@ -231,7 +231,7 @@ test "witness reader derives the root of tracked changes through a sorted commit
     _ = try state.setStorage(.fromAddress(address.addr(1)), 2, 3);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
 
     var witness = try initFromNodes(std.testing.allocator, trie.empty_root_hash, &.{}, &.{});
     defer witness.deinit();

@@ -116,7 +116,7 @@ Added
 - `TxExecutionResult.cause`: why the execution ended with its status, which
   `frame_halt` cannot say for a create that fails after its frame returned.
 - `ResultGas.execution_refund`: the EVM refund counter after the fork's refund
-  cap. `refunded` remains the unused gas returned to the payer.
+  cap. `returned` remains the unused gas returned to the payer.
 - `ResultGas.spent`: the gas spent before refunds and floor rules. When the
   calldata floor sets `used`, `used + execution_refund` is more than this.
 - `execution.RootExecutionInit`: per-root entry mode for multi-root sessions.
@@ -134,6 +134,31 @@ Added
 
 Changed
 
+- `Evm` is now `Vm(eth.stable)`, the latest fork on Ethereum mainnet
+  (Osaka), instead of `Vm(eth.latest)` (Amsterdam). Use `Vm(eth.latest)` for
+  the newest fork evmz implements. `eth.stable` is exported next to
+  `eth.latest`.
+- Removed the root `Interpreter`, `Executed` and `Outcome` aliases, which
+  named the latest fork's types; use `Vm(spec).Interpreter`, `.Executed` and
+  `.Outcome`, and `execution.Status` for the frame status. `evmz.Transaction`
+  is `transaction.Transaction`, which every fork shares.
+- `ResultGas.refunded` is `ResultGas.returned`, and the C header's
+  `evmz_result_gas.refunded` is `returned`, so the unused gas given back to
+  the payer no longer reads like `execution_refund`. The C layout and ABI
+  version are unchanged.
+- One verb for keeping a result: `Executed.retain` and `.retainResult` are
+  `accept` and `acceptResult`, `Executor.retainStateTransition` is
+  `acceptStateTransition`, and a transaction journal's `retainTransaction`
+  hook is `acceptTransaction`, matching the C ABI's `evmz_session_accept` and
+  the Executor's `acceptedChanges`.
+- Removed `eth.BlockSTF`; use `eth.block_stf`. `src/Interpreter.zig` is now
+  `src/interpreter.zig`; `evmz.interpreter` is unchanged.
+- `evmz.t` and `stateless.testing` exist only in test builds, and the package
+  no longer exports the `fixtures`, `statetest` and `blocktest` modules.
+- `RELEASING.md` defines the stable, experimental and internal tiers, the
+  public build options, and the patch-versus-minor rules. The native-contract
+  hook (`Spec.native_contract`, `execution.NativeContract*`, `NativeContext`)
+  and `precompile.Spec.custom` are experimental.
 - Program `Context.beginRootSession` takes an `ExecutionScopeInit`, so a
   session's warm set is applied once. `Context.runRoot` takes a
   `RootExecutionInit` in its place and returns the root's `log_range` alongside

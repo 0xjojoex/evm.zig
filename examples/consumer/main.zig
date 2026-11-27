@@ -35,5 +35,5 @@ pub fn main(init: std.process.Init) !void {
     });
 
     // Commit into the VM's pending branch (otherwise `discardIfCurrent` rolls back).
-    execution.retain();
+    execution.accept();
 }

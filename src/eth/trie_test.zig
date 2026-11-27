@@ -756,7 +756,7 @@ test "MPT state root is the same through a detached delta" {
     try state.setBalance(.fromAddress(address.addr(0x2000)), 5);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     const live = state.acceptedView().changes();
 
     var delta = try StateDelta.init(scratch, live);
@@ -785,7 +785,7 @@ test "MPT state root consumes tracked changes" {
     _ = try state.setStorage(.fromAddress(target), 1, 7);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     const changes = state.acceptedView().changes();
 
     const direct = try rootAfterChanges(scratch, empty_root_hash, &.{}, changes);
@@ -818,7 +818,7 @@ test "MPT state root consumes tracked changes" {
     } });
     state.closeSession();
     state.sealAttempt(wiped);
-    state.retainAttempt(wiped);
+    state.acceptAttempt(wiped);
     const wiped_changes = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 1), wiped_changes.storage_wipes.len());
     try std.testing.expectEqual(@as(u32, 0), wiped_changes.storage_writes.len());
@@ -854,7 +854,7 @@ test "MPT state root groups interleaved tracked storage writes by address" {
     _ = try state.setStorage(.fromAddress(first), 3, 33);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     const changes = state.acceptedView().changes();
     try std.testing.expectEqual(first, changes.storage_writes.at(0).address);
     try std.testing.expectEqual(second, changes.storage_writes.at(1).address);
@@ -921,7 +921,7 @@ test "MPT state root loads the parent account from the catalog" {
     _ = try state.setStorage(.fromAddress(target), 1, 7);
     state.closeSession();
     state.sealAttempt(attempt);
-    state.retainAttempt(attempt);
+    state.acceptAttempt(attempt);
     const changes = state.acceptedView().changes();
     try std.testing.expectEqual(@as(u32, 0), changes.accounts.len());
 
