@@ -9,6 +9,7 @@ pub const settlement = @import("./transaction/settlement.zig");
 pub const type_id = @import("./transaction/type_id.zig");
 pub const envelope = @import("./transaction/envelope.zig");
 pub const raw = @import("./transaction/raw.zig");
+pub const signed = @import("./transaction/signed.zig");
 pub const signing = @import("./transaction/signing.zig");
 const transaction = @import("./transaction/types.zig");
 pub const transition = @import("./transaction/transition.zig");

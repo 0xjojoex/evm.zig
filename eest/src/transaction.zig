@@ -92,11 +92,22 @@ fn runResult(
     const hash = try fixtures.parseBytesFromValue(allocator, expected.get("hash") orelse return error.MalformedFixture);
     defer allocator.free(hash);
     if (!std.mem.eql(u8, &evmz.crypto.keccak256(bytes), hash)) return error.HashMismatch;
+    try expectSignedRoundTrip(allocator, bytes);
     const sender = try fixtures.parseAddressFromValue(expected.get("sender") orelse return error.MalformedFixture);
     if (!std.meta.eql(sender, tx.sender)) return error.SenderMismatch;
     const gas = try validation.gasPlan(validation_input);
     const intrinsic = try fixtures.parseU64FromValue(expected.get("intrinsicGas") orelse return error.MalformedFixture);
     if (gas.intrinsic_gas != intrinsic) return error.IntrinsicGasMismatch;
+}
+
+/// Every accepted envelope decodes into the signed form and re-encodes to the
+/// same bytes.
+fn expectSignedRoundTrip(allocator: std.mem.Allocator, bytes: []const u8) !void {
+    var signed = try evmz.transaction.signed.Envelope.decodeAlloc(allocator, bytes);
+    defer signed.deinit(allocator);
+    const encoded = try signed.encodeAlloc(allocator);
+    defer allocator.free(encoded);
+    if (!std.mem.eql(u8, bytes, encoded)) return error.SignedRoundTripMismatch;
 }
 
 fn decodeExceptionName(comptime revision: evmz.eth.Revision, bytes: []const u8, err: anyerror) ?[]const u8 {
