@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const evmz = @import("./evm.zig");
+/// Tests below run the newest fork; `t.Vm` cannot be used inside `t` itself.
+const Latest = evmz.Vm(evmz.eth.latest);
 
 const Host = evmz.Host;
 const ExecutionContext = evmz.execution.ExecutionContext;
@@ -604,7 +606,7 @@ test "ORIGIN and GASPRICE read the borrowed transaction context" {
     var host = mock_host.host();
     const msg = defaultMessage();
 
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .msg = &msg,
         .execution_context = &mock_host.execution_context,

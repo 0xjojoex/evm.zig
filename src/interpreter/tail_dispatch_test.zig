@@ -1,5 +1,6 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
+const Latest = evmz.t.Vm(.latest).?;
 const Interpreter = @import("../interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const ExactSpec = @import("../spec.zig").Spec;
@@ -35,7 +36,7 @@ test "prepared tail dispatch executes promoted binary and shift opcodes" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -93,7 +94,7 @@ test "prepared tail dispatch executes promoted mcopy and exp" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -206,7 +207,7 @@ test "prepared tail dispatch reads frame-local values" {
         msg.sender = sender;
         msg.value = 42;
         msg.input_data = &input;
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -267,7 +268,7 @@ test "prepared tail dispatch reads execution-context values" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -309,7 +310,7 @@ test "prepared tail dispatch reads host account values" {
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
         msg.recipient = target;
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -350,7 +351,7 @@ test "prepared tail dispatch copies frame-local byte slices" {
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
         msg.input_data = &input;
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -379,7 +380,7 @@ test "prepared tail dispatch rejects out-of-bounds RETURNDATACOPY" {
     defer mock_host.deinit();
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &mock_host.execution_context,
         .msg = &msg,
@@ -436,7 +437,7 @@ test "prepared tail dispatch halts once on unrepresentable memory operands" {
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
         msg.gas = 100_000;
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -472,7 +473,7 @@ test "prepared tail dispatch returns and reverts frame-local output" {
         defer mock_host.deinit();
         var host = mock_host.host();
         var msg = evmz.t.defaultMessage();
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &mock_host.execution_context,
             .msg = &msg,
@@ -536,7 +537,7 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var host = mock_host.host();
     var msg = evmz.t.defaultMessage();
 
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &mock_host.execution_context,
         .msg = &msg,
@@ -559,7 +560,7 @@ test "prepared tail dispatch emits LOG4 data and rejects static context" {
     var static_msg = evmz.t.defaultMessage();
     static_msg.is_static = true;
 
-    var static_frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var static_frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &static_host,
         .execution_context = &static_host_state.execution_context,
         .msg = &static_msg,
