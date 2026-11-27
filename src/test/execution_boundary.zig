@@ -157,7 +157,7 @@ test "execution checkpoint preserves family pre-scope writes" {
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
-    executed.retain();
+    executed.accept();
 }
 
 test "checkpoint commit retains state and restore rolls back without closing scope" {
@@ -217,7 +217,7 @@ test "checkpoint commit retains state and restore rolls back without closing sco
     try std.testing.expect(!executor.state.isAccountWarm(.fromAddress(additional)));
     try std.testing.expectEqual(@as(usize, 0), executor.logView().len());
     try std.testing.expect(executor.execution_context != null);
-    try observed.retainStateTransition();
+    try observed.acceptStateTransition();
     try std.testing.expect(observations.found);
 }
 
@@ -308,7 +308,7 @@ test "checkpoint revert preserves reads without retaining storage effects" {
     defer checkpoint.deinit();
     _ = try executor.state.setStorage(.fromAddress(contract), 8, 1);
     checkpoint.restore();
-    try observed.retainStateTransition();
+    try observed.acceptStateTransition();
     try std.testing.expect(observations.found);
 }
 
@@ -537,7 +537,7 @@ test "execution checkpoints restore effects across multiple roots" {
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
-    executed.retain();
+    executed.accept();
 }
 
 test "manual execution retains after finalization or rollback" {
@@ -550,7 +550,7 @@ test "manual execution retains after finalization or rollback" {
     defer executor.discardStateTransition();
     // No bytecode ran: coordinator-only changes can be retained directly.
     try executor.addBalance(target, 3);
-    executor.retainStateTransition();
+    executor.acceptStateTransition();
 
     try executor.beginMessageScope(request(sender, target), .{});
     {
@@ -561,7 +561,7 @@ test "manual execution retains after finalization or rollback" {
         // An unresolved guard restores the dispatched state.
     }
     try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(target));
-    executor.retainStateTransition();
+    executor.acceptStateTransition();
 
     try executor.beginMessageScope(request(sender, target), .{});
     var checkpoint = executor.checkpoint();
@@ -569,7 +569,7 @@ test "manual execution retains after finalization or rollback" {
     _ = try executor.executeTransactionRequest(request(sender, target));
     checkpoint.commit();
     try executor.finalizeExecution();
-    executor.retainStateTransition();
+    executor.acceptStateTransition();
 }
 
 test "rolling back finalization preserves closed dispatch and allows finalizing again" {
@@ -607,6 +607,6 @@ test "rolling back finalization preserves closed dispatch and allows finalizing 
 
     try executor.finalizeExecution();
     try std.testing.expectEqual(@as(u256, 0), try executor.getStorage(target, 7));
-    executor.retainStateTransition();
+    executor.acceptStateTransition();
     try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(target));
 }

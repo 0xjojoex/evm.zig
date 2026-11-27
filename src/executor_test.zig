@@ -236,8 +236,8 @@ test "closed world executor matches open world checkpoint discard" {
 
     tracked_observer.code_hash = replacement_hash;
     claim_observer.code_hash = replacement_hash;
-    try observed_tracked.retainStateTransition();
-    try observed_claim.retainStateTransition();
+    try observed_tracked.acceptStateTransition();
+    try observed_claim.acceptStateTransition();
     try std.testing.expectEqualDeep(tracked_observer.summary, claim_observer.summary);
     try std.testing.expectEqual(@as(usize, 1), claim.logView().len());
     const tracked_account_change = tracked.acceptedChanges().accounts.at(0);
@@ -534,7 +534,7 @@ test "prepared execution follows current code hash without owning public code re
 
     executor.endPreparedCodeExecution();
     prepared_execution_open = false;
-    executor.retainStateTransition();
+    executor.acceptStateTransition();
     try pool.clearRetainingCapacity();
     try std.testing.expectEqualSlices(u8, &replacement_code, public_replacement);
     try std.testing.expectEqualSlices(u8, &replacement_code, try executor.getCode(contract));
@@ -1799,7 +1799,7 @@ test "active transaction finishes into pending state" {
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
-    executed.retain();
+    executed.accept();
     try std.testing.expectEqual(@as(u256, 7), try executor.getBalance(sender));
     try std.testing.expect(!executor.hasCurrentTransaction());
 }
@@ -2127,7 +2127,7 @@ test "transaction nonce advancement survives payload rollback" {
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
-    executed.retain();
+    executed.accept();
     try std.testing.expectEqual(@as(u64, 8), (try executor.getAccount(sender)).?.nonce);
 }
 
@@ -2203,7 +2203,7 @@ test "transaction nonce advancement selects the root create entry" {
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
-    executed.retain();
+    executed.accept();
     try std.testing.expectEqual(@as(u64, 8), (try executor.getAccount(sender)).?.nonce);
 }
 
@@ -2245,7 +2245,7 @@ test "transaction nonce advancement leaves max-nonce acceptance to policy" {
         .generation = transaction_runtime.finish(&executor),
         .output_value = {},
     };
-    executed.retain();
+    executed.accept();
     try std.testing.expectEqual(max_nonce, (try executor.getAccount(sender)).?.nonce);
 }
 
@@ -2291,7 +2291,7 @@ test "transaction payload resolves only its inner checkpoint" {
             .generation = transaction_runtime.finish(&executor),
             .output_value = {},
         };
-        executed.retain();
+        executed.accept();
         try std.testing.expectEqual(@as(u256, 12), try executor.getBalance(sender));
     }
 
@@ -2321,7 +2321,7 @@ test "transaction payload resolves only its inner checkpoint" {
             .generation = transaction_runtime.finish(&executor),
             .output_value = {},
         };
-        executed.retain();
+        executed.accept();
         try std.testing.expectEqual(@as(u256, 0x2a), try executor.getStorage(contract, 0));
     }
 }
@@ -3456,7 +3456,7 @@ test "sealed observations expose storage state without a trace tape" {
     defer executor.discardStateTransition();
     const result = try executor.executeCallTransaction(sender, contract, &.{}, .legacy(100_000), 0);
     try executor.finalizeExecution();
-    try observed.retainStateTransition();
+    try observed.acceptStateTransition();
 
     try std.testing.expectEqual(Interpreter.Status.success, result.status());
     try std.testing.expectEqual(@as(usize, 1), observations.calls);
@@ -3622,7 +3622,7 @@ test "execution finalization permits settlement and outer rollback without reope
     try std.testing.expectEqual(@as(u256, 3), try executor.getBalance(target));
     try std.testing.expectEqual(.closed, executor.execution_phase);
     try executor.finalizeExecution();
-    executor.retainStateTransition();
+    executor.acceptStateTransition();
 
     try executor.beginTransaction(testExecutionContext(sender, 100_000), sender, target);
     _ = try executor.executeCallTransaction(sender, target, &.{}, .legacy(100_000), 0);

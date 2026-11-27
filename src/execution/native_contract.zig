@@ -1,5 +1,8 @@
 //! Explicit state-capable native-contract extension.
 //!
+//! Experimental: the protocol below (`Call`, `ChildRequest`, `Ledger`, `Step`,
+//! `None`) may change in any release.
+//!
 //! Ethereum precompiles are terminal call targets and never receive this
 //! capability. A specification opts addresses into this separate domain by
 //! naming a native type `N`, which declares:

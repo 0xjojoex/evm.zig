@@ -118,10 +118,10 @@ std.debug.print("status: {t}, gas: {}\n", .{
 });
 
 // Commit into the VM's pending branch (otherwise `discardIfCurrent` rolls back).
-execution.retain();
+execution.accept();
 ```
 
-`retain()` accepts the execution into the VM's pending branch; block-level
+`accept()` accepts the execution into the VM's pending branch; block-level
 callers can consume `vm.executor.acceptedChanges()` and persist it. See
 [`examples/basic.zig`](examples/basic.zig) for a runnable transaction example,
 [`examples/transaction_journal.zig`](examples/transaction_journal.zig) for host
@@ -144,7 +144,9 @@ Each tier strips outer protocol concerns before calling the next:
 
 ## Customizing specifications
 
-`evmz.Evm` aliases `evmz.Vm(evmz.eth.latest)`. Pass any built-in fork or derive
+`evmz.Evm` aliases `evmz.Vm(evmz.eth.stable)`, the latest fork live on Ethereum
+mainnet; `evmz.eth.latest` is the newest fork evmz implements, which may still
+be a devnet fork. Pass any built-in fork or derive
 a custom specification at comptime with `Spec.extend`:
 
 ```zig

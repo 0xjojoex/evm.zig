@@ -226,7 +226,7 @@ pub fn ExecutionType(comptime Program: type) type {
 
                     if (comptime @TypeOf(observer) != void)
                         try observer.observe(executed.observation());
-                    executed.retain();
+                    executed.accept();
                     self.state_value = next;
                     break :blk .{ .included = included };
                 },

@@ -1,4 +1,4 @@
-const Interpreter = @import("../Interpreter.zig");
+const Interpreter = @import("../interpreter.zig");
 const evmz = @import("../evm.zig");
 const ExactSpec = @import("../spec.zig").Spec;
 const CallFrame = Interpreter.CallFrame;

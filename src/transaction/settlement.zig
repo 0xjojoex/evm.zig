@@ -53,7 +53,9 @@ pub const ExecutionGasResult = struct {
 /// Amsterdam state-gas accounting, is derived from cumulative dimensions as
 /// `max(regular, state)`.
 pub const BlockGas = struct {
-    /// Canonical/header gas used by the block.
+    /// Canonical/header gas used by the block. Totals do not sum: the total
+    /// of two contributions is `max` over the summed dimensions, which can be
+    /// less than the sum of their totals. Accumulate with `add`.
     total: u64 = 0,
     /// Regular EVM gas contribution.
     regular: u64 = 0,
@@ -99,7 +101,7 @@ pub const BlockGas = struct {
 ///
 /// The two refund fields answer different questions. `execution_refund` is
 /// what the EVM earned back (SSTORE clears, EIP-7702 existing-account
-/// refunds); `refunded` is everything the payer did not pay for, which is
+/// refunds); `returned` is everything the payer did not pay for, which is
 /// mostly gas the transaction never spent.
 pub const ResultGas = struct {
     /// Gas spent before refunds and floor rules: the gas limit minus what
@@ -114,7 +116,7 @@ pub const ResultGas = struct {
     /// the floor did not raise `used`.
     execution_refund: u64 = 0,
     /// Unused gas returned to the payer: the gas limit minus `used`.
-    refunded: u64 = 0,
+    returned: u64 = 0,
     /// Block/session accounting contribution.
     block: BlockGas = .{},
 };
@@ -272,7 +274,7 @@ fn calculateDefaultCosts(
             .spent = pre_refund_gas_used,
             .used = gas_used,
             .execution_refund = refund_gas,
-            .refunded = sender_refunded_gas,
+            .returned = sender_refunded_gas,
             .block = block_gas,
         },
         .payer_refund = try checkedGasCost(sender_refunded_gas, settlement.gas_price),
@@ -366,7 +368,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                     .spent = 60,
                     .used = 48,
                     .execution_refund = 12,
-                    .refunded = 52,
+                    .returned = 52,
                     .block = .{ .total = 48, .regular = 48 },
                 },
                 .payer_refund = 260,
@@ -383,7 +385,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                     .spent = 60,
                     .used = 30,
                     .execution_refund = 30,
-                    .refunded = 70,
+                    .returned = 70,
                     .block = .{ .total = 30, .regular = 30 },
                 },
                 .payer_refund = 350,
@@ -412,7 +414,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                     .spent = 50,
                     .used = 38,
                     .execution_refund = 12,
-                    .refunded = 62,
+                    .returned = 62,
                     .block = .{ .total = 43, .regular = 43, .state = 7 },
                 },
                 .payer_refund = 310,
@@ -442,7 +444,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                     .spent = 21_016,
                     .used = 21_040,
                     .execution_refund = 20,
-                    .refunded = 60,
+                    .returned = 60,
                     .block = .{ .total = 21_040, .regular = 21_040 },
                 },
                 .payer_refund = 420,
@@ -469,7 +471,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .gas = .{
                     .spent = 80,
                     .used = 80,
-                    .refunded = 120,
+                    .returned = 120,
                     .block = .{ .total = 70, .regular = 30, .state = 70 },
                 },
                 .payer_refund = 600,
@@ -485,7 +487,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                     .spent = 60,
                     .used = 48,
                     .execution_refund = 12,
-                    .refunded = 52,
+                    .returned = 52,
                     .block = .{ .total = 60, .regular = 60 },
                 },
                 .payer_refund = 260,
@@ -512,7 +514,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .gas = .{
                     .spent = eth_tx_eip7825.max_transaction_gas_limit,
                     .used = eth_tx_eip7825.max_transaction_gas_limit,
-                    .refunded = 120_000_000 - eth_tx_eip7825.max_transaction_gas_limit,
+                    .returned = 120_000_000 - eth_tx_eip7825.max_transaction_gas_limit,
                     .block = .{
                         .total = eth_tx_eip7825.max_transaction_gas_limit,
                         .regular = eth_tx_eip7825.max_transaction_gas_limit,
@@ -543,7 +545,7 @@ test "settlement cost vectors follow fork and exact-spec policies" {
                 .gas = .{
                     .spent = 283_798 - eth_tx_eip8037.new_account_state_gas,
                     .used = 283_776,
-                    .refunded = 22,
+                    .returned = 22,
                     .block = .{ .total = 283_776, .regular = 283_776 },
                 },
                 .payer_refund = 220,

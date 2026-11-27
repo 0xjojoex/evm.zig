@@ -525,14 +525,14 @@ test "memory store consumes cumulative wipe then write from a detached delta" {
     } });
     state.closeSession();
     state.sealAttempt(wiped);
-    state.retainAttempt(wiped);
+    state.acceptAttempt(wiped);
 
     const rewritten = state.beginAttempt();
     state.openSession();
     _ = try state.setStorage(.fromAddress(address), 2, 33);
     state.closeSession();
     state.sealAttempt(rewritten);
-    state.retainAttempt(rewritten);
+    state.acceptAttempt(rewritten);
 
     var delta = try StateDelta.init(std.testing.allocator, state.acceptedView().changes());
     defer delta.deinit();

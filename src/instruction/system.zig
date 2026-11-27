@@ -1,4 +1,4 @@
-const Interpreter = @import("../Interpreter.zig");
+const Interpreter = @import("../interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const Host = @import("../Host.zig");
 const evmz = @import("../evm.zig");

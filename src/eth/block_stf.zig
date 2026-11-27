@@ -1718,7 +1718,7 @@ test "external candidate owns its root delta through failure commit and output" 
         try execution_state.setBalance(.fromAddress(address.addr(1)), 7);
         execution_state.closeSession();
         execution_state.sealAttempt(attempt);
-        execution_state.retainAttempt(attempt);
+        execution_state.acceptAttempt(attempt);
 
         const root_result = commit.stateRoot(failing.allocator(), &run.state_backend, execution_state.acceptedView(), null, &run.delta);
         if (mode == .root_failure) {

@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
-const Interpreter = @import("../../Interpreter.zig");
+const Interpreter = @import("../../interpreter.zig");
 const system = @import("../../instruction/system.zig");
 
 test "CREATE initcode limit is independent from transaction validation" {

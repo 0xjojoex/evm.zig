@@ -162,7 +162,7 @@ int main(void) {
     CHECK(data->gas.used > 0);
     /* No refund and no calldata, so the receipt gas is what was spent. */
     CHECK(data->gas.spent == data->gas.used);
-    CHECK(data->gas.used + data->gas.refunded == transaction.gas_limit);
+    CHECK(data->gas.used + data->gas.returned == transaction.gas_limit);
     CHECK(data->output_len == 0);
     CHECK(data->storage_len == 0);
     CHECK(data->code_changes_len == 0);
@@ -189,7 +189,7 @@ int main(void) {
 
     /* The copy outlives the session it came from. */
     evmz_session_destroy(session);
-    CHECK(data->gas.used + data->gas.refunded == transaction.gas_limit);
+    CHECK(data->gas.used + data->gas.returned == transaction.gas_limit);
     evmz_result_destroy(result);
     return 0;
 }

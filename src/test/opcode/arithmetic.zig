@@ -42,7 +42,7 @@ test "EXP byte gas comes from the exact spec" {
     var intpr = frame.interpreter();
     const result = try intpr.execute();
 
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status());
     try std.testing.expectEqual(
         msg.gas - Exact.spec.instruction.entry(@backingInt(evmz.Opcode.EXP)).info.static_gas - 2,
         frame.frame.gas_left,

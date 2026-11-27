@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("../../evm.zig");
-const Interpreter = @import("../../Interpreter.zig");
+const Interpreter = @import("../../interpreter.zig");
 const AccessStatus = evmz.execution.AccessStatus;
 const StorageStatus = evmz.execution.StorageStatus;
 
@@ -118,7 +118,7 @@ test "cold SSTORE charges full cold SLOAD cost from Berlin" {
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status());
     try std.testing.expectEqual(@as(i64, 100_000 - 3 - 3 - cold_sload_cost - 20_000), result.gas_left);
     try std.testing.expectEqual(@as(u64, 1), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
@@ -145,7 +145,7 @@ test "Amsterdam cold new SSTORE charges state gas from reservoir" {
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.success, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.success, result.status());
     try std.testing.expectEqual(
         @as(i64, 100_000 - 3 - 3 - evmz.eth.eip8038.cold_storage_access_cost - evmz.eth.eip8038.storage_write_cost),
         result.gas_left,
@@ -178,7 +178,7 @@ test "prepared cold Amsterdam SSTORE at stipend stops before storage access" {
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.out_of_gas, result.status());
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
@@ -205,7 +205,7 @@ test "prepared SSTORE rejects static context before host access" {
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.invalid, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.invalid, result.status());
     try std.testing.expectEqual(@as(u64, 0), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_stores);
     try std.testing.expectEqual(@as(u256, 0), mock_host.storageValue(0));
@@ -232,7 +232,7 @@ test "prepared cold SLOAD out of gas stops before storage read" {
     var interpreter = frame.interpreter();
 
     const result = try interpreter.execute();
-    try std.testing.expectEqual(evmz.Interpreter.Status.out_of_gas, result.status());
+    try std.testing.expectEqual(evmz.execution.Status.out_of_gas, result.status());
     try std.testing.expectEqual(@as(u64, 1), mock_host.access_storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_reads);
     try std.testing.expectEqual(@as(u64, 0), mock_host.storage_loads);

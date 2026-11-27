@@ -1,6 +1,6 @@
 const evmz = @import("../evm.zig");
 const ExactSpec = @import("../spec.zig").Spec;
-const Interpreter = @import("../Interpreter.zig");
+const Interpreter = @import("../interpreter.zig");
 
 const CallFrame = Interpreter.CallFrame;
 

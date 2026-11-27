@@ -13,6 +13,7 @@
 //! The Ethereum block transition function itself lives in `eth.block_stf`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const WitnessReader = @import("./stateless/WitnessReader.zig");
 
@@ -26,9 +27,11 @@ pub const Validator = validator.Validator;
 pub const ValidatorWithOptions = validator.ValidatorWithOptions;
 pub const RevisionValidator = validator.RevisionValidator;
 pub const RevisionValidatorWithOptions = validator.RevisionValidatorWithOptions;
-pub const testing = struct {
+/// Test-only validator variants. Exists only in test builds and is not part
+/// of the package's API.
+pub const testing = if (builtin.is_test) struct {
     pub const TrackedValidator = validator.TrackedValidator;
-};
+} else @compileError("evmz.stateless.testing only exists in test builds");
 pub const wire = @import("./stateless/wire.zig");
 pub const tx = @import("./stateless/tx.zig");
 

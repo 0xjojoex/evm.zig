@@ -4,7 +4,7 @@
 const std = @import("std");
 
 const Host = @import("../Host.zig");
-const Interpreter = @import("../Interpreter.zig");
+const Interpreter = @import("../interpreter.zig");
 const Memory = @import("../Memory.zig");
 const frame_io = @import("../frame_io.zig");
 const Stack = @import("../Stack.zig");

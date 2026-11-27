@@ -107,6 +107,8 @@ pub const NoCustomPrecompiles = struct {};
 /// delegate to the `Exact` dispatcher derived from this value.
 pub const Spec = struct {
     config: Config,
+    /// Custom dispatch leaf, consulted before the catalog. Experimental: its
+    /// protocol may change in any release.
     custom: type = NoCustomPrecompiles,
 
     pub fn resolve(comptime self: Spec, target: Address) ?Exact(self).Entry {

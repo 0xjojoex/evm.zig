@@ -23,10 +23,19 @@ a compatibility break exactly like renaming a function.
 | root | `-Dcore=false` | `rlp`, `mpt`, `ssz` | none |
 | root | `-Dprofile=zkvm` | `evmz` (guest) | none |
 
-Other options that consumers may set — `-Dnative-keccak`, `-Dstateless-schema`,
-`-Dpic`, `-Dguest-heap-bytes` — are part of the surface
-with the same rules. Steps (`test`, `ci`, `bench-*`, …) are not: they are
-development entry points and may change freely.
+The public options are `target`, `optimize`, `core`, `profile`,
+`native-keccak`, `stateless-schema`, and `pic`. Each exported module is built
+with evmz's own `target` and `optimize`, so a consumer must forward both in
+`b.dependency("evmz", .{ ... })`; without `optimize`, evmz builds as Debug
+inside an optimized program. Zig ignores a dependency argument the package
+does not declare, so a misspelled option is silently dropped.
+
+`c-api-revisions` and `frame-pointers` are experimental, like the C header
+they serve. `frame-pointers` also applies to the exported Zig `evmz` module:
+by default `debug` and `safe` builds keep frame pointers. Every other option
+(`test-forks`, `guest-*`, `bench-*`, `eest-*`, `t8n-*`, …) belongs to
+repository steps and may change freely, as may the steps themselves (`test`,
+`ci`, `bench-*`, …).
 
 The dependency table describes configuration by a parent build. A repository
 checkout may configure native providers for its test and guest-development
@@ -48,6 +57,33 @@ It is experimental and outside the compatibility surface until it is promoted:
 it may change in any release, and a binding must match `evmz_abi_version()`
 exactly.
 
+## Stability tiers
+
+Zig cannot hide a `pub` declaration from other packages, so every public
+declaration sits in one of three tiers, and only the first is frozen by a
+release.
+
+- **Stable:** `Vm`, `Evm` and the fork specifications Ethereum mainnet has
+  activated (up to `eth.stable`); `transact` and its `Executed` and `Outcome`
+  results; the state readers; `Spec.extend`; the ordered transaction,
+  receipt, and withdrawal roots; and the `mpt`, `rlp`, and `ssz` modules.
+- **Experimental:** may change in any release, with a changelog entry.
+  - The C header and its build options.
+  - Fork specifications not yet on mainnet: `eth.latest` while it is ahead of
+    `eth.stable`, and every devnet fork.
+  - The witness lane: the state-trie parts of `eth.trie`, `eth.commit`,
+    `stateless.WitnessReader`, `Backend.fromWitness`, the claim plan's trie
+    keys, and the commit-view contract (`state.checkCommitView`,
+    `WorldState.CommitView`).
+  - `BalVm` and `eth.bal.ClosedWorld`, `debug`, `trace`, the Executor's manual
+    scope, and `prepared_code`.
+  - Native contracts and custom precompiles: `Spec.native_contract` with
+    `execution.NativeContractCall`, `NativeContractChildRequest`,
+    `NativeContractLedger`, `NativeContractStep` and `NoNativeContracts`;
+    the Executor's `NativeContext`; and `precompile.Spec.custom`.
+- **Internal:** everything else, including `state.sparse_hash_map`. Internal
+  declarations may change or disappear in any release.
+
 ## Package versioning
 
 The root `build.zig.zon` `.version` is authoritative and the tag is `vX.Y.Z`
@@ -55,9 +91,17 @@ for exactly that string. It is evmz's own semver, not a mirror of Zig's.
 
 While below `1.0.0`:
 
-- any break in an exported module, a build option, or observed execution
-  behavior bumps the minor;
-- backward-compatible fixes bump the patch;
+- the minor bumps for a break in the stable tier, a public build option, or
+  observed execution behavior of a stable fork; a new fork; a new tag on a
+  public enum; `eth.stable`, `eth.latest`, or `Evm` moving to another fork;
+  adopting a new Zig minor; and a C ABI version bump;
+- the patch bumps for fixes, new declarations, new struct fields with
+  defaults, new modules, any change to the experimental tier, and rule
+  changes to a fork that is not on mainnet;
+- public enums only grow at the end, and only in a minor: a consumer that
+  must keep compiling across minors switches on them with an `else` arm;
+- a field added to a public struct, including a `Spec` substructure, has a
+  default; a fork's patch is what turns it on;
 - every break is spelled out in the changelog with its migration.
 
 `.version` is bumped only in the release commit. There is no `-dev` suffix on

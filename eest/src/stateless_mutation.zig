@@ -2,7 +2,7 @@ const std = @import("std");
 const evmz = @import("evmz");
 const fixture = @import("fixtures");
 
-const block_stf = evmz.eth.BlockSTF;
+const block_stf = evmz.eth.block_stf;
 const wire = evmz.stateless.wire;
 const wire_v1 = wire.v1;
 

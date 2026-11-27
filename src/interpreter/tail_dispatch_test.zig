@@ -1,6 +1,6 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
-const Interpreter = @import("../Interpreter.zig");
+const Interpreter = @import("../interpreter.zig");
 const Opcode = @import("../opcode.zig").Opcode;
 const ExactSpec = @import("../spec.zig").Spec;
 const Stack = @import("../Stack.zig");

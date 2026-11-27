@@ -53,7 +53,7 @@ const TestJournal = struct {
         self.revertTo(checkpoint_value);
     }
 
-    pub fn retainTransaction(self: *TestJournal) void {
+    pub fn acceptTransaction(self: *TestJournal) void {
         std.debug.assert(self.attempt_start.? == 0);
         std.debug.assert(self.checkpoints_len == 0);
         self.undo_len = 0;
@@ -288,7 +288,7 @@ test "Program result owns journal retain and discard" {
     const retained = try Program.transact(&executor, .{ .tx = 8, .journal = &journal });
     switch (retained) {
         .rejected => return error.UnexpectedRejection,
-        .executed => |executed| try std.testing.expectEqual(@as(u8, 8), executed.retainResult()),
+        .executed => |executed| try std.testing.expectEqual(@as(u8, 8), executed.acceptResult()),
     }
     try std.testing.expectEqual(@as(u64, 8), journal.value);
 
@@ -381,7 +381,7 @@ const SidecarBlock = struct {
             .executed => |executed_value| blk: {
                 var executed = executed_value;
                 defer executed.discardIfCurrent();
-                break :blk executed.retainResult();
+                break :blk executed.acceptResult();
             },
         };
     }

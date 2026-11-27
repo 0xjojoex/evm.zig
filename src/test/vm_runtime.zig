@@ -111,7 +111,7 @@ test "Executor account code remains overlay-owned and traced with a prepared bac
     try observed.beginStateTransition(evmz.t.defaultExecutionContext(contract, 100_000));
     defer executor.discardStateTransition();
     const view = try executor.getCode(contract);
-    try observed.retainStateTransition();
+    try observed.acceptStateTransition();
 
     try std.testing.expect(view.ptr != prepared.bytes.ptr);
     try std.testing.expectEqualSlices(u8, &code, view);
@@ -392,7 +392,7 @@ test "copied execution handles cannot discard a newer transaction" {
     };
     const copied = first;
     try std.testing.expect(first.changes().hasChanges());
-    first.retain();
+    first.accept();
     copied.discardIfCurrent();
 
     const second = switch (try transact(Default, &executor, .{
@@ -414,7 +414,7 @@ test "copied execution handles cannot discard a newer transaction" {
     second.discard();
 }
 
-test "Executed retainResult retains state and returns the validated output" {
+test "Executed acceptResult retains state and returns the validated output" {
     const Cancun = evmz.t.Vm(.cancun) orelse return error.SkipZigTest;
     const sender = addr(0xaaaa);
     const recipient = addr(0xbbbb);
@@ -435,7 +435,7 @@ test "Executed retainResult retains state and returns the validated output" {
         .rejected => return error.UnexpectedRejection,
     };
     const copied = executed;
-    const output = executed.retainResult();
+    const output = executed.acceptResult();
 
     try std.testing.expectEqual(TxStatus.success, output.status);
     copied.discardIfCurrent();
@@ -628,7 +628,7 @@ test "explicit backend commit persists then rebases the Executor overlay" {
     var delta = try evmz.state.StateDelta.init(std.testing.allocator, executed.changes());
     defer delta.deinit();
     try memory.committer().commit(delta.view());
-    executed.retain();
+    executed.accept();
     executor.discardAccepted();
 
     try std.testing.expect(!executor.acceptedChanges().hasChanges());
@@ -691,16 +691,16 @@ test "Amsterdam transaction reports gross block gas separately from receipt gas"
         },
     }));
     try std.testing.expectEqual(TxStatus.success, result.status);
-    try std.testing.expect(result.gas.refunded > 0);
+    try std.testing.expect(result.gas.returned > 0);
     try std.testing.expect(result.gas.block.total > result.gas.used);
     // Clearing a slot spends no state gas and this call is far above the
     // calldata floor, so block gas is the pre-refund spend and the gap to
-    // receipt gas is exactly the EVM refund -- not the unused gas in `refunded`.
+    // receipt gas is exactly the EVM refund -- not the unused gas in `returned`.
     try std.testing.expectEqual(
         result.gas.block.total - result.gas.used,
         result.gas.execution_refund,
     );
-    try std.testing.expect(result.gas.execution_refund < result.gas.refunded);
+    try std.testing.expect(result.gas.execution_refund < result.gas.returned);
 }
 
 test "transaction result reports how the root frame halted" {

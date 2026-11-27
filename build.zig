@@ -197,17 +197,15 @@ pub fn build(b: *std.Build) void {
     // native providers when this package is the top-level build.
     if (!is_native_profile and b.pkg_hash.len != 0) return;
 
-    // Register the public module graph before requesting lazy packages. A
-    // parent build may ask for `module("evmz")` during the configure pass that
-    // discovers a missing lazy dependency; Zig then fetches and configures the
-    // graph again before making any steps.
-    const fixtures_mod = b.addModule("fixtures", .{
+    // The fixture tools are repository-only and not exported; `eest/` builds
+    // its own copies from this package's `tools/` sources.
+    const fixtures_mod = b.createModule(.{
         .root_source_file = b.path("tools/fixtures.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "evmz", .module = native_evmz_mod }},
     });
-    const statetest_mod = b.addModule("statetest", .{
+    const statetest_mod = b.createModule(.{
         .root_source_file = b.path("tools/statetest/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -216,7 +214,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fixtures", .module = fixtures_mod },
         },
     });
-    const blocktest_mod = b.addModule("blocktest", .{
+    const blocktest_mod = b.createModule(.{
         .root_source_file = b.path("tools/blocktest/root.zig"),
         .target = target,
         .optimize = optimize,

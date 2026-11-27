@@ -708,7 +708,7 @@ fn ForkSession(comptime revision: Revision) type {
                 .spent = output.gas.spent,
                 .used = output.gas.used,
                 .execution_refund = output.gas.execution_refund,
-                .refunded = output.gas.refunded,
+                .returned = output.gas.returned,
                 .block = .{
                     .regular = output.gas.block.regular,
                     .state = output.gas.block.state,
@@ -774,7 +774,7 @@ fn ForkSession(comptime revision: Revision) type {
         fn accept(session: *Session) Status {
             const self = from(session);
             const executed = self.pending orelse return no_pending_result;
-            executed.retain();
+            executed.accept();
             self.pending = null;
             return ok;
         }
@@ -1387,7 +1387,7 @@ const EngineRun = struct {
     gas_spent: u64,
     gas_used: u64,
     execution_refund: u64,
-    refunded: u64,
+    returned: u64,
     block_gas: [2]u64,
     logs: usize,
 };
@@ -1416,7 +1416,7 @@ fn engineRun(host: *TestHost, env: Env, tx: Transaction) !EngineRun {
         .gas_spent = gas.spent,
         .gas_used = gas.used,
         .execution_refund = gas.execution_refund,
-        .refunded = gas.refunded,
+        .returned = gas.returned,
         .block_gas = .{ gas.block.regular, gas.block.state },
         .logs = executed.logs().len(),
     };
@@ -1440,7 +1440,7 @@ fn executeAccepted(
     try testing.expectEqual(engine.gas_spent, data.gas.spent);
     try testing.expectEqual(engine.gas_used, data.gas.used);
     try testing.expectEqual(engine.execution_refund, data.gas.execution_refund);
-    try testing.expectEqual(engine.refunded, data.gas.refunded);
+    try testing.expectEqual(engine.returned, data.gas.returned);
     try testing.expectEqual(
         engine.block_gas,
         [2]u64{ data.gas.block.regular, data.gas.block.state },
@@ -1557,7 +1557,7 @@ test "a transfer applies to the host's state root" {
     try expectCode(c.EVMZ_EXECUTION_SUCCESS, data.status);
     try expectCode(c.EVMZ_CAUSE_NONE, data.cause);
     try expectCode(c.EVMZ_REJECTION_NONE, data.rejection);
-    try testing.expectEqual(fixture.gas_limit - data.gas.used, data.gas.refunded);
+    try testing.expectEqual(fixture.gas_limit - data.gas.used, data.gas.returned);
 
     const sent = accountRow(data, fixture.sender).?;
     try testing.expectEqual(0, sent.original.nonce);
@@ -1639,7 +1639,7 @@ test "the gas spent before refunds is reported when the calldata floor sets the 
 
     try testing.expectEqual(0, gas.execution_refund);
     try testing.expect(gas.spent > 0 and gas.spent < gas.used);
-    try testing.expectEqual(fixture.gas_limit - gas.used, gas.refunded);
+    try testing.expectEqual(fixture.gas_limit - gas.used, gas.returned);
 }
 
 test "opcode 0x44 reads the difficulty before the Merge and prev_randao from it on" {
@@ -2221,7 +2221,7 @@ test "a transaction with the most gas the engine counts is charged what a small 
         const data = dataOf(out.?);
         try expectCode(c.EVMZ_EXECUTION_SUCCESS, data.status);
         try testing.expectEqual(data.gas.used, data.gas.spent);
-        try testing.expectEqual(gas_limit - data.gas.used, data.gas.refunded);
+        try testing.expectEqual(gas_limit - data.gas.used, data.gas.returned);
         target.* = data.gas.used;
     }
     try testing.expect(used[0] != 0);

@@ -1,5 +1,9 @@
 # Native contracts, precompiles, predeploys, and system calls
 
+The native-contract hook (`Spec.native_contract`, its `execution.NativeContract*`
+protocol and the Executor's `NativeContext`) and the custom precompile leaf
+(`precompile.Spec.custom`) are experimental: they may change in any release.
+
 Most EVM engines call every address that runs host code a _precompile_. evmz splits
 the word because the capabilities differ: a hash function should not get state
 access just because the same chain also ships a stateful native contract.

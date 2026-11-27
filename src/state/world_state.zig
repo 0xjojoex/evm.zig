@@ -14,7 +14,7 @@
 //! store holds introduced code. Otherwise parent code is supplied to the store
 //! at initialization.
 //!
-//! An attempt is the mutable span from `beginAttempt` to `retainAttempt` or
+//! An attempt is the mutable span from `beginAttempt` to `acceptAttempt` or
 //! `discardAttempt`; `transaction` names the lifetime its row stamps carry,
 //! which outlives retention. An attempt permits writes before a session opens.
 //! Those writes survive session checkpoints and are undone by discarding the
@@ -1040,7 +1040,7 @@ pub fn WorldState(comptime World: type) type {
         /// Start a mutable attempt on the accepted branch, with no session.
         /// Asserts no attempt is active and the journal is empty. The returned
         /// generation identifies this attempt on this State; finish it with
-        /// `retainAttempt` or `discardAttempt`. Copies must not be reused after a clock reset.
+        /// `acceptAttempt` or `discardAttempt`. Copies must not be reused after a clock reset.
         /// Observations are tracked internally but not exposed through the pending view.
         pub fn beginAttempt(self: *State) Generation(.transaction) {
             return self.beginAttemptMode(false);
@@ -1187,7 +1187,7 @@ pub fn WorldState(comptime World: type) type {
         /// Accept the current attempt's values, retain its logs, and end it.
         /// Release transaction observations and undo records.
         /// Asserts a matching attempt generation, a sealed attempt, and no open scope.
-        pub fn retainAttempt(self: *State, attempt: Generation(.transaction)) void {
+        pub fn acceptAttempt(self: *State, attempt: Generation(.transaction)) void {
             self.assertCurrent(attempt);
             std.debug.assert(self.sealed);
             std.debug.assert(!self.sessionActive());

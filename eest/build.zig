@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .@"native-keccak" = native_keccak,
     });
     const evmz_mod = evmz_dep.module("evmz");
+    const tools = evmzTools(b, evmz_dep, target, optimize, evmz_mod);
     const ssz_mod = evmz_dep.module("ssz");
     const snappy_mod = b.createModule(.{
         .root_source_file = b.path("vendor/snappy/snappy.zig"),
@@ -33,7 +34,7 @@ pub fn build(b: *std.Build) void {
 
     {
         const eest_tests = b.addTest(.{
-            .root_module = eestModule(b, "src/test.zig", target, optimize, evmz_mod, evmz_dep.module("fixtures"), evmz_dep.module("statetest"), evmz_dep.module("blocktest")),
+            .root_module = eestModule(b, "src/test.zig", target, optimize, evmz_mod, tools.fixtures, tools.statetest, tools.blocktest),
             .filters = test_filters,
             .test_runner = .{ .path = evmz_dep.path("tools/test_runner.zig"), .mode = .simple },
         });
@@ -79,7 +80,7 @@ pub fn build(b: *std.Build) void {
     {
         const eest_exe = b.addExecutable(.{
             .name = "evmz-eest",
-            .root_module = eestModule(b, "src/main.zig", target, optimize, evmz_mod, evmz_dep.module("fixtures"), evmz_dep.module("statetest"), evmz_dep.module("blocktest")),
+            .root_module = eestModule(b, "src/main.zig", target, optimize, evmz_mod, tools.fixtures, tools.statetest, tools.blocktest),
         });
         b.installArtifact(eest_exe);
 
@@ -209,6 +210,42 @@ fn sszConformanceModule(
             .{ .name = "snappyz", .module = snappy_mod },
         },
     });
+}
+
+/// evmz's fixture tools are repository-only, not exported modules, so the
+/// EEST runner builds them from the dependency's `tools/` sources.
+fn evmzTools(
+    b: *std.Build,
+    evmz_dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    evmz_mod: *std.Build.Module,
+) struct { fixtures: *std.Build.Module, statetest: *std.Build.Module, blocktest: *std.Build.Module } {
+    const fixtures = b.createModule(.{
+        .root_source_file = evmz_dep.path("tools/fixtures.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "evmz", .module = evmz_mod }},
+    });
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "evmz", .module = evmz_mod },
+        .{ .name = "fixtures", .module = fixtures },
+    };
+    return .{
+        .fixtures = fixtures,
+        .statetest = b.createModule(.{
+            .root_source_file = evmz_dep.path("tools/statetest/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+        .blocktest = b.createModule(.{
+            .root_source_file = evmz_dep.path("tools/blocktest/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    };
 }
 
 fn eestModule(
