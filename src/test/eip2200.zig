@@ -1,5 +1,6 @@
 const std = @import("std");
 const evmz = @import("../evm.zig");
+const Latest = evmz.t.Vm(.latest).?;
 
 const Host = evmz.Host;
 const Interpreter = evmz.interpreter;
@@ -141,7 +142,7 @@ fn runSstoreVector(hex_code: []const u8, original: u256, comptime revision: evmz
     };
 }
 
-fn testingFrame() !evmz.Evm.Interpreter.OwnedCallFrame {
+fn testingFrame() !Latest.Interpreter.OwnedCallFrame {
     const code = [_]u8{@backingInt(Opcode.STOP)};
     var host: Host = undefined;
     const msg = Host.Message{
@@ -154,7 +155,7 @@ fn testingFrame() !evmz.Evm.Interpreter.OwnedCallFrame {
         .value = 0,
     };
 
-    return evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    return Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,

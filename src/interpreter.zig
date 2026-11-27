@@ -6,6 +6,7 @@ const Host = @import("./Host.zig");
 const Bytecode = @import("./code/Bytecode.zig");
 const Spec = @import("./spec.zig").Spec;
 const evmz = @import("./evm.zig");
+const Latest = evmz.t.Vm(.latest).?;
 const Stack = @import("./Stack.zig");
 const frame_io = @import("./frame_io.zig");
 const trace = @import("./trace.zig");
@@ -677,7 +678,7 @@ test "call frame can execute with externally supplied stack storage" {
     try std.testing.expectEqual(@intFromPtr(&stack_storage), @intFromPtr(frame.stack.base));
     try std.testing.expectEqual(@as(u32, 0), frame.stack.base_word);
 
-    var interpreter = evmz.Evm.Interpreter.init(&frame);
+    var interpreter = Latest.Interpreter.init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status());
@@ -722,7 +723,7 @@ test "call frame can execute with externally supplied memory storage" {
     defer frame.deinit();
     try std.testing.expectEqual(@intFromPtr(&memory_storage), @intFromPtr(frame.memory.bytes));
 
-    var interpreter = evmz.Evm.Interpreter.init(&frame);
+    var interpreter = Latest.Interpreter.init(&frame);
     const result = try interpreter.execute();
 
     try std.testing.expectEqual(Status.success, result.status());
@@ -746,7 +747,7 @@ test "interpreter trace cursor records step start and end" {
     msg.depth = 7;
     msg.gas = 100;
 
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,
@@ -815,7 +816,7 @@ test "interpreter captured tail table records a replay span" {
         .depth = 0,
         .kind = .root,
     });
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,
@@ -891,7 +892,7 @@ test "captured tail memory exhaustion remains a resource error" {
         .depth = 0,
         .kind = .root,
     });
-    var interpreter = evmz.Evm.Interpreter.init(&frame);
+    var interpreter = Latest.Interpreter.init(&frame);
 
     try std.testing.expectError(error.OutOfMemory, interpreter.executeCapturedUntilSuspended(&capture));
     try std.testing.expect(frame.isRunning());
@@ -906,7 +907,7 @@ test "interpreter captured tail table records optional memory writes" {
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,
@@ -966,7 +967,7 @@ test "interpreter captured tail table preserves terminal and fault outcomes" {
         var host: Host = undefined;
         var msg = evmz.t.defaultMessage();
         msg.gas = case.gas;
-        var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+        var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
             .host = &host,
             .execution_context = &test_execution_context,
             .msg = &msg,
@@ -996,7 +997,7 @@ test "interpreter capture replays minimal EIP-3155 JSONL" {
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
-    var frame = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var frame = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,
@@ -1024,7 +1025,7 @@ test "yielded action stays in frame-owned sidecar until resume" {
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
-    var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var owned = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,
@@ -1074,7 +1075,7 @@ test "call and create resumes reject mismatched suspended actions" {
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
-    var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var owned = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,
@@ -1170,7 +1171,7 @@ test "successful child merge repays state gas spill from reservoir" {
     var host: Host = undefined;
     var msg = evmz.t.defaultMessage();
     msg.gas = 100;
-    var owned = try evmz.Evm.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
+    var owned = try Latest.Interpreter.OwnedCallFrame.init(std.testing.allocator, .{
         .host = &host,
         .execution_context = &test_execution_context,
         .msg = &msg,
