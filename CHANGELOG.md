@@ -153,8 +153,9 @@ Changed
   the Executor's `acceptedChanges`.
 - Removed `eth.BlockSTF`; use `eth.block_stf`. `src/Interpreter.zig` is now
   `src/interpreter.zig`; `evmz.interpreter` is unchanged.
-- `evmz.t` and `stateless.testing` exist only in test builds, and the package
-  no longer exports the `fixtures`, `statetest` and `blocktest` modules.
+- `evmz.t` exists only in test builds, `stateless.testing` is documented as
+  internal, and the package no longer exports the `fixtures`, `statetest` and
+  `blocktest` modules.
 - `RELEASING.md` defines the stable, experimental and internal tiers, the
   public build options, and the patch-versus-minor rules. The native-contract
   hook (`Spec.native_contract`, `execution.NativeContract*`, `NativeContext`)
